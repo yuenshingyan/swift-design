@@ -8,11 +8,7 @@
 
 use axum::routing::get;
 use axum::{Json, Router};
-use design_model::Design;
-
-use crate::briefs::PREVIEW_SCREEN_COUNT;
-use crate::candidates::CANDIDATE_LIMIT;
-use crate::questions::QUESTION_LIMIT;
+use design_model::{Design, QUESTIONS_PER_TURN_LIMIT};
 
 /// Design content rules, shared by the agent instructions and the
 /// built-in generation engine. Simplified Technical English.
@@ -100,21 +96,21 @@ fn instructions() -> serde_json::Value {
         serde_json::from_str(include_str!("../../../fixtures/sample-design.json"))
             .unwrap_or_default();
     serde_json::json!({
-        "purpose": "Build an HTML presentation as one JSON design. Swift Design validates, renders, and lets the user edit it. Swift Design makes no LLM API calls.",
+        "purpose": "Turn a request into an approved design brief, then build HTML designs from it. Swift Design keeps the workflow state, validates, renders, and lets the user edit. Swift Design makes no LLM API calls.",
+        "session": "The run works on one session. Its id is in the SWIFT_DESIGN_SESSION_ID environment variable. The mode is in SWIFT_DESIGN_RUN_MODE: briefing or generation. GET /sessions/{id} returns the state, the brief, the question sets, the answers, and the messages.",
         "steps": [
-            "GET /schemas/design. Read the JSON Schema for designs.",
-            "GET /briefs. Read the user's prompt, the scenario, the length, the variation count, the project, the effort, the preview flag, the variety, the answers, and the messages. Length is the target screen count as `min-max`, like `10-15`, or `any`. Stay in the range. One screen outside it is acceptable when the content needs it. Variety says how different the candidates must be: low changes only colors and fonts, medium changes themes and arrangements, high changes themes, structure, and angle. When the scenario is absent, ask the question `What scenario is the design for?` with PUT /questions and options such as `Technology`, `Academia`, `Business`, `Finance`, `Medical`, `Education`, `Marketing`, `Startup pitch`. When the length is absent, ask the question `How long should the design be?` with the options `Short: 5 to 8 screens`, `Standard: 10 to 15 screens`, `Long: 20 to 30 screens`. When the variation count is absent, ask the question `How many candidates should I write?` with PUT /questions and the options `1 candidate` to `{CANDIDATE_LIMIT} candidates`. When variety is absent and the variation count is more than 1, ask the question `How different should the candidates be?` with the options `Low: same structure, new colors and fonts`, `Medium: new themes and arrangements, same outline`, `High: new themes, structure, and angle`. The app stores the answers as the brief's scenario, length, variations, and variety. The messages are the conversation, oldest first. The brief's `templates` field lists template ids. When it is not empty, GET /templates/{id} for each id. Give candidate 1 the first template. Give candidate 2 the second template. Start again at the first template when the candidates outnumber the templates. Use that template's theme for that candidate. Match its screens in CSS style. Write new content; do not reuse its text. A brief saved before this field can carry one `template` id instead; read it the same way. Use the project as {base} for design ids. If the response is 404, ask the user for the subject, the theme, the fonts, and the visual style.",
-            "To talk to the user, POST /briefs/messages with {\"role\":\"assistant\",\"content\":\"text\"}. The user replies in the Swift Design browser UI. A new user message raises the /events revision; then GET /briefs again and read the last message. A user message may carry design: the id of the design open in the editor. Then apply the request to that design: GET /designs/{id}, change only what the request asks, and PUT /designs/{id}. A reference like [screen 3, node 0/1 <h2.title>: What Swift Design does] names a screen (1-based) and one element in its html by the index path from the screen root (zero-based child indexes), its tag and class, and the start of its text.",
-            "GET /events returns {\"revision\": n}. The revision increases when data changes. To wait for a change in one run, call GET /events?after={revision}&wait=25 in a loop until the revision increases. Each call returns within the wait time, so loop; do not treat a timeout as an error.",
-            format!("If the brief leaves a choice open, PUT the questions to /questions. Send at most {QUESTION_LIMIT}. The user answers in the Swift Design browser UI. Wait with the /events loop, then GET /briefs and read the answers. Treat the answer `You decide` as your choice to make."),
-            "GET /uploads lists the user's source files. Each row has name, size_bytes, content_type, and is_image. GET /uploads/{name} returns the file. Read the source files to write screen content. Use an image row as `<img src='/uploads/{name}'>`. A reference like [upload chart.png] in a user message names one of these files.",
-            "Write the design as JSON that conforms to the schema.",
-            "PUT the design to /designs/{id}. Use a kebab-case id: lowercase letters, digits, and hyphens. Use at most 64 characters. The id `render` is reserved.",
+            "GET /schemas/design, GET /schemas/brief, and GET /schemas/question-set. Read the JSON Schemas.",
+            "GET /sessions/{id}. Read the request, the state, the messages, the question sets, and the answers.",
+            format!("Briefing mode: ask only questions that change the design. Ask in this order: artifact type and platform; audience and primary goal; primary action; required content and constraints; brand and visual direction and accessibility; technical constraints. Ask at most {limit} questions per turn. PUT /sessions/{{id}}/question-set with a BriefQuestionSet. Set required to false for a question the user may skip. The app adds a skip choice. Never invent a brand, an audience, or a conversion goal.", limit = QUESTIONS_PER_TURN_LIMIT),
+            "Briefing mode: wait with the /events loop, then GET /sessions/{id} and read the answers. When the brief is ready, PUT /sessions/{id}/brief with {\"brief\": <DesignBrief>, \"source\": \"agent\"}. Keep confirmed_facts for what the user stated, assumptions for what you decided, and open_questions for what is still unknown. Do not write designs in briefing mode. The server answers 409.",
+            "Generation mode: GET /sessions/{id}/brief. The brief is authoritative. Do not override a confirmed fact. Use an assumption only where no confirmed fact covers the need.",
+            "Generation mode: write the design as JSON that conforms to the schema. PUT it to /designs/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.",
             "A 422 response lists every problem in error.details. Fix each one. PUT again.",
-            format!("When the brief asks for more than one variation, first decide one concept per candidate: angle, outline, palette, fonts, and visual idea. Make the concepts differ by the variety level. Then PUT designs named {{base}}-candidate-1 to {{base}}-candidate-N, one per concept. Write at most {CANDIDATE_LIMIT}. The browser shows them to the user at once. To learn the choice in the same run, wait with the /events loop until GET /designs/{{base}} returns 200."),
-            format!("When the brief's preview flag is true, write each candidate as a preview: only the first {PREVIEW_SCREEN_COUNT} screens, starting with the title screen, plus `outline`, the screen titles of the complete design in order. A design with more outline titles than screens is a preview. The user picks a preview to continue. A user message with action `continue` and a design id asks for the rest: GET /designs/{{id}}, keep the theme and the existing screens unchanged, add one screen per remaining outline title in order, set outline to an empty list, and PUT /designs/{{id}}. When the preview flag is false, write complete candidates with an empty outline."),
-            "Save the design before you tell the user it is ready. The user edits it in the browser at /.",
-            "After you save a design, look at it: GET /designs/{id}/screens/{n}.png returns a PNG of screen n, 1-based. It needs Chrome or Chromium on the server machine and answers 503 without one. Review every screen for overlap, overflow, empty space, and weak contrast. Fix what you see and PUT the design again. GET /designs/{id}/export returns the design as one HTML file. GET /designs/{id}/export.pdf returns it as a PDF, one page per screen. The PDF needs Chrome too.",
+            "Generation mode: if the brief lacks a detail you cannot design without, do not guess. PUT /sessions/{id}/question-set with the blocking questions. The session returns to clarifying. Then stop.",
+            "GET /uploads lists the user's source files. Each row has name, size_bytes, content_type, and is_image. GET /uploads/{name} returns the file. Use an image row as `<img src='/uploads/{name}'>`.",
+            "After you save a design, look at it: GET /designs/{id}/screens/{n}.png returns a PNG of screen n, 1-based. It needs Chrome or Chromium and answers 503 without one. Review every screen for overlap, overflow, empty space, and weak contrast. Fix what you see and PUT the design again. GET /designs/{id}/export returns the design as one HTML file. GET /designs/{id}/export.pdf returns it as a PDF, one page per screen.",
+            "When the design is written, POST /sessions/{id}/complete, or exit with code 0. The session moves to reviewing.",
+            "GET /events returns {\"revision\": n}. The revision increases when data changes. To wait for a change in one run, call GET /events?after={revision}&wait=25 in a loop. Each call returns within the wait time, so loop; do not treat a timeout as an error.",
         ],
         "rules": CONTENT_RULES,
         "charts": {
@@ -129,17 +125,22 @@ fn instructions() -> serde_json::Value {
             "upload_reference": "[upload name]",
         },
         "payloads": {
-            "PUT /questions": {"questions": [{"question": "text", "options": ["option"]}]},
-            "POST /briefs/messages": {"role": "assistant", "content": "text"},
+            "PUT /sessions/{id}/question-set": "a BriefQuestionSet",
+            "PUT /sessions/{id}/brief": {"brief": "a DesignBrief", "source": "agent"},
             "PUT /designs/{id}": "the design JSON",
             "POST /designs/render": "the design JSON; returns the rendered HTML, or every validation error",
         },
         "routes": {
-            "schema": "GET /schemas/design",
-            "brief": "GET /briefs",
+            "schema_design": "GET /schemas/design",
+            "schema_brief": "GET /schemas/brief",
+            "schema_question_set": "GET /schemas/question-set",
+            "session": "GET /sessions/{id}",
+            "brief": "GET /sessions/{id}/brief",
+            "save_brief": "PUT /sessions/{id}/brief",
+            "question_set": "PUT /sessions/{id}/question-set",
+            "answers": "GET /sessions/{id} (answers field)",
+            "complete": "POST /sessions/{id}/complete",
             "events": "GET /events?after={revision}&wait={seconds}",
-            "questions": "PUT /questions",
-            "messages": "POST /briefs/messages",
             "uploads": "GET /uploads",
             "upload": "GET /uploads/{name}",
             "save_design": "PUT /designs/{id}",
@@ -168,27 +169,30 @@ mod tests {
         let payload = instructions();
         assert!(!payload["steps"].as_array().unwrap().is_empty());
         assert!(!payload["rules"].as_array().unwrap().is_empty());
-        assert_eq!(payload["routes"]["schema"], "GET /schemas/design");
+        assert_eq!(payload["routes"]["schema_design"], "GET /schemas/design");
+        assert_eq!(payload["routes"]["session"], "GET /sessions/{id}");
         assert_eq!(payload["example_design"]["title"], "Swift Design Overview");
     }
 
     #[test]
-    fn instructions_name_the_candidate_and_question_limits() {
+    fn instructions_name_the_modes_and_the_gating() {
         let text = instructions().to_string();
-        assert!(text.contains("at most 5"));
-        assert!(text.contains("You decide"));
-        assert!(text.contains("only the first 3 screens"));
-        assert!(text.contains("action `continue`"));
+        assert!(text.contains("Briefing mode"));
+        assert!(text.contains("Generation mode"));
+        assert!(text.contains("Do not write designs in briefing mode"));
+        assert!(text.contains("at most 3 questions"));
+        assert!(text.contains("The brief is authoritative"));
     }
 
     #[test]
-    fn instructions_describe_transitions_and_templates() {
-        let text = instructions().to_string();
-        assert!(text.contains("`fade`, `push`, `cover`, or `zoom`"));
-        assert!(text.contains("0 to 3000"));
-        assert!(text.contains("The brief's `templates` field lists template ids."));
-        assert!(text.contains("Start again at the first template"));
-        assert_eq!(instructions()["routes"]["templates"], "GET /templates");
+    fn instructions_serve_every_schema() {
+        let payload = instructions();
+        assert_eq!(payload["routes"]["schema_brief"], "GET /schemas/brief");
+        assert_eq!(
+            payload["routes"]["schema_question_set"],
+            "GET /schemas/question-set"
+        );
+        assert_eq!(payload["routes"]["templates"], "GET /templates");
     }
 
     #[test]
@@ -239,6 +243,6 @@ mod tests {
         assert_eq!(payload["conventions"]["upload_reference"], "[upload name]");
         let text = payload.to_string();
         assert!(text.contains("is_image"));
-        assert!(text.contains("[upload chart.png]"));
+        assert!(text.contains("<img src='/uploads/"));
     }
 }

@@ -8,14 +8,16 @@
 
 use std::sync::Arc;
 
-use design_model::Design;
+use design_model::{
+    BriefQuestionSet, Critique, Design, DesignBrief, QuestionSetError, validate_question_set,
+};
 
-use crate::briefs::{Brief, BriefStore, ChatMessage};
 use crate::concepts::{Concept, concept_input, concept_note, concept_prompt, parse_concepts};
 use crate::designs::DesignStore;
 use crate::events::ChangeNotifier;
 use crate::instructions::CONTENT_RULES;
 use crate::model_client::{LogSink, ModelClient, ModelConfiguration, TextSink, UsageSink};
+use crate::sessions::{ChatMessage, RunMode, RunOptions, RunRecord, SessionStore};
 
 /// Fix rounds per candidate before giving up, by effort level.
 fn fix_round_limit(effort: &str) -> usize {
@@ -26,14 +28,82 @@ fn fix_round_limit(effort: &str) -> usize {
     }
 }
 
+/// Screens a preview candidate writes before the rest are continued.
+const PREVIEW_SCREEN_COUNT: usize = 3;
+
+/// What a generation run did.
+#[derive(Debug)]
+pub enum GenerationOutcome {
+    /// The run wrote these design ids.
+    Wrote {
+        /// The design ids written, in candidate order.
+        design_ids: Vec<String>,
+    },
+    /// The run needs the user to answer a blocking question set. The
+    /// engine has written the set and moved the session to clarifying.
+    NeedsClarification {
+        /// The set number.
+        question_set: u32,
+    },
+}
+
+/// What the model must do this run.
+enum GenerationTask {
+    /// Write the requested candidates.
+    Candidates,
+    /// Apply a critique to one chosen design.
+    Edit {
+        /// The design id to edit.
+        design: String,
+        /// The critique to apply.
+        critique: Critique,
+    },
+    /// Continue the preview designs named here.
+    Continue(Vec<String>),
+}
+
+/// The approved brief and options one generation run works from.
+#[derive(Clone)]
+struct GenerationContext {
+    brief: DesignBrief,
+    options: RunOptions,
+    session_id: String,
+}
+
+impl GenerationContext {
+    /// The effort level for this run.
+    fn effort(&self) -> &str {
+        &self.options.effort
+    }
+
+    /// The preview screen count, or `None` for complete candidates.
+    fn preview_screens(&self) -> Option<usize> {
+        self.options.preview.then_some(PREVIEW_SCREEN_COUNT)
+    }
+}
+
+/// Why a generation run stopped without writing a design.
+enum GenerationStop {
+    /// The run failed with this message.
+    Failed(String),
+    /// The model asked for a blocking detail. The engine writes the set
+    /// and returns the session to clarifying.
+    NeedsClarification(BriefQuestionSet),
+}
+
+impl From<String> for GenerationStop {
+    fn from(message: String) -> Self {
+        GenerationStop::Failed(message)
+    }
+}
+
 /// The built-in engine: the model client plus the stores it writes.
 #[derive(Clone)]
 pub struct GenerationEngine {
     model: ModelClient,
     designs: DesignStore,
-    briefs: BriefStore,
-    questions: crate::questions::QuestionStore,
-    settings: Option<crate::settings::SettingsStore>,
+    sessions: SessionStore,
+    address: String,
     notifier: ChangeNotifier,
     progress_sink: Option<ProgressSink>,
     design_progress_sink: Option<DesignProgressSink>,
@@ -77,17 +147,16 @@ impl GenerationEngine {
     pub fn new(
         configuration: ModelConfiguration,
         designs: DesignStore,
-        briefs: BriefStore,
-        questions: crate::questions::QuestionStore,
+        sessions: SessionStore,
         settings: Option<crate::settings::SettingsStore>,
+        address: String,
         notifier: ChangeNotifier,
     ) -> Self {
         Self {
-            model: ModelClient::new(configuration, settings.clone()),
+            model: ModelClient::new(configuration, settings),
             designs,
-            briefs,
-            questions,
-            settings,
+            sessions,
+            address,
             notifier,
             progress_sink: None,
             design_progress_sink: None,
@@ -175,15 +244,14 @@ impl GenerationEngine {
         })
     }
 
-    /// The templates the brief names, in the order it names them. A
-    /// template the brief names that was deleted is skipped, so the run
-    /// still writes the rest.
+    /// The templates the options name, in order. A template that was
+    /// deleted is skipped, so the run still writes the rest.
     async fn brief_templates(
         &self,
-        brief: &Brief,
+        options: &RunOptions,
         log: &LogSink,
     ) -> Vec<crate::templates::Template> {
-        let ids = brief.template_ids();
+        let ids = options.templates.clone();
         if ids.is_empty() {
             return Vec::new();
         }
@@ -219,183 +287,279 @@ impl GenerationEngine {
         self.model.context_window()
     }
 
-    /// Runs one turn of the conversation. The model reads the brief and
-    /// the chat, then asks questions, replies, or writes candidates.
-    /// User turns that arrive during the run start another turn.
-    pub async fn run(mut self, log: LogSink) -> Result<(), String> {
+    /// Runs one generation turn for `session_id`: read the approved
+    /// brief, write designs from it, and report the outcome. The session
+    /// must be in the generating state.
+    pub async fn run(
+        mut self,
+        session_id: &str,
+        log: LogSink,
+    ) -> Result<GenerationOutcome, String> {
         self.refresh_login_if_needed(&log).await?;
-        let client = ModelClient::build_http_client()?;
-        loop {
-            let brief = self.load_brief().await?;
-            let seen_turns = brief.messages.len();
-            log(&format!(
-                "built-in engine · {} · {} · effort {}",
-                self.label(),
-                match brief.variations {
-                    Some(count) => format!("{count} variations"),
-                    None => "variations not chosen".to_owned(),
-                },
-                brief.effort,
-            ));
-            self.report_progress(0);
-            let appended = self.take_turn(&client, &brief, &log).await?;
-            self.report_progress(100);
-            let latest = self.load_brief().await?;
-            if latest.messages.len() <= seen_turns + appended {
-                break;
-            }
-            log("new message during the run; taking another turn");
-        }
-        log("done");
-        Ok(())
-    }
-
-    /// Reads the brief, or fails when none exists.
-    async fn load_brief(&self) -> Result<Brief, String> {
-        self.briefs
-            .read()
+        let session = self
+            .sessions
+            .read(session_id)
             .await
             .map_err(|error| error.to_string())?
-            .ok_or_else(|| "no brief exists: write one in the studio first".to_owned())
+            .ok_or_else(|| format!("no session `{session_id}`"))?;
+        if session.state != design_model::WorkflowState::Generating {
+            return Err(format!(
+                "the session is in state `{}`, not generating",
+                session.state
+            ));
+        }
+        let revision = session
+            .approved_revision
+            .ok_or_else(|| "the session has no approved brief".to_owned())?;
+        let brief = self
+            .sessions
+            .read_brief(session_id, revision)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("brief revision {revision} is missing"))?;
+        let context = GenerationContext {
+            brief,
+            options: session.options.clone(),
+            session_id: session_id.to_owned(),
+        };
+        let task = self.pick_task(&session, &context).await?;
+        let run_id = self
+            .sessions
+            .start_run(
+                session_id,
+                RunRecord {
+                    run_id: String::new(),
+                    mode: RunMode::Generation,
+                    runtime: "built-in".to_owned(),
+                    provider: None,
+                    model: Some(self.model.model().to_owned()),
+                    brief_revision: Some(revision),
+                    started_at: crate::time::rfc3339_now(),
+                    finished_at: None,
+                    result: None,
+                    error: None,
+                    artifacts: Vec::new(),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        log(&format!(
+            "generation · {} · brief revision {revision} · effort {}",
+            self.label(),
+            context.effort(),
+        ));
+        self.report_progress(0);
+        let client = ModelClient::build_http_client()?;
+        let outcome = self.execute(&client, &context, task, &log).await;
+        self.report_progress(100);
+        self.settle(session_id, &run_id, outcome, &log).await
     }
 
-    /// Plans one turn and acts on it. Returns how many turns the engine
-    /// appended to the conversation.
-    async fn take_turn(
+    /// Picks what the run does from the session and the brief.
+    async fn pick_task(
+        &self,
+        session: &crate::sessions::Session,
+        context: &GenerationContext,
+    ) -> Result<GenerationTask, String> {
+        if let Some(pending) = &session.pending_critique {
+            return Ok(GenerationTask::Edit {
+                design: pending.design.clone(),
+                critique: pending.critique.clone(),
+            });
+        }
+        let continues = self.continue_requests(&context.session_id).await?;
+        if !continues.is_empty() {
+            return Ok(GenerationTask::Continue(continues));
+        }
+        Ok(GenerationTask::Candidates)
+    }
+
+    /// The preview designs the latest user turn asked to continue: the
+    /// design id of the newest user message, when that design exists and
+    /// is still a preview.
+    async fn continue_requests(&self, session_id: &str) -> Result<Vec<String>, String> {
+        let messages = self
+            .sessions
+            .messages(session_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(design_id) = messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .and_then(|message| message.design.clone())
+        else {
+            return Ok(Vec::new());
+        };
+        match self.designs.load(&design_id).await {
+            Ok(Some(design)) if design.is_preview() => Ok(vec![design_id]),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// Runs the chosen task and returns the outcome.
+    async fn execute(
         &self,
         client: &reqwest::Client,
-        brief: &Brief,
+        context: &GenerationContext,
+        task: GenerationTask,
         log: &LogSink,
-    ) -> Result<usize, String> {
-        // Continue requests name their designs; no planning is needed.
-        let requests = brief.continue_requests();
-        if !requests.is_empty() {
-            let outcomes = self.continue_designs(client, brief, &requests, log).await;
-            if outcomes.iter().all(|(_, outcome)| outcome.is_err()) {
-                let failures: Vec<String> = outcomes
-                    .iter()
-                    .filter_map(|(id, outcome)| {
-                        outcome.as_ref().err().map(|error| format!("{id}: {error}"))
-                    })
-                    .collect();
-                return Err(failures.join("; "));
+    ) -> Result<GenerationOutcome, GenerationStop> {
+        match task {
+            GenerationTask::Candidates => self.generate_candidates(client, context, log).await,
+            GenerationTask::Edit { design, critique } => {
+                self.edit_design(client, context, &design, &critique, log)
+                    .await?;
+                Ok(GenerationOutcome::Wrote {
+                    design_ids: vec![design],
+                })
             }
-            self.say(&continue_summary(&outcomes)).await?;
-            return Ok(1);
+            GenerationTask::Continue(design_ids) => {
+                let refs: Vec<&str> = design_ids.iter().map(String::as_str).collect();
+                let outcomes = self.continue_designs(client, context, &refs, log).await;
+                if outcomes.iter().all(|(_, outcome)| outcome.is_err()) {
+                    let failures: Vec<String> = outcomes
+                        .iter()
+                        .filter_map(|(id, outcome)| {
+                            outcome.as_ref().err().map(|error| format!("{id}: {error}"))
+                        })
+                        .collect();
+                    return Err(GenerationStop::Failed(failures.join("; ")));
+                }
+                Ok(GenerationOutcome::Wrote { design_ids })
+            }
         }
-        let candidate_count = self.candidate_count(brief).await?;
-        let messages = vec![
-            serde_json::json!({ "role": "system", "content": planner_prompt() }),
-            serde_json::json!({
-                "role": "user",
-                "content": planner_input(brief, candidate_count),
-            }),
-        ];
-        let reply = self.model.chat(client, &messages, &brief.effort).await?;
-        let plan = with_candidate_questions(parse_plan(&reply), brief);
-        let mut appended = 0;
-        if !plan.reply.trim().is_empty() {
-            self.say(&plan.reply).await?;
-            appended += 1;
+    }
+
+    /// Records the run outcome and updates the session. A written design
+    /// is reported and the run finishes; a clarification writes the set
+    /// and returns to clarifying; a failure is recorded and propagated.
+    async fn settle(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        outcome: Result<GenerationOutcome, GenerationStop>,
+        log: &LogSink,
+    ) -> Result<GenerationOutcome, String> {
+        match outcome {
+            // The engine returns clarification as an Err below; an Ok
+            // clarification cannot arise, but the type allows it.
+            Ok(GenerationOutcome::NeedsClarification { question_set }) => {
+                Ok(GenerationOutcome::NeedsClarification { question_set })
+            }
+            Ok(GenerationOutcome::Wrote { design_ids }) => {
+                let summary = wrote_summary(&design_ids);
+                self.say(session_id, &summary).await?;
+                self.sessions
+                    .update(session_id, |session| session.pending_critique = None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                self.finish_run(session_id, run_id, "succeeded", None, design_ids.clone())
+                    .await;
+                Ok(GenerationOutcome::Wrote { design_ids })
+            }
+            Err(GenerationStop::NeedsClarification(set)) => {
+                let number = self
+                    .sessions
+                    .write_question_set(session_id, &set)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                self.sessions
+                    .append_message(
+                        session_id,
+                        ChatMessage::assistant_questions(&set.message, number),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                self.sessions
+                    .apply(session_id, design_model::WorkflowEvent::QuestionsAsked)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                self.finish_run(session_id, run_id, "needs_clarification", None, Vec::new())
+                    .await;
+                log("generation needs clarification; returned to the questions");
+                Ok(GenerationOutcome::NeedsClarification {
+                    question_set: number,
+                })
+            }
+            Err(GenerationStop::Failed(message)) => {
+                self.finish_run(
+                    session_id,
+                    run_id,
+                    "failed",
+                    Some(message.clone()),
+                    Vec::new(),
+                )
+                .await;
+                Err(message)
+            }
         }
-        if !plan.questions.is_empty() {
-            log(&format!(
-                "asked {} questions; answer them in the studio",
-                plan.questions.len()
-            ));
-            self.questions
-                .write(&plan.questions)
-                .await
-                .map_err(|error| error.to_string())?;
-            self.notifier.notify();
-            return Ok(appended);
-        }
-        if plan.should_edit
-            && let Some(design_id) = brief.editing_design()
-        {
-            self.edit_design(client, brief, design_id, log).await?;
-            self.say("I updated the design. Tell me what else to change.")
-                .await?;
-            return Ok(appended + 1);
-        }
-        if !plan.should_generate {
-            log("replied; waiting for the user");
-            return Ok(appended);
-        }
-        let saved = self.generate_candidates(client, brief, log).await?;
-        self.say(&format!(
-            "I wrote {saved} candidate{} to the canvas. Tell me what to change, or pick one.",
-            if saved == 1 { "" } else { "s" }
-        ))
-        .await?;
-        Ok(appended + 1)
     }
 
     /// Appends an assistant turn and wakes the studio.
-    async fn say(&self, content: &str) -> Result<(), String> {
-        self.briefs
-            .append_message(ChatMessage::assistant(content))
+    async fn say(&self, session_id: &str, content: &str) -> Result<(), String> {
+        self.sessions
+            .append_message(session_id, ChatMessage::assistant(content))
             .await
             .map_err(|error| error.to_string())?;
         self.notifier.notify();
         Ok(())
     }
 
-    /// How many candidates this brief's project already has.
-    async fn candidate_count(&self, brief: &Brief) -> Result<usize, String> {
-        let Some(project) = &brief.project else {
-            return Ok(0);
-        };
-        let prefix = format!("{project}-candidate-");
-        let designs = self
-            .designs
-            .list()
+    /// Records the end of the run and wakes the studio.
+    async fn finish_run(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        result: &str,
+        error: Option<String>,
+        artifacts: Vec<String>,
+    ) {
+        if let Err(failure) = self
+            .sessions
+            .finish_run(session_id, run_id, result, error, artifacts)
             .await
-            .map_err(|error| error.to_string())?;
-        Ok(designs
-            .iter()
-            .filter(|design| design.id.starts_with(&prefix))
-            .count())
+        {
+            tracing::warn!(%failure, "recording the generation run failed");
+        }
+        self.notifier.notify();
     }
 
-    /// Writes one design per requested variation. Returns the count.
+    /// Writes one design per requested variation. Returns the ids.
     async fn generate_candidates(
         &self,
         client: &reqwest::Client,
-        brief: &Brief,
+        context: &GenerationContext,
         log: &LogSink,
-    ) -> Result<usize, String> {
-        let count = brief.variation_count();
+    ) -> Result<GenerationOutcome, GenerationStop> {
+        let count = context.options.variation_count();
         let attachments = Arc::new(self.load_attachments(log).await);
         let concepts = if count > 1 {
-            self.plan_concepts(client, brief, count, &attachments, log)
+            self.plan_concepts(client, context, count, &attachments, log)
                 .await?
         } else {
             Vec::new()
         };
         self.report_progress(10);
-        let base = brief
-            .project
-            .clone()
-            .unwrap_or_else(|| design_base_id(&prompt_words(&brief.prompt)));
+        let base = context.session_id.clone();
         let ids: Vec<String> = (1..=count)
             .map(|candidate_number| {
                 if count > 1 {
                     format!("{base}-candidate-{candidate_number}")
                 } else {
-                    base.clone()
+                    format!("{base}-candidate-1")
                 }
             })
             .collect();
         let shares = self.shared_progress(&ids, 10, 90);
-        let templates = self.brief_templates(brief, log).await;
+        let templates = self.brief_templates(&context.options, log).await;
         // Every candidate runs at the same time; each saves itself as
         // soon as it is ready.
         let mut tasks = tokio::task::JoinSet::new();
         for candidate_number in 1..=count {
             let engine = self.clone();
             let client = client.clone();
-            let brief = brief.clone();
+            let context = context.clone();
             let concepts = concepts.clone();
             // One look per candidate, wrapping when the user picked
             // fewer templates than candidates.
@@ -408,10 +572,10 @@ impl GenerationEngine {
             share(0.0);
             tasks.spawn(async move {
                 let request = CandidateRequest {
-                    brief: &brief,
+                    context: &context,
                     candidate_number,
                     concepts: &concepts,
-                    preview_screens: brief.preview_screen_count(),
+                    preview_screens: context.preview_screens(),
                     design_id: id.clone(),
                     template: template.as_ref(),
                 };
@@ -419,25 +583,36 @@ impl GenerationEngine {
                     .generate_candidate(&client, &request, &attachments, &share, &log)
                     .await?;
                 log(&format!("candidate {candidate_number}: saved as {id}"));
-                Ok::<(), String>(())
+                Ok::<(), GenerationStop>(())
             });
         }
-        let mut saved = 0;
+        let mut saved = Vec::new();
         let mut failures = Vec::new();
         while let Some(outcome) = tasks.join_next().await {
             match outcome {
-                Ok(Ok(())) => saved += 1,
-                Ok(Err(error)) => failures.push(error),
+                Ok(Ok(())) => {}
+                Ok(Err(GenerationStop::NeedsClarification(set))) => {
+                    tasks.shutdown().await;
+                    return Err(GenerationStop::NeedsClarification(set));
+                }
+                Ok(Err(GenerationStop::Failed(error))) => failures.push(error),
                 Err(error) => failures.push(format!("candidate task failed: {error}")),
             }
         }
-        if saved == 0 {
-            return Err(failures.join("; "));
+        // Every candidate saves itself, so the written ids are those on
+        // disk under this base.
+        for id in &ids {
+            if matches!(self.designs.load(id).await, Ok(Some(_))) {
+                saved.push(id.clone());
+            }
+        }
+        if saved.is_empty() {
+            return Err(GenerationStop::Failed(failures.join("; ")));
         }
         for failure in &failures {
             log(&format!("candidate failed: {failure}"));
         }
-        Ok(saved)
+        Ok(GenerationOutcome::Wrote { design_ids: saved })
     }
 
     /// Asks the model for `count` distinct concepts in one call. A reply
@@ -446,18 +621,18 @@ impl GenerationEngine {
     async fn plan_concepts(
         &self,
         client: &reqwest::Client,
-        brief: &Brief,
+        context: &GenerationContext,
         count: usize,
         attachments: &Attachments,
         log: &LogSink,
-    ) -> Result<Vec<Concept>, String> {
+    ) -> Result<Vec<Concept>, GenerationStop> {
         log(&format!("planning {count} concepts"));
         let messages = vec![
-            serde_json::json!({ "role": "system", "content": concept_prompt(brief, count) }),
-            self.user_message(&concept_input(brief), attachments),
+            serde_json::json!({ "role": "system", "content": concept_prompt(count) }),
+            self.user_message(&concept_input(&context.brief), attachments),
         ];
         let started = std::time::Instant::now();
-        let reply = self.model.chat(client, &messages, &brief.effort).await?;
+        let reply = self.model.chat(client, &messages, context.effort()).await?;
         log(&format!(
             "concepts: reply in {:.0}s",
             started.elapsed().as_secs_f32()
@@ -475,31 +650,39 @@ impl GenerationEngine {
         Ok(concepts)
     }
 
-    /// Applies the latest user request to the design open in the editor:
-    /// the model rewrites the design, the result is validated, polished,
-    /// and saved under the same id.
+    /// Applies a critique to one chosen design: the model rewrites the
+    /// design against the brief and the critique, the result is
+    /// validated, polished, and saved under the same id.
     async fn edit_design(
         &self,
         client: &reqwest::Client,
-        brief: &Brief,
+        context: &GenerationContext,
         design_id: &str,
+        critique: &Critique,
         log: &LogSink,
-    ) -> Result<(), String> {
+    ) -> Result<(), GenerationStop> {
         let design = self
             .designs
             .load(design_id)
             .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("design `{design_id}` does not exist"))?;
-        let design_json = serde_json::to_string(&design).map_err(|error| error.to_string())?;
+            .map_err(|error| GenerationStop::Failed(error.to_string()))?
+            .ok_or_else(|| {
+                GenerationStop::Failed(format!("design `{design_id}` does not exist"))
+            })?;
+        let design_json = serde_json::to_string(&design)
+            .map_err(|error| GenerationStop::Failed(error.to_string()))?;
         let attachments = self.load_attachments(log).await;
         let messages = vec![
             serde_json::json!({ "role": "system", "content": system_prompt() }),
-            self.user_message(&edit_prompt(brief, &design_json), &attachments),
+            self.user_message(
+                &edit_prompt(&context.brief, critique, &design_json),
+                &attachments,
+            ),
         ];
         let original = design.clone();
-        let context = DesignRequest {
-            effort: &brief.effort,
+        let effort = context.effort().to_owned();
+        let request = DesignRequest {
+            effort: effort.clone(),
             label: format!("edit {design_id}"),
             parse: Box::new(move |content| {
                 crate::patch::apply_patch(&original, crate::patch::parse_patch(content)?)
@@ -508,19 +691,21 @@ impl GenerationEngine {
             live: None,
         };
         let edited = self
-            .request_valid_design(client, messages, &context, log)
+            .request_valid_design(client, messages, &request, log)
             .await?;
         // A polish round costs a full-design rewrite; edits get one only
         // at high effort.
-        let final_design = if brief.effort == "high" {
-            self.polish_design(client, edited, &context, log).await?
+        let final_design = if effort == "high" {
+            self.polish_design(client, edited, &request, log)
+                .await
+                .map_err(GenerationStop::Failed)?
         } else {
             edited
         };
         self.designs
             .save(design_id, &final_design)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| GenerationStop::Failed(error.to_string()))?;
         self.notifier.notify();
         log(&format!("edit {design_id}: saved"));
         Ok(())
@@ -532,7 +717,7 @@ impl GenerationEngine {
     async fn continue_designs(
         &self,
         client: &reqwest::Client,
-        brief: &Brief,
+        context: &GenerationContext,
         design_ids: &[&str],
         log: &LogSink,
     ) -> Vec<(String, Result<usize, String>)> {
@@ -543,14 +728,14 @@ impl GenerationEngine {
         for (index, design_id) in design_ids.iter().enumerate() {
             let engine = self.clone();
             let client = client.clone();
-            let brief = brief.clone();
+            let context = context.clone();
             let design_id = (*design_id).to_owned();
             let attachments = Arc::clone(&attachments);
             let share = Arc::clone(&shares[index]);
             let log = Arc::clone(log);
             tasks.spawn(async move {
                 let outcome = engine
-                    .continue_design(&client, &brief, &design_id, &attachments, &share, &log)
+                    .continue_design(&client, &context, &design_id, &attachments, &share, &log)
                     .await;
                 (index, design_id, outcome)
             });
@@ -574,7 +759,7 @@ impl GenerationEngine {
     async fn continue_design(
         &self,
         client: &reqwest::Client,
-        brief: &Brief,
+        context: &GenerationContext,
         design_id: &str,
         attachments: &Arc<Attachments>,
         progress: &ShareSink,
@@ -634,7 +819,7 @@ impl GenerationEngine {
         for (position, chunk) in chunks.iter().enumerate() {
             let engine = self.clone();
             let client = client.clone();
-            let brief = brief.clone();
+            let context = context.clone();
             let preview = preview.clone();
             let board = Arc::clone(&board);
             let show = Arc::clone(&show);
@@ -648,7 +833,7 @@ impl GenerationEngine {
                 let messages = vec![
                     serde_json::json!({ "role": "system", "content": system_prompt() }),
                     engine.user_message(
-                        &continue_prompt(&brief, &preview, &design_json, chunk),
+                        &continue_prompt(&context.brief, &preview, &design_json, chunk),
                         &attachments,
                     ),
                 ];
@@ -656,8 +841,8 @@ impl GenerationEngine {
                 let written = preview.screens.len();
                 let live_board = Arc::clone(&board);
                 let live_show = Arc::clone(&show);
-                let context = DesignRequest {
-                    effort: &brief.effort,
+                let request = DesignRequest {
+                    effort: context.effort().to_owned(),
                     label: format!("{label} chunk {}", position + 1),
                     parse: Box::new(move |content| apply_continuation(&original, content)),
                     progress: None,
@@ -674,8 +859,9 @@ impl GenerationEngine {
                     })),
                 };
                 let continued = engine
-                    .request_valid_design(&client, messages, &context, &log)
-                    .await?;
+                    .request_valid_design(&client, messages, &request, &log)
+                    .await
+                    .map_err(stop_to_string)?;
                 let screens: Vec<design_model::Screen> = continued.screens[written..].to_vec();
                 if let Ok(mut board) = board.lock() {
                     board[position] = screens;
@@ -719,7 +905,7 @@ impl GenerationEngine {
         // The polish rounds fill the last share.
         let share = Arc::clone(progress);
         let polish_context = DesignRequest {
-            effort: &brief.effort,
+            effort: context.effort().to_owned(),
             label: label.clone(),
             parse: Box::new(parse_design),
             progress: Some(Arc::new(move |fraction: f32| {
@@ -748,7 +934,7 @@ impl GenerationEngine {
         log: &LogSink,
     ) -> Result<Design, String> {
         let label = &context.label;
-        let rounds = crate::polish::polish_rounds(context.effort);
+        let rounds = crate::polish::polish_rounds(&context.effort);
         if rounds == 0 {
             context.report(1.0);
         }
@@ -775,7 +961,7 @@ impl GenerationEngine {
                 .chat_with(
                     client,
                     self.model
-                        .request_body(&messages, writing_effort(context.effort)),
+                        .request_body(&messages, writing_effort(&context.effort)),
                     None,
                 )
                 .await?;
@@ -845,10 +1031,7 @@ impl GenerationEngine {
 
     /// The server's own URL, for relative image paths in screenshots.
     fn base_url(&self) -> String {
-        match &self.settings {
-            Some(settings) => format!("http://{}", settings.address()),
-            None => "http://127.0.0.1:3000".to_owned(),
-        }
+        self.address.clone()
     }
 
     /// Asks the model for one candidate, repairs it through fix rounds
@@ -862,7 +1045,7 @@ impl GenerationEngine {
         attachments: &Attachments,
         progress: &ShareSink,
         log: &LogSink,
-    ) -> Result<Design, String> {
+    ) -> Result<Design, GenerationStop> {
         let messages = vec![
             serde_json::json!({ "role": "system", "content": system_prompt() }),
             self.user_message(&candidate_prompt(request), attachments),
@@ -870,7 +1053,7 @@ impl GenerationEngine {
         let saver = LiveSaver::new(self, &request.design_id);
         let live_saver = saver.clone();
         let context = DesignRequest {
-            effort: &request.brief.effort,
+            effort: request.context.effort().to_owned(),
             label: format!("candidate {}", request.candidate_number),
             parse: Box::new(parse_design),
             progress: Some(Arc::clone(progress)),
@@ -885,27 +1068,34 @@ impl GenerationEngine {
             .request_valid_design(client, messages, &context, log)
             .await?;
         saver.offer(draft.clone(), draft.screens.len());
-        let polished = self.polish_design(client, draft, &context, log).await?;
-        saver.finish(&polished).await?;
+        let polished = self
+            .polish_design(client, draft, &context, log)
+            .await
+            .map_err(GenerationStop::Failed)?;
+        saver
+            .finish(&polished)
+            .await
+            .map_err(GenerationStop::Failed)?;
         self.designs
             .clear_user_paths(&request.design_id)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| GenerationStop::Failed(error.to_string()))?;
         Ok(polished)
     }
 
     /// Sends `messages`, parses the design reply, and repairs it through
-    /// fix rounds until it validates.
+    /// fix rounds until it validates. A reply that asks for a blocking
+    /// detail stops the run with a clarification.
     async fn request_valid_design(
         &self,
         client: &reqwest::Client,
         mut messages: Vec<serde_json::Value>,
         context: &DesignRequest<'_>,
         log: &LogSink,
-    ) -> Result<Design, String> {
+    ) -> Result<Design, GenerationStop> {
         let label = &context.label;
-        let fix_round_limit = fix_round_limit(context.effort);
-        let effort = writing_effort(context.effort);
+        let fix_round_limit = fix_round_limit(&context.effort);
+        let effort = writing_effort(&context.effort);
         for round in 0..=fix_round_limit {
             log(&format!("{label}: requesting (round {})", round + 1));
             let started = std::time::Instant::now();
@@ -922,6 +1112,21 @@ impl GenerationEngine {
                 started.elapsed().as_secs_f32(),
                 content.len()
             ));
+            // A valid clarification request stops the run at once.
+            if let Some(result) = clarification_request(&content) {
+                match result {
+                    Ok(set) => {
+                        log(&format!("{label}: the model asked for clarification"));
+                        return Err(GenerationStop::NeedsClarification(set));
+                    }
+                    Err(problems) => {
+                        log(&format!(
+                            "{label}: the clarification request was invalid ({} problems); retrying",
+                            problems.len()
+                        ));
+                    }
+                }
+            }
             match (context.parse)(&content) {
                 Ok(design) => {
                     let errors = design.validate();
@@ -960,9 +1165,9 @@ impl GenerationEngine {
                 }
             }
         }
-        Err(format!(
+        Err(GenerationStop::Failed(format!(
             "{label} still fails after {fix_round_limit} fix rounds"
-        ))
+        )))
     }
 
     /// Reports each request's token usage to `sink`.
@@ -1417,121 +1622,8 @@ fn continue_chunks(start: usize, planned: usize) -> Vec<ContinueChunk> {
         .collect()
 }
 
-/// The planner's system prompt: one turn of the design conversation.
-fn planner_prompt() -> String {
-    format!(
-        "You plan screen designs with the user.\n\
-         Read the brief and the conversation. Reply with only this JSON:\n\
-         {{\"reply\":\"text for the user\",\"questions\":[{{\"question\":\"...\",\"options\":[\"...\"]}}],\"generate\":false,\"edit\":false}}\n\
-         Use questions when you need a choice from the user. Ask at most 3. Give 2 to 4 short options for each.\n\
-         The app asks four questions itself: the scenario, the design length in screens, the number of candidates, and how different the candidates are. Never ask these. The input shows their answers, or `not chosen yet` when the app has not asked them yet.\n\
-         After {limit} answered questions, do not ask more.\n\
-         Set generate to true when you know enough to write the design. Then say in reply what you will write.\n\
-         When the input names a design open in the editor and the user asks for a change, set edit to true and generate to false. Say in reply what you will change. The app applies the change to that design.\n\
-         When no design is open and candidates exist and the user asks for changes, set generate to true to write new candidates.\n\
-         When the user only chats, set generate to false and answer in reply.\n\
-         Keep reply to 1 to 3 sentences. Reply with only the JSON.",
-        limit = crate::questions::QUESTION_LIMIT
-    )
-}
-
-/// The planner's user input: brief, conversation, and canvas state.
-fn planner_input(brief: &Brief, candidate_count: usize) -> String {
-    let mut input = format!(
-        "Brief:\n{}\nScenario: {}\nLength in screens: {}\nVariations requested: {}\nEffort: {}\nVariety: {}\n",
-        brief.prompt,
-        brief.scenario.as_deref().unwrap_or("not chosen yet"),
-        brief.length.as_deref().unwrap_or("not chosen yet"),
-        match brief.variations {
-            Some(count) => count.to_string(),
-            None => "not chosen yet".to_owned(),
-        },
-        brief.effort,
-        brief.variety.as_deref().unwrap_or("not chosen yet")
-    );
-    input.push_str(&format!("Candidates on the canvas: {candidate_count}\n"));
-    input.push_str(&format!(
-        "Design open in the editor: {}\n",
-        brief.editing_design().unwrap_or("none")
-    ));
-    input.push_str(&format!(
-        "Questions answered so far: {}\n",
-        brief.answers.len()
-    ));
-    if brief.messages.is_empty() {
-        input.push_str("Conversation: none yet.\n");
-    } else {
-        input.push_str("Conversation, oldest first:\n");
-        for message in &brief.messages {
-            match &message.design {
-                Some(design) => input.push_str(&format!(
-                    "{} (editing {design}): {}\n",
-                    message.role, message.content
-                )),
-                None => input.push_str(&format!("{}: {}\n", message.role, message.content)),
-            }
-        }
-    }
-    input.push_str("Reply with only the JSON.");
-    input
-}
-
-/// One planned turn, parsed from the model's reply.
-#[derive(Debug, Default)]
-struct Plan {
-    /// Text for the user. Empty means nothing to say.
-    reply: String,
-    /// Questions for the studio, at most `QUESTION_LIMIT`.
-    questions: Vec<crate::questions::Question>,
-    /// True when the model wants to write candidates now.
-    should_generate: bool,
-    /// True when the model wants to apply the request to the design open
-    /// in the editor.
-    should_edit: bool,
-}
-
-/// Parses a planner reply. Prose that is not JSON becomes the reply
-/// text, so the user still sees it.
-fn parse_plan(content: &str) -> Plan {
-    #[derive(serde::Deserialize)]
-    struct PlanReply {
-        #[serde(default)]
-        reply: String,
-        #[serde(default)]
-        questions: Vec<crate::questions::Question>,
-        #[serde(default)]
-        generate: bool,
-        #[serde(default)]
-        edit: bool,
-    }
-    let parsed = content
-        .find('{')
-        .zip(content.rfind('}'))
-        .filter(|(start, end)| end > start)
-        .and_then(|(start, end)| serde_json::from_str::<PlanReply>(&content[start..=end]).ok());
-    let Some(parsed) = parsed else {
-        return Plan {
-            reply: content.trim().to_owned(),
-            questions: Vec::new(),
-            should_generate: false,
-            should_edit: false,
-        };
-    };
-    let mut questions: Vec<_> = parsed
-        .questions
-        .into_iter()
-        .filter(|question| !question.question.trim().is_empty())
-        .collect();
-    questions.truncate(crate::questions::QUESTION_LIMIT);
-    Plan {
-        reply: parsed.reply,
-        questions,
-        should_generate: parsed.generate,
-        should_edit: parsed.edit,
-    }
-}
-
-/// The system prompt: role, rules, schema, and one example design.
+/// The system prompt: role, rules, schema, the clarification protocol,
+/// and one example design.
 fn system_prompt() -> String {
     let schema = serde_json::to_string(&schemars::schema_for!(Design)).unwrap_or_default();
     format!(
@@ -1540,62 +1632,127 @@ fn system_prompt() -> String {
          Follow these rules:\n{rules}\n\
          The design must conform to this JSON Schema:\n{schema}\n\
          Example design:\n{example}\n\
-         Always reply with only one design JSON document. No prose, no code fences.",
+         The brief is authoritative. Do not override a confirmed fact. Use an assumption only where the brief has no confirmed fact for the need.\n\
+         If the brief lacks a detail you cannot design without, do not guess. Reply with only this JSON instead:\n\
+         {{\"needs_clarification\":{{\"title\":\"...\",\"message\":\"...\",\"questions\":[{{\"id\":\"...\",\"label\":\"...\",\"kind\":\"single_select\",\"required\":true,\"options\":[{{\"value\":\"...\",\"label\":\"...\"}}]}}],\"can_proceed_with_assumptions\":true}}}}\n\
+         Ask at most {limit} questions. Otherwise reply with only one design JSON document. No prose, no code fences.",
         rules = CONTENT_RULES.join("\n"),
         example = include_str!("../../../fixtures/sample-design.json"),
+        limit = design_model::QUESTIONS_PER_TURN_LIMIT,
     )
 }
 
-/// Adds the app's candidate questions to a plan that asks or would
-/// generate: the scenario when none is chosen, the length when none is
-/// chosen, the count when none is chosen, and the variety when none is
-/// chosen and the count is not one. A plan that would generate asks
-/// first instead.
-fn with_candidate_questions(mut plan: Plan, brief: &Brief) -> Plan {
-    if !plan.should_generate && plan.questions.is_empty() {
-        return plan;
+/// A brief question set the model returned instead of a design, when
+/// the reply carries a `needs_clarification` object. `Some(Err)` when
+/// the object is present but invalid.
+fn clarification_request(content: &str) -> Option<Result<BriefQuestionSet, Vec<QuestionSetError>>> {
+    let start = content.find('{')?;
+    let end = content.rfind('}')?;
+    if end <= start {
+        return None;
     }
-    let needs_scenario = brief.scenario.is_none();
-    let needs_length = brief.length.is_none();
-    let needs_count = brief.variations.is_none();
-    let needs_variety = brief.variations != Some(1) && brief.variety.is_none();
-    if !needs_scenario && !needs_length && !needs_count && !needs_variety {
-        return plan;
+    #[derive(serde::Deserialize)]
+    struct Wrapper {
+        needs_clarification: BriefQuestionSet,
     }
-    let has_scenario = plan
-        .questions
-        .iter()
-        .any(|question| crate::candidate_questions::is_scenario_question(&question.question));
-    let has_length = plan
-        .questions
-        .iter()
-        .any(|question| crate::candidate_questions::is_length_question(&question.question));
-    let has_count = plan
-        .questions
-        .iter()
-        .any(|question| crate::candidate_questions::is_variation_question(&question.question));
-    let has_variety = plan
-        .questions
-        .iter()
-        .any(|question| crate::candidate_questions::is_variety_question(&question.question));
-    if needs_scenario && !has_scenario {
-        plan.questions
-            .push(crate::candidate_questions::scenario_question());
+    let wrapper: Wrapper = serde_json::from_str(&content[start..=end]).ok()?;
+    let set = wrapper.needs_clarification;
+    let problems = validate_question_set(&set);
+    Some(if problems.is_empty() {
+        Ok(set)
+    } else {
+        Err(problems)
+    })
+}
+
+/// Turns a generation stop into a plain message, for callers that do not
+/// carry a clarification.
+fn stop_to_string(stop: GenerationStop) -> String {
+    match stop {
+        GenerationStop::Failed(message) => message,
+        GenerationStop::NeedsClarification(_) => {
+            "the model asked for clarification mid-continuation".to_owned()
+        }
     }
-    if needs_length && !has_length {
-        plan.questions
-            .push(crate::candidate_questions::length_question());
+}
+
+/// The assistant summary after a run wrote designs.
+fn wrote_summary(design_ids: &[String]) -> String {
+    match design_ids.len() {
+        0 => "The run wrote no designs.".to_owned(),
+        1 => format!(
+            "I wrote `{}`. Review it, then critique it or ask for a change.",
+            design_ids[0]
+        ),
+        count => format!(
+            "I wrote {count} candidates to the canvas. Pick one, then critique it or ask for a change."
+        ),
     }
-    if needs_count && !has_count {
-        plan.questions
-            .push(crate::candidate_questions::variation_question());
+}
+
+/// Appends `title: value` when the value is not blank.
+fn push_field(input: &mut String, title: &str, value: &str) {
+    if !value.trim().is_empty() {
+        input.push_str(&format!("{title}: {value}\n"));
     }
-    if needs_variety && !has_variety {
-        plan.questions
-            .push(crate::candidate_questions::variety_question());
+}
+
+/// Appends a bullet list under `title` when it has items.
+fn push_list(input: &mut String, title: &str, items: &[String]) {
+    if !items.is_empty() {
+        input.push_str(&format!("{title}:\n"));
+        for item in items {
+            input.push_str(&format!("- {item}\n"));
+        }
     }
-    plan.should_generate = false;
-    plan
+}
+
+/// The brief, rendered as labelled sections for a generation prompt.
+fn brief_input(brief: &DesignBrief) -> String {
+    let mut input = String::new();
+    push_field(&mut input, "Request", &brief.request);
+    push_field(&mut input, "Target artifact", &brief.target_artifact);
+    push_field(&mut input, "Target platform", &brief.target_platform);
+    push_field(&mut input, "Audience", &brief.audience);
+    push_field(&mut input, "User problem", &brief.user_problem);
+    push_field(&mut input, "Primary job", &brief.primary_job);
+    push_field(&mut input, "Success criterion", &brief.success_criterion);
+    push_field(&mut input, "Visual direction", &brief.visual_direction);
+    push_list(&mut input, "Confirmed facts", &brief.confirmed_facts);
+    push_list(
+        &mut input,
+        "Assumptions (use only where a confirmed fact does not cover the need)",
+        &brief.assumptions,
+    );
+    push_list(&mut input, "Open questions", &brief.open_questions);
+    push_list(
+        &mut input,
+        "Information architecture",
+        &brief.information_architecture,
+    );
+    if !brief.required_sections.is_empty() {
+        input.push_str("Required sections:\n");
+        for section in &brief.required_sections {
+            input.push_str(&format!("- {}: {}\n", section.name, section.content));
+        }
+    }
+    push_list(&mut input, "Brand assets", &brief.brand_assets);
+    push_list(
+        &mut input,
+        "Accessibility constraints",
+        &brief.accessibility_constraints,
+    );
+    push_list(
+        &mut input,
+        "Technical constraints",
+        &brief.technical_constraints,
+    );
+    push_list(
+        &mut input,
+        "Generation instructions (newest last)",
+        &brief.generation_instructions,
+    );
+    input
 }
 
 /// Turns a model reply into a design: a whole design, or a patch applied
@@ -1605,7 +1762,7 @@ type ReplyParser<'request> = Box<dyn Fn(&str) -> Result<Design, String> + Send +
 /// Effort, log label, and reply parser for one design request: a
 /// candidate (the reply is a design) or an edit (the reply is a patch).
 struct DesignRequest<'request> {
-    effort: &'request str,
+    effort: String,
     label: String,
     parse: ReplyParser<'request>,
     /// Where this request reports its share of the turn: `DRAFT_SHARE`
@@ -1625,108 +1782,56 @@ impl DesignRequest<'_> {
     }
 }
 
-/// The user prompt for an edit: the design as it is, the conversation,
-/// and the latest request.
-fn edit_prompt(brief: &Brief, design_json: &str) -> String {
-    let mut prompt = format!("Here is the design the user is editing:\n{design_json}\n");
-    if !brief.messages.is_empty() {
-        prompt.push_str("The conversation so far, oldest first:\n");
-        for message in &brief.messages {
-            prompt.push_str(&format!("- {}: {}\n", message.role, message.content));
-        }
-    }
-    let latest = brief
-        .messages
-        .iter()
-        .rev()
-        .find(|message| message.role == "user")
-        .map(|message| message.content.as_str())
-        .unwrap_or("");
-    prompt.push_str(&format!(
-        "Apply this request to the design: {latest}\n\
+/// The user prompt for an edit: the design as it is, the approved
+/// brief, and the critique to apply.
+fn edit_prompt(brief: &DesignBrief, critique: &Critique, design_json: &str) -> String {
+    format!(
+        "Here is the design to change:\n{design_json}\n\
+         The design is for this approved brief:\n{brief}\n\
+         Apply this critique: {critique}\n\
          A reference like [screen 3, node 0/1 <h2.title>: What Swift Design does] names a screen \
          (1-based) and one element in that screen's html by its index path from the screen root \
          (zero-based child indexes, element children only), its tag and first class, and the \
-         start of its text. A reference like [upload chart.png] names one of the user's \
-         source files; an image file goes into a screen as <img src='/uploads/chart.png'>. \
-         Change only what the request asks for. Keep every other screen and \
-         value as it is. Return every changed screen complete: html, css, and notes.\n{}",
-        crate::patch::PATCH_FORMAT
-    ));
-    prompt
+         start of its text. Change only what the critique asks for. Keep every other screen and \
+         value as it is. Return every changed screen complete: html, css, and notes.\n{format}",
+        brief = brief_input(brief),
+        critique = critique.as_instruction(),
+        format = crate::patch::PATCH_FORMAT
+    )
 }
 
-/// The first words of a prompt, for a design id when no project is set.
-fn prompt_words(prompt: &str) -> String {
-    prompt
-        .split_whitespace()
-        .take(4)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// What one candidate call needs: the brief, the candidate number,
+/// What one candidate call needs: the run context, the candidate number,
 /// every concept, so the prompt can name its own and the others, and
 /// the preview length when the candidate is a preview.
 struct CandidateRequest<'request> {
-    brief: &'request Brief,
+    context: &'request GenerationContext,
     candidate_number: usize,
     concepts: &'request [Concept],
     /// `Some(n)`: write only the first `n` screens plus the outline.
     preview_screens: Option<usize>,
     /// The id the candidate is saved under.
     design_id: String,
-    /// The template the candidate takes its look from, when the brief
-    /// names one.
+    /// The template the candidate takes its look from, when the options
+    /// name one.
     template: Option<&'request crate::templates::Template>,
 }
 
 /// The prompt lines for a preview candidate: write `count` screens and
-/// the full outline. The length wording replaces `length_note`, which
-/// would ask for the complete design.
-fn preview_note(count: usize, length: Option<(usize, usize)>) -> String {
-    let outline_length = match length {
-        Some((min, max)) if min == max => format!("{min} titles"),
-        Some((min, max)) => format!("between {min} and {max} titles"),
-        None => "every screen title of the complete design".to_owned(),
-    };
+/// the full outline.
+fn preview_note(count: usize) -> String {
     format!(
         "Write a preview: only the first {count} screens of the design, in order, starting with the \
-         title screen. Put the screen titles of the complete design in `outline`, in order, {outline_length}, \
-         counting the title screen. The app asks you for the remaining screens later. Make these {count} \
-         screens show the theme, the layout language, and the text density of the whole design.\n"
+         title screen. Put the screen titles of the complete design in `outline`, in order, \
+         every screen title of the complete design. The app asks you for the remaining screens \
+         later. Make these {count} screens show the theme, the layout language, and the text \
+         density of the whole design.\n"
     )
-}
-
-/// The reply for the user after continue requests: one sentence per
-/// design. Designs that were complete already are left out unless nothing
-/// else happened.
-fn continue_summary(outcomes: &[(String, Result<usize, String>)]) -> String {
-    let mut lines: Vec<String> = outcomes
-        .iter()
-        .filter_map(|(design_id, outcome)| match outcome {
-            Ok(0) => None,
-            Ok(1) => Some(format!("I wrote the last screen of `{design_id}`.")),
-            Ok(added) => Some(format!(
-                "I wrote the remaining {added} screens of `{design_id}`."
-            )),
-            Err(error) => Some(format!("I could not continue `{design_id}`: {error}.")),
-        })
-        .collect();
-    if lines.is_empty() {
-        lines = outcomes
-            .iter()
-            .map(|(design_id, _)| format!("`{design_id}` is complete already."))
-            .collect();
-    }
-    lines.push("Tell me what to change, or continue another candidate.".to_owned());
-    lines.join(" ")
 }
 
 /// The user prompt for one continuation chunk: the preview design, the
 /// conversation, and the chunk's screens to add, as a patch of inserts.
 fn continue_prompt(
-    brief: &Brief,
+    brief: &DesignBrief,
     design: &Design,
     design_json: &str,
     chunk: ContinueChunk,
@@ -1746,18 +1851,9 @@ fn continue_prompt(
     let mut prompt = format!(
         "Here is a design in progress: its theme, its first {written} screens, and `outline`, the \
          screen titles of the complete design:\n{design_json}\n\
-         The design is for this brief:\n{}\n",
-        brief.prompt
+         The design is for this approved brief:\n{}\n",
+        brief_input(brief)
     );
-    if !brief.messages.is_empty() {
-        prompt.push_str("The conversation so far, oldest first. Follow every request in it:\n");
-        for message in &brief.messages {
-            prompt.push_str(&format!("- {}: {}\n", message.role, message.content));
-        }
-    }
-    if let Some(scenario) = &brief.scenario {
-        prompt.push_str(&crate::candidate_questions::scenario_note(scenario));
-    }
     prompt.push_str(&format!(
         "Write {} screens: outline titles {} to {last} of {planned}, in order, one screen per \
          title:\n{}\n\
@@ -1772,13 +1868,6 @@ fn continue_prompt(
         prompt.push_str(
             "Other requests write the other outline titles at the same time. Write only these.\n",
         );
-    }
-    match brief.effort.as_str() {
-        "low" => prompt.push_str("Keep the text on each screen short.\n"),
-        "high" => prompt.push_str(
-            "Work carefully: complete content, strong structure, thorough presenter notes.\n",
-        ),
-        _ => {}
     }
     prompt.push_str(&format!(
         "Reply with only a JSON patch that appends the new screens, not the whole design:\n\
@@ -1862,52 +1951,43 @@ fn apply_continuation(original: &Design, content: &str) -> Result<Design, String
     Ok(continued)
 }
 
-/// The user prompt for one candidate: brief, conversation, scenario,
-/// variety note, and concept. Answered questions are part of the
-/// conversation.
+/// The user prompt for one candidate: the approved brief is
+/// authoritative, plus the template, preview, concept, and effort notes.
 fn candidate_prompt(request: &CandidateRequest<'_>) -> String {
-    let brief = request.brief;
+    let brief = &request.context.brief;
+    let options = &request.context.options;
     let candidate_number = request.candidate_number;
-    let mut prompt = format!("Build a design for this brief:\n{}\n", brief.prompt);
-    if !brief.messages.is_empty() {
-        prompt.push_str("The conversation so far, oldest first. Follow every request in it:\n");
-        for message in &brief.messages {
-            prompt.push_str(&format!("- {}: {}\n", message.role, message.content));
-        }
-    }
-    if let Some(scenario) = &brief.scenario {
-        prompt.push_str(&crate::candidate_questions::scenario_note(scenario));
-    }
+    let mut prompt = format!(
+        "Build a design for this approved brief. The brief is authoritative; do not override a \
+         confirmed fact.\n{}\n",
+        brief_input(brief)
+    );
     if let Some(template) = request.template {
         prompt.push_str(&template_note(template));
     }
-    let has_length = brief.length_bounds().is_some();
-    match (request.preview_screens, &brief.length) {
-        (Some(count), _) => prompt.push_str(&preview_note(count, brief.length_bounds())),
-        (None, Some(length)) => prompt.push_str(&crate::candidate_questions::length_note(length)),
-        (None, None) => {}
+    if let Some(count) = request.preview_screens {
+        prompt.push_str(&preview_note(count));
     }
-    let count = brief.variation_count();
+    let count = options.variation_count();
     if count > 1 {
         prompt.push_str(&format!(
-            "This is candidate {candidate_number} of {count}. {}\n",
-            crate::candidate_questions::variety_note(
-                brief
-                    .variety
-                    .as_deref()
-                    .unwrap_or(crate::candidate_questions::DEFAULT_VARIETY)
-            )
+            "This is candidate {candidate_number} of {count}. Make it distinct from the other \
+             candidates in theme, structure, and angle.\n"
         ));
         prompt.push_str(&concept_note(request.concepts, candidate_number - 1));
     }
-    match brief.effort.as_str() {
-        "low" if has_length => prompt.push_str("Keep the text on each screen short.\n"),
+    match options.effort.as_str() {
         "low" => prompt.push_str("Keep the design concise: fewer screens, short text.\n"),
-        "high" => prompt.push_str(
-            "Work carefully: complete content, strong structure, thorough presenter notes.\n",
-        ),
+        "high" => {
+            prompt.push_str("Work carefully: complete content, strong structure, clear notes.\n")
+        }
         _ => {}
     }
+    let viewport = brief.viewport();
+    prompt.push_str(&format!(
+        "Set `viewport` to {} by {} px.\n",
+        viewport.width, viewport.height
+    ));
     prompt.push_str("Reply with only the design JSON.");
     prompt
 }
@@ -1965,670 +2045,194 @@ fn parse_design(content: &str) -> Result<Design, String> {
     serde_json::from_str(&content[start..=end]).map_err(|error| format!("invalid design: {error}"))
 }
 
-/// A valid design id derived from the design title.
-fn design_base_id(title: &str) -> String {
-    let mut id = String::new();
-    let mut previous_was_hyphen = true;
-    for character in title.chars() {
-        if character.is_ascii_alphanumeric() {
-            id.push(character.to_ascii_lowercase());
-            previous_was_hyphen = false;
-        } else if !previous_was_hyphen {
-            id.push('-');
-            previous_was_hyphen = true;
-        }
-        if id.len() >= 40 {
-            break;
-        }
-    }
-    let id = id.trim_matches('-').to_owned();
-    let id = match id.find("-candidate-") {
-        Some(position) => id[..position].to_owned(),
-        None => id,
-    };
-    if crate::designs::is_valid_design_id(&id) {
-        id
-    } else {
-        "design".to_owned()
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use crate::briefs::{Brief, BriefAnswer, ChatMessage};
-    use crate::concepts::Concept;
-    use crate::generation::{
-        Attachments, CandidateRequest, Plan, UploadAttachment, candidate_prompt,
-        candidate_template, describe_size, design_base_id, edit_prompt, parse_design, parse_plan,
-        planner_input, system_prompt, user_content_with_attachments, user_content_with_images,
-        with_candidate_questions,
-    };
-    use crate::model_client::{
-        anthropic_messages_body, chatgpt_responses_body, without_file_parts,
-    };
+    use std::sync::Arc;
 
-    fn attachment(name: &str, content_type: &str, bytes: &[u8]) -> UploadAttachment {
-        UploadAttachment {
-            name: name.to_owned(),
-            content_type: content_type.to_owned(),
-            bytes: bytes.to_vec(),
+    use design_model::{Critique, CritiqueCategory, DesignBrief, RevisionSource, WorkflowState};
+
+    use super::{GenerationEngine, GenerationOutcome, brief_input, system_prompt};
+    use crate::designs::DesignStore;
+    use crate::events::ChangeNotifier;
+    use crate::model_client::LogSink;
+    use crate::sessions::SessionStore;
+    use crate::test_support::{FakeModelServer, SAMPLE_DESIGN, low_effort_options};
+
+    fn silent_log() -> LogSink {
+        Arc::new(|_line: &str| {})
+    }
+
+    fn engine(
+        server: &FakeModelServer,
+        designs: &DesignStore,
+        sessions: &SessionStore,
+    ) -> GenerationEngine {
+        GenerationEngine::new(
+            server.configuration(),
+            designs.clone(),
+            sessions.clone(),
+            None,
+            "http://127.0.0.1:3000".to_owned(),
+            ChangeNotifier::new(),
+        )
+    }
+
+    /// A session in the generating state with a one-candidate,
+    /// low-effort brief approved.
+    async fn generating_session(sessions: &SessionStore, brief: DesignBrief) {
+        sessions
+            .create("talk", "Talk", "A landing page.", low_effort_options())
+            .await
+            .unwrap();
+        let revision = sessions
+            .write_brief_revision("talk", brief, RevisionSource::Agent, "Drafted")
+            .await
+            .unwrap();
+        sessions
+            .update("talk", |session| session.approved_revision = Some(revision))
+            .await
+            .unwrap();
+        sessions
+            .apply("talk", design_model::WorkflowEvent::GenerateWithAssumptions)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn brief_input_keeps_assumptions_apart_from_facts() {
+        let brief = DesignBrief {
+            request: "A finance page.".to_owned(),
+            confirmed_facts: vec!["Platform: web".to_owned()],
+            assumptions: vec!["Audience: investors".to_owned()],
+            audience: "investors".to_owned(),
+            ..DesignBrief::default()
+        };
+        let text = brief_input(&brief);
+        assert!(text.contains("Confirmed facts:\n- Platform: web"));
+        assert!(text.contains("Assumptions (use only where a confirmed fact"));
+        assert!(text.contains("- Audience: investors"));
+    }
+
+    #[test]
+    fn system_prompt_names_the_clarification_protocol() {
+        let prompt = system_prompt();
+        assert!(prompt.contains("The brief is authoritative"));
+        assert!(prompt.contains("needs_clarification"));
+        assert!(prompt.contains("\"viewport\""));
+    }
+
+    #[tokio::test]
+    async fn generation_sends_the_approved_brief_not_the_chat() {
+        let server = FakeModelServer::start().await;
+        server.push_text(SAMPLE_DESIGN);
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let brief = DesignBrief {
+            audience: "retail investors".to_owned(),
+            ..DesignBrief::default()
+        };
+        generating_session(&sessions, brief).await;
+        engine(&server, &designs, &sessions)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        let request = &server.requests()[0];
+        let text = request.to_string();
+        assert!(text.contains("retail investors"));
+        assert!(text.contains("The brief is authoritative"));
+    }
+
+    #[tokio::test]
+    async fn a_valid_design_reply_is_saved_as_a_candidate_and_recorded_on_the_run() {
+        let server = FakeModelServer::start().await;
+        server.push_text(SAMPLE_DESIGN);
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        generating_session(&sessions, DesignBrief::default()).await;
+        let outcome = engine(&server, &designs, &sessions)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
+        assert!(designs.load("talk-candidate-1").await.unwrap().is_some());
+        let runs = sessions.runs("talk").await.unwrap();
+        assert_eq!(runs[0].result.as_deref(), Some("succeeded"));
+        assert_eq!(runs[0].artifacts, vec!["talk-candidate-1"]);
+    }
+
+    #[tokio::test]
+    async fn a_needs_clarification_reply_moves_the_session_back_to_clarifying() {
+        let server = FakeModelServer::start().await;
+        server.push_text(
+            r#"{"needs_clarification":{"title":"One thing","message":"Which brand color?","questions":[{"id":"color","label":"Which brand color?","kind":"short_text","required":true}]}}"#,
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        generating_session(&sessions, DesignBrief::default()).await;
+        let outcome = engine(&server, &designs, &sessions)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            GenerationOutcome::NeedsClarification { .. }
+        ));
+        let session = sessions.read("talk").await.unwrap().unwrap();
+        assert_eq!(session.state, WorkflowState::Clarifying);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_design_gets_fix_rounds_then_fails() {
+        let server = FakeModelServer::start().await;
+        // Low effort gives two fix rounds: three attempts, all empty.
+        for _ in 0..3 {
+            server.push_text("{}");
         }
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        generating_session(&sessions, DesignBrief::default()).await;
+        let result = engine(&server, &designs, &sessions)
+            .run("talk", silent_log())
+            .await;
+        assert!(result.unwrap_err().contains("fix rounds"));
+        let runs = sessions.runs("talk").await.unwrap();
+        assert_eq!(runs[0].result.as_deref(), Some("failed"));
     }
 
-    #[test]
-    fn attachments_become_image_file_and_text_parts() {
-        let attachments = Attachments {
-            files: vec![
-                attachment("chart.png", "image/png", &[1, 2, 3]),
-                attachment("brief.pdf", "application/pdf", b"%PDF"),
-                attachment(
-                    "notes.md",
-                    "text/markdown; charset=utf-8",
-                    b"# Plan\nShip it.",
-                ),
-                attachment("blob.bin", "application/octet-stream", &[0]),
-            ],
-            skipped: vec!["huge.pdf (40.0 MB)".to_owned()],
-        };
-        let content = user_content_with_attachments("Write.", &attachments, true);
-        let parts = content.as_array().unwrap();
-        assert_eq!(parts[0]["text"], "Write.");
-        assert!(
-            parts[1]["text"]
-                .as_str()
-                .unwrap()
-                .contains("source files follow")
-        );
-        assert!(
-            parts[2]["text"]
-                .as_str()
-                .unwrap()
-                .starts_with("File chart.png (image/png, 3 B)")
-        );
-        assert_eq!(parts[3]["type"], "image_url");
-        assert!(
-            parts[3]["image_url"]["url"]
-                .as_str()
-                .unwrap()
-                .starts_with("data:image/png;base64,AQID")
-        );
-        assert_eq!(parts[5]["type"], "file");
-        assert_eq!(parts[5]["file"]["filename"], "brief.pdf");
-        assert!(
-            parts[5]["file"]["file_data"]
-                .as_str()
-                .unwrap()
-                .starts_with("data:application/pdf;base64,")
-        );
-        assert!(
-            parts[6]["text"]
-                .as_str()
-                .unwrap()
-                .contains("# Plan\nShip it.")
-        );
-        assert!(parts[7]["text"].as_str().unwrap().contains("blob.bin"));
-        assert!(parts[7]["text"].as_str().unwrap().contains("cannot carry"));
-        assert!(
-            parts[8]["text"]
-                .as_str()
-                .unwrap()
-                .contains("huge.pdf (40.0 MB)")
-        );
-        // Without vision, an image is named but not sent.
-        let blind = user_content_with_attachments("Write.", &attachments, false);
-        let blind_parts = blind.as_array().unwrap();
-        assert!(blind_parts.iter().all(|part| part["type"] != "image_url"));
-        assert!(
-            blind_parts[2]["text"]
-                .as_str()
-                .unwrap()
-                .contains("<img src='/uploads/chart.png'>")
-        );
-        // Nothing attached keeps the plain string.
-        assert_eq!(
-            user_content_with_attachments("x", &Attachments::default(), true),
-            "x"
-        );
-    }
-
-    #[test]
-    fn file_parts_convert_to_documents_and_input_files() {
-        let attachments = Attachments {
-            files: vec![attachment("brief.pdf", "application/pdf", b"%PDF")],
-            skipped: Vec::new(),
-        };
-        let content = user_content_with_attachments("Write.", &attachments, true);
-        let messages = vec![serde_json::json!({ "role": "user", "content": content })];
-        let anthropic = anthropic_messages_body("claude", &messages);
-        let blocks = anthropic["messages"][0]["content"].as_array().unwrap();
-        let document = blocks
-            .iter()
-            .find(|block| block["type"] == "document")
-            .unwrap();
-        assert_eq!(document["source"]["media_type"], "application/pdf");
-        assert_eq!(document["source"]["data"], "JVBERg==");
-        assert_eq!(document["title"], "brief.pdf");
-        let chatgpt = chatgpt_responses_body("gpt-5", &messages, "low");
-        let items = chatgpt["input"][0]["content"].as_array().unwrap();
-        let file = items
-            .iter()
-            .find(|item| item["type"] == "input_file")
-            .unwrap();
-        assert_eq!(file["filename"], "brief.pdf");
-        assert!(
-            file["file_data"]
-                .as_str()
-                .unwrap()
-                .starts_with("data:application/pdf;base64,")
-        );
-        // Providers without file support get a note.
-        let stripped = without_file_parts(&messages);
-        let parts = stripped[0]["content"].as_array().unwrap();
-        assert!(parts.iter().all(|part| part["type"] == "text"));
-        assert!(parts.iter().any(|part| {
-            part["text"]
-                .as_str()
-                .unwrap()
-                .contains("brief.pdf cannot be sent")
-        }));
-        let plain = without_file_parts(&[serde_json::json!({ "role": "user", "content": "hi" })]);
-        assert_eq!(plain[0]["content"], "hi");
-    }
-
-    #[test]
-    fn sizes_describe_bytes_kilobytes_and_megabytes() {
-        assert_eq!(describe_size(512), "512 B");
-        assert_eq!(describe_size(3 * 1024 + 410), "3.4 KB");
-        assert_eq!(describe_size(40 * 1024 * 1024), "40.0 MB");
-    }
-
-    #[test]
-    fn parses_a_design_wrapped_in_prose_and_fences() {
-        let sample = include_str!("../../../fixtures/sample-design.json");
-        let wrapped = format!("Here is the design:\n```json\n{sample}\n```\nDone.");
-        let design = parse_design(&wrapped).unwrap();
-        assert_eq!(design.title, "Swift Design Overview");
-        assert!(parse_design("no json here").is_err());
-    }
-
-    #[test]
-    fn design_ids_come_from_titles_and_stay_valid() {
-        assert_eq!(design_base_id("Q3 Sales — Review!"), "q3-sales-review");
-        assert_eq!(design_base_id("???"), "design");
-        assert_eq!(design_base_id("My Talk Candidate 1"), "my-talk");
-        assert_eq!(design_base_id("render"), "design");
-    }
-
-    #[test]
-    fn prompts_carry_rules_brief_and_conversation() {
-        assert!(system_prompt().contains("\"html\""));
-        assert!(system_prompt().contains("`viewport`"));
-        let brief = Brief {
-            prompt: "A schema talk.".to_owned(),
-            variations: Some(3),
-            project: Some("talk".to_owned()),
-            effort: "medium".to_owned(),
-            preview: false,
-            variety: Some("high".to_owned()),
-            scenario: Some("Finance".to_owned()),
-            length: Some("10-15".to_owned()),
-            templates: Vec::new(),
-            template: None,
-            answers: vec![BriefAnswer {
-                question: "How long?".to_owned(),
-                answer: "10 min".to_owned(),
-            }],
-            messages: vec![
-                ChatMessage::assistant("How long?"),
-                ChatMessage::user("10 min", Some("talk-candidate-1")),
-            ],
-        };
-        let concepts = vec![
-            Concept {
-                name: "One".to_owned(),
-                ..Concept::default()
-            },
-            Concept {
-                name: "Two".to_owned(),
-                angle: "second".to_owned(),
-                ..Concept::default()
-            },
-        ];
-        let request = CandidateRequest {
-            brief: &brief,
-            candidate_number: 2,
-            concepts: &concepts,
-            preview_screens: None,
-            design_id: "talk-candidate-2".to_owned(),
-            template: None,
-        };
-        let prompt = candidate_prompt(&request);
-        assert!(prompt.contains("\"name\":\"Two\""));
-        assert!(prompt.contains("- One:"));
-        assert!(prompt.contains("A schema talk."));
-        assert!(prompt.contains("user: 10 min"));
-        assert!(prompt.contains("candidate 2 of 3"));
-        assert!(prompt.contains("different outline"));
-        assert!(prompt.contains("scenario: Finance"));
-        assert!(prompt.contains("between 10 and 15 screens"));
-        assert!(!prompt.contains("Write a preview"));
-        let preview = candidate_prompt(&CandidateRequest {
-            preview_screens: Some(3),
-            ..request
-        });
-        assert!(preview.contains("only the first 3 screens"));
-        assert!(preview.contains("between 10 and 15 titles"));
-        assert!(!preview.contains("between 10 and 15 screens"));
-        let input = planner_input(&brief, 3);
-        assert!(input.contains("Variety: high"));
-        assert!(input.contains("Length in screens: 10-15"));
-        assert!(input.contains("Design open in the editor: talk-candidate-1"));
-        assert!(input.contains("user (editing talk-candidate-1): 10 min"));
-        let edit = edit_prompt(&brief, "{}");
-        assert!(edit.contains("Apply this request to the design: 10 min"));
-        assert!(edit.contains("JSON patch"));
-        assert!(edit.contains("node 0/1"));
-        assert_eq!(
-            super::prompt_words("A long talk about many things"),
-            "A long talk about"
-        );
-        assert!(input.contains("Scenario: Finance"));
-        assert!(input.contains("Candidates on the canvas: 3"));
-        assert!(input.contains("assistant: How long?"));
-    }
-
-    #[test]
-    fn plans_ask_for_count_and_variety_before_they_generate() {
-        let ready = || Plan {
-            should_generate: true,
-            ..Plan::default()
-        };
-        let brief = Brief {
-            prompt: "A talk.".to_owned(),
-            ..Brief::default()
-        };
-        // Nothing chosen: all four questions, no generation.
-        let asked = with_candidate_questions(ready(), &brief);
-        assert!(!asked.should_generate);
-        assert_eq!(asked.questions.len(), 4);
-        assert!(crate::candidate_questions::is_scenario_question(
-            &asked.questions[0].question
-        ));
-        assert!(crate::candidate_questions::is_length_question(
-            &asked.questions[1].question
-        ));
-        assert!(crate::candidate_questions::is_variation_question(
-            &asked.questions[2].question
-        ));
-        assert!(crate::candidate_questions::is_variety_question(
-            &asked.questions[3].question
-        ));
-        // A chat-only reply asks nothing.
-        let chat = with_candidate_questions(Plan::default(), &brief);
-        assert!(chat.questions.is_empty());
-        // A scenario, length, and count without a variety asks only for
-        // the variety.
-        let counted = Brief {
-            scenario: Some("Business".to_owned()),
-            length: Some("any".to_owned()),
-            variations: Some(3),
-            ..brief.clone()
-        };
-        let asked = with_candidate_questions(ready(), &counted);
-        assert_eq!(asked.questions.len(), 1);
-        assert!(crate::candidate_questions::is_variety_question(
-            &asked.questions[0].question
-        ));
-        // Both chosen, or a single candidate, generates.
-        let chosen = Brief {
-            variety: Some("low".to_owned()),
-            ..counted
-        };
-        assert!(with_candidate_questions(ready(), &chosen).should_generate);
-        let single = Brief {
-            scenario: Some("general".to_owned()),
-            length: Some("5-8".to_owned()),
-            variations: Some(1),
-            ..brief
-        };
-        assert!(with_candidate_questions(ready(), &single).should_generate);
-    }
-
-    fn preview_design() -> design_model::Design {
-        let mut design: design_model::Design =
-            serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap();
-        design.outline = vec![
-            "Swift Design".to_owned(),
-            "How agents build designs".to_owned(),
-            "Results".to_owned(),
-            "Roadmap".to_owned(),
-            "Thanks".to_owned(),
-        ];
-        design
-    }
-
-    #[test]
-    fn preview_notes_ask_for_a_few_screens_and_the_full_outline() {
-        let note = super::preview_note(3, Some((10, 15)));
-        assert!(note.contains("only the first 3 screens"));
-        assert!(note.contains("between 10 and 15 titles"));
-        assert!(super::preview_note(3, Some((12, 12))).contains("12 titles"));
-        assert!(super::preview_note(3, None).contains("every screen title of the complete design"));
-    }
-
-    #[test]
-    fn continue_prompts_list_the_remaining_titles_and_ask_for_inserts() {
-        let design = preview_design();
-        let brief = Brief {
-            prompt: "A schema talk.".to_owned(),
-            effort: "high".to_owned(),
-            scenario: Some("Finance".to_owned()),
-            messages: vec![ChatMessage::user("Use British spelling.", None)],
-            ..Brief::default()
-        };
-        let whole = super::ContinueChunk { first: 3, count: 2 };
-        let prompt = super::continue_prompt(&brief, &design, "{design}", whole);
-        assert!(prompt.contains("its first 3 screens"));
-        assert!(prompt.contains("Write 2 screens: outline titles 4 to 5 of 5"));
-        assert!(prompt.contains("4. Roadmap\n5. Thanks"));
-        assert!(!prompt.contains("1. Swift Design"));
-        assert!(!prompt.contains("Other requests write"));
-        assert!(prompt.contains("user: Use British spelling."));
-        assert!(prompt.contains("scenario: Finance"));
-        assert!(prompt.contains("thorough presenter notes"));
-        assert!(prompt.contains("\"index\":3,\"insert\":true"));
-        let second = super::ContinueChunk { first: 4, count: 1 };
-        let chunk = super::continue_prompt(&brief, &design, "{design}", second);
-        assert!(chunk.contains("Write 1 screens: outline titles 5 to 5 of 5"));
-        assert!(chunk.contains("5. Thanks"));
-        assert!(!chunk.contains("4. Roadmap"));
-        assert!(chunk.contains("Other requests write"));
-        assert_eq!(
-            super::continue_chunks(3, 8),
-            vec![
-                super::ContinueChunk { first: 3, count: 3 },
-                super::ContinueChunk { first: 6, count: 2 },
-            ]
-        );
-        assert!(super::continue_chunks(5, 5).is_empty());
-    }
-
-    #[test]
-    fn a_later_chunk_shows_over_placeholders_for_the_chunks_before_it() {
-        let mut preview: design_model::Design =
-            serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap();
-        preview.screens.truncate(1);
-        preview.outline = (1..=7).map(|number| format!("Title {number}")).collect();
-        let chunks = super::continue_chunks(1, 7);
-        assert_eq!(chunks.len(), 2);
-        let written = preview.screens[0].clone();
-
-        // Nothing written yet: the preview shows as it is.
-        let empty: Vec<Vec<design_model::Screen>> = vec![Vec::new(), Vec::new()];
-        assert_eq!(
-            super::shown_design(&preview, &chunks, &empty).screens.len(),
-            1
-        );
-
-        // The second chunk lands first. The first chunk's three titles
-        // become placeholders, so the real screen sits at index 4.
-        let board = vec![Vec::new(), vec![written.clone()]];
-        let shown = super::shown_design(&preview, &chunks, &board);
-        assert_eq!(shown.screens.len(), 5);
-        assert!(shown.validate().is_empty());
-        let pending: Vec<bool> = shown
-            .screens
-            .iter()
-            .map(crate::designs::is_pending_screen)
-            .collect();
-        assert_eq!(pending, vec![false, true, true, true, false]);
-        assert!(shown.screens[1].html.contains("Title 2"));
-        // The design stays a preview, so a stopped run leaves it continuable.
-        assert!(shown.is_preview());
-
-        // Nothing is padded past the last chunk that has screens.
-        let head_only = vec![vec![written], Vec::new()];
-        assert_eq!(
-            super::shown_design(&preview, &chunks, &head_only)
-                .screens
-                .len(),
-            2
-        );
-    }
-
-    #[test]
-    fn a_template_prompt_carries_the_theme_and_the_example_screens() {
-        let design: design_model::Design =
-            serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap();
-        let template = crate::templates::Template {
-            id: "midnight-finance-1".to_owned(),
-            name: "Midnight Finance".to_owned(),
-            saved_at: "2026-01-01T00:00:00Z".to_owned(),
-            source_design: "talk".to_owned(),
-            theme: design.theme.clone(),
-            viewport: design.viewport,
-            screens: design.screens[..2].to_vec(),
-        };
-        let brief = Brief {
-            prompt: "A talk".to_owned(),
-            ..Brief::default()
-        };
-        let request = super::CandidateRequest {
-            brief: &brief,
-            candidate_number: 1,
-            concepts: &[],
-            preview_screens: None,
-            design_id: "talk-candidate-1".to_owned(),
-            template: Some(&template),
-        };
-        let prompt = super::candidate_prompt(&request);
-        assert!(prompt.contains("Midnight Finance"));
-        assert!(prompt.contains(&design.theme.colors.accent));
-        assert!(prompt.contains("Template screen 1:"));
-        assert!(prompt.contains("Template screen 2:"));
-        assert!(!prompt.contains("Template screen 3:"));
-        assert!(prompt.contains("Do not copy their text."));
-
-        // Without a template the prompt says nothing about one.
-        let plain = super::candidate_prompt(&super::CandidateRequest {
-            template: None,
-            ..request
-        });
-        assert!(!plain.contains("Template screen"));
-    }
-
-    #[test]
-    fn writing_requests_reason_one_level_under_the_brief_effort() {
-        assert_eq!(super::writing_effort("low"), "minimal");
-        assert_eq!(super::writing_effort("medium"), "low");
-        assert_eq!(super::writing_effort("high"), "medium");
-    }
-
-    #[test]
-    fn partial_designs_grow_screen_by_screen_while_the_reply_streams() {
-        let full = include_str!("../../../fixtures/sample-design.json");
-        let (array_start, items) = super::complete_array_items(full, "screens").unwrap();
-        assert_eq!(&full[array_start..=array_start], "[");
-        assert_eq!(items.len(), 3);
-        // Cut inside the second screen: one complete screen so far.
-        let second_start = full.find(items[1]).unwrap();
-        let cut = &full[..second_start + items[1].len() / 2];
-        let partial = super::partial_design(cut).unwrap();
-        assert_eq!(partial.screens.len(), 1);
-        assert_eq!(partial.title, "Swift Design Overview");
-        assert!(partial.validate().is_empty());
-        // Before the first screen closes there is nothing to show.
-        let early = &full[..second_start - items[0].len() / 2 - 1];
-        assert!(super::partial_design(early).is_none());
-        assert!(super::partial_design("Sure, here").is_none());
-        // Braces inside strings do not end a screen.
-        let tricky = "{\"screens\":[{\"html\":\"<p>}</p>\",\"css\":\"a{}\"},{\"html\":\"x";
-        let (_, items) = super::complete_array_items(tricky, "screens").unwrap();
-        assert_eq!(items, vec!["{\"html\":\"<p>}</p>\",\"css\":\"a{}\"}"]);
-        // Continuation replies: complete inserts only.
-        let screen = serde_json::to_string(&partial.screens[0]).unwrap();
-        let streaming = format!(
-            "{{\"screens\":[{{\"index\":3,\"insert\":true,\"screen\":{screen}}},{{\"index\":3,\"insert\":true,\"screen\":{{\"html\":\"<h1>"
-        );
-        assert_eq!(super::partial_continuation_screens(3, &streaming).len(), 1);
-        assert!(super::partial_continuation_screens(3, "{\"screens\":[").is_empty());
-    }
-
-    #[test]
-    fn continue_summaries_name_each_design_and_skip_complete_ones() {
-        let outcomes = vec![
-            ("a".to_owned(), Ok(0)),
-            ("b".to_owned(), Ok(4)),
-            ("c".to_owned(), Err("timed out".to_owned())),
-        ];
-        let summary = super::continue_summary(&outcomes);
-        assert!(!summary.contains("`a`"));
-        assert!(summary.contains("I wrote the remaining 4 screens of `b`."));
-        assert!(summary.contains("I could not continue `c`: timed out."));
-        assert!(summary.ends_with("continue another candidate."));
-        let complete = super::continue_summary(&[("a".to_owned(), Ok(0))]);
-        assert!(complete.starts_with("`a` is complete already."));
-    }
-
-    #[test]
-    fn continuations_append_new_screens_and_keep_the_outline_until_complete() {
-        let design = preview_design();
-        let screen = serde_json::to_string(&design.screens[2]).unwrap();
-        // A short reply is kept; the design stays a preview.
-        let short =
-            format!("{{\"screens\":[{{\"index\":3,\"insert\":true,\"screen\":{screen}}}]}}");
-        let partial = super::apply_continuation(&design, &short).unwrap();
-        assert_eq!(partial.screens.len(), 4);
-        assert!(partial.is_preview());
-        // Indexes may count up; order is kept.
-        let mut numbered = design.screens[2].clone();
-        numbered.notes = Some("last".to_owned());
-        let numbered_json = serde_json::to_string(&numbered).unwrap();
-        let full = format!(
-            "Here: {{\"screens\":[{{\"index\":3,\"insert\":true,\"screen\":{screen}}},\
-             {{\"index\":4,\"screen\":{numbered_json}}}]}}"
-        );
-        let continued = super::apply_continuation(&design, &full).unwrap();
-        assert_eq!(continued.screens.len(), 5);
-        assert!(continued.outline.is_empty());
-        assert!(!continued.is_preview());
-        assert_eq!(continued.screens[0], design.screens[0]);
-        assert_eq!(continued.screens[4].notes.as_deref(), Some("last"));
-        // Existing screens are never replaced; a reply with nothing new fails.
-        let replacing = format!("{{\"screens\":[{{\"index\":0,\"screen\":{screen}}}]}}");
-        assert!(
-            super::apply_continuation(&design, &replacing)
-                .unwrap_err()
-                .contains("adds no screens")
-        );
-        // A whole design reply contributes its screens past the existing ones.
-        let mut whole = design.clone();
-        whole.screens.push(numbered.clone());
-        whole.screens.push(numbered);
-        let whole_json = serde_json::to_string(&whole).unwrap();
-        let from_design = super::apply_continuation(&design, &whole_json).unwrap();
-        assert_eq!(from_design.screens.len(), 5);
-        assert!(!from_design.is_preview());
-        assert!(super::apply_continuation(&design, "no json").is_err());
-    }
-
-    #[test]
-    fn the_planner_is_told_not_to_ask_the_app_questions() {
-        let prompt = super::planner_prompt();
-        assert!(prompt.contains("Never ask these"));
-        assert!(prompt.contains("number of candidates"));
-        assert!(prompt.contains("design length"));
-    }
-
-    #[test]
-    fn image_parts_convert_to_every_wire_format() {
-        let content = user_content_with_images("Review.", &[vec![1, 2, 3]]);
-        let parts = content.as_array().unwrap();
-        assert_eq!(parts.len(), 3);
-        assert!(
-            parts[2]["image_url"]["url"]
-                .as_str()
-                .unwrap()
-                .starts_with("data:image/png;base64,AQID")
-        );
-        let messages = vec![
-            serde_json::json!({ "role": "system", "content": "sys" }),
-            serde_json::json!({ "role": "user", "content": content }),
-        ];
-        let anthropic = anthropic_messages_body("claude", &messages);
-        let blocks = anthropic["messages"][0]["content"].as_array().unwrap();
-        assert_eq!(blocks[2]["type"], "image");
-        assert_eq!(blocks[2]["source"]["media_type"], "image/png");
-        assert_eq!(blocks[2]["source"]["data"], "AQID");
-        let chatgpt = chatgpt_responses_body("gpt-5", &messages, "low");
-        let items = chatgpt["input"][0]["content"].as_array().unwrap();
-        assert_eq!(items[0]["type"], "input_text");
-        assert_eq!(items[2]["type"], "input_image");
-        // Plain strings stay plain.
-        assert_eq!(user_content_with_images("x", &[]), "x");
-        let plain = anthropic_messages_body(
-            "claude",
-            &[serde_json::json!({ "role": "user", "content": "hi" })],
-        );
-        assert_eq!(plain["messages"][0]["content"], "hi");
-    }
-
-    #[test]
-    fn plans_parse_json_and_fall_back_to_prose() {
-        let plan = parse_plan(
-            "{\"reply\":\"Two questions first.\",\
-             \"questions\":[{\"question\":\"How long?\",\"options\":[\"5 min\",\"20 min\"]}],\
-             \"generate\":false}",
-        );
-        assert_eq!(plan.reply, "Two questions first.");
-        assert_eq!(plan.questions.len(), 1);
-        assert!(!plan.should_generate);
-        let ready = parse_plan("{\"reply\":\"Writing now.\",\"generate\":true}");
-        assert!(ready.should_generate);
-        assert!(!ready.should_edit);
-        let editing = parse_plan("{\"reply\":\"Changing the title.\",\"edit\":true}");
-        assert!(editing.should_edit);
-        assert!(ready.questions.is_empty());
-        let prose = parse_plan("Sure, what audience?");
-        assert_eq!(prose.reply, "Sure, what audience?");
-        assert!(!prose.should_generate);
-    }
-
-    #[test]
-    fn candidates_take_one_template_look_each_and_wrap() {
-        let looks: Vec<crate::templates::Template> = ["warm", "cool", "mono"]
-            .iter()
-            .map(|name| {
-                serde_json::from_value(serde_json::json!({
-                    "id": name,
-                    "name": name,
-                    "saved_at": "",
-                    "source_design": "",
-                    "theme": {
-                        "name": name,
-                        "colors": {
-                            "background": "#ffffff",
-                            "text": "#000000",
-                            "accent": "#0e6e63",
-                            "muted": "#6c7178",
-                        },
-                        "fonts": { "heading": "Inter", "body": "Inter", "mono": "JetBrains Mono" },
+    #[tokio::test]
+    async fn a_critique_run_patches_the_chosen_design() {
+        let server = FakeModelServer::start().await;
+        server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:64px;}"}}]}"#);
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+        designs.save("talk-candidate-1", &design).await.unwrap();
+        generating_session(&sessions, DesignBrief::default()).await;
+        sessions
+            .update("talk", |session| {
+                session.chosen_design = Some("talk-candidate-1".to_owned());
+                session.pending_critique = Some(crate::sessions::PendingCritique {
+                    design: "talk-candidate-1".to_owned(),
+                    critique: Critique {
+                        category: CritiqueCategory::Structure,
+                        text: "Tighten the hero.".to_owned(),
                     },
-                    "screens": [],
-                }))
-                .unwrap()
+                });
             })
-            .collect();
-        let chosen: Vec<String> = (1..=5)
-            .map(|number| candidate_template(&looks, number).unwrap().id)
-            .collect();
-        assert_eq!(chosen, ["warm", "cool", "mono", "warm", "cool"]);
-    }
-
-    #[test]
-    fn no_templates_leaves_every_candidate_without_a_look() {
-        assert!(candidate_template(&[], 1).is_none());
-        assert!(candidate_template(&[], 7).is_none());
+            .await
+            .unwrap();
+        let outcome = engine(&server, &designs, &sessions)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
+        let edited = designs.load("talk-candidate-1").await.unwrap().unwrap();
+        assert!(edited.screens[0].html.contains("Tighter"));
     }
 }

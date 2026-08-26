@@ -9,9 +9,10 @@ use axum::{Json, Router};
 use serde::Deserialize;
 
 use crate::api_error;
-use crate::briefs::BriefStore;
 use crate::designs::{DesignStore, is_valid_design_id};
 use crate::events::ChangeNotifier;
+use crate::sessions::SessionStore;
+use design_model::WorkflowState;
 
 /// Body of `POST /projects/{name}/rename`.
 #[derive(Debug, Deserialize)]
@@ -35,11 +36,11 @@ fn renamed_id(id: &str, old: &str, new: &str) -> String {
     format!("{new}{}", &id[old.len()..])
 }
 
-/// Moves every design of the project to the new name and updates the
-/// brief when it points at the project.
+/// Moves every design of the project to the new name and renames the
+/// session that owns it.
 async fn rename_project(
     State(designs): State<DesignStore>,
-    State(briefs): State<BriefStore>,
+    State(sessions): State<SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path(old): Path<String>,
     Json(request): Json<RenameRequest>,
@@ -47,6 +48,17 @@ async fn rename_project(
     let new = request.name.trim().to_owned();
     if !is_valid_design_id(&old) {
         return api_error::invalid_design_id(&old);
+    }
+    // A session that is generating must not have its designs moved out
+    // from under the run.
+    if let Ok(Some(session)) = sessions.read(&old).await
+        && session.state == WorkflowState::Generating
+    {
+        return api_error::error_response(
+            StatusCode::CONFLICT,
+            "cannot rename a project while its session is generating",
+            Vec::new(),
+        );
     }
     if !is_valid_design_id(&new) || new.contains("-candidate-") {
         return api_error::error_response(
@@ -89,8 +101,8 @@ async fn rename_project(
             return api_error::internal_error(&error);
         }
     }
-    if let Err(error) = briefs.rename_project(&old, &new).await {
-        return api_error::internal_error(&error);
+    if let Err(error) = sessions.rename(&old, &new).await {
+        return api_error::internal_error(&anyhow::anyhow!(error.to_string()));
     }
     notifier.notify();
     tracing::info!(%old, %new, moved = members.len(), "project renamed");

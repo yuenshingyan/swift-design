@@ -47,7 +47,7 @@ pub struct DesignStore {
 }
 
 /// One row in the `GET /designs` listing.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct DesignSummary {
     /// File stem of the design file, used in `/designs/{id}` routes.
     pub id: String,
@@ -373,6 +373,7 @@ async fn get_design(State(store): State<DesignStore>, Path(id): Path<String>) ->
 /// changed fields as user-authored; other saves count as agent writes.
 async fn put_design(
     State(store): State<DesignStore>,
+    State(sessions): State<crate::sessions::SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path(id): Path<String>,
     headers: HeaderMap,
@@ -381,14 +382,19 @@ async fn put_design(
     if !is_valid_design_id(&id) {
         return api_error::invalid_design_id(&id);
     }
-    let errors = design.validate();
-    if !errors.is_empty() {
-        return api_error::validation_failed(&errors);
-    }
     let is_user = headers
         .get(provenance::AUTHOR_HEADER)
         .and_then(|value| value.to_str().ok())
         == Some("user");
+    // Gating: designs are written only while the session is generating,
+    // and the editor may also save while reviewing.
+    if let Err(message) = crate::sessions::write_access(&sessions, &id, is_user).await {
+        return api_error::error_response(StatusCode::CONFLICT, &message, Vec::new());
+    }
+    let errors = design.validate();
+    if !errors.is_empty() {
+        return api_error::validation_failed(&errors);
+    }
     let previous = match store.load(&id).await {
         Ok(previous) => previous,
         Err(error) => return api_error::internal_error(&error),
@@ -438,11 +444,15 @@ async fn list_history(State(store): State<DesignStore>, Path(id): Path<String>) 
 /// becomes the newest snapshot.
 async fn restore_history(
     State(store): State<DesignStore>,
+    State(sessions): State<crate::sessions::SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path((id, stamp)): Path<(String, String)>,
 ) -> Response {
     if !is_valid_design_id(&id) {
         return api_error::invalid_design_id(&id);
+    }
+    if let Err(message) = crate::sessions::write_access(&sessions, &id, true).await {
+        return api_error::error_response(StatusCode::CONFLICT, &message, Vec::new());
     }
     if !is_valid_stamp(&stamp) {
         return api_error::error_response(

@@ -5,9 +5,8 @@
 //! concept and told what the other concepts are, so candidates differ
 //! by design rather than by chance.
 
+use design_model::DesignBrief;
 use serde::{Deserialize, Serialize};
-
-use crate::briefs::Brief;
 
 /// One design direction for a candidate design.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -59,14 +58,10 @@ fn shared_note(variety: &str) -> &'static str {
 }
 
 /// The system prompt for the concept call.
-pub fn concept_prompt(brief: &Brief, count: usize) -> String {
-    let variety = brief
-        .variety
-        .as_deref()
-        .unwrap_or(crate::candidate_questions::DEFAULT_VARIETY);
+pub fn concept_prompt(count: usize) -> String {
     format!(
         "You plan {count} distinct candidate designs for one brief.\n\
-         Variety level: {variety}. {shared}\n\
+         {shared}\n\
          Reply with only this JSON:\n\
          {{\"concepts\":[{{\"name\":\"...\",\"angle\":\"...\",\"outline\":[\"screen title\"],\
          \"palette\":{{\"background\":\"#rrggbb\",\"text\":\"#rrggbb\",\"accent\":\"#rrggbb\",\"muted\":\"#rrggbb\"}},\
@@ -74,27 +69,27 @@ pub fn concept_prompt(brief: &Brief, count: usize) -> String {
          \"visual_idea\":\"how the screens look\"}}]}}\n\
          Give exactly {count} concepts. Use web-safe or Google font family names.\n\
          Keep every string short. Reply with only the JSON.",
-        shared = shared_note(variety),
+        shared = shared_note("medium"),
     )
 }
 
-/// The user input for the concept call: the brief and conversation.
-pub fn concept_input(brief: &Brief) -> String {
-    let mut input = format!("Brief:\n{}\n", brief.prompt);
-    if let Some(scenario) = &brief.scenario {
-        input.push_str(&format!("Scenario: {scenario}\n"));
+/// The user input for the concept call: the approved brief.
+pub fn concept_input(brief: &DesignBrief) -> String {
+    let mut input = format!("Request:\n{}\n", brief.request);
+    if !brief.target_artifact.is_empty() {
+        input.push_str(&format!("Artifact: {}\n", brief.target_artifact));
     }
-    if let Some((min, max)) = brief.length_bounds() {
+    if !brief.audience.is_empty() {
+        input.push_str(&format!("Audience: {}\n", brief.audience));
+    }
+    if !brief.visual_direction.is_empty() {
+        input.push_str(&format!("Visual direction: {}\n", brief.visual_direction));
+    }
+    if !brief.information_architecture.is_empty() {
         input.push_str(&format!(
-            "Length: {min} to {max} screens. Give every outline between {min} and {max} \
-             screen titles, counting the title screen.\n"
+            "Information architecture: {}\n",
+            brief.information_architecture.join("; ")
         ));
-    }
-    if !brief.messages.is_empty() {
-        input.push_str("Conversation, oldest first:\n");
-        for message in &brief.messages {
-            input.push_str(&format!("{}: {}\n", message.role, message.content));
-        }
     }
     input.push_str("Reply with only the JSON.");
     input
@@ -152,29 +147,17 @@ pub fn concept_note(concepts: &[Concept], index: usize) -> String {
 mod tests {
     use super::*;
 
-    fn brief(variety: &str) -> Brief {
-        Brief {
-            prompt: "A talk.".to_owned(),
-            variety: Some(variety.to_owned()),
-            scenario: Some("Finance".to_owned()),
-            ..Brief::default()
-        }
-    }
-
     #[test]
     fn prompts_state_the_count_and_the_variety_contract() {
-        let prompt = concept_prompt(&brief("high"), 3);
+        let prompt = concept_prompt(3);
         assert!(prompt.contains("plan 3 distinct"));
-        assert!(prompt.contains("its own outline"));
-        let low = concept_prompt(&brief("low"), 2);
-        assert!(low.contains("only in palette and fonts"));
-        assert!(concept_input(&brief("low")).contains("Scenario: Finance"));
-        assert!(!concept_input(&brief("low")).contains("Length:"));
-        let sized = Brief {
-            length: Some("10-15".to_owned()),
-            ..brief("low")
+        let brief = DesignBrief {
+            request: "A finance landing page.".to_owned(),
+            audience: "retail investors".to_owned(),
+            ..DesignBrief::default()
         };
-        assert!(concept_input(&sized).contains("between 10 and 15 screen titles"));
+        assert!(concept_input(&brief).contains("Audience: retail investors"));
+        assert!(concept_input(&brief).contains("A finance landing page."));
     }
 
     #[test]

@@ -69,6 +69,7 @@ async fn chooser(State(store): State<DesignStore>, Path(base): Path<String>) -> 
 /// stay, so the user can come back and pick another.
 async fn choose(
     State(store): State<DesignStore>,
+    State(sessions): State<crate::sessions::SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path(base): Path<String>,
     Json(request): Json<ChooseRequest>,
@@ -95,6 +96,12 @@ async fn choose(
     if let Err(error) = store.clear_user_paths(&base).await {
         return api_error::internal_error(&error);
     }
+    // Record the choice on the owning session, when one exists.
+    let _ = sessions
+        .update(&base, |session| {
+            session.chosen_design = Some(request.id.clone());
+        })
+        .await;
     notifier.notify();
     tracing::info!(%base, chosen = %request.id, "candidate chosen");
     Json(serde_json::json!({ "id": base })).into_response()

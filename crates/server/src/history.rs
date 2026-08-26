@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::templates::{rfc3339, unix_now_seconds};
+use crate::time::{rfc3339, unix_now_seconds};
 
 /// Snapshots kept per design. The next save deletes older ones.
 pub const SNAPSHOT_LIMIT: usize = 50;

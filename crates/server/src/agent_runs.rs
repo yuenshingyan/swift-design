@@ -1,12 +1,13 @@
-//! Generation runs: the app runs the model the user picked.
+//! Generation runs: the app runs the model the user picked for one
+//! session.
 //!
-//! `POST /agent-runs` starts a run with the settings from the studio
-//! (provider, model, API key or Claude login). No agent CLI is needed
-//! or launched; `SWIFT_DESIGN_AGENT_COMMAND` remains as an override for
-//! users who want an external command instead. Output streams into a
-//! log served by `GET /agent-runs`, and every change bumps `/events`,
-//! so the studio shows the run live. All credentials are the user's
-//! own.
+//! `POST /agent-runs` with `{session_id}` starts a run. The mode comes
+//! from the session state: a briefing state runs the briefing engine, a
+//! generating state runs the generation engine. No agent CLI is needed;
+//! `SWIFT_DESIGN_AGENT_COMMAND` remains as an override for users who
+//! want an external command. Output streams into a log served by
+//! `GET /agent-runs`, and every change bumps `/events`, so the studio
+//! shows the run live. All credentials are the user's own.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -16,17 +17,19 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use design_model::WorkflowState;
+use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::oneshot;
 
 use crate::api_error;
-use crate::briefs::BriefStore;
+use crate::briefing::{BriefingEngine, BriefingOutcome};
 use crate::designs::DesignStore;
 use crate::events::ChangeNotifier;
-use crate::generation::GenerationEngine;
-use crate::model_client::{self, TokenUsage};
-use crate::questions::QuestionStore;
+use crate::generation::{GenerationEngine, GenerationOutcome};
+use crate::model_client::{self, ModelClient, TokenUsage};
+use crate::sessions::{RunMode, RunRecord, SessionStore, run_mode_for};
 use crate::settings::SettingsStore;
 
 /// Most log bytes kept in memory. Older output is dropped from the
@@ -40,8 +43,47 @@ const LOG_TAIL_BYTES: usize = 4 * 1024;
 enum ResolvedLaunch {
     /// The user's custom shell command.
     Shell(String),
-    /// The built-in engine with the chosen model.
-    BuiltIn(Box<GenerationEngine>),
+    /// The built-in briefing engine.
+    Briefing(Box<BriefingEngine>),
+    /// The built-in generation engine.
+    Generation(Box<GenerationEngine>),
+}
+
+/// Why a run could not start.
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    /// No session with that id.
+    #[error("no session `{id}`: create it with POST /sessions")]
+    NoSession {
+        /// The missing id.
+        id: String,
+    },
+    /// The session state has no run to start.
+    #[error("no run for a session in state `{state}`")]
+    WrongState {
+        /// The session state.
+        state: WorkflowState,
+    },
+    /// A run is already active.
+    #[error("a run is already active")]
+    AlreadyRunning,
+    /// No model is configured.
+    #[error("{0}")]
+    NotConfigured(String),
+    /// A storage failure. No path is named.
+    #[error("session storage failed: {0}")]
+    Storage(String),
+}
+
+impl StartError {
+    /// The HTTP status for this error.
+    fn status(&self) -> StatusCode {
+        match self {
+            StartError::NoSession { .. } => StatusCode::NOT_FOUND,
+            StartError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            _ => StatusCode::CONFLICT,
+        }
+    }
 }
 
 /// Mutable state of the current (or last) run.
@@ -50,6 +92,8 @@ struct RunState {
     is_running: bool,
     exit_code: Option<i32>,
     active_agent: Option<String>,
+    session_id: Option<String>,
+    mode: Option<RunMode>,
     stop_sender: Option<oneshot::Sender<()>>,
     /// Input tokens of the latest request: the live context size.
     context_tokens: u64,
@@ -65,14 +109,14 @@ struct RunState {
     designs: HashMap<String, u8>,
 }
 
-/// Starts and tracks one generation run at a time.
+/// Starts and tracks one run at a time.
 #[derive(Clone)]
 pub struct AgentRunner {
     custom_command: Option<String>,
     settings: SettingsStore,
     designs: DesignStore,
-    briefs: BriefStore,
-    questions: QuestionStore,
+    sessions: SessionStore,
+    address: String,
     templates: Option<crate::templates::TemplateStore>,
     uploads: Option<crate::uploads::UploadStore>,
     state: Arc<Mutex<RunState>>,
@@ -81,21 +125,21 @@ pub struct AgentRunner {
 
 impl AgentRunner {
     /// Creates a runner. `custom_command` overrides the built-in
-    /// engine when set.
+    /// engines when set.
     pub fn new(
         custom_command: Option<String>,
         settings: SettingsStore,
         designs: DesignStore,
-        briefs: BriefStore,
-        questions: QuestionStore,
+        sessions: SessionStore,
+        address: String,
         notifier: ChangeNotifier,
     ) -> Self {
         Self {
             custom_command,
             settings,
             designs,
-            briefs,
-            questions,
+            sessions,
+            address,
             templates: None,
             uploads: None,
             state: Arc::new(Mutex::new(RunState {
@@ -103,6 +147,8 @@ impl AgentRunner {
                 is_running: false,
                 exit_code: None,
                 active_agent: None,
+                session_id: None,
+                mode: None,
                 stop_sender: None,
                 context_tokens: 0,
                 total_tokens: 0,
@@ -138,180 +184,235 @@ impl AgentRunner {
         notifier.notify();
     }
 
-    /// Picks how to run: the custom command, the studio settings, or
-    /// the environment configuration, in that order.
-    async fn resolve(&self) -> Result<(String, ResolvedLaunch), String> {
-        if let Some(command) = &self.custom_command {
-            return Ok(("custom".to_owned(), ResolvedLaunch::Shell(command.clone())));
-        }
-        let configuration = match self.settings.read().await {
+    /// The model configuration the user chose, or `None` when nothing
+    /// is set.
+    async fn model_configuration(&self) -> Option<model_client::ModelConfiguration> {
+        match self.settings.read().await {
             Ok(Some(stored)) => model_client::configuration_from_settings(&stored),
             _ => None,
         }
-        .or_else(model_client::configured_model);
-        let Some(configuration) = configuration else {
-            return Err("no model is chosen: pick a model in the studio settings first".to_owned());
-        };
-        let mut engine = GenerationEngine::new(
-            configuration,
-            self.designs.clone(),
-            self.briefs.clone(),
-            self.questions.clone(),
-            Some(self.settings.clone()),
-            self.notifier.clone(),
-        );
-        if let Some(templates) = &self.templates {
-            engine = engine.with_templates(templates.clone());
-        }
-        if let Some(uploads) = &self.uploads {
-            engine = engine.with_uploads(uploads.clone());
-        }
-        Ok((engine.label(), ResolvedLaunch::BuiltIn(Box::new(engine))))
+        .or_else(model_client::configured_model)
     }
 
-    /// Starts a run. Errors when one is already active or nothing is
-    /// configured.
-    pub async fn start(&self) -> Result<(), String> {
-        let (name, launch) = self.resolve().await?;
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "run state lock poisoned".to_owned())?;
-        if state.is_running {
-            return Err("a run is already active".to_owned());
+    /// Picks how to run for `session_id`: the custom command, or the
+    /// built-in engine for the session's mode.
+    async fn resolve(
+        &self,
+        _session_id: &str,
+        mode: RunMode,
+    ) -> Result<(String, ResolvedLaunch), StartError> {
+        if let Some(command) = &self.custom_command {
+            return Ok(("custom".to_owned(), ResolvedLaunch::Shell(command.clone())));
+        }
+        let configuration = self.model_configuration().await.ok_or_else(|| {
+            StartError::NotConfigured(
+                "no model is chosen: pick a model in the studio settings first".to_owned(),
+            )
+        })?;
+        match mode {
+            RunMode::Briefing => {
+                let client = ModelClient::new(configuration, Some(self.settings.clone()));
+                let engine =
+                    BriefingEngine::new(client, self.sessions.clone(), self.notifier.clone());
+                Ok((engine.label(), ResolvedLaunch::Briefing(Box::new(engine))))
+            }
+            RunMode::Generation => {
+                let mut engine = GenerationEngine::new(
+                    configuration,
+                    self.designs.clone(),
+                    self.sessions.clone(),
+                    Some(self.settings.clone()),
+                    self.address.clone(),
+                    self.notifier.clone(),
+                );
+                if let Some(templates) = &self.templates {
+                    engine = engine.with_templates(templates.clone());
+                }
+                if let Some(uploads) = &self.uploads {
+                    engine = engine.with_uploads(uploads.clone());
+                }
+                Ok((engine.label(), ResolvedLaunch::Generation(Box::new(engine))))
+            }
+        }
+    }
+
+    /// Starts a run for `session_id`. The mode comes from the session
+    /// state.
+    pub async fn start(&self, session_id: &str) -> Result<(), StartError> {
+        let session = self
+            .sessions
+            .read(session_id)
+            .await
+            .map_err(|error| StartError::Storage(error.to_string()))?
+            .ok_or_else(|| StartError::NoSession {
+                id: session_id.to_owned(),
+            })?;
+        let mode = run_mode_for(session.state).ok_or(StartError::WrongState {
+            state: session.state,
+        })?;
+        let (name, launch) = self.resolve(session_id, mode).await?;
+        // A shell command is spawned before the lock so the guard never
+        // crosses an await.
+        let mut shell_process = None;
+        if let ResolvedLaunch::Shell(command) = &launch {
+            {
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| StartError::Storage("run state lock poisoned".to_owned()))?;
+                if state.is_running {
+                    return Err(StartError::AlreadyRunning);
+                }
+            }
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned());
+            let process = Command::new(shell)
+                .arg("-lc")
+                .arg(command)
+                .env("SWIFT_DESIGN_SESSION_ID", session_id)
+                .env("SWIFT_DESIGN_RUN_MODE", mode.as_str())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|error| {
+                    StartError::NotConfigured(format!(
+                        "failed to start the custom command: {error}"
+                    ))
+                })?;
+            self.record_run_start(session_id, mode, "custom").await;
+            shell_process = Some(process);
         }
         let (stop_sender, stop_receiver) = oneshot::channel();
-        match launch {
-            ResolvedLaunch::Shell(command) => {
-                // A login shell, so the user's PATH additions apply no
-                // matter how the server started.
-                let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned());
-                let process = Command::new(shell)
-                    .arg("-lc")
-                    .arg(&command)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
-                    .map_err(|error| format!("failed to start the custom command: {error}"))?;
-                mark_running(&mut state, &name, stop_sender);
-                drop(state);
-                self.spawn_shell_tasks(process, stop_receiver);
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| StartError::Storage("run state lock poisoned".to_owned()))?;
+            if state.is_running {
+                return Err(StartError::AlreadyRunning);
             }
-            ResolvedLaunch::BuiltIn(engine) => {
-                mark_running(&mut state, &name, stop_sender);
+            mark_running(&mut state, &name, session_id, mode, stop_sender);
+            if let ResolvedLaunch::Briefing(engine) = &launch {
                 state.context_window = engine.context_window();
-                drop(state);
-                self.spawn_built_in_task(*engine, stop_receiver);
+            }
+            if let ResolvedLaunch::Generation(engine) = &launch {
+                state.context_window = engine.context_window();
+            }
+        }
+        match launch {
+            ResolvedLaunch::Shell(_) => {
+                if let Some(process) = shell_process.take() {
+                    self.spawn_shell_tasks(session_id.to_owned(), mode, process, stop_receiver);
+                }
+            }
+            ResolvedLaunch::Briefing(engine) => {
+                self.spawn_briefing_task(*engine, session_id.to_owned(), stop_receiver);
+            }
+            ResolvedLaunch::Generation(engine) => {
+                self.spawn_generation_task(*engine, session_id.to_owned(), stop_receiver);
             }
         }
         self.notifier.notify();
         Ok(())
     }
 
-    /// Streams the subprocess output into the log and records its exit.
+    /// Records a run start for an external command, so its history
+    /// mirrors the built-in engines.
+    async fn record_run_start(&self, session_id: &str, mode: RunMode, runtime: &str) {
+        let record = RunRecord {
+            run_id: String::new(),
+            mode,
+            runtime: runtime.to_owned(),
+            provider: None,
+            model: None,
+            brief_revision: None,
+            started_at: crate::time::rfc3339_now(),
+            finished_at: None,
+            result: None,
+            error: None,
+            artifacts: Vec::new(),
+        };
+        if let Err(error) = self.sessions.start_run(session_id, record).await {
+            tracing::warn!(%error, "recording the custom run failed");
+        }
+    }
+
+    /// Streams the subprocess output into the log and settles the
+    /// session when it exits.
     fn spawn_shell_tasks(
         &self,
+        session_id: String,
+        mode: RunMode,
         mut process: tokio::process::Child,
         stop_receiver: oneshot::Receiver<()>,
     ) {
         let stdout = process.stdout.take();
         let stderr = process.stderr.take();
-        if let Some(stdout) = stdout {
+        for stream in [stdout.map(Ok), stderr.map(Err)].into_iter().flatten() {
             let state = Arc::clone(&self.state);
             let notifier = self.notifier.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    Self::append_log(&state, &notifier, &line);
+            match stream {
+                Ok(stdout) => {
+                    tokio::spawn(async move {
+                        let mut lines = BufReader::new(stdout).lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            Self::append_log(&state, &notifier, &line);
+                        }
+                    });
                 }
-            });
-        }
-        if let Some(stderr) = stderr {
-            let state = Arc::clone(&self.state);
-            let notifier = self.notifier.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    Self::append_log(&state, &notifier, &line);
+                Err(stderr) => {
+                    tokio::spawn(async move {
+                        let mut lines = BufReader::new(stderr).lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            Self::append_log(&state, &notifier, &line);
+                        }
+                    });
                 }
-            });
+            }
         }
         let state = Arc::clone(&self.state);
         let notifier = self.notifier.clone();
+        let sessions = self.sessions.clone();
         tokio::spawn(async move {
-            let status = tokio::select! {
-                status = process.wait() => status.ok(),
+            let (status, stopped) = tokio::select! {
+                status = process.wait() => (status.ok(), false),
                 _ = stop_receiver => {
                     let _ = process.start_kill();
-                    process.wait().await.ok()
+                    (process.wait().await.ok(), true)
                 }
             };
+            let code = status.and_then(|status| status.code());
+            // Settle the session before marking the run finished, so a
+            // watcher that sees `is_running: false` also sees the final
+            // session state.
+            settle_shell(&sessions, &session_id, mode, code, stopped).await;
             if let Ok(mut state) = state.lock() {
                 state.is_running = false;
-                state.exit_code = status.and_then(|status| status.code());
+                state.exit_code = code;
                 state.stop_sender = None;
             }
             notifier.notify();
         });
     }
 
-    /// Runs the built-in engine and records its result like a process
-    /// exit: 0 on success, 1 on failure.
-    fn spawn_built_in_task(&self, engine: GenerationEngine, stop_receiver: oneshot::Receiver<()>) {
-        let log_state = Arc::clone(&self.state);
-        let log_notifier = self.notifier.clone();
-        let log: crate::model_client::LogSink =
-            Arc::new(move |line: &str| Self::append_log(&log_state, &log_notifier, line));
-        let usage_state = Arc::clone(&self.state);
-        let usage_notifier = self.notifier.clone();
-        let usage: crate::model_client::UsageSink = Arc::new(move |usage: TokenUsage| {
-            if let Ok(mut state) = usage_state.lock() {
-                state.context_tokens = usage.input_tokens;
-                state.total_tokens += usage.input_tokens + usage.output_tokens;
-            }
-            usage_notifier.notify();
-        });
-        let progress_state = Arc::clone(&self.state);
-        let progress_notifier = self.notifier.clone();
-        let progress: crate::generation::ProgressSink = Arc::new(move |percent: u8| {
-            if let Ok(mut state) = progress_state.lock() {
-                state.progress = Some(percent.min(100));
-                // A turn starts at 0: the per-design bars of the previous
-                // turn are done.
-                if percent == 0 {
-                    state.designs.clear();
-                }
-            }
-            progress_notifier.notify();
-        });
-        let design_state = Arc::clone(&self.state);
-        let design_notifier = self.notifier.clone();
-        let design_progress: crate::generation::DesignProgressSink =
-            Arc::new(move |design_id: &str, percent: u8| {
-                if let Ok(mut state) = design_state.lock() {
-                    state.designs.insert(design_id.to_owned(), percent.min(100));
-                }
-                design_notifier.notify();
-            });
-        let engine = engine
-            .with_usage_sink(usage)
-            .with_progress_sink(progress)
-            .with_design_progress_sink(design_progress);
+    /// Runs the briefing engine and settles the session.
+    fn spawn_briefing_task(
+        &self,
+        engine: BriefingEngine,
+        session_id: String,
+        stop_receiver: oneshot::Receiver<()>,
+    ) {
+        let log = self.log_sink();
         let state = Arc::clone(&self.state);
         let notifier = self.notifier.clone();
+        let sessions = self.sessions.clone();
         tokio::spawn(async move {
             let result = tokio::select! {
-                result = engine.run(Arc::clone(&log)) => result,
+                result = engine.run(&session_id, Arc::clone(&log)) => result,
                 _ = stop_receiver => Err("stopped by the user".to_owned()),
             };
-            let exit_code = match result {
-                Ok(()) => 0,
-                Err(message) => {
-                    log(&format!("error: {message}"));
-                    1
-                }
-            };
+            let outcome: Result<(), String> = result.map(|_: BriefingOutcome| ());
+            let exit_code = settle_built_in(&sessions, &session_id, outcome, &log).await;
             if let Ok(mut state) = state.lock() {
                 state.is_running = false;
                 state.exit_code = Some(exit_code);
@@ -319,6 +420,84 @@ impl AgentRunner {
             }
             notifier.notify();
         });
+    }
+
+    /// Runs the generation engine and settles the session.
+    fn spawn_generation_task(
+        &self,
+        engine: GenerationEngine,
+        session_id: String,
+        stop_receiver: oneshot::Receiver<()>,
+    ) {
+        let log = self.log_sink();
+        let engine = engine
+            .with_usage_sink(self.usage_sink())
+            .with_progress_sink(self.progress_sink())
+            .with_design_progress_sink(self.design_progress_sink());
+        let state = Arc::clone(&self.state);
+        let notifier = self.notifier.clone();
+        let sessions = self.sessions.clone();
+        tokio::spawn(async move {
+            let result = tokio::select! {
+                result = engine.run(&session_id, Arc::clone(&log)) => result,
+                _ = stop_receiver => Err("stopped by the user".to_owned()),
+            };
+            let outcome = result.map(|_: GenerationOutcome| ());
+            let exit_code = settle_built_in(&sessions, &session_id, outcome, &log).await;
+            if let Ok(mut state) = state.lock() {
+                state.is_running = false;
+                state.exit_code = Some(exit_code);
+                state.stop_sender = None;
+            }
+            notifier.notify();
+        });
+    }
+
+    /// A log sink that appends to the run log.
+    fn log_sink(&self) -> crate::model_client::LogSink {
+        let state = Arc::clone(&self.state);
+        let notifier = self.notifier.clone();
+        Arc::new(move |line: &str| Self::append_log(&state, &notifier, line))
+    }
+
+    /// A usage sink that records the token counts.
+    fn usage_sink(&self) -> crate::model_client::UsageSink {
+        let state = Arc::clone(&self.state);
+        let notifier = self.notifier.clone();
+        Arc::new(move |usage: TokenUsage| {
+            if let Ok(mut state) = state.lock() {
+                state.context_tokens = usage.input_tokens;
+                state.total_tokens += usage.input_tokens + usage.output_tokens;
+            }
+            notifier.notify();
+        })
+    }
+
+    /// A progress sink that records how far the turn is.
+    fn progress_sink(&self) -> crate::generation::ProgressSink {
+        let state = Arc::clone(&self.state);
+        let notifier = self.notifier.clone();
+        Arc::new(move |percent: u8| {
+            if let Ok(mut state) = state.lock() {
+                state.progress = Some(percent.min(100));
+                if percent == 0 {
+                    state.designs.clear();
+                }
+            }
+            notifier.notify();
+        })
+    }
+
+    /// A per-design progress sink.
+    fn design_progress_sink(&self) -> crate::generation::DesignProgressSink {
+        let state = Arc::clone(&self.state);
+        let notifier = self.notifier.clone();
+        Arc::new(move |design_id: &str, percent: u8| {
+            if let Ok(mut state) = state.lock() {
+                state.designs.insert(design_id.to_owned(), percent.min(100));
+            }
+            notifier.notify();
+        })
     }
 
     /// Stops the active run. Does nothing when no run is active.
@@ -343,6 +522,8 @@ impl AgentRunner {
                     "exit_code": state.exit_code,
                     "log_tail": &state.log[boundary..],
                     "active_agent": state.active_agent,
+                    "session_id": state.session_id,
+                    "mode": state.mode.map(|mode| mode.as_str()),
                     "context_tokens": state.context_tokens,
                     "total_tokens": state.total_tokens,
                     "context_window": state.context_window,
@@ -355,6 +536,8 @@ impl AgentRunner {
                 "exit_code": null,
                 "log_tail": "",
                 "active_agent": null,
+                "session_id": null,
+                "mode": null,
                 "context_tokens": 0,
                 "total_tokens": 0,
                 "context_window": 0,
@@ -365,18 +548,124 @@ impl AgentRunner {
     }
 }
 
-/// Marks the run state as active under `name` with a fresh log.
-fn mark_running(state: &mut RunState, name: &str, stop_sender: oneshot::Sender<()>) {
+/// Settles the session after a built-in run. Returns the exit code:
+/// 0 on success, 1 on failure. A generation success is already recorded
+/// by the engine only for questions; the run moves to reviewing here.
+async fn settle_built_in(
+    sessions: &SessionStore,
+    session_id: &str,
+    outcome: Result<(), String>,
+    log: &crate::model_client::LogSink,
+) -> i32 {
+    match outcome {
+        Ok(()) => {
+            // The generation engine leaves the session generating on a
+            // written design; move it to reviewing. Briefing and
+            // needs-clarification already set the state.
+            if let Ok(Some(session)) = sessions.read(session_id).await
+                && session.state == WorkflowState::Generating
+            {
+                let _ = sessions
+                    .apply(session_id, design_model::WorkflowEvent::GenerationSucceeded)
+                    .await;
+            }
+            0
+        }
+        Err(message) => {
+            log(&format!("error: {message}"));
+            if let Ok(Some(session)) = sessions.read(session_id).await
+                && session.state != WorkflowState::Error
+            {
+                let _ = sessions
+                    .apply(session_id, design_model::WorkflowEvent::RunFailed)
+                    .await;
+                let _ = sessions
+                    .update(session_id, |session| {
+                        session.error = Some(format!("built-in: {message}"));
+                    })
+                    .await;
+            }
+            1
+        }
+    }
+}
+
+/// Settles the session after an external command exits.
+async fn settle_shell(
+    sessions: &SessionStore,
+    session_id: &str,
+    mode: RunMode,
+    code: Option<i32>,
+    stopped: bool,
+) {
+    let Ok(Some(session)) = sessions.read(session_id).await else {
+        return;
+    };
+    if stopped {
+        if session.state != WorkflowState::Error {
+            let _ = sessions
+                .apply(session_id, design_model::WorkflowEvent::RunFailed)
+                .await;
+            let _ = sessions
+                .update(session_id, |session| {
+                    session.error = Some("stopped by the user".to_owned());
+                })
+                .await;
+        }
+        return;
+    }
+    match code {
+        Some(0) => {
+            if mode == RunMode::Generation && session.state == WorkflowState::Generating {
+                let _ = sessions
+                    .apply(session_id, design_model::WorkflowEvent::GenerationSucceeded)
+                    .await;
+            }
+        }
+        other => {
+            if session.state != WorkflowState::Error {
+                let code = other.unwrap_or(-1);
+                let _ = sessions
+                    .apply(session_id, design_model::WorkflowEvent::RunFailed)
+                    .await;
+                let _ = sessions
+                    .update(session_id, |session| {
+                        session.error = Some(format!(
+                            "the custom command exited with {code}: check SWIFT_DESIGN_AGENT_COMMAND"
+                        ));
+                    })
+                    .await;
+            }
+        }
+    }
+}
+
+/// Marks the run state as active for `session_id` with a fresh log.
+fn mark_running(
+    state: &mut RunState,
+    name: &str,
+    session_id: &str,
+    mode: RunMode,
+    stop_sender: oneshot::Sender<()>,
+) {
     state.is_running = true;
     state.exit_code = None;
     state.log.clear();
     state.active_agent = Some(name.to_owned());
+    state.session_id = Some(session_id.to_owned());
+    state.mode = Some(mode);
     state.stop_sender = Some(stop_sender);
     state.context_tokens = 0;
     state.total_tokens = 0;
     state.context_window = 0;
     state.progress = None;
     state.designs.clear();
+}
+
+/// Body of `POST /agent-runs`.
+#[derive(Debug, Deserialize)]
+struct StartRequest {
+    session_id: String,
 }
 
 /// The `/agent-runs` route table.
@@ -389,14 +678,17 @@ async fn get_run(State(runner): State<AgentRunner>) -> Response {
     Json(runner.status()).into_response()
 }
 
-/// Starts a run with the current settings.
-async fn start_run(State(runner): State<AgentRunner>) -> Response {
-    match runner.start().await {
+/// Starts a run for the named session.
+async fn start_run(
+    State(runner): State<AgentRunner>,
+    Json(request): Json<StartRequest>,
+) -> Response {
+    match runner.start(&request.session_id).await {
         Ok(()) => {
-            tracing::info!("run started");
+            tracing::info!(session_id = %request.session_id, "run started");
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(message) => api_error::error_response(StatusCode::CONFLICT, &message, Vec::new()),
+        Err(error) => api_error::error_response(error.status(), &error.to_string(), Vec::new()),
     }
 }
 
@@ -415,23 +707,25 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::agent_runs::AgentRunner;
-    use crate::briefs::BriefStore;
     use crate::designs::DesignStore;
     use crate::events::ChangeNotifier;
+    use crate::sessions::{RunOptions, SessionStore};
     use crate::settings::SettingsStore;
 
-    fn command_runner(directory: &TempDir, command: &str) -> AgentRunner {
-        AgentRunner::new(
+    fn command_runner(directory: &TempDir, command: &str) -> (AgentRunner, SessionStore) {
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let runner = AgentRunner::new(
             Some(command.to_owned()),
             SettingsStore::new(
                 directory.path().join("settings.json"),
                 "127.0.0.1:3000".to_owned(),
             ),
             DesignStore::new(directory.path().join("designs")),
-            BriefStore::new(directory.path().join("brief.json")),
-            crate::questions::QuestionStore::new(directory.path().join("questions.json")),
+            sessions.clone(),
+            "http://127.0.0.1:3000".to_owned(),
             ChangeNotifier::new(),
-        )
+        );
+        (runner, sessions)
     }
 
     async fn wait_until_finished(runner: &AgentRunner) -> serde_json::Value {
@@ -448,11 +742,16 @@ mod tests {
     #[tokio::test]
     async fn a_custom_command_run_captures_output_and_exit_code() {
         let directory = TempDir::new().unwrap();
-        let runner = command_runner(&directory, "echo custom-agent");
-        runner.start().await.unwrap();
+        let (runner, sessions) = command_runner(&directory, "echo custom-agent");
+        sessions
+            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .await
+            .unwrap();
+        runner.start("talk").await.unwrap();
         let status = wait_until_finished(&runner).await;
         assert_eq!(status["exit_code"], 0);
         assert_eq!(status["active_agent"], "custom");
+        assert_eq!(status["mode"], "briefing");
         assert!(
             status["log_tail"]
                 .as_str()
@@ -464,11 +763,80 @@ mod tests {
     #[tokio::test]
     async fn a_second_start_while_running_is_rejected() {
         let directory = TempDir::new().unwrap();
-        let runner = command_runner(&directory, "sleep 5");
-        runner.start().await.unwrap();
-        assert!(runner.start().await.is_err());
+        let (runner, sessions) = command_runner(&directory, "sleep 5");
+        sessions
+            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .await
+            .unwrap();
+        runner.start("talk").await.unwrap();
+        assert!(runner.start("talk").await.is_err());
         runner.stop();
         let status = wait_until_finished(&runner).await;
         assert_eq!(status["is_running"], false);
+    }
+
+    #[tokio::test]
+    async fn a_run_is_refused_when_the_session_is_reviewing() {
+        let directory = TempDir::new().unwrap();
+        let (runner, sessions) = command_runner(&directory, "echo hi");
+        sessions
+            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .await
+            .unwrap();
+        sessions
+            .apply("talk", design_model::WorkflowEvent::GenerateWithAssumptions)
+            .await
+            .unwrap();
+        sessions
+            .apply("talk", design_model::WorkflowEvent::GenerationSucceeded)
+            .await
+            .unwrap();
+        assert!(runner.start("talk").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_missing_session_is_reported_as_not_found() {
+        let directory = TempDir::new().unwrap();
+        let (runner, _sessions) = command_runner(&directory, "echo hi");
+        let error = runner.start("missing").await.unwrap_err();
+        assert_eq!(error.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_failing_command_moves_the_session_to_error_and_names_the_runtime() {
+        let directory = TempDir::new().unwrap();
+        let (runner, sessions) = command_runner(&directory, "exit 3");
+        sessions
+            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .await
+            .unwrap();
+        runner.start("talk").await.unwrap();
+        wait_until_finished(&runner).await;
+        let session = sessions.read("talk").await.unwrap().unwrap();
+        assert_eq!(session.state, design_model::WorkflowState::Error);
+        assert!(
+            session
+                .error
+                .unwrap()
+                .contains("SWIFT_DESIGN_AGENT_COMMAND")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_exit_in_generating_moves_the_session_to_reviewing() {
+        let directory = TempDir::new().unwrap();
+        let (runner, sessions) = command_runner(&directory, "echo done");
+        sessions
+            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .await
+            .unwrap();
+        sessions
+            .apply("talk", design_model::WorkflowEvent::GenerateWithAssumptions)
+            .await
+            .unwrap();
+        runner.start("talk").await.unwrap();
+        wait_until_finished(&runner).await;
+        let session = sessions.read("talk").await.unwrap().unwrap();
+        assert_eq!(session.state, design_model::WorkflowState::Reviewing);
     }
 }

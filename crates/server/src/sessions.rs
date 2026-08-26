@@ -1,0 +1,1161 @@
+//! Sessions: the persisted state of one brief-first design workflow.
+//!
+//! Each session is one project. Its id is the project slug, which is
+//! also the design-id prefix its designs share. Everything for a
+//! session lives under `data/sessions/{id}/`: the session record, the
+//! brief revisions, the question sets, the answers, the chat, and the
+//! run records. The workflow state is authoritative and changes only
+//! through `apply`, which calls `design_model::transition`.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use design_model::{
+    BriefQuestion, BriefQuestionSet, BriefRevision, Critique, DesignBrief, QuestionAnswer,
+    RevisionSource, WorkflowError, WorkflowEvent, WorkflowState, transition,
+};
+use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
+
+use crate::designs::is_valid_design_id;
+
+/// The candidate-id marker: a session id may not contain it, so a
+/// session id and a candidate id never collide.
+pub const CANDIDATE_MARKER: &str = "-candidate-";
+
+/// Which engine a run uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunMode {
+    /// The briefing engine: asks questions and drafts the brief.
+    Briefing,
+    /// The generation engine: writes designs from the approved brief.
+    Generation,
+}
+
+impl RunMode {
+    /// The snake_case name used in JSON and env vars.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunMode::Briefing => "briefing",
+            RunMode::Generation => "generation",
+        }
+    }
+}
+
+/// How the user set up a run: the same options across the session.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RunOptions {
+    /// How hard to work: `low`, `medium`, or `high`.
+    #[serde(default = "default_effort")]
+    pub effort: String,
+    /// How many candidate designs to write. `None` means the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variations: Option<usize>,
+    /// How different the candidates should be: `low`, `medium`, `high`.
+    #[serde(default = "default_effort")]
+    pub variety: String,
+    /// Template ids the candidates follow.
+    #[serde(default)]
+    pub templates: Vec<String>,
+    /// True to write preview candidates first.
+    #[serde(default = "default_true")]
+    pub preview: bool,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            effort: default_effort(),
+            variations: None,
+            variety: default_effort(),
+            templates: Vec::new(),
+            preview: true,
+        }
+    }
+}
+
+impl RunOptions {
+    /// The candidate count to write: the chosen count, or two.
+    pub fn variation_count(&self) -> usize {
+        self.variations.unwrap_or(2).max(1)
+    }
+}
+
+/// The effort or variety level when none is set.
+fn default_effort() -> String {
+    "medium".to_owned()
+}
+
+/// The default for a boolean field that is on when absent.
+fn default_true() -> bool {
+    true
+}
+
+/// A critique waiting for the next generation run to apply.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PendingCritique {
+    /// The design the critique is about.
+    pub design: String,
+    /// The critique itself.
+    pub critique: Critique,
+}
+
+/// One conversation turn kept with the session.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatMessage {
+    /// `user` or `assistant`.
+    pub role: String,
+    /// The turn text.
+    pub content: String,
+    /// The design open in the editor when the user sent this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub design: Option<String>,
+    /// The number of the question set this turn posed, when it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_set: Option<u32>,
+}
+
+impl ChatMessage {
+    /// A user turn, optionally about the design open in the editor.
+    pub fn user(content: &str, design: Option<&str>) -> Self {
+        Self {
+            role: "user".to_owned(),
+            content: content.to_owned(),
+            design: design.map(str::to_owned),
+            question_set: None,
+        }
+    }
+
+    /// An assistant turn.
+    pub fn assistant(content: &str) -> Self {
+        Self {
+            role: "assistant".to_owned(),
+            content: content.to_owned(),
+            design: None,
+            question_set: None,
+        }
+    }
+
+    /// An assistant turn that posed question set `number`.
+    pub fn assistant_questions(content: &str, number: u32) -> Self {
+        Self {
+            role: "assistant".to_owned(),
+            content: content.to_owned(),
+            design: None,
+            question_set: Some(number),
+        }
+    }
+}
+
+/// One recorded set of answers.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnswerRecord {
+    /// The question set answered.
+    pub question_set: u32,
+    /// The answers.
+    pub answers: Vec<QuestionAnswer>,
+    /// When the answers arrived, as an RFC 3339 UTC string.
+    pub at: String,
+}
+
+/// One generation or briefing run.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RunRecord {
+    /// Unique id: `{unix_seconds}-{n}`.
+    pub run_id: String,
+    /// Which engine ran.
+    pub mode: RunMode,
+    /// `built-in` or `custom`.
+    pub runtime: String,
+    /// Provider name for a built-in run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Model id for a built-in run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The brief revision the run read, for a generation run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief_revision: Option<u32>,
+    /// When it started, as an RFC 3339 UTC string.
+    pub started_at: String,
+    /// When it finished, when it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    /// The outcome: `succeeded`, `failed`, `asked_questions`,
+    /// `brief_presented`, `needs_clarification`, or `stopped`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    /// The failure message, when the run failed. Ids only, never paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The design ids the run wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<String>,
+}
+
+/// The persisted session record.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Session {
+    /// The session id, which is the project slug.
+    pub id: String,
+    /// A short title, from the request.
+    pub title: String,
+    /// The user's request, in their words.
+    pub request: String,
+    /// Where the session is in the workflow.
+    pub state: WorkflowState,
+    /// The state to return to after an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_before_error: Option<WorkflowState>,
+    /// The failure message shown in the error state. Ids only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// When the session was created, as an RFC 3339 UTC string.
+    pub created_at: String,
+    /// When it last changed, as an RFC 3339 UTC string.
+    pub updated_at: String,
+    /// The design the user chose from the candidates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_design: Option<String>,
+    /// The brief revision the user approved for generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_revision: Option<u32>,
+    /// The number of the newest brief revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_brief_revision: Option<u32>,
+    /// The number of the newest question set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_question_set: Option<u32>,
+    /// A critique waiting for the next generation run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_critique: Option<PendingCritique>,
+    /// The run options for this session.
+    #[serde(default)]
+    pub options: RunOptions,
+}
+
+/// One row of `GET /sessions`.
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionSummary {
+    /// The session id.
+    pub id: String,
+    /// The title.
+    pub title: String,
+    /// The workflow state.
+    pub state: WorkflowState,
+    /// When it last changed.
+    pub updated_at: String,
+    /// The chosen design, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chosen_design: Option<String>,
+}
+
+/// The full view of one session for `GET /sessions/{id}`.
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionView {
+    /// The session record.
+    pub session: Session,
+    /// The latest brief, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brief: Option<DesignBrief>,
+    /// Every question set asked, in order.
+    pub question_sets: Vec<BriefQuestionSet>,
+    /// The number of the question set still open, when one is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_question_set: Option<u32>,
+    /// Every recorded answer set.
+    pub answers: Vec<AnswerRecord>,
+    /// The conversation.
+    pub messages: Vec<ChatMessage>,
+    /// The run records.
+    pub runs: Vec<RunRecord>,
+    /// The designs that belong to this session.
+    pub designs: Vec<crate::designs::DesignSummary>,
+}
+
+/// What went wrong in a session operation.
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    /// No session with that id.
+    #[error("no session `{id}`: create it with POST /sessions")]
+    NotFound {
+        /// The missing id.
+        id: String,
+    },
+    /// A session already exists with that id.
+    #[error("session `{id}` already exists")]
+    AlreadyExists {
+        /// The id in use.
+        id: String,
+    },
+    /// The workflow refused the event.
+    #[error(transparent)]
+    Workflow(#[from] WorkflowError),
+    /// A storage failure. The message names no path.
+    #[error("session storage failed: {0}")]
+    Io(String),
+}
+
+impl SessionError {
+    /// Wraps a storage error without leaking a path into the message.
+    fn io(error: impl std::fmt::Display) -> Self {
+        SessionError::Io(error.to_string())
+    }
+}
+
+/// Filesystem-backed session storage. A per-store lock serializes the
+/// read-modify-write of a session record.
+#[derive(Clone)]
+pub struct SessionStore {
+    directory: PathBuf,
+    write_lock: Arc<Mutex<()>>,
+}
+
+impl SessionStore {
+    /// Creates a store over `directory`. The directory is created on
+    /// the first write.
+    pub fn new(directory: PathBuf) -> Self {
+        Self {
+            directory,
+            write_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    fn session_directory(&self, id: &str) -> PathBuf {
+        self.directory.join(id)
+    }
+
+    fn session_path(&self, id: &str) -> PathBuf {
+        self.session_directory(id).join("session.json")
+    }
+
+    fn brief_path(&self, id: &str, revision: u32) -> PathBuf {
+        self.session_directory(id)
+            .join("brief")
+            .join(format!("{revision}.json"))
+    }
+
+    fn question_set_path(&self, id: &str, number: u32) -> PathBuf {
+        self.session_directory(id)
+            .join("question-sets")
+            .join(format!("{number}.json"))
+    }
+
+    fn answers_path(&self, id: &str) -> PathBuf {
+        self.session_directory(id).join("answers.json")
+    }
+
+    fn messages_path(&self, id: &str) -> PathBuf {
+        self.session_directory(id).join("messages.json")
+    }
+
+    fn runs_directory(&self, id: &str) -> PathBuf {
+        self.session_directory(id).join("runs")
+    }
+
+    /// Creates a session in the intake state. Fails when one exists.
+    pub async fn create(
+        &self,
+        id: &str,
+        title: &str,
+        request: &str,
+        options: RunOptions,
+    ) -> Result<Session, SessionError> {
+        let _guard = self.write_lock.lock().await;
+        if self.session_path(id).exists() {
+            return Err(SessionError::AlreadyExists { id: id.to_owned() });
+        }
+        let now = crate::time::rfc3339_now();
+        let session = Session {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            request: request.to_owned(),
+            state: WorkflowState::Intake,
+            state_before_error: None,
+            error: None,
+            created_at: now.clone(),
+            updated_at: now,
+            chosen_design: None,
+            approved_revision: None,
+            latest_brief_revision: None,
+            latest_question_set: None,
+            pending_critique: None,
+            options,
+        };
+        self.write_session(&session).await?;
+        Ok(session)
+    }
+
+    /// Reads a session record. `Ok(None)` means none exists.
+    pub async fn read(&self, id: &str) -> Result<Option<Session>, SessionError> {
+        match tokio::fs::read_to_string(self.session_path(id)).await {
+            Ok(raw) => serde_json::from_str(&raw)
+                .map(Some)
+                .map_err(SessionError::io),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(SessionError::io(error)),
+        }
+    }
+
+    /// Reads a session or fails with `NotFound`.
+    async fn require(&self, id: &str) -> Result<Session, SessionError> {
+        self.read(id)
+            .await?
+            .ok_or_else(|| SessionError::NotFound { id: id.to_owned() })
+    }
+
+    async fn write_session(&self, session: &Session) -> Result<(), SessionError> {
+        let directory = self.session_directory(&session.id);
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .map_err(SessionError::io)?;
+        let json = serde_json::to_string_pretty(session).map_err(SessionError::io)?;
+        tokio::fs::write(self.session_path(&session.id), json)
+            .await
+            .map_err(SessionError::io)
+    }
+
+    /// Lists every session, newest change first.
+    pub async fn list(&self) -> Result<Vec<SessionSummary>, SessionError> {
+        let mut entries = match tokio::fs::read_dir(&self.directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(SessionError::io(error)),
+        };
+        let mut summaries = Vec::new();
+        while let Some(entry) = entries.next_entry().await.map_err(SessionError::io)? {
+            let Ok(file_type) = entry.file_type().await else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if let Some(session) = self.read(&id).await? {
+                summaries.push(SessionSummary {
+                    id: session.id,
+                    title: session.title,
+                    state: session.state,
+                    updated_at: session.updated_at,
+                    chosen_design: session.chosen_design,
+                });
+            }
+        }
+        summaries.sort_by(|first, second| second.updated_at.cmp(&first.updated_at));
+        Ok(summaries)
+    }
+
+    /// Removes a session and everything under it.
+    pub async fn delete(&self, id: &str) -> Result<bool, SessionError> {
+        let _guard = self.write_lock.lock().await;
+        match tokio::fs::remove_dir_all(self.session_directory(id)).await {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(SessionError::io(error)),
+        }
+    }
+
+    /// Renames a session directory, so its id keeps matching its
+    /// designs. `Ok(false)` when there is no session `old`.
+    pub async fn rename(&self, old: &str, new: &str) -> Result<bool, SessionError> {
+        let _guard = self.write_lock.lock().await;
+        let Some(mut session) = self.read(old).await? else {
+            return Ok(false);
+        };
+        tokio::fs::rename(self.session_directory(old), self.session_directory(new))
+            .await
+            .map_err(SessionError::io)?;
+        session.id = new.to_owned();
+        session.updated_at = crate::time::rfc3339_now();
+        self.write_session(&session).await?;
+        Ok(true)
+    }
+
+    /// Applies a workflow event through `design_model::transition`, the
+    /// only place the state changes. Records the previous state on an
+    /// error, and clears the error on recovery.
+    pub async fn apply(&self, id: &str, event: WorkflowEvent) -> Result<Session, SessionError> {
+        let _guard = self.write_lock.lock().await;
+        let mut session = self.require(id).await?;
+        let next = transition(session.state, event)?;
+        if event == WorkflowEvent::RunFailed {
+            session.state_before_error = Some(session.state);
+        }
+        if matches!(event, WorkflowEvent::Recovered { .. }) {
+            session.state_before_error = None;
+            session.error = None;
+        }
+        session.state = next;
+        session.updated_at = crate::time::rfc3339_now();
+        self.write_session(&session).await?;
+        Ok(session)
+    }
+
+    /// Edits the non-state fields of a session under the lock.
+    pub async fn update(
+        &self,
+        id: &str,
+        edit: impl FnOnce(&mut Session),
+    ) -> Result<Session, SessionError> {
+        let _guard = self.write_lock.lock().await;
+        let mut session = self.require(id).await?;
+        edit(&mut session);
+        session.updated_at = crate::time::rfc3339_now();
+        self.write_session(&session).await?;
+        Ok(session)
+    }
+
+    /// The state to recover into after an error: the state before it,
+    /// or intake.
+    pub async fn recovery_target(&self, id: &str) -> Result<WorkflowState, SessionError> {
+        let session = self.require(id).await?;
+        Ok(session.state_before_error.unwrap_or(WorkflowState::Intake))
+    }
+
+    /// Writes the next brief revision and records it in the history.
+    /// Returns the new revision number.
+    pub async fn write_brief_revision(
+        &self,
+        id: &str,
+        mut brief: DesignBrief,
+        source: RevisionSource,
+        summary: &str,
+    ) -> Result<u32, SessionError> {
+        let _guard = self.write_lock.lock().await;
+        let mut session = self.require(id).await?;
+        let revision = session.latest_brief_revision.unwrap_or(0) + 1;
+        brief.request = session.request.clone();
+        brief.revision = revision;
+        // Carry the whole history forward, then add this entry.
+        if revision > 1
+            && let Some(previous) = self.read_brief_unlocked(id, revision - 1).await?
+        {
+            brief.revision_history = previous.revision_history;
+        }
+        brief.revision_history.push(BriefRevision {
+            revision,
+            source,
+            summary: summary.to_owned(),
+            at: crate::time::rfc3339_now(),
+        });
+        let directory = self.session_directory(id).join("brief");
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .map_err(SessionError::io)?;
+        let json = serde_json::to_string_pretty(&brief).map_err(SessionError::io)?;
+        tokio::fs::write(self.brief_path(id, revision), json)
+            .await
+            .map_err(SessionError::io)?;
+        session.latest_brief_revision = Some(revision);
+        session.updated_at = crate::time::rfc3339_now();
+        self.write_session(&session).await?;
+        Ok(revision)
+    }
+
+    async fn read_brief_unlocked(
+        &self,
+        id: &str,
+        revision: u32,
+    ) -> Result<Option<DesignBrief>, SessionError> {
+        match tokio::fs::read_to_string(self.brief_path(id, revision)).await {
+            Ok(raw) => serde_json::from_str(&raw)
+                .map(Some)
+                .map_err(SessionError::io),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(SessionError::io(error)),
+        }
+    }
+
+    /// Reads one brief revision.
+    pub async fn read_brief(
+        &self,
+        id: &str,
+        revision: u32,
+    ) -> Result<Option<DesignBrief>, SessionError> {
+        self.read_brief_unlocked(id, revision).await
+    }
+
+    /// Reads the latest brief revision, when one exists.
+    pub async fn latest_brief(&self, id: &str) -> Result<Option<DesignBrief>, SessionError> {
+        let session = self.require(id).await?;
+        match session.latest_brief_revision {
+            Some(revision) => self.read_brief_unlocked(id, revision).await,
+            None => Ok(None),
+        }
+    }
+
+    /// The revision history of the latest brief.
+    pub async fn brief_revisions(&self, id: &str) -> Result<Vec<BriefRevision>, SessionError> {
+        Ok(self
+            .latest_brief(id)
+            .await?
+            .map(|brief| brief.revision_history)
+            .unwrap_or_default())
+    }
+
+    /// Writes the next question set. Returns its number.
+    pub async fn write_question_set(
+        &self,
+        id: &str,
+        set: &BriefQuestionSet,
+    ) -> Result<u32, SessionError> {
+        let _guard = self.write_lock.lock().await;
+        let mut session = self.require(id).await?;
+        let number = session.latest_question_set.unwrap_or(0) + 1;
+        let directory = self.session_directory(id).join("question-sets");
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .map_err(SessionError::io)?;
+        let json = serde_json::to_string_pretty(set).map_err(SessionError::io)?;
+        tokio::fs::write(self.question_set_path(id, number), json)
+            .await
+            .map_err(SessionError::io)?;
+        session.latest_question_set = Some(number);
+        session.updated_at = crate::time::rfc3339_now();
+        self.write_session(&session).await?;
+        Ok(number)
+    }
+
+    /// Reads one question set.
+    pub async fn read_question_set(
+        &self,
+        id: &str,
+        number: u32,
+    ) -> Result<Option<BriefQuestionSet>, SessionError> {
+        match tokio::fs::read_to_string(self.question_set_path(id, number)).await {
+            Ok(raw) => serde_json::from_str(&raw)
+                .map(Some)
+                .map_err(SessionError::io),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(SessionError::io(error)),
+        }
+    }
+
+    /// Every question set, in order.
+    pub async fn question_sets(&self, id: &str) -> Result<Vec<BriefQuestionSet>, SessionError> {
+        let session = self.require(id).await?;
+        let mut sets = Vec::new();
+        for number in 1..=session.latest_question_set.unwrap_or(0) {
+            if let Some(set) = self.read_question_set(id, number).await? {
+                sets.push(set);
+            }
+        }
+        Ok(sets)
+    }
+
+    /// Records a set of answers.
+    pub async fn record_answers(
+        &self,
+        id: &str,
+        question_set: u32,
+        answers: Vec<QuestionAnswer>,
+    ) -> Result<(), SessionError> {
+        let _guard = self.write_lock.lock().await;
+        let mut records = self.answers(id).await?;
+        records.push(AnswerRecord {
+            question_set,
+            answers,
+            at: crate::time::rfc3339_now(),
+        });
+        self.write_json(&self.answers_path(id), &records).await
+    }
+
+    /// Every recorded answer set.
+    pub async fn answers(&self, id: &str) -> Result<Vec<AnswerRecord>, SessionError> {
+        self.read_json(&self.answers_path(id)).await
+    }
+
+    /// The questions and the user's latest answer for each, joined
+    /// across every set. A later answer for the same question wins.
+    pub async fn answered_questions(
+        &self,
+        id: &str,
+    ) -> Result<Vec<(BriefQuestion, QuestionAnswer)>, SessionError> {
+        let sets = self.question_sets(id).await?;
+        let records = self.answers(id).await?;
+        let mut joined: Vec<(BriefQuestion, QuestionAnswer)> = Vec::new();
+        for record in records {
+            let Some(set) = sets.get((record.question_set as usize).wrapping_sub(1)) else {
+                continue;
+            };
+            for answer in record.answers {
+                let Some(question) = set
+                    .questions
+                    .iter()
+                    .find(|question| question.id == answer.question_id)
+                else {
+                    continue;
+                };
+                joined.retain(|(existing, _)| existing.id != question.id);
+                joined.push((question.clone(), answer));
+            }
+        }
+        Ok(joined)
+    }
+
+    /// Appends one conversation turn.
+    pub async fn append_message(&self, id: &str, message: ChatMessage) -> Result<(), SessionError> {
+        let _guard = self.write_lock.lock().await;
+        let mut messages = self.messages(id).await?;
+        messages.push(message);
+        self.write_json(&self.messages_path(id), &messages).await
+    }
+
+    /// The conversation.
+    pub async fn messages(&self, id: &str) -> Result<Vec<ChatMessage>, SessionError> {
+        self.read_json(&self.messages_path(id)).await
+    }
+
+    /// Records the start of a run. Returns its id.
+    pub async fn start_run(&self, id: &str, mut record: RunRecord) -> Result<String, SessionError> {
+        let _guard = self.write_lock.lock().await;
+        let directory = self.runs_directory(id);
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .map_err(SessionError::io)?;
+        let existing = self.runs(id).await?.len();
+        record.run_id = format!("{}-{}", crate::time::unix_now_seconds(), existing + 1);
+        let json = serde_json::to_string_pretty(&record).map_err(SessionError::io)?;
+        tokio::fs::write(directory.join(format!("{}.json", record.run_id)), json)
+            .await
+            .map_err(SessionError::io)?;
+        Ok(record.run_id)
+    }
+
+    /// Records the end of a run.
+    pub async fn finish_run(
+        &self,
+        id: &str,
+        run_id: &str,
+        result: &str,
+        error: Option<String>,
+        artifacts: Vec<String>,
+    ) -> Result<(), SessionError> {
+        let _guard = self.write_lock.lock().await;
+        let path = self.runs_directory(id).join(format!("{run_id}.json"));
+        let Some(mut record) = self.read_json_file::<RunRecord>(&path).await? else {
+            return Ok(());
+        };
+        record.finished_at = Some(crate::time::rfc3339_now());
+        record.result = Some(result.to_owned());
+        record.error = error;
+        record.artifacts = artifacts;
+        let json = serde_json::to_string_pretty(&record).map_err(SessionError::io)?;
+        tokio::fs::write(&path, json)
+            .await
+            .map_err(SessionError::io)
+    }
+
+    /// Every run record, oldest first.
+    pub async fn runs(&self, id: &str) -> Result<Vec<RunRecord>, SessionError> {
+        let mut entries = match tokio::fs::read_dir(self.runs_directory(id)).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(SessionError::io(error)),
+        };
+        let mut records = Vec::new();
+        while let Some(entry) = entries.next_entry().await.map_err(SessionError::io)? {
+            if let Some(record) = self.read_json_file::<RunRecord>(&entry.path()).await? {
+                records.push(record);
+            }
+        }
+        records.sort_by(|first, second| first.run_id.cmp(&second.run_id));
+        Ok(records)
+    }
+
+    async fn write_json<T: Serialize>(&self, path: &Path, value: &T) -> Result<(), SessionError> {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(SessionError::io)?;
+        }
+        let json = serde_json::to_string_pretty(value).map_err(SessionError::io)?;
+        tokio::fs::write(path, json).await.map_err(SessionError::io)
+    }
+
+    async fn read_json<T: for<'de> Deserialize<'de> + Default>(
+        &self,
+        path: &Path,
+    ) -> Result<T, SessionError> {
+        Ok(self.read_json_file(path).await?.unwrap_or_default())
+    }
+
+    async fn read_json_file<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &Path,
+    ) -> Result<Option<T>, SessionError> {
+        match tokio::fs::read_to_string(path).await {
+            Ok(raw) => serde_json::from_str(&raw)
+                .map(Some)
+                .map_err(SessionError::io),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(SessionError::io(error)),
+        }
+    }
+}
+
+/// Checks that a design write is allowed now: the owning session must
+/// be generating (agent writes), or generating or reviewing (user
+/// writes from the editor). Returns the design id's session state so the
+/// caller can build a message.
+pub async fn write_access(
+    sessions: &SessionStore,
+    design_id: &str,
+    is_user: bool,
+) -> Result<(), String> {
+    let session_id = session_id_of_design(design_id);
+    let session = sessions
+        .read(session_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("no session `{session_id}`: create it with POST /sessions"))?;
+    let allowed = session.state == WorkflowState::Generating
+        || (is_user && session.state == WorkflowState::Reviewing);
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "design writes to `{design_id}` are not allowed while session `{session_id}` is in state `{}`",
+            session.state
+        ))
+    }
+}
+
+/// The run mode for a workflow state: briefing while the session gathers
+/// the brief, generation while it writes designs, and nothing otherwise.
+pub fn run_mode_for(state: WorkflowState) -> Option<RunMode> {
+    match state {
+        WorkflowState::Intake | WorkflowState::Clarifying => Some(RunMode::Briefing),
+        WorkflowState::Generating => Some(RunMode::Generation),
+        _ => None,
+    }
+}
+
+/// True for ids that are valid session ids: a valid design id that is
+/// not a candidate id, so a session and a candidate never collide.
+pub fn is_valid_session_id(id: &str) -> bool {
+    is_valid_design_id(id) && !id.contains(CANDIDATE_MARKER)
+}
+
+/// The session id a design belongs to: the design id with any
+/// `-candidate-N` suffix removed.
+pub fn session_id_of_design(design_id: &str) -> &str {
+    match design_id.find(CANDIDATE_MARKER) {
+        Some(position) => &design_id[..position],
+        None => design_id,
+    }
+}
+
+/// A session id derived from the first words of a request. Falls back
+/// to `design` when the request has no usable words.
+pub fn session_id_from_request(request: &str) -> String {
+    let slug: String = request
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let words: Vec<&str> = slug.split('-').filter(|word| !word.is_empty()).collect();
+    let candidate = words.iter().take(4).cloned().collect::<Vec<_>>().join("-");
+    let candidate: String = candidate.chars().take(48).collect();
+    let trimmed = candidate.trim_matches('-');
+    if trimmed.is_empty() || !is_valid_session_id(trimmed) {
+        "design".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use design_model::{QuestionKind, QuestionOption};
+
+    fn store() -> (tempfile::TempDir, SessionStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(directory.path().join("sessions"));
+        (directory, store)
+    }
+
+    fn question(id: &str) -> BriefQuestion {
+        BriefQuestion {
+            id: id.to_owned(),
+            label: format!("Which {id}?"),
+            rationale: None,
+            kind: QuestionKind::SingleSelect,
+            required: true,
+            options: vec![
+                QuestionOption {
+                    value: "a".to_owned(),
+                    label: "A".to_owned(),
+                },
+                QuestionOption {
+                    value: "b".to_owned(),
+                    label: "B".to_owned(),
+                },
+            ],
+            allow_other: false,
+        }
+    }
+
+    fn set(id: &str) -> BriefQuestionSet {
+        BriefQuestionSet {
+            title: "Q".to_owned(),
+            message: "m".to_owned(),
+            questions: vec![question(id)],
+            can_proceed_with_assumptions: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn creating_a_session_starts_in_intake_and_survives_a_new_store() {
+        let (directory, store) = store();
+        let session = store
+            .create(
+                "finance-app",
+                "Finance app",
+                "Design a landing page.",
+                RunOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(session.state, WorkflowState::Intake);
+        assert!(
+            store
+                .create("finance-app", "x", "y", RunOptions::default())
+                .await
+                .is_err()
+        );
+        let reopened = SessionStore::new(directory.path().join("sessions"));
+        let loaded = reopened.read("finance-app").await.unwrap().unwrap();
+        assert_eq!(loaded.request, "Design a landing page.");
+        assert_eq!(loaded.state, WorkflowState::Intake);
+        assert_eq!(store.list().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn brief_revisions_number_from_one_and_keep_history() {
+        let (_directory, store) = store();
+        store
+            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .await
+            .unwrap();
+        let first = store
+            .write_brief_revision(
+                "talk",
+                DesignBrief::default(),
+                RevisionSource::Agent,
+                "Drafted",
+            )
+            .await
+            .unwrap();
+        assert_eq!(first, 1);
+        let second = store
+            .write_brief_revision(
+                "talk",
+                DesignBrief {
+                    audience: "engineers".to_owned(),
+                    ..DesignBrief::default()
+                },
+                RevisionSource::UserEdit,
+                "Edited",
+            )
+            .await
+            .unwrap();
+        assert_eq!(second, 2);
+        let brief = store.latest_brief("talk").await.unwrap().unwrap();
+        assert_eq!(brief.revision, 2);
+        assert_eq!(brief.audience, "engineers");
+        assert_eq!(brief.revision_history.len(), 2);
+        assert_eq!(brief.revision_history[0].source, RevisionSource::Agent);
+        assert_eq!(store.brief_revisions("talk").await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn question_sets_number_in_order_and_answers_attach_to_the_latest() {
+        let (_directory, store) = store();
+        store
+            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .write_question_set("talk", &set("platform"))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .write_question_set("talk", &set("audience"))
+                .await
+                .unwrap(),
+            2
+        );
+        store
+            .record_answers(
+                "talk",
+                2,
+                vec![QuestionAnswer {
+                    question_id: "audience".to_owned(),
+                    values: vec!["a".to_owned()],
+                    ..QuestionAnswer::default()
+                }],
+            )
+            .await
+            .unwrap();
+        let answered = store.answered_questions("talk").await.unwrap();
+        assert_eq!(answered.len(), 1);
+        assert_eq!(answered[0].0.id, "audience");
+        assert_eq!(answered[0].1.values, vec!["a"]);
+        assert_eq!(store.question_sets("talk").await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn apply_rejects_illegal_events_and_keeps_the_file() {
+        let (_directory, store) = store();
+        store
+            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .await
+            .unwrap();
+        assert!(store.apply("talk", WorkflowEvent::Approved).await.is_err());
+        let session = store.read("talk").await.unwrap().unwrap();
+        assert_eq!(session.state, WorkflowState::Intake);
+        let after = store
+            .apply("talk", WorkflowEvent::GenerateWithAssumptions)
+            .await
+            .unwrap();
+        assert_eq!(after.state, WorkflowState::Generating);
+    }
+
+    #[tokio::test]
+    async fn run_failed_remembers_the_previous_state_for_retry() {
+        let (_directory, store) = store();
+        store
+            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .await
+            .unwrap();
+        store
+            .apply("talk", WorkflowEvent::GenerateWithAssumptions)
+            .await
+            .unwrap();
+        store
+            .update("talk", |session| {
+                session.error = Some("boom".to_owned());
+            })
+            .await
+            .unwrap();
+        let failed = store.apply("talk", WorkflowEvent::RunFailed).await.unwrap();
+        assert_eq!(failed.state, WorkflowState::Error);
+        assert_eq!(failed.state_before_error, Some(WorkflowState::Generating));
+        assert_eq!(
+            store.recovery_target("talk").await.unwrap(),
+            WorkflowState::Generating
+        );
+        let recovered = store
+            .apply(
+                "talk",
+                WorkflowEvent::Recovered {
+                    to: WorkflowState::Generating,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.state, WorkflowState::Generating);
+        assert_eq!(recovered.error, None);
+        assert_eq!(recovered.state_before_error, None);
+    }
+
+    #[tokio::test]
+    async fn runs_record_revision_runtime_and_result() {
+        let (_directory, store) = store();
+        store
+            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .await
+            .unwrap();
+        let run_id = store
+            .start_run(
+                "talk",
+                RunRecord {
+                    run_id: String::new(),
+                    mode: RunMode::Generation,
+                    runtime: "built-in".to_owned(),
+                    provider: Some("openai".to_owned()),
+                    model: Some("gpt-5".to_owned()),
+                    brief_revision: Some(1),
+                    started_at: crate::time::rfc3339_now(),
+                    finished_at: None,
+                    result: None,
+                    error: None,
+                    artifacts: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .finish_run(
+                "talk",
+                &run_id,
+                "succeeded",
+                None,
+                vec!["talk-candidate-1".to_owned()],
+            )
+            .await
+            .unwrap();
+        let runs = store.runs("talk").await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].mode, RunMode::Generation);
+        assert_eq!(runs[0].result.as_deref(), Some("succeeded"));
+        assert_eq!(runs[0].artifacts, vec!["talk-candidate-1"]);
+    }
+
+    #[tokio::test]
+    async fn rename_moves_the_directory() {
+        let (_directory, store) = store();
+        store
+            .create("old-name", "Old", "A talk.", RunOptions::default())
+            .await
+            .unwrap();
+        assert!(store.rename("old-name", "new-name").await.unwrap());
+        assert!(store.read("old-name").await.unwrap().is_none());
+        let moved = store.read("new-name").await.unwrap().unwrap();
+        assert_eq!(moved.id, "new-name");
+        assert!(!store.rename("missing", "x").await.unwrap());
+    }
+
+    #[test]
+    fn session_id_of_design_strips_the_candidate_suffix() {
+        assert_eq!(session_id_of_design("talk-candidate-2"), "talk");
+        assert_eq!(session_id_of_design("talk"), "talk");
+        assert_eq!(
+            session_id_of_design("finance-app-candidate-10"),
+            "finance-app"
+        );
+    }
+
+    #[test]
+    fn session_ids_reject_candidate_suffixes() {
+        assert!(is_valid_session_id("finance-app"));
+        assert!(!is_valid_session_id("talk-candidate-1"));
+        assert!(!is_valid_session_id("render"));
+        assert!(!is_valid_session_id("Bad Id"));
+    }
+
+    #[test]
+    fn session_ids_come_from_the_first_words_of_the_request() {
+        assert_eq!(
+            session_id_from_request("Design a landing page for my finance app"),
+            "design-a-landing-page"
+        );
+        assert_eq!(session_id_from_request("???"), "design");
+        assert_eq!(session_id_from_request(""), "design");
+    }
+}
