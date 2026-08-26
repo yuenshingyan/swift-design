@@ -428,6 +428,11 @@ fn AccessStep(state: SetupState, provider: api::CatalogProvider) -> Element {
     let uses_callback_login = is_openrouter || is_openai;
 
     let get_login_link = move |_| {
+        // Open a blank tab now, inside the click gesture, so the popup
+        // blocker allows it. The tab is named, so the URL is loaded into
+        // this same tab once the server returns it. Doing the open after
+        // the async round trip would be blocked as a non-gesture popup.
+        let _ = dioxus::document::eval("window.open('', 'swiftDesignLogin');");
         spawn(async move {
             let started = if is_openrouter {
                 api::start_openrouter_login().await
@@ -438,6 +443,11 @@ fn AccessStep(state: SetupState, provider: api::CatalogProvider) -> Element {
             };
             match started {
                 Ok(url) => {
+                    // Point the already-open tab at the login page.
+                    let opener = dioxus::document::eval(
+                        "const url = await dioxus.recv(); window.open(url, 'swiftDesignLogin');",
+                    );
+                    let _ = opener.send(url.clone());
                     state.login_url.set(Some(url));
                     state.message.set(None);
                 }
@@ -529,16 +539,15 @@ fn AccessStep(state: SetupState, provider: api::CatalogProvider) -> Element {
                     }
                 }
             }
-            if let Some(url) = state.login_url() {
+            if state.login_url().is_some() {
                 div { class: "settings-login",
-                    a { class: "button", href: "{url}", target: "_blank", "Open the login page" }
                     if uses_callback_login {
                         p { class: "agent-log",
                             "Finish in the new tab; this page moves on by itself."
                         }
                     } else {
                         label {
-                            "Paste the code the page shows"
+                            "Paste the code the login page shows"
                             input {
                                 value: "{state.login_code()}",
                                 oninput: move |event| state.login_code.set(event.value()),
