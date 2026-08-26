@@ -957,6 +957,25 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let schema: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(schema["properties"]["screens"].is_object());
+        assert!(schema["properties"]["viewport"].is_object());
+
+        let (status, body) =
+            send(test_application(&directory), "GET", "/schemas/brief", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let schema: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(schema["properties"]["confirmed_facts"].is_object());
+        assert!(schema["properties"]["assumptions"].is_object());
+
+        let (status, body) = send(
+            test_application(&directory),
+            "GET",
+            "/schemas/question-set",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let schema: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(schema["properties"]["can_proceed_with_assumptions"].is_object());
     }
 
     #[tokio::test]

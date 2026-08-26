@@ -7,21 +7,36 @@
 //! A design is a theme, a viewport, and screens, plus an optional page
 //! transition. A screen is one HTML fragment plus its own CSS for the
 //! viewport's px canvas. `markup` checks both.
+//!
+//! The crate also holds the brief-first workflow types the server and
+//! the studio share: the `workflow` state machine, the `question`
+//! protocol, and the `brief`.
 
+pub mod brief;
 pub mod design;
 pub mod markup;
+pub mod question;
 pub mod screen;
 pub mod theme;
 pub mod transition;
 pub mod validation;
 pub mod viewport;
+pub mod workflow;
 
+pub use brief::{
+    BriefRevision, BriefSection, Critique, CritiqueCategory, DesignBrief, RevisionSource,
+};
 pub use design::Design;
+pub use question::{
+    AnswerError, BriefQuestion, BriefQuestionSet, QUESTIONS_PER_TURN_LIMIT, QuestionAnswer,
+    QuestionKind, QuestionOption, QuestionSetError, validate_answers, validate_question_set,
+};
 pub use screen::Screen;
 pub use theme::{FontSet, Palette, Theme};
 pub use transition::{Transition, TransitionAxis, TransitionEffect};
 pub use validation::ValidationError;
 pub use viewport::Viewport;
+pub use workflow::{WorkflowError, WorkflowEvent, WorkflowState, transition};
 
 #[cfg(test)]
 pub(crate) mod test_support {

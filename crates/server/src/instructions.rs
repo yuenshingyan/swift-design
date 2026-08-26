@@ -68,11 +68,24 @@ pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/instructions", get(get_instructions))
         .route("/schemas/design", get(get_design_schema))
+        .route("/schemas/brief", get(get_brief_schema))
+        .route("/schemas/question-set", get(get_question_set_schema))
 }
 
 /// Returns the design JSON Schema, generated from the design types.
 async fn get_design_schema() -> Json<schemars::Schema> {
     Json(schemars::schema_for!(Design))
+}
+
+/// Returns the brief JSON Schema, generated from the brief types.
+async fn get_brief_schema() -> Json<schemars::Schema> {
+    Json(schemars::schema_for!(design_model::DesignBrief))
+}
+
+/// Returns the question set JSON Schema, generated from the question
+/// types.
+async fn get_question_set_schema() -> Json<schemars::Schema> {
+    Json(schemars::schema_for!(design_model::BriefQuestionSet))
 }
 
 /// Returns the build procedure for agents as JSON.

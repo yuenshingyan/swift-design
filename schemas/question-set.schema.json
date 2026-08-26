@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BriefQuestionSet",
+  "description": "The questions of one turn.",
+  "type": "object",
+  "properties": {
+    "can_proceed_with_assumptions": {
+      "description": "True when the agent can draft a brief with assumptions instead\nof waiting for these answers.",
+      "type": "boolean",
+      "default": false
+    },
+    "message": {
+      "description": "One or two sentences that introduce the questions.",
+      "type": "string"
+    },
+    "questions": {
+      "description": "The questions, at most `QUESTIONS_PER_TURN_LIMIT`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/BriefQuestion"
+      }
+    },
+    "title": {
+      "description": "A short title for the card, such as `Two things before I draft`.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "title",
+    "message",
+    "questions"
+  ],
+  "$defs": {
+    "BriefQuestion": {
+      "description": "One question the agent asks the user.",
+      "type": "object",
+      "properties": {
+        "allow_other": {
+          "description": "True to offer an `Other` choice with a text field.",
+          "type": "boolean",
+          "default": false
+        },
+        "id": {
+          "description": "A short id unique in the set, such as `platform`.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "How the user answers.",
+          "$ref": "#/$defs/QuestionKind"
+        },
+        "label": {
+          "description": "The question text.",
+          "type": "string"
+        },
+        "options": {
+          "description": "The choices for a select question. Empty for text questions.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QuestionOption"
+          }
+        },
+        "rationale": {
+          "description": "Why the answer changes the design. Shown under the question.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required": {
+          "description": "True when the user must answer or skip. False when an empty\nanswer is fine.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "kind"
+      ]
+    },
+    "QuestionKind": {
+      "description": "How the user answers a question.",
+      "oneOf": [
+        {
+          "description": "One choice from `options`.",
+          "type": "string",
+          "const": "single_select"
+        },
+        {
+          "description": "Any number of choices from `options`.",
+          "type": "string",
+          "const": "multi_select"
+        },
+        {
+          "description": "One line of text.",
+          "type": "string",
+          "const": "short_text"
+        },
+        {
+          "description": "A paragraph of text.",
+          "type": "string",
+          "const": "long_text"
+        }
+      ]
+    },
+    "QuestionOption": {
+      "description": "One preset answer for a select question.",
+      "type": "object",
+      "properties": {
+        "label": {
+          "description": "The text the user sees, such as `Mobile app`.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The stored value, such as `mobile_app`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "label"
+      ]
+    }
+  }
+}
