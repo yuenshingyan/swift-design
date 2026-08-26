@@ -1,0 +1,13 @@
+[package]
+name = "ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+design-model.workspace = true
+dioxus.workspace = true
+gloo-net = "0.7.0"
+serde.workspace = true
+
+[lints]
+workspace = true

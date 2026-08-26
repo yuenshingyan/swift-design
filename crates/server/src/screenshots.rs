@@ -1,0 +1,440 @@
+//! Screen screenshots: how a model sees its own work.
+//!
+//! The server renders one screen to HTML and asks an installed Chrome or
+//! Chromium to draw it as a PNG. No browser crate is shipped: the
+//! binary is the user's own. `GET /designs/{id}/screens/{n}.png` serves a
+//! screenshot to external agents, and the polish pass sends the images
+//! to vision-capable models. Without Chrome, everything falls back to
+//! text.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use axum::Router;
+use axum::extract::{Path, State};
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use design_model::Design;
+
+use crate::api_error;
+use crate::designs::{DesignStore, is_valid_design_id};
+use crate::render::{RenderOptions, render_design_with};
+use crate::settings::SettingsStore;
+
+/// Environment variable that names the Chrome binary to use.
+pub const CHROME_ENVIRONMENT_VARIABLE: &str = "SWIFT_DESIGN_CHROME";
+
+/// Longest time to wait for one screenshot.
+const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(40);
+
+/// Longest time to wait for one PDF: a whole design with its fonts and
+/// images.
+const PDF_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Virtual time Chrome waits for fonts and images before it prints. A
+/// PDF carries every screen, so it gets more than a screenshot.
+const PDF_VIRTUAL_TIME_BUDGET_MS: u32 = 5000;
+
+/// Screenshot size: one pixel per logical 1920x1080 unit.
+const WINDOW_SIZE: &str = "1920,1080";
+
+/// Most screens the polish pass photographs per round.
+pub const POLISH_IMAGE_LIMIT: usize = 12;
+
+/// Known Chrome locations on macOS and Linux, checked in order.
+const KNOWN_PATHS: [&str; 8] = [
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+];
+
+/// Command names looked up on `PATH` after the known locations.
+const PATH_NAMES: [&str; 5] = [
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "chrome",
+];
+
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// The Chrome binary to use: `SWIFT_DESIGN_CHROME`, a known location, or
+/// a name on `PATH`. `None` when nothing is installed.
+pub fn find_chrome() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var(CHROME_ENVIRONMENT_VARIABLE) {
+        let path = PathBuf::from(path);
+        return path.is_file().then_some(path);
+    }
+    for path in KNOWN_PATHS {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let search_path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&search_path) {
+        for name in PATH_NAMES {
+            let candidate = directory.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// True when the model can read images, judged from its name.
+pub fn supports_vision(model: &str) -> bool {
+    let name = model.to_ascii_lowercase();
+    [
+        "gpt-4o",
+        "gpt-4.1",
+        "gpt-5",
+        "o3",
+        "o4",
+        "claude",
+        "gemini",
+        "llava",
+        "vision",
+        "pixtral",
+        "qwen2.5-vl",
+        "qwen-vl",
+        "gemma3",
+    ]
+    .iter()
+    .any(|marker| name.contains(marker))
+}
+
+/// Renders screen `index` (zero-based) of `design` to a PNG. `base_url`
+/// resolves relative image paths like `/uploads/…`.
+pub async fn screenshot_screen(
+    design: &Design,
+    index: usize,
+    base_url: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let chrome = find_chrome().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
+        )
+    })?;
+    let html = render_design_with(
+        design,
+        RenderOptions {
+            only_screen: Some(index),
+            asset_origin: Some(base_url.to_owned()),
+            ..RenderOptions::default()
+        },
+    );
+    screenshot_html(&chrome, &with_base_href(&html, base_url)).await
+}
+
+/// Renders the whole design with the layout audit script and returns the
+/// DOM after the audit ran, as Chrome dumps it. The polish pass reads
+/// the findings out of it.
+pub async fn dump_design_dom(design: &Design, base_url: &str) -> anyhow::Result<String> {
+    let html = render_design_with(
+        design,
+        RenderOptions {
+            is_auditing: true,
+            asset_origin: Some(base_url.to_owned()),
+            ..RenderOptions::default()
+        },
+    );
+    dump_rendered_dom(&html, base_url).await
+}
+
+/// Loads a rendered page in Chrome and returns the DOM after its
+/// scripts ran. `base_url` resolves relative image paths.
+pub async fn dump_rendered_dom(html: &str, base_url: &str) -> anyhow::Result<String> {
+    let chrome = find_chrome().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
+        )
+    })?;
+    let (html_path, _) = scratch_paths("-audit", "dom").await?;
+    tokio::fs::write(&html_path, with_base_href(html, base_url)).await?;
+    let result = run_chrome_dump(&chrome, &html_path).await;
+    let _ = tokio::fs::remove_file(&html_path).await;
+    result
+}
+
+/// Creates the scratch directory and returns a fresh pair of paths in
+/// it: `{stamp}{suffix}.html` and `{stamp}.{extension}`. Nothing is
+/// written yet.
+async fn scratch_paths(suffix: &str, extension: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let directory = std::env::temp_dir().join("swift-design-screenshots");
+    tokio::fs::create_dir_all(&directory).await?;
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    Ok((
+        directory.join(format!("{stamp}{suffix}.html")),
+        directory.join(format!("{stamp}.{extension}")),
+    ))
+}
+
+/// A headless Chrome command with the flags every run shares. The
+/// caller adds the output flag and the URL.
+fn chrome_command(
+    chrome: &std::path::Path,
+    headless_flag: &str,
+    virtual_time_budget_ms: u32,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(chrome);
+    command
+        .arg(headless_flag)
+        .arg("--disable-gpu")
+        .arg("--hide-scrollbars")
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg(format!("--virtual-time-budget={virtual_time_budget_ms}"))
+        .arg(format!("--window-size={WINDOW_SIZE}"))
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    command
+}
+
+/// Runs Chrome headless with `--dump-dom` and returns the serialized
+/// page after scripts ran.
+async fn run_chrome_dump(
+    chrome: &std::path::Path,
+    html_path: &std::path::Path,
+) -> anyhow::Result<String> {
+    let url = format!("file://{}", html_path.display());
+    for headless_flag in ["--headless=new", "--headless"] {
+        let command = chrome_command(chrome, headless_flag, 2500)
+            .arg("--dump-dom")
+            .arg(&url)
+            .stdout(std::process::Stdio::piped())
+            .output();
+        let output = tokio::time::timeout(SCREENSHOT_TIMEOUT, command)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("Chrome did not finish within {SCREENSHOT_TIMEOUT:?}")
+            })??;
+        if output.status.success() && !output.stdout.is_empty() {
+            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        }
+    }
+    anyhow::bail!("Chrome did not dump the page {}", html_path.display())
+}
+
+/// Writes `html` to a temp file, prints it to a PDF with Chrome, and
+/// reads the PDF back. The page must carry its own `@page` rules; theme
+/// fonts load from Google Fonts when the machine is online, and fall
+/// back to the system stack otherwise.
+pub async fn print_html_to_pdf(chrome: &std::path::Path, html: &str) -> anyhow::Result<Vec<u8>> {
+    let (html_path, pdf_path) = scratch_paths("-print", "pdf").await?;
+    tokio::fs::write(&html_path, html).await?;
+    let result = run_chrome_print(chrome, &html_path, &pdf_path).await;
+    let _ = tokio::fs::remove_file(&html_path).await;
+    result?;
+    let bytes = tokio::fs::read(&pdf_path).await?;
+    let _ = tokio::fs::remove_file(&pdf_path).await;
+    Ok(bytes)
+}
+
+/// Runs Chrome headless with `--print-to-pdf`. Tries the new headless
+/// mode first, then the old flag for older builds.
+async fn run_chrome_print(
+    chrome: &std::path::Path,
+    html_path: &std::path::Path,
+    pdf_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let url = format!("file://{}", html_path.display());
+    let print_flag = format!("--print-to-pdf={}", pdf_path.display());
+    for headless_flag in ["--headless=new", "--headless"] {
+        let command = chrome_command(chrome, headless_flag, PDF_VIRTUAL_TIME_BUDGET_MS)
+            .arg("--no-pdf-header-footer")
+            .arg(&print_flag)
+            .arg(&url)
+            .stdout(std::process::Stdio::null())
+            .output();
+        let output = tokio::time::timeout(PDF_TIMEOUT, command)
+            .await
+            .map_err(|_| anyhow::anyhow!("Chrome did not finish within {PDF_TIMEOUT:?}"))??;
+        if output.status.success() && pdf_path.is_file() {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("Chrome did not write a PDF for {}", html_path.display())
+}
+
+/// The 503 response for a Chrome-backed feature on a machine without
+/// Chrome. `feature` is plural, like `screen images`.
+pub fn chrome_missing_response(feature: &str) -> Response {
+    api_error::error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        &format!(
+            "{feature} need Chrome or Chromium on the server machine: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
+        ),
+        Vec::new(),
+    )
+}
+
+/// Inserts `<base href>` after `<head>`, so relative paths resolve
+/// against the server when the page loads from a file.
+pub fn with_base_href(html: &str, base_url: &str) -> String {
+    let base = format!("<base href=\"{}/\">", base_url.trim_end_matches('/'));
+    match html.find("<head>") {
+        Some(position) => {
+            let split = position + "<head>".len();
+            format!("{}\n{base}{}", &html[..split], &html[split..])
+        }
+        None => format!("{base}{html}"),
+    }
+}
+
+/// Writes `html` to a temp file, screenshots it with Chrome, and reads
+/// the PNG back.
+async fn screenshot_html(chrome: &std::path::Path, html: &str) -> anyhow::Result<Vec<u8>> {
+    let (html_path, png_path) = scratch_paths("", "png").await?;
+    tokio::fs::write(&html_path, html).await?;
+    let result = run_chrome(chrome, &html_path, &png_path).await;
+    let _ = tokio::fs::remove_file(&html_path).await;
+    result?;
+    let bytes = tokio::fs::read(&png_path).await?;
+    let _ = tokio::fs::remove_file(&png_path).await;
+    Ok(bytes)
+}
+
+/// Runs Chrome headless once. Tries the new headless mode first, then
+/// the old flag for older builds.
+async fn run_chrome(
+    chrome: &std::path::Path,
+    html_path: &std::path::Path,
+    png_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let url = format!("file://{}", html_path.display());
+    let screenshot_flag = format!("--screenshot={}", png_path.display());
+    for headless_flag in ["--headless=new", "--headless"] {
+        let command = chrome_command(chrome, headless_flag, 1200)
+            .arg(&screenshot_flag)
+            .arg(&url)
+            .stdout(std::process::Stdio::null())
+            .output();
+        let output = tokio::time::timeout(SCREENSHOT_TIMEOUT, command)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("Chrome did not finish within {SCREENSHOT_TIMEOUT:?}")
+            })??;
+        if output.status.success() && png_path.is_file() {
+            return Ok(());
+        }
+    }
+    anyhow::bail!(
+        "Chrome did not write a screenshot for {}",
+        html_path.display()
+    )
+}
+
+/// The `/designs/{id}/screens/{n}.png` route table.
+pub fn routes() -> Router<crate::AppState> {
+    Router::new().route("/designs/{id}/screens/{file}", get(get_screen_image))
+}
+
+/// Serves a PNG of one screen. `file` is `{n}.png` with a 1-based `n`.
+async fn get_screen_image(
+    State(designs): State<DesignStore>,
+    State(settings): State<SettingsStore>,
+    Path((id, file)): Path<(String, String)>,
+) -> Response {
+    if !is_valid_design_id(&id) {
+        return api_error::invalid_design_id(&id);
+    }
+    let Some(number) = file
+        .strip_suffix(".png")
+        .and_then(|stem| stem.parse::<usize>().ok())
+        .filter(|number| *number >= 1)
+    else {
+        return api_error::error_response(
+            StatusCode::NOT_FOUND,
+            &format!("no screen image `{file}`: use {{n}}.png with n from 1"),
+            Vec::new(),
+        );
+    };
+    let design = match designs.load(&id).await {
+        Ok(Some(design)) => design,
+        Ok(None) => return api_error::design_not_found(&id),
+        Err(error) => return api_error::internal_error(&error),
+    };
+    if number > design.screens.len() {
+        return api_error::error_response(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "design `{id}` has no screen {number}: use 1 to {}",
+                design.screens.len()
+            ),
+            Vec::new(),
+        );
+    }
+    if find_chrome().is_none() {
+        return chrome_missing_response("screen images");
+    }
+    let base_url = format!("http://{}", settings.address());
+    match screenshot_screen(&design, number - 1, &base_url).await {
+        Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vision_support_follows_the_model_name() {
+        assert!(supports_vision("gpt-5-mini"));
+        assert!(supports_vision("claude-sonnet-5"));
+        assert!(supports_vision("google/gemini-2.5-flash"));
+        assert!(!supports_vision("llama-3.3-70b-versatile"));
+        assert!(!supports_vision("deepseek/deepseek-chat"));
+    }
+
+    #[test]
+    fn base_href_lands_inside_head() {
+        let html = "<!doctype html>\n<html><head>\n<title>x</title></head><body></body></html>";
+        let result = with_base_href(html, "http://127.0.0.1:3000/");
+        assert!(result.contains("<head>\n<base href=\"http://127.0.0.1:3000/\">"));
+        assert!(with_base_href("<p>x</p>", "http://h").starts_with("<base href=\"http://h/\">"));
+    }
+
+    #[tokio::test]
+    async fn scratch_paths_share_a_stem_and_carry_the_extension() {
+        let (html_path, pdf_path) = scratch_paths("-print", "pdf")
+            .await
+            .unwrap_or_else(|error| {
+                panic!("scratch paths: {error}");
+            });
+        assert!(html_path.to_string_lossy().ends_with("-print.html"));
+        assert!(pdf_path.to_string_lossy().ends_with(".pdf"));
+        assert_eq!(html_path.parent(), pdf_path.parent());
+        let html_stem = html_path.to_string_lossy().replace("-print.html", "");
+        let pdf_stem = pdf_path.to_string_lossy().replace(".pdf", "");
+        assert_eq!(html_stem, pdf_stem);
+    }
+
+    #[tokio::test]
+    async fn chrome_missing_response_uses_the_shared_shape() {
+        let response = chrome_missing_response("PDF exports");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap_or_else(|error| panic!("body: {error}"));
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or_else(|error| panic!("json: {error}"));
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.starts_with("PDF exports need Chrome"));
+        assert!(message.contains(CHROME_ENVIRONMENT_VARIABLE));
+    }
+}
