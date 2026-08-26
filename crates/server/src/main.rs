@@ -13,6 +13,7 @@ mod generation;
 mod history;
 mod icon;
 mod instructions;
+mod model_client;
 mod patch;
 mod polish;
 mod projects;

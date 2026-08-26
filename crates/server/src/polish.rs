@@ -12,7 +12,7 @@
 use design_model::Design;
 use serde::Deserialize;
 
-use crate::generation::LogSink;
+use crate::model_client::LogSink;
 
 /// One finding from the in-browser audit script.
 #[derive(Debug, Deserialize)]

@@ -24,7 +24,8 @@ use crate::api_error;
 use crate::briefs::BriefStore;
 use crate::designs::DesignStore;
 use crate::events::ChangeNotifier;
-use crate::generation::{self, GenerationEngine, TokenUsage};
+use crate::generation::GenerationEngine;
+use crate::model_client::{self, TokenUsage};
 use crate::questions::QuestionStore;
 use crate::settings::SettingsStore;
 
@@ -144,10 +145,10 @@ impl AgentRunner {
             return Ok(("custom".to_owned(), ResolvedLaunch::Shell(command.clone())));
         }
         let configuration = match self.settings.read().await {
-            Ok(Some(stored)) => generation::configuration_from_settings(&stored),
+            Ok(Some(stored)) => model_client::configuration_from_settings(&stored),
             _ => None,
         }
-        .or_else(generation::configured_model);
+        .or_else(model_client::configured_model);
         let Some(configuration) = configuration else {
             return Err("no model is chosen: pick a model in the studio settings first".to_owned());
         };
@@ -260,11 +261,11 @@ impl AgentRunner {
     fn spawn_built_in_task(&self, engine: GenerationEngine, stop_receiver: oneshot::Receiver<()>) {
         let log_state = Arc::clone(&self.state);
         let log_notifier = self.notifier.clone();
-        let log: crate::generation::LogSink =
+        let log: crate::model_client::LogSink =
             Arc::new(move |line: &str| Self::append_log(&log_state, &log_notifier, line));
         let usage_state = Arc::clone(&self.state);
         let usage_notifier = self.notifier.clone();
-        let usage: crate::generation::UsageSink = Arc::new(move |usage: TokenUsage| {
+        let usage: crate::model_client::UsageSink = Arc::new(move |usage: TokenUsage| {
             if let Ok(mut state) = usage_state.lock() {
                 state.context_tokens = usage.input_tokens;
                 state.total_tokens += usage.input_tokens + usage.output_tokens;

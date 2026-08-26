@@ -690,7 +690,7 @@ async fn fetch_provider_models(
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
     } else {
-        let chat_url = crate::generation::provider_chat_url(provider)
+        let chat_url = crate::model_client::provider_chat_url(provider)
             .ok_or_else(|| format!("unknown provider `{provider}`"))?;
         let mut request = client.get(chat_url.replace("/chat/completions", "/models"));
         if let Some(api_key) = api_key {
@@ -1181,7 +1181,7 @@ mod tests {
     fn every_catalog_provider_resolves_to_a_chat_url() {
         for provider in CATALOG {
             assert!(
-                crate::generation::provider_chat_url(provider.name).is_some(),
+                crate::model_client::provider_chat_url(provider.name).is_some(),
                 "provider `{}` has no chat URL in the generation registry",
                 provider.name
             );
