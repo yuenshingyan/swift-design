@@ -52,4 +52,55 @@ There are two agent modes:
 1. **Briefing mode** — asks, summarizes, and updates the brief; it cannot write artifacts.
 2. **Generation mode** — creates the artifact from an approved brief.
 
-See `AGENT.md` for implementation rules.
+See `AGENT.MD` for implementation rules.
+
+## Run it
+
+```sh
+# Build the WASM studio once (needs: cargo install dioxus-cli).
+cd crates/ui && dx build --release && cd ../..
+
+# Run the server on http://127.0.0.1:3000.
+cargo run -p server
+```
+
+Open `http://127.0.0.1:3000`, pick a model in the studio settings, and
+describe a design. The agent runs on your own model account.
+
+## Checks
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo run -p server --bin generate_schema && git diff --exit-code schemas/
+```
+
+## Environment
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SWIFT_DESIGN_ADDRESS` | `127.0.0.1:3000` | Bind address |
+| `SWIFT_DESIGN_SESSIONS_DIR` | `data/sessions` | Sessions, briefs, answers, runs |
+| `SWIFT_DESIGN_DESIGNS_DIR` | `designs` | Design JSON files |
+| `SWIFT_DESIGN_UPLOADS_DIR` | `uploads` | Source materials |
+| `SWIFT_DESIGN_TEMPLATES_DIR` | `templates` | Saved style templates |
+| `SWIFT_DESIGN_HISTORY_DIR` | `history` | Save snapshots |
+| `SWIFT_DESIGN_SETTINGS_PATH` | `data/settings.json` | Provider, model, credential |
+| `SWIFT_DESIGN_UI_DIR` | `target/dx/ui/release/web/public` | Built WASM bundle |
+| `SWIFT_DESIGN_AGENT_COMMAND` | unset | External agent CLI; overrides the built-in engine |
+| `SWIFT_DESIGN_CHROME` | unset | Chrome path for screenshots and PDF export |
+| `SWIFT_DESIGN_PROVIDER` / `_MODEL` / `_PROVIDER_URL` / `_PROVIDER_API_KEY` | `google` | Built-in engine defaults |
+
+## Layout
+
+```
+crates/
+  design-model/  # serde + schemars types: design, brief, question, workflow. No IO.
+  server/        # axum: sessions, engines, validation, render, static hosting.
+  ui/            # Dioxus studio (WASM).
+```
+
+The workflow state machine, the question protocol, and the brief live in
+`design-model`, so the server and the studio share one definition. See
+`CLAUDE.md` for project conventions.

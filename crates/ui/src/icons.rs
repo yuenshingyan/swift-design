@@ -34,6 +34,7 @@ stroke=\"currentColor\" stroke-width=\"1.3\" stroke-linecap=\"round\" \
 stroke-linejoin=\"round\"></path></svg>";
 
 /// A pencil, for rename.
+#[allow(dead_code)]
 pub(crate) const PENCIL: &str = "<svg width=\"11\" height=\"11\" viewBox=\"0 0 12 12\" \
 fill=\"none\" aria-hidden=\"true\"><path d=\"M8.2 1.9l1.9 1.9-6 6-2.4.5.5-2.4 6-6z\" \
 stroke=\"currentColor\" stroke-width=\"1.1\" stroke-linejoin=\"round\"></path></svg>";

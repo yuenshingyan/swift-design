@@ -118,6 +118,8 @@ mod tests {
             exit_code: None,
             log_tail: String::new(),
             active_agent: None,
+            session_id: None,
+            mode: None,
             context_tokens: 25_000,
             total_tokens: 60_000,
             context_window: 200_000,

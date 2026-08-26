@@ -266,37 +266,6 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
         }
     });
 
-    // Asks the engine for the remaining screens of a preview design. Local
-    // edits are saved first, so the continuation builds on them.
-    let continue_design = use_callback({
-        let design_id = design_id.clone();
-        move |_: ()| {
-            let id = design_id.clone();
-            let snapshot = design();
-            let needs_save = is_dirty();
-            spawn(async move {
-                if needs_save {
-                    if let Err(details) = api::save_design(&id, &snapshot).await {
-                        messages.set(details);
-                        return;
-                    }
-                    is_dirty.set(false);
-                }
-                let started = match api::continue_design(&id).await {
-                    Ok(()) => api::start_agent_run().await,
-                    Err(message) => Err(message),
-                };
-                match started {
-                    Ok(()) => messages.set(Vec::new()),
-                    Err(message) if message.contains("already active") => {
-                        messages.set(Vec::new());
-                    }
-                    Err(message) => messages.set(vec![message]),
-                }
-            });
-        }
-    });
-
     // Reloads the design from the server after the engine edited it.
     let reload = use_callback({
         let design_id = design_id.clone();
@@ -434,10 +403,6 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
 
     let screen_count = design().screens.len();
     let outline_count = design().outline.len();
-    // A stopped run may have left placeholders. They are not written
-    // screens, so the continue label does not count them.
-    let pending_count = api::pending_screen_count(&design());
-    let written_count = screen_count.saturating_sub(pending_count);
     let total_fields = field_count(&design());
     let user_count = user_paths().len().min(total_fields);
     let agent_count = total_fields - user_count;
@@ -487,14 +452,6 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                         }
                     }
                     div { class: "actions",
-                        if design().is_preview() || pending_count > 0 {
-                            button {
-                                class: "primary",
-                                title: "Write the remaining screens of this preview",
-                                onclick: move |_| continue_design.call(()),
-                                "Continue · {written_count} of {design().outline.len()}"
-                            }
-                        }
                         button { onclick: move |_| show_properties.set(!show_properties()),
                             "Properties"
                         }

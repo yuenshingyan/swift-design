@@ -5,17 +5,26 @@
 //! crate's directory.
 
 mod api;
+mod brief_panel;
+mod canvas;
 mod chat;
 mod chat_controls;
+mod critique;
 mod editor;
 mod home;
 mod icons;
+mod question_card;
+mod route;
 mod select;
+mod session;
+mod settings;
 mod status;
-mod studio;
 mod uploads;
 
+use dioxus::document;
 use dioxus::prelude::*;
+
+use crate::route::View;
 
 /// Embedded stylesheet: the editor ships as one WASM bundle with no
 /// separate asset pipeline yet. The palette and type follow the
@@ -744,6 +753,117 @@ button.primary.send-button { display: inline-flex; align-items: center; gap: 0.4
   color: var(--ink-2); box-shadow: none; }
 .option-chip.selected { background: var(--ink); border-color: var(--ink); color: var(--paper); }
 .option-chip.selected:hover:not(:disabled) { background: #23272C; border-color: #23272C; }
+.option-chip.skip { border-style: dashed; border-color: var(--line); color: var(--muted);
+  align-self: flex-start; }
+.option-chip.other { }
+
+/* The brief-first session workspace. */
+.session { display: grid; grid-template-columns: 420px 1fr; height: calc(100vh - 3.6rem); }
+.conversation { display: flex; flex-direction: column; min-height: 0;
+  border-right: 1px solid var(--hairline); }
+.studio-head { display: flex; align-items: center; gap: 0.75rem; padding: 0.9rem 1.25rem;
+  border-bottom: 1px solid var(--hairline); }
+.studio-head .back { font-size: 0.82rem; color: var(--ink-2); box-shadow: none; padding: 0.3rem 0.5rem; }
+.studio-title { font-size: 0.95rem; font-weight: 600; }
+.thread { flex: 1; overflow-y: auto; padding: 1.1rem 1.25rem; display: flex;
+  flex-direction: column; gap: 0.75rem; }
+.workbench { background: var(--sunken); overflow-y: auto; padding: 1.25rem 1.5rem;
+  display: flex; flex-direction: column; gap: 1rem; }
+.start-run { align-self: flex-start; }
+
+.state-badge { display: inline-flex; align-items: center; border-radius: 999px;
+  padding: 0.12rem 0.55rem; font-size: 0.7rem; font-weight: 500; background: var(--subtle);
+  border: 1px solid var(--hairline); color: var(--ink-2); }
+.state-badge.generating { background: var(--teal-tint); border-color: var(--teal-line); color: var(--teal); }
+.state-badge.reviewing { background: var(--teal-tint); border-color: var(--teal-line); color: var(--teal); }
+.state-badge.error { color: var(--danger, #b4231f); border-color: rgba(180,35,31,.35); }
+
+.question-set { align-self: stretch; background: var(--raised); border: 1px solid var(--line-soft);
+  border-radius: 12px; box-shadow: var(--sh-card, 0 1px 2px rgba(21,24,28,.06));
+  padding: 0.9rem 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
+.question-set-title { font-size: 0.85rem; font-weight: 600; }
+.question-set-message { font-size: 0.8rem; color: var(--ink-2); }
+.question-set-actions { display: flex; align-items: center; gap: 0.625rem; }
+.question-hint { font-size: 0.72rem; color: var(--muted); }
+.question-card { background: var(--subtle); border-radius: 10px; padding: 0.75rem 0.875rem;
+  display: flex; flex-direction: column; gap: 0.5rem; }
+.question-head { display: flex; align-items: center; gap: 0.5rem; }
+.question-label { font-size: 0.85rem; font-weight: 500; }
+.question-rationale { font-size: 0.72rem; color: var(--muted); }
+.badge.required { font-size: 0.62rem; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 4px; padding: 0 0.3rem; }
+.answer-textarea, .other-input { width: 100%; font: inherit; font-size: 0.84rem;
+  border: 1px solid var(--line); border-radius: 6px; padding: 0.4rem 0.5rem; background: var(--raised); }
+.answered-card { align-self: stretch; background: var(--sunken); border-radius: 10px;
+  padding: 0.625rem 0.875rem; display: flex; flex-direction: column; gap: 0.3rem; }
+.answered-row { display: grid; grid-template-columns: 1fr auto; gap: 0.5rem; align-items: baseline;
+  font-size: 0.78rem; }
+.answered-summary { color: var(--ink-2); }
+.answered-note { font-size: 0.7rem; color: var(--faint); }
+.badge.skipped { font-size: 0.62rem; color: var(--muted); border: 1px solid var(--ghost);
+  border-radius: 4px; padding: 0 0.3rem; }
+
+.brief-panel { background: var(--raised); border: 1px solid var(--line-soft); border-radius: 12px;
+  box-shadow: var(--sh-card, 0 1px 2px rgba(21,24,28,.06)); padding: 1rem 1.1rem;
+  display: flex; flex-direction: column; gap: 0.75rem; }
+.brief-head { display: flex; align-items: center; gap: 0.6rem; }
+.brief-head .rev { font-family: var(--mono); font-size: 0.65rem; color: var(--faint); margin-left: auto; }
+.brief-groups { display: flex; flex-direction: column; gap: 0.625rem; }
+.brief-group { border-radius: 8px; padding: 0.625rem 0.75rem; }
+.brief-group-title { font-family: var(--mono); font-size: 0.62rem; text-transform: uppercase;
+  letter-spacing: 0.04em; }
+.brief-list { margin: 0.3rem 0 0; padding-left: 1.1rem; font-size: 0.8rem; display: flex;
+  flex-direction: column; gap: 0.2rem; }
+.brief-list-empty { font-size: 0.75rem; color: var(--faint); margin: 0.25rem 0 0; }
+.brief-group.facts { background: var(--teal-tint); border: 1px solid var(--teal-line); }
+.brief-group.facts .brief-group-title { color: var(--teal); }
+.brief-group.assumptions { background: var(--sunken); border: 1px dashed var(--line); }
+.brief-group.assumptions .brief-group-title { color: var(--ink-2); }
+.brief-group.open { background: var(--raised); border: 1px solid var(--hairline); }
+.brief-group.open .brief-group-title { color: var(--danger, #b4231f); }
+.brief-fields { display: flex; flex-direction: column; gap: 0.5rem; }
+.brief-field { display: flex; flex-direction: column; gap: 0.15rem; }
+.brief-field-label { font-size: 0.68rem; color: var(--muted); text-transform: uppercase;
+  letter-spacing: 0.03em; }
+.brief-field-value { font-size: 0.85rem; }
+.section-row { display: grid; grid-template-columns: 1fr 2fr; gap: 0.5rem; font-size: 0.8rem; }
+.section-name { font-weight: 500; }
+.section-content { color: var(--ink-2); }
+.brief-actions { display: flex; flex-wrap: wrap; gap: 0.625rem; align-items: center;
+  border-top: 1px solid var(--hairline); padding-top: 0.75rem; }
+.brief-note { font-size: 0.72rem; color: var(--muted); }
+.revision-list { display: flex; flex-direction: column; gap: 0.2rem; }
+.revision-list .history-row { font-family: var(--mono); font-size: 0.7rem; color: var(--muted); }
+.revision-list .history-row.current { color: var(--ink); font-weight: 500; }
+
+.progress-step { font-size: 0.8rem; font-weight: 500; margin-bottom: 0.4rem; }
+.canvas-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 1rem; }
+.canvas-card { border: 1px solid var(--line-soft); border-radius: 10px; overflow: hidden;
+  background: var(--raised); }
+.canvas-card.chosen { border-color: var(--teal); box-shadow: 0 0 0 1px var(--teal); }
+.canvas-card iframe { display: block; width: 100%; border: 0; }
+.card-footer { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.6rem; }
+.card-label { font-size: 0.72rem; color: var(--ink-2); flex: 1; }
+.card-pager { display: flex; align-items: center; gap: 0.25rem; font-size: 0.72rem; }
+.card-pager button, .open-card { font-size: 0.72rem; padding: 0.15rem 0.4rem; box-shadow: none; }
+.card-placeholder { aspect-ratio: 16 / 9; display: flex; align-items: center;
+  justify-content: center; color: var(--faint); font-size: 0.8rem; }
+
+.critique-bar { background: var(--raised); border: 1px solid var(--teal-line); border-radius: 12px;
+  padding: 0.875rem 1rem; display: flex; flex-direction: column; gap: 0.6rem; }
+.critique-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.critique-text { width: 100%; font: inherit; font-size: 0.84rem; border: 1px solid var(--line);
+  border-radius: 6px; padding: 0.4rem 0.5rem; }
+.critique-actions { display: flex; justify-content: flex-end; }
+
+.error-card { background: var(--raised); border: 1px solid rgba(180,35,31,.35); border-radius: 10px;
+  padding: 0.75rem 0.875rem; display: flex; flex-direction: column; gap: 0.4rem; align-items: flex-start; }
+.error-card .error-title { color: var(--danger, #b4231f); font-weight: 600; }
+
+.chat-controls { display: flex; align-items: center; gap: 0.5rem; justify-content: flex-end;
+  padding: 0.5rem 1.25rem; }
+.session-row .state-badge { margin-left: auto; }
 ";
 
 /// The Swift Design pinwheel, as one SVG path in a 178 by 179 box. The
@@ -796,26 +916,33 @@ pub(crate) struct TopbarContext {
     pub model: Option<String>,
 }
 
-/// The page the app is showing.
-#[derive(Clone, PartialEq, Eq)]
-enum View {
-    /// The landing page: prompt box plus the project list.
-    Home,
-    /// One project's studio: conversation plus live canvas.
-    Project(String),
-    /// The editor for one design.
-    Editor(String),
-}
-
-/// Root component: top bar plus the current view.
+/// Root component: top bar plus the current view. The view is kept in
+/// the URL hash, so a reload lands on the same screen.
 #[component]
 fn App() -> Element {
-    let mut view = use_signal(|| View::Home);
+    let mut view = use_signal(|| Option::<View>::None);
     let topbar_context = use_context_provider(|| Signal::new(Option::<TopbarContext>::None));
+    // Read the hash on load and on every hashchange.
+    use_future(move || async move {
+        let mut channel = document::eval(route::HASH_LISTENER);
+        while let Ok(hash) = channel.recv::<String>().await {
+            let next = route::route_from_hash(&hash);
+            if view.peek().as_ref() != Some(&next) {
+                view.set(Some(next));
+            }
+        }
+    });
+    // Write the hash the app chose.
+    use_effect(move || {
+        if let Some(current) = view() {
+            let writer = document::eval(route::WRITE_HASH);
+            let _ = writer.send(route::hash_for(&current));
+        }
+    });
     rsx! {
         style { dangerous_inner_html: STYLESHEET }
         header { class: "topbar",
-            button { class: "brand", onclick: move |_| view.set(View::Home),
+            button { class: "brand", onclick: move |_| view.set(Some(View::Home)),
                 span { dangerous_inner_html: logo_svg(20, "currentColor") }
                 span { "Swift Design" }
             }
@@ -830,21 +957,21 @@ fn App() -> Element {
             }
         }
         match view() {
-            View::Home => rsx! {
-                home::Home { on_open_project: move |name| view.set(View::Project(name)) }
+            None => rsx! { p { class: "lede", "Loading…" } },
+            Some(View::Home) => rsx! {
+                home::Home { on_open_session: move |id| view.set(Some(View::Session(id))) }
             },
-            View::Project(name) => rsx! {
-                studio::Studio {
-                    project: name,
-                    on_open: move |id| view.set(View::Editor(id)),
-                    on_home: move |_| view.set(View::Home),
-                    on_rename: move |renamed| view.set(View::Project(renamed)),
+            Some(View::Session(id)) => rsx! {
+                session::SessionWorkspace {
+                    session_id: id,
+                    on_open_design: move |design_id| view.set(Some(View::Design(design_id))),
+                    on_home: move |_| view.set(Some(View::Home)),
                 }
             },
-            View::Editor(id) => {
-                let project = studio::design_project(&id);
+            Some(View::Design(id)) => {
+                let session = settings::design_project(&id);
                 rsx! {
-                    editor::Editor { design_id: id, on_back: move |_| view.set(View::Project(project.clone())) }
+                    editor::Editor { design_id: id, on_back: move |_| view.set(Some(View::Session(session.clone()))) }
                 }
             }
         }

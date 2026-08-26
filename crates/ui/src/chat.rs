@@ -10,8 +10,8 @@ use dioxus::prelude::*;
 
 use crate::api;
 use crate::chat_controls::{ModelChip, SendButton};
+use crate::settings::{SettingsPanel, design_project, pause_briefly};
 use crate::status::RunStatusCard;
-use crate::studio::{SettingsPanel, pause_briefly};
 use crate::uploads::{AttachButton, AttachmentChips};
 
 /// Scrolls the conversation to its newest message. Runs after the
@@ -37,49 +37,53 @@ pub fn DesignChat(
     /// Called when a run finishes, so the editor can reload the design.
     on_run_finished: EventHandler<()>,
 ) -> Element {
-    let mut brief = use_signal(|| Option::<api::Brief>::None);
+    let session_id = design_project(&design_id);
+    let mut messages = use_signal(Vec::<api::ChatMessage>::new);
     let mut agent_run = use_signal(|| Option::<api::AgentRun>::None);
     let mut settings = use_signal(|| Option::<api::SettingsView>::None);
     let mut is_configuring = use_signal(|| false);
     let mut draft = use_signal(String::new);
     let mut error = use_signal(|| Option::<String>::None);
     let mut was_running = use_signal(|| false);
-    // The source files the agent reads, attached from this chat box or
-    // anywhere else: uploads are shared by every project.
     let mut uploads = use_signal(Vec::<api::UploadSummary>::new);
     let refresh_uploads = use_callback(move |_: ()| {
         spawn(async move {
-            match api::fetch_uploads().await {
-                Ok(listing) => uploads.set(listing),
-                Err(message) => error.set(Some(message)),
+            if let Ok(listing) = api::fetch_uploads().await {
+                uploads.set(listing);
             }
         });
     });
 
     // The live loop: refresh, then wait for the next change.
-    use_future(move || async move {
-        let mut seen = 0u64;
-        loop {
-            if let Ok(fetched) = api::fetch_brief().await {
-                brief.set(fetched);
-            }
-            refresh_uploads.call(());
-            if let Ok(fetched) = api::fetch_agent_run().await {
-                if was_running() && !fetched.is_running {
-                    on_run_finished.call(());
+    {
+        let session_id = session_id.clone();
+        use_future(move || {
+            let session_id = session_id.clone();
+            async move {
+                let mut seen = 0u64;
+                loop {
+                    if let Ok(view) = api::fetch_session(&session_id).await {
+                        messages.set(view.messages);
+                    }
+                    refresh_uploads.call(());
+                    if let Ok(fetched) = api::fetch_agent_run().await {
+                        if was_running() && !fetched.is_running {
+                            on_run_finished.call(());
+                        }
+                        was_running.set(fetched.is_running);
+                        agent_run.set(Some(fetched));
+                    }
+                    if let Ok(fetched) = api::fetch_settings().await {
+                        settings.set(Some(fetched));
+                    }
+                    match api::wait_for_change(seen).await {
+                        Ok(current) => seen = current,
+                        Err(_) => pause_briefly().await,
+                    }
                 }
-                was_running.set(fetched.is_running);
-                agent_run.set(Some(fetched));
             }
-            if let Ok(fetched) = api::fetch_settings().await {
-                settings.set(Some(fetched));
-            }
-            match api::wait_for_change(seen).await {
-                Ok(current) => seen = current,
-                Err(_) => pause_briefly().await,
-            }
-        }
-    });
+        });
+    }
 
     // Open the setup panel once when no model is chosen yet. The user
     // can close it and come back through the model chip.
@@ -97,7 +101,7 @@ pub fn DesignChat(
     // whenever a message arrives.
     let mut followed_count = use_signal(|| usize::MAX);
     use_effect(move || {
-        let count = brief().map(|current| current.messages.len()).unwrap_or(0);
+        let count = messages().len();
         if count != *followed_count.peek() {
             followed_count.set(count);
             document::eval(SCROLL_TO_LATEST);
@@ -106,6 +110,7 @@ pub fn DesignChat(
 
     let send = use_callback({
         let design_id = design_id.clone();
+        let session_id = session_id.clone();
         move |_: ()| {
             let text = draft().trim().to_owned();
             if text.is_empty() {
@@ -116,14 +121,15 @@ pub fn DesignChat(
                 None => text,
             };
             let design_id = design_id.clone();
+            let session_id = session_id.clone();
             draft.set(String::new());
             context.set(None);
             on_before_send.call(());
             spawn(async move {
-                match api::send_message(&content, Some(&design_id)).await {
+                match api::send_session_message(&session_id, &content, Some(&design_id)).await {
                     Ok(()) => {
                         error.set(None);
-                        if let Err(message) = api::start_agent_run().await
+                        if let Err(message) = api::start_agent_run(&session_id).await
                             && !message.contains("already active")
                         {
                             error.set(Some(message));
@@ -144,19 +150,17 @@ pub fn DesignChat(
     rsx! {
         section { class: "conversation editor-chat",
             div { class: "thread",
-                if brief().is_none() {
+                if messages().is_empty() {
                     p { class: "chat-note",
                         "No conversation yet. Ask for a change below, for example "
                         "“make the title on screen 2 bigger”."
                     }
                 }
-                if let Some(current_brief) = brief() {
-                    for (index, message) in current_brief.messages.iter().enumerate() {
-                        div {
-                            key: "{index}",
-                            class: if message.role == "user" { "bubble user" } else { "bubble agent" },
-                            p { "{message.content}" }
-                        }
+                for (index, message) in messages().iter().enumerate() {
+                    div {
+                        key: "{index}",
+                        class: if message.role == "user" { "bubble user" } else { "bubble agent" },
+                        p { "{message.content}" }
                     }
                 }
                 if let Some(run) = agent_run() {
