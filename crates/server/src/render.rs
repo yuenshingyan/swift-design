@@ -1,28 +1,31 @@
 //! Renders a validated design to one standalone HTML page.
 //!
-//! Every screen is a 1920 by 1080 px canvas, scaled with CSS to fit its
-//! 16:9 frame, so the same layout appears in thumbnails, the editor, the
-//! presentation, and screenshots. Screen `html` is inserted as written and
+//! Every screen is a px canvas the size of the design's viewport, scaled
+//! with CSS to fit its frame, so the same layout appears in thumbnails,
+//! the editor, and screenshots. Screen `html` is inserted as written and
 //! screen `css` is scoped to the screen. Validation (`design_model::markup`)
 //! rejected unsafe markup before this point; a hash-based CSP is the
 //! second layer. Callers must run `Design::validate` first.
 
 use design_model::transition::MAX_TRANSITION_MS;
-use design_model::{Design, Screen, Theme, Transition, TransitionEffect};
+use design_model::{Design, Screen, Theme, Transition, TransitionEffect, Viewport};
 use sha2::{Digest, Sha256};
 
 use crate::export::base64_encode;
 use crate::screen_css::{google_fonts_link, scope_css};
 
-/// Fits each 1920 by 1080 root to its frame by setting the scale
+/// Fits each viewport-sized root to its frame by setting the scale
 /// variable from the measured frame width. The stylesheet carries a
 /// CSS-only fallback, but container units inside `atan2()` do not
-/// resolve in every browser, so the script is the primary path.
+/// resolve in every browser, so the script is the primary path. The
+/// canvas width comes from `data-swift-design-width` on `main.design`.
 const LAYOUT_SCRIPT: &str = r##"(() => {
+  const main = document.querySelector('main.design');
+  const canvasWidth = Number(main && main.dataset.swiftDesignWidth) || 1440;
   const sections = Array.from(document.querySelectorAll('[data-swift-design-screen]'));
   const fit = (section) => {
     const width = section.getBoundingClientRect().width;
-    if (width > 0) { section.style.setProperty('--swift-design-scale', String(width / 1920)); }
+    if (width > 0) { section.style.setProperty('--swift-design-scale', String(width / canvasWidth)); }
   };
   sections.forEach(fit);
   if (window.ResizeObserver) {
@@ -41,6 +44,8 @@ const LAYOUT_SCRIPT: &str = r##"(() => {
 const NAVIGATION_SCRIPT: &str = r##"const frames = Array.from(document.querySelectorAll('[data-swift-design-frame]'));
 const design = document.querySelector('main.design');
 const effect = design && design.getAttribute('data-swift-design-effect');
+const canvasWidth = Number(design && design.dataset.swiftDesignWidth) || 1440;
+const canvasHeight = Number(design && design.dataset.swiftDesignHeight) || 900;
 function scrollIndex() {
   return Math.round(design.scrollTop / (design.clientHeight || 1));
 }
@@ -367,7 +372,7 @@ document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
       element, root, moved: false,
       x: event.clientX, y: event.clientY,
       base: translateOf(element),
-      scale: width / 1920 || 1,
+      scale: width / canvasWidth || 1,
     };
   });
   root.addEventListener('click', (event) => {
@@ -464,7 +469,7 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
   document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
     const screen = Number(root.closest('[data-swift-design-screen]').dataset.swiftDesignScreen);
     const rootRect = root.getBoundingClientRect();
-    const scale = rootRect.width / 1920 || 1;
+    const scale = rootRect.width / canvasWidth || 1;
     const pathOf = (element) => {
       const parts = [];
       let node = element;
@@ -485,7 +490,7 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
       findings.push({ screen, node: name(element), kind: 'overflow', detail: 'content needs ' + Math.round(element.scrollHeight) + 'px but the box is ' + Math.round(element.clientHeight) + 'px tall' });
     });
     if (root.scrollHeight > root.clientHeight + 2 || root.scrollWidth > root.clientWidth + 2) {
-      findings.push({ screen, node: 'root', kind: 'off_screen', detail: 'content runs past the 1920 by 1080 canvas (' + Math.round(root.scrollWidth) + ' by ' + Math.round(root.scrollHeight) + 'px)' });
+      findings.push({ screen, node: 'root', kind: 'off_screen', detail: 'content runs past the ' + canvasWidth + ' by ' + canvasHeight + ' canvas (' + Math.round(root.scrollWidth) + ' by ' + Math.round(root.scrollHeight) + 'px)' });
     }
     const textBlocks = [];
     all.forEach((element) => {
@@ -496,7 +501,7 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
       const rect = element.getBoundingClientRect();
       const tolerance = 2 * scale;
       if (rect.left < rootRect.left - tolerance || rect.top < rootRect.top - tolerance || rect.right > rootRect.right + tolerance || rect.bottom > rootRect.bottom + tolerance) {
-        findings.push({ screen, node: name(element), kind: 'off_screen', detail: 'runs off the screen: keep it inside the 1920 by 1080 canvas' });
+        findings.push({ screen, node: name(element), kind: 'off_screen', detail: 'runs off the screen: keep it inside the ' + canvasWidth + ' by ' + canvasHeight + ' canvas' });
       }
       if (isText) {
         const size = parseFloat(getComputedStyle(element).fontSize);
@@ -582,22 +587,28 @@ pub struct RenderOptions {
     /// Extra origin allowed for images, such as the server URL when the
     /// page loads from a file for a screenshot.
     pub asset_origin: Option<String>,
-    /// One screen per 1920 by 1080 page, no scripts, no transition. Used
-    /// for `--print-to-pdf`.
+    /// One screen per viewport-sized page, no scripts, no transition.
+    /// Used for `--print-to-pdf`.
     pub is_print: bool,
 }
 
 /// Print rules appended after the base stylesheet, so they override it.
 /// Every frame is one page the size of the canvas, so the root needs no
 /// scaling at all.
-const PRINT_STYLESHEET: &str = "@page { size: 1920px 1080px; margin: 0; }\n\
-    html, body { height: auto; background: transparent; }\n\
-    * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }\n\
-    main.design { height: auto; overflow: visible; scroll-snap-type: none; }\n\
-    main.design > [data-swift-design-frame] { width: 1920px; height: 1080px; display: block; overflow: hidden; }\n\
-    main.design > [data-swift-design-frame]:not(:last-child) { break-after: page; page-break-after: always; }\n\
-    [data-swift-design-screen] { width: 1920px; height: 1080px; container-type: normal; --swift-design-scale: 1; }\n\
-    [data-swift-design-root] { transform: none; }\n";
+fn print_stylesheet(viewport: Viewport) -> String {
+    let width = viewport.width;
+    let height = viewport.height;
+    format!(
+        "@page {{ size: {width}px {height}px; margin: 0; }}\n\
+         html, body {{ height: auto; background: transparent; }}\n\
+         * {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}\n\
+         main.design {{ height: auto; overflow: visible; scroll-snap-type: none; }}\n\
+         main.design > [data-swift-design-frame] {{ width: {width}px; height: {height}px; display: block; overflow: hidden; }}\n\
+         main.design > [data-swift-design-frame]:not(:last-child) {{ break-after: page; page-break-after: always; }}\n\
+         [data-swift-design-screen] {{ width: {width}px; height: {height}px; container-type: normal; --swift-design-scale: 1; }}\n\
+         [data-swift-design-root] {{ transform: none; }}\n"
+    )
+}
 
 /// Renders the whole design as an HTML document.
 pub fn render_design(design: &Design, is_editable: bool) -> String {
@@ -638,9 +649,9 @@ pub fn render_design_with(design: &Design, options: RenderOptions) -> String {
     let design_attributes = transition.map(design_attributes).unwrap_or_default();
     let transition_style = transition.map(transition_styles).unwrap_or_default();
     let print_style = if options.is_print {
-        PRINT_STYLESHEET
+        print_stylesheet(design.viewport)
     } else {
-        ""
+        String::new()
     };
     let image_sources = match &options.asset_origin {
         Some(origin) => format!("'self' data: {}", css_safe(origin).replace(' ', "")),
@@ -654,11 +665,13 @@ pub fn render_design_with(design: &Design, options: RenderOptions) -> String {
          font-src 'self' https://fonts.gstatic.com; img-src {image_sources}; connect-src 'none'; \
          object-src 'none'; frame-src 'none'; form-action 'none'\">\n\
          <title>{title}</title>\n{fonts}<style>\n{style}{print_style}{transition_style}{screen_styles}</style>\n</head>\n<body>\n\
-         <main class=\"design\"{design_attributes}>\n{sections}</main>\n\
+         <main class=\"design\" data-swift-design-width=\"{width}\" data-swift-design-height=\"{height}\"{design_attributes}>\n{sections}</main>\n\
          {script_element}</body>\n</html>\n",
         title = escape_html(&design.title),
         fonts = google_fonts_link(&design.theme).unwrap_or_default(),
-        style = stylesheet(&design.theme),
+        style = stylesheet(&design.theme, design.viewport),
+        width = design.viewport.width,
+        height = design.viewport.height,
     )
 }
 
@@ -765,8 +778,9 @@ pub(crate) fn script_hash(script: &str) -> String {
     base64_encode(&Sha256::digest(script.as_bytes()))
 }
 
-/// Renders one screen: a full-window frame that centers the 16:9 box, and
-/// the 1920 by 1080 root that holds the screen's HTML as written.
+/// Renders one screen: a full-window frame that centers the viewport
+/// box, and the viewport-sized root that holds the screen's HTML as
+/// written.
 fn render_screen(screen: &Screen, index: usize) -> String {
     format!(
         "<div class=\"screen-frame\" id=\"screen-{number}\" data-swift-design-frame>\n\
@@ -778,10 +792,10 @@ fn render_screen(screen: &Screen, index: usize) -> String {
     )
 }
 
-/// Builds the base stylesheet: page chrome, the 16:9 frame, the scaled
-/// 1920 by 1080 root, theme variables, and small defaults that screen
-/// CSS always overrides.
-fn stylesheet(theme: &Theme) -> String {
+/// Builds the base stylesheet: page chrome, the viewport-shaped frame,
+/// the scaled viewport-sized root, theme variables, and small defaults
+/// that screen CSS always overrides.
+fn stylesheet(theme: &Theme, viewport: Viewport) -> String {
     let background = css_safe(&theme.colors.background);
     let text = css_safe(&theme.colors.text);
     let accent = css_safe(&theme.colors.accent);
@@ -789,20 +803,23 @@ fn stylesheet(theme: &Theme) -> String {
     let heading_font = css_safe(&theme.fonts.heading);
     let body_font = css_safe(&theme.fonts.body);
     let mono_font = css_safe(&theme.fonts.mono);
+    let width = viewport.width;
+    let height = viewport.height;
     format!(
         "html, body {{ margin: 0; height: 100%; background: #000; }}\n\
          main.design {{ height: 100vh; overflow-y: auto; scroll-snap-type: y mandatory; }}\n\
          main.design > [data-swift-design-frame] {{ height: 100vh; display: flex; align-items: center;\n\
            justify-content: center; scroll-snap-align: start; }}\n\
-         [data-swift-design-screen] {{ position: relative; width: min(100vw, 177.7778vh); aspect-ratio: 16 / 9;\n\
+         [data-swift-design-screen] {{ position: relative; width: min(100vw, calc(100vh * {width} / {height}));\n\
+           aspect-ratio: {width} / {height};\n\
            container-type: size; contain: layout paint; overflow: hidden; box-sizing: border-box;\n\
            background: {background};\n\
-           --swift-design-scale: calc(tan(atan2(100cqw, 1920px)));\n\
+           --swift-design-scale: calc(tan(atan2(100cqw, {width}px)));\n\
            --background: {background}; --text: {text}; --accent: {accent}; --muted: {muted};\n\
            --heading-font: '{heading_font}', Inter, system-ui, sans-serif;\n\
            --body-font: '{body_font}', Inter, system-ui, sans-serif;\n\
            --mono-font: '{mono_font}', ui-monospace, monospace; }}\n\
-         [data-swift-design-root] {{ position: relative; width: 1920px; height: 1080px; overflow: hidden;\n\
+         [data-swift-design-root] {{ position: relative; width: {width}px; height: {height}px; overflow: hidden;\n\
            box-sizing: border-box; transform-origin: 0 0;\n\
            transform: scale(var(--swift-design-scale, 1));\n\
            background: var(--background); color: var(--text);\n\
@@ -894,7 +911,9 @@ mod tests {
         assert!(html.contains("--heading-font: 'Inter'"));
         assert!(html.contains("--mono-font: 'JetBrains Mono'"));
         assert!(html.contains("fonts.googleapis.com/css2?family=Inter"));
-        assert!(html.contains("--swift-design-scale: calc(tan(atan2(100cqw, 1920px)))"));
+        assert!(html.contains("--swift-design-scale: calc(tan(atan2(100cqw, 1440px)))"));
+        assert!(html.contains("aspect-ratio: 1440 / 900;"));
+        assert!(html.contains("data-swift-design-width=\"1440\" data-swift-design-height=\"900\""));
         assert!(html.contains("transform: scale(var(--swift-design-scale, 1))"));
         assert!(html.contains("new ResizeObserver"));
     }
@@ -973,7 +992,7 @@ mod tests {
                 ..RenderOptions::default()
             },
         );
-        assert!(html.contains("@page { size: 1920px 1080px; margin: 0; }"));
+        assert!(html.contains("@page { size: 1440px 900px; margin: 0; }"));
         assert!(html.contains("break-after: page"));
         assert!(html.contains("[data-swift-design-root] { transform: none; }"));
         assert!(html.contains("script-src 'none'"));
@@ -993,7 +1012,9 @@ mod tests {
         let html = render_design(&sample_design(), false);
         assert!(!html.contains("data-swift-design-effect="));
         assert!(!html.contains("--swift-design-in"));
-        assert!(html.contains("<main class=\"design\">"));
+        assert!(html.contains(
+            "<main class=\"design\" data-swift-design-width=\"1440\" data-swift-design-height=\"900\">"
+        ));
         assert!(html.contains("scroll-snap-type: y mandatory"));
     }
 

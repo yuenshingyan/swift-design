@@ -18,8 +18,8 @@ use crate::questions::QUESTION_LIMIT;
 /// built-in generation engine. Simplified Technical English.
 pub const CONTENT_RULES: &[&str] = &[
     "A screen is one HTML fragment in `html` and one CSS block in `css`.",
-    "Design each screen for a canvas of 1920 by 1080 px. Use px units. Do not use vw, vh, vmin, vmax, or container units.",
-    "Lay out with flex, grid, or absolute positioning. The screen root is position: relative, 1920 by 1080 px, overflow: hidden.",
+    "Design each screen for the px canvas in the design's `viewport`. The default is 1440 by 900 px (desktop web). Use 390 by 844 for a phone and 1024 by 768 for a tablet. Use px units. Do not use vw, vh, vmin, vmax, or container units.",
+    "Lay out with flex, grid, or absolute positioning. The screen root is position: relative, the viewport size, overflow: hidden.",
     "The server scopes your CSS to the screen. Write plain selectors such as `.title` or `h1`. Do not write `html`, `body`, or `:root` selectors. Do not use `@import`. `@media`, `@keyframes`, and `@font-face` are allowed.",
     "Use the theme through CSS variables: `--background`, `--text`, `--accent`, `--muted`, `--heading-font`, `--body-font`, `--mono-font`. Write other colors as #rrggbb.",
     "The server loads the theme fonts from Google Fonts. Base styles: text is 32px in the body font and text color, headings use the heading font with margin 0, paragraphs and lists have margin 0, images are block and max-width 100%.",
@@ -109,7 +109,7 @@ fn instructions() -> serde_json::Value {
             "example": CHART_EXAMPLE,
         },
         "conventions": {
-            "canvas": "1920 by 1080 px, px units, scaled by the server to any screen",
+            "canvas": "the design's `viewport` in px (default 1440 by 900), px units, scaled by the server to any frame",
             "css_variables": ["--background", "--text", "--accent", "--muted", "--heading-font", "--body-font", "--mono-font"],
             "base_styles": "32px body text in the body font and text color; headings in the heading font with margin 0; paragraphs and lists margin 0; images block and max-width 100%",
             "node_reference": "[screen N, node a/b/c <tag.class>: text]",

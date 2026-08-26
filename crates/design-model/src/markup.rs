@@ -696,7 +696,7 @@ fn check_viewport_units(css: &str, problems: &mut Vec<String>) {
                     .is_some_and(|next| next.is_ascii_alphanumeric())
             {
                 problems.push(format!(
-                    "uses the unit `{unit}`: use px, the screen is 1920 by 1080 px"
+                    "uses the unit `{unit}`: use px against the design's fixed viewport"
                 ));
                 return;
             }

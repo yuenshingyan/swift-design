@@ -2044,6 +2044,7 @@ fn shown_design(
 /// It must validate, because the live saver drops a design that does not.
 fn placeholder_screen(title: &str) -> design_model::Screen {
     design_model::Screen {
+        name: title.to_owned(),
         html: format!(
             "<div class=\"{pending} pending\"><p class=\"pending-label\">Writing</p>\
              <h2 class=\"pending-title\">{title}</h2></div>",
@@ -2264,7 +2265,7 @@ fn system_prompt() -> String {
     let schema = serde_json::to_string(&schemars::schema_for!(Design)).unwrap_or_default();
     format!(
         "You build screen designs as JSON documents. Each screen is one HTML fragment plus its own CSS, \
-         for a 1920 by 1080 px canvas.\n\
+         for the px canvas the design's `viewport` names.\n\
          Follow these rules:\n{rules}\n\
          The design must conform to this JSON Schema:\n{schema}\n\
          Example design:\n{example}\n\
@@ -2951,7 +2952,7 @@ mod tests {
     #[test]
     fn prompts_carry_rules_brief_and_conversation() {
         assert!(system_prompt().contains("\"html\""));
-        assert!(system_prompt().contains("1920 by 1080"));
+        assert!(system_prompt().contains("`viewport`"));
         let brief = Brief {
             prompt: "A schema talk.".to_owned(),
             variations: Some(3),
@@ -3195,6 +3196,7 @@ mod tests {
             saved_at: "2026-01-01T00:00:00Z".to_owned(),
             source_design: "talk".to_owned(),
             theme: design.theme.clone(),
+            viewport: design.viewport,
             screens: design.screens[..2].to_vec(),
         };
         let brief = Brief {

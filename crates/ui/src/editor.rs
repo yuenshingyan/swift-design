@@ -1388,9 +1388,10 @@ fn strip_tags(html: &str) -> String {
 /// The screen the + tile inserts: a heading and a paragraph.
 fn default_screen() -> Screen {
     Screen {
+        name: String::new(),
         html: "<div class='body'><h2>New screen</h2><p>Text</p></div>".to_owned(),
         css: Some(
-            ".body { padding: 120px; height: 100%; display: flex; flex-direction: column; gap: 40px; } h2 { font-size: 72px; }"
+            ".body { padding: 90px; height: 100%; display: flex; flex-direction: column; gap: 30px; } h2 { font-size: 54px; }"
                 .to_owned(),
         ),
         notes: None,
@@ -1474,6 +1475,7 @@ mod tests {
                     mono: "Menlo".to_owned(),
                 },
             },
+            viewport: Default::default(),
             screens: vec![default_screen()],
             outline: Vec::new(),
         }
@@ -1483,12 +1485,14 @@ mod tests {
     fn screen_labels_use_the_heading_then_the_text_then_a_number() {
         assert_eq!(screen_label(0, &default_screen()), "1. New screen");
         let plain = design_model::Screen {
+            name: String::new(),
             html: "<p>Just <b>some</b> words here</p>".to_owned(),
             css: None,
             notes: None,
         };
         assert_eq!(screen_label(2, &plain), "3. Just some words here");
         let empty = design_model::Screen {
+            name: String::new(),
             html: "<div></div>".to_owned(),
             css: None,
             notes: None,

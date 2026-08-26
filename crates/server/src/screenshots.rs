@@ -16,7 +16,7 @@ use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use design_model::Design;
+use design_model::{Design, Viewport};
 
 use crate::api_error;
 use crate::designs::{DesignStore, is_valid_design_id};
@@ -37,8 +37,10 @@ const PDF_TIMEOUT: Duration = Duration::from_secs(90);
 /// PDF carries every screen, so it gets more than a screenshot.
 const PDF_VIRTUAL_TIME_BUDGET_MS: u32 = 5000;
 
-/// Screenshot size: one pixel per logical 1920x1080 unit.
-const WINDOW_SIZE: &str = "1920,1080";
+/// The Chrome window size for `viewport`: one pixel per logical px.
+fn window_size(viewport: Viewport) -> String {
+    format!("{},{}", viewport.width, viewport.height)
+}
 
 /// Most screens the polish pass photographs per round.
 pub const POLISH_IMAGE_LIMIT: usize = 12;
@@ -133,7 +135,7 @@ pub async fn screenshot_screen(
             ..RenderOptions::default()
         },
     );
-    screenshot_html(&chrome, &with_base_href(&html, base_url)).await
+    screenshot_html(&chrome, &with_base_href(&html, base_url), design.viewport).await
 }
 
 /// Renders the whole design with the layout audit script and returns the
@@ -148,12 +150,17 @@ pub async fn dump_design_dom(design: &Design, base_url: &str) -> anyhow::Result<
             ..RenderOptions::default()
         },
     );
-    dump_rendered_dom(&html, base_url).await
+    dump_rendered_dom(&html, base_url, design.viewport).await
 }
 
 /// Loads a rendered page in Chrome and returns the DOM after its
-/// scripts ran. `base_url` resolves relative image paths.
-pub async fn dump_rendered_dom(html: &str, base_url: &str) -> anyhow::Result<String> {
+/// scripts ran. `base_url` resolves relative image paths; `viewport`
+/// sizes the window.
+pub async fn dump_rendered_dom(
+    html: &str,
+    base_url: &str,
+    viewport: Viewport,
+) -> anyhow::Result<String> {
     let chrome = find_chrome().ok_or_else(|| {
         anyhow::anyhow!(
             "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
@@ -161,7 +168,7 @@ pub async fn dump_rendered_dom(html: &str, base_url: &str) -> anyhow::Result<Str
     })?;
     let (html_path, _) = scratch_paths("-audit", "dom").await?;
     tokio::fs::write(&html_path, with_base_href(html, base_url)).await?;
-    let result = run_chrome_dump(&chrome, &html_path).await;
+    let result = run_chrome_dump(&chrome, &html_path, viewport).await;
     let _ = tokio::fs::remove_file(&html_path).await;
     result
 }
@@ -189,6 +196,7 @@ fn chrome_command(
     chrome: &std::path::Path,
     headless_flag: &str,
     virtual_time_budget_ms: u32,
+    viewport: Viewport,
 ) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(chrome);
     command
@@ -198,7 +206,7 @@ fn chrome_command(
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .arg(format!("--virtual-time-budget={virtual_time_budget_ms}"))
-        .arg(format!("--window-size={WINDOW_SIZE}"))
+        .arg(format!("--window-size={}", window_size(viewport)))
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
     command
@@ -209,10 +217,11 @@ fn chrome_command(
 async fn run_chrome_dump(
     chrome: &std::path::Path,
     html_path: &std::path::Path,
+    viewport: Viewport,
 ) -> anyhow::Result<String> {
     let url = format!("file://{}", html_path.display());
     for headless_flag in ["--headless=new", "--headless"] {
-        let command = chrome_command(chrome, headless_flag, 2500)
+        let command = chrome_command(chrome, headless_flag, 2500, viewport)
             .arg("--dump-dom")
             .arg(&url)
             .stdout(std::process::Stdio::piped())
@@ -233,10 +242,14 @@ async fn run_chrome_dump(
 /// reads the PDF back. The page must carry its own `@page` rules; theme
 /// fonts load from Google Fonts when the machine is online, and fall
 /// back to the system stack otherwise.
-pub async fn print_html_to_pdf(chrome: &std::path::Path, html: &str) -> anyhow::Result<Vec<u8>> {
+pub async fn print_html_to_pdf(
+    chrome: &std::path::Path,
+    html: &str,
+    viewport: Viewport,
+) -> anyhow::Result<Vec<u8>> {
     let (html_path, pdf_path) = scratch_paths("-print", "pdf").await?;
     tokio::fs::write(&html_path, html).await?;
-    let result = run_chrome_print(chrome, &html_path, &pdf_path).await;
+    let result = run_chrome_print(chrome, &html_path, &pdf_path, viewport).await;
     let _ = tokio::fs::remove_file(&html_path).await;
     result?;
     let bytes = tokio::fs::read(&pdf_path).await?;
@@ -250,11 +263,12 @@ async fn run_chrome_print(
     chrome: &std::path::Path,
     html_path: &std::path::Path,
     pdf_path: &std::path::Path,
+    viewport: Viewport,
 ) -> anyhow::Result<()> {
     let url = format!("file://{}", html_path.display());
     let print_flag = format!("--print-to-pdf={}", pdf_path.display());
     for headless_flag in ["--headless=new", "--headless"] {
-        let command = chrome_command(chrome, headless_flag, PDF_VIRTUAL_TIME_BUDGET_MS)
+        let command = chrome_command(chrome, headless_flag, PDF_VIRTUAL_TIME_BUDGET_MS, viewport)
             .arg("--no-pdf-header-footer")
             .arg(&print_flag)
             .arg(&url)
@@ -297,10 +311,14 @@ pub fn with_base_href(html: &str, base_url: &str) -> String {
 
 /// Writes `html` to a temp file, screenshots it with Chrome, and reads
 /// the PNG back.
-async fn screenshot_html(chrome: &std::path::Path, html: &str) -> anyhow::Result<Vec<u8>> {
+async fn screenshot_html(
+    chrome: &std::path::Path,
+    html: &str,
+    viewport: Viewport,
+) -> anyhow::Result<Vec<u8>> {
     let (html_path, png_path) = scratch_paths("", "png").await?;
     tokio::fs::write(&html_path, html).await?;
-    let result = run_chrome(chrome, &html_path, &png_path).await;
+    let result = run_chrome(chrome, &html_path, &png_path, viewport).await;
     let _ = tokio::fs::remove_file(&html_path).await;
     result?;
     let bytes = tokio::fs::read(&png_path).await?;
@@ -314,11 +332,12 @@ async fn run_chrome(
     chrome: &std::path::Path,
     html_path: &std::path::Path,
     png_path: &std::path::Path,
+    viewport: Viewport,
 ) -> anyhow::Result<()> {
     let url = format!("file://{}", html_path.display());
     let screenshot_flag = format!("--screenshot={}", png_path.display());
     for headless_flag in ["--headless=new", "--headless"] {
-        let command = chrome_command(chrome, headless_flag, 1200)
+        let command = chrome_command(chrome, headless_flag, 1200, viewport)
             .arg(&screenshot_flag)
             .arg(&url)
             .stdout(std::process::Stdio::null())
@@ -391,6 +410,18 @@ async fn get_screen_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_sizes_follow_the_viewport() {
+        assert_eq!(window_size(Viewport::default()), "1440,900");
+        assert_eq!(
+            window_size(Viewport {
+                width: 390,
+                height: 844
+            }),
+            "390,844"
+        );
+    }
 
     #[test]
     fn vision_support_follows_the_model_name() {

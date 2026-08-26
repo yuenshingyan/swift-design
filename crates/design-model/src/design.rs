@@ -6,16 +6,23 @@ use serde::{Deserialize, Serialize};
 use crate::screen::Screen;
 use crate::theme::Theme;
 use crate::transition::Transition;
+use crate::viewport::Viewport;
 
-/// A complete presentation: one theme applied to an ordered list of screens.
+/// A complete design: one theme and one viewport applied to an ordered
+/// list of screens.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Design {
-    /// Presentation title, shown on the title screen and in the editor.
+    /// Design title, shown in the editor and the session.
     pub title: String,
     /// Visual identity applied to every screen.
     pub theme: Theme,
-    /// Screens in presentation order.
+    /// The px canvas every screen is laid out on. Set it from the
+    /// brief's target platform: 1440 by 900 for desktop web, 390 by 844
+    /// for a phone, 1024 by 768 for a tablet. Absent means 1440 by 900.
+    #[serde(default)]
+    pub viewport: Viewport,
+    /// Screens in flow order.
     pub screens: Vec<Screen>,
     /// The screen titles of the complete design, in order. A preview design
     /// lists more titles than it has screens: the app continues it from
@@ -48,6 +55,15 @@ mod tests {
         let json = serde_json::to_string(&design).unwrap();
         let restored: Design = serde_json::from_str(&json).unwrap();
         assert_eq!(design, restored);
+    }
+
+    #[test]
+    fn a_design_without_a_viewport_loads_with_the_default() {
+        let mut value = serde_json::to_value(sample_design()).unwrap();
+        assert_eq!(value["viewport"]["width"], 1440);
+        value.as_object_mut().unwrap().remove("viewport");
+        let design: Design = serde_json::from_value(value).unwrap();
+        assert_eq!(design.viewport, crate::Viewport::default());
     }
 
     #[test]

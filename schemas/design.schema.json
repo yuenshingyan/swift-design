@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Design",
-  "description": "A complete presentation: one theme applied to an ordered list of screens.",
+  "description": "A complete design: one theme and one viewport applied to an ordered\nlist of screens.",
   "type": "object",
   "properties": {
     "outline": {
@@ -12,7 +12,7 @@
       }
     },
     "screens": {
-      "description": "Screens in presentation order.",
+      "description": "Screens in flow order.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/Screen"
@@ -23,7 +23,7 @@
       "$ref": "#/$defs/Theme"
     },
     "title": {
-      "description": "Presentation title, shown on the title screen and in the editor.",
+      "description": "Design title, shown in the editor and the session.",
       "type": "string"
     },
     "transition": {
@@ -36,6 +36,14 @@
           "type": "null"
         }
       ]
+    },
+    "viewport": {
+      "description": "The px canvas every screen is laid out on. Set it from the\nbrief's target platform: 1440 by 900 for desktop web, 390 by 844\nfor a phone, 1024 by 768 for a tablet. Absent means 1440 by 900.",
+      "$ref": "#/$defs/Viewport",
+      "default": {
+        "height": 900,
+        "width": 1440
+      }
     }
   },
   "additionalProperties": false,
@@ -99,7 +107,7 @@
       ]
     },
     "Screen": {
-      "description": "One screen: an HTML fragment for a 1920 by 1080 px canvas, CSS for\nthat fragment, and presenter notes.",
+      "description": "One screen: an HTML fragment for the design's viewport, CSS for\nthat fragment, a name, and notes.",
       "type": "object",
       "properties": {
         "css": {
@@ -110,11 +118,15 @@
           ]
         },
         "html": {
-          "description": "The screen as one HTML fragment. The canvas is 1920 by 1080 px;\nuse px units. Allowed: headings, text, lists, tables, `<img>`\nwith `src=\"/uploads/{name}\"`, inline `<svg>`, `<pre><code>`,\n`<blockquote>`, `<a>`. Not allowed: `<script>`, `<style>`,\n`<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, forms,\nmedia, comments, `on*` attributes, `javascript:` and `data:`\nURLs, external images. Close every tag.",
+          "description": "The screen as one HTML fragment. The canvas is the design's\n`viewport` in px; use px units. Allowed: headings, text, lists, tables, `<img>`\nwith `src=\"/uploads/{name}\"`, inline `<svg>`, `<pre><code>`,\n`<blockquote>`, `<a>`. Not allowed: `<script>`, `<style>`,\n`<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, forms,\nmedia, comments, `on*` attributes, `javascript:` and `data:`\nURLs, external images. Close every tag.",
+          "type": "string"
+        },
+        "name": {
+          "description": "A short name for the screen, such as `Home` or `Checkout`. Shown\nin the editor. Empty means the editor derives one from the html.",
           "type": "string"
         },
         "notes": {
-          "description": "Presenter notes. Never rendered on the screen.",
+          "description": "Design notes: intent, states, or handoff remarks. Never rendered\non the screen.",
           "type": [
             "string",
             "null"
@@ -217,6 +229,29 @@
           "type": "string",
           "const": "zoom"
         }
+      ]
+    },
+    "Viewport": {
+      "description": "The canvas size of every screen in a design, in px. Screens use px\nunits against this size; the server scales the result to the frame.",
+      "type": "object",
+      "properties": {
+        "height": {
+          "description": "Canvas height in px, from 320 to 4096.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "width": {
+          "description": "Canvas width in px, from 320 to 4096.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "height"
       ]
     }
   }

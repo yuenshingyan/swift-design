@@ -109,13 +109,14 @@ fn chooser_page(base: &str, candidates: &[DesignSummary]) -> String {
     for candidate in candidates {
         cards.push_str(&format!(
             "<article>\n\
-             <iframe src=\"/designs/{id}/render\" title=\"{id}\"></iframe>\n\
+             <iframe src=\"/designs/{id}/render\" title=\"{id}\" style=\"aspect-ratio: {ratio}\"></iframe>\n\
              <div class=\"card-footer\">\n\
              <span class=\"card-label\">{id} · {theme}</span>\n\
              <button data-id=\"{id}\">Choose this design</button>\n\
              </div>\n</article>\n",
             id = candidate.id,
             theme = crate::render::escape_html(&candidate.theme),
+            ratio = candidate.viewport.aspect_ratio_css(),
         ));
     }
     format!(

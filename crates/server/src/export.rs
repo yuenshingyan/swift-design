@@ -247,7 +247,7 @@ async fn build_pdf_response(
             ..RenderOptions::default()
         },
     );
-    match screenshots::print_html_to_pdf(&chrome, &html).await {
+    match screenshots::print_html_to_pdf(&chrome, &html, design.viewport).await {
         Ok(bytes) => {
             tracing::info!(%id, size_bytes = bytes.len(), "design exported as pdf");
             (

@@ -43,6 +43,9 @@ pub struct Template {
     pub source_design: String,
     /// The theme every design from this template starts with.
     pub theme: Theme,
+    /// The px canvas the example screens were laid out on.
+    #[serde(default)]
+    pub viewport: design_model::Viewport,
     /// Screens kept as layout examples, in design order.
     pub screens: Vec<Screen>,
 }
@@ -203,6 +206,7 @@ async fn render_template(
     let design = Design {
         title: template.name.clone(),
         theme: template.theme.clone(),
+        viewport: template.viewport,
         screens: template.screens.clone(),
         outline: Vec::new(),
         transition: None,
@@ -314,6 +318,7 @@ async fn save_template(
         saved_at: rfc3339_now(),
         source_design: request.design_id,
         theme: design.theme,
+        viewport: design.viewport,
         screens,
     };
     match store.save(&template).await {
@@ -469,6 +474,7 @@ mod tests {
             saved_at: "2024-01-01T00:00:00Z".to_owned(),
             source_design: "talk".to_owned(),
             theme: design.theme.clone(),
+            viewport: design.viewport,
             screens: design.screens.clone(),
         };
         let newer = Template {

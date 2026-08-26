@@ -55,6 +55,8 @@ pub struct DesignSummary {
     pub title: String,
     /// Theme name, shown next to the id on chooser cards.
     pub theme: String,
+    /// The px canvas of every screen, for preview frames.
+    pub viewport: design_model::Viewport,
     /// Number of screens.
     pub screen_count: usize,
     /// Number of titles in the planned outline. More than `screen_count`
@@ -203,6 +205,7 @@ impl DesignStore {
                     id: id.to_owned(),
                     title: design.title,
                     theme: design.theme.name,
+                    viewport: design.viewport,
                     screen_count: design.screens.len(),
                     pending_count: design
                         .screens

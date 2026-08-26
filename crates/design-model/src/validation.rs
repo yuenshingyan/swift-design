@@ -6,6 +6,7 @@
 
 use crate::markup::{SCREEN_CSS_LIMIT, SCREEN_HTML_LIMIT, css_problems, html_problems};
 use crate::transition::MAX_TRANSITION_MS;
+use crate::viewport::{MAX_VIEWPORT_SIDE, MIN_VIEWPORT_SIDE};
 use crate::{Design, Screen};
 
 /// A single problem found in a design.
@@ -68,6 +69,18 @@ pub enum ValidationError {
         /// What is wrong and how to fix it.
         rule: String,
     },
+    /// A viewport side is outside the allowed range.
+    #[error("viewport is {width} by {height}: use {min} to {max} px for each side")]
+    InvalidViewport {
+        /// The rejected width in px.
+        width: u32,
+        /// The rejected height in px.
+        height: u32,
+        /// The shortest allowed side in px.
+        min: u32,
+        /// The longest allowed side in px.
+        max: u32,
+    },
 }
 
 impl Design {
@@ -103,6 +116,14 @@ impl Design {
             errors.push(ValidationError::TransitionTooLong {
                 duration_ms: transition.duration_ms,
                 limit: MAX_TRANSITION_MS,
+            });
+        }
+        if !self.viewport.is_valid() {
+            errors.push(ValidationError::InvalidViewport {
+                width: self.viewport.width,
+                height: self.viewport.height,
+                min: MIN_VIEWPORT_SIDE,
+                max: MAX_VIEWPORT_SIDE,
             });
         }
         for (index, screen) in self.screens.iter().enumerate() {
@@ -167,11 +188,35 @@ mod tests {
     use crate::test_support::sample_design;
     use crate::transition::MAX_TRANSITION_MS;
     use crate::validation::ValidationError;
-    use crate::{Screen, Transition};
+    use crate::viewport::{MAX_VIEWPORT_SIDE, MIN_VIEWPORT_SIDE};
+    use crate::{Screen, Transition, Viewport};
 
     #[test]
     fn accepts_a_valid_design() {
         assert_eq!(sample_design().validate(), Vec::new());
+    }
+
+    #[test]
+    fn rejects_a_viewport_outside_the_limits() {
+        let mut design = sample_design();
+        design.viewport = Viewport {
+            width: 200,
+            height: 900,
+        };
+        assert_eq!(
+            design.validate(),
+            vec![ValidationError::InvalidViewport {
+                width: 200,
+                height: 900,
+                min: MIN_VIEWPORT_SIDE,
+                max: MAX_VIEWPORT_SIDE,
+            }]
+        );
+        assert!(
+            design.validate()[0]
+                .to_string()
+                .contains("use 320 to 4096 px")
+        );
     }
 
     #[test]
@@ -211,6 +256,7 @@ mod tests {
     fn rejects_a_blank_screen() {
         let mut design = sample_design();
         design.screens.push(Screen {
+            name: String::new(),
             html: "   ".to_owned(),
             css: None,
             notes: None,
@@ -225,6 +271,7 @@ mod tests {
     fn html_and_css_problems_carry_field_paths() {
         let mut design = sample_design();
         design.screens.push(Screen {
+            name: String::new(),
             html: "<div><script>x</script>".to_owned(),
             css: Some("@import url(x); .a { width: 10vw }".to_owned()),
             notes: None,
