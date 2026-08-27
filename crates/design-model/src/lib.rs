@@ -22,6 +22,7 @@ pub mod markup;
 pub mod question;
 pub mod screen;
 pub mod slide;
+pub mod text;
 pub mod theme;
 pub mod transition;
 pub mod validation;
@@ -30,7 +31,8 @@ pub mod workflow;
 
 pub use artifact_kind::ArtifactKind;
 pub use brief::{
-    BriefRevision, BriefSection, Critique, CritiqueCategory, DesignBrief, RevisionSource,
+    AnsweredQuestion, BriefRevision, BriefSection, Critique, CritiqueCategory, DesignBrief,
+    RevisionSource,
 };
 pub use deck::{DECK_HEIGHT, DECK_VIEWPORT, DECK_WIDTH, Deck};
 pub use design::Design;
