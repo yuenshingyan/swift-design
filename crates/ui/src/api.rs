@@ -144,6 +144,58 @@ pub struct Session {
     /// The approved brief revision.
     #[serde(default)]
     pub approved_revision: Option<u32>,
+    /// The run options the next run uses.
+    #[serde(default)]
+    pub options: SessionOptions,
+}
+
+/// Most candidates one run may write. The server rejects more.
+pub const VARIATION_LIMIT: usize = 5;
+
+/// The run options of one session, mirrored from the server.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionOptions {
+    /// `low`, `medium`, or `high`.
+    pub effort: String,
+    /// How many candidates a run writes, 1 to `VARIATION_LIMIT`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variations: Option<usize>,
+    /// How different the candidates are: `low`, `medium`, or `high`.
+    pub variety: String,
+    /// Template ids the candidates follow.
+    #[serde(default)]
+    pub templates: Vec<String>,
+    /// True to write preview candidates first.
+    pub preview: bool,
+    /// The canvases a demo run builds for. One design per canvas per
+    /// variation. Empty means the default desktop canvas.
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    /// How many slides a deck run writes. `None` leaves it to the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slide_count: Option<u32>,
+}
+
+impl Default for SessionOptions {
+    fn default() -> Self {
+        Self {
+            effort: "medium".to_owned(),
+            variations: None,
+            variety: "medium".to_owned(),
+            templates: Vec::new(),
+            preview: true,
+            platforms: Vec::new(),
+            slide_count: None,
+        }
+    }
+}
+
+impl SessionOptions {
+    /// How many candidates the next run writes. Mirrors the server
+    /// default so the studio shows the number the run will use.
+    pub fn variation_count(&self) -> usize {
+        self.variations.unwrap_or(2).clamp(1, VARIATION_LIMIT)
+    }
 }
 
 /// The full view of one session.
@@ -302,6 +354,18 @@ pub async fn fetch_brief_revisions(id: &str) -> Result<Vec<BriefRevision>, Strin
 /// Fetches one brief revision.
 pub async fn fetch_brief_revision(id: &str, revision: u32) -> Result<DesignBrief, String> {
     get_json(&format!("/sessions/{id}/brief?revision={revision}")).await
+}
+
+/// Replaces the run options of one session. The server rejects a
+/// variation count outside 1 to `VARIATION_LIMIT`, and any change while
+/// the session generates.
+pub async fn save_session_options(id: &str, options: &SessionOptions) -> Result<(), String> {
+    let builder = Request::put(&format!("/sessions/{id}/options"))
+        .json(options)
+        .map_err(|error| error.to_string())?;
+    send_checked(builder, "PUT /sessions/{id}/options")
+        .await
+        .map(|_| ())
 }
 
 /// Approves the brief and starts generation.
@@ -913,4 +977,29 @@ pub async fn complete_login(code: &str, model: Option<&str>) -> Result<(), Strin
     send_checked(builder, "POST /settings/login/complete")
         .await
         .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::api::{SessionOptions, VARIATION_LIMIT};
+
+    #[test]
+    fn the_variation_count_defaults_to_two_and_stays_inside_the_limit() {
+        assert_eq!(SessionOptions::default().variation_count(), 2);
+        let counted = SessionOptions {
+            variations: Some(4),
+            ..SessionOptions::default()
+        };
+        assert_eq!(counted.variation_count(), 4);
+        let too_many = SessionOptions {
+            variations: Some(99),
+            ..SessionOptions::default()
+        };
+        assert_eq!(too_many.variation_count(), VARIATION_LIMIT);
+        let none = SessionOptions {
+            variations: Some(0),
+            ..SessionOptions::default()
+        };
+        assert_eq!(none.variation_count(), 1);
+    }
 }
