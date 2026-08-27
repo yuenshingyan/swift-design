@@ -2,10 +2,27 @@
 //! groups (confirmed facts, assumptions, open questions), the editable
 //! fields, the revision list, and the approve/generate actions.
 
-use design_model::{BriefRevision, BriefSection, DesignBrief, WorkflowState};
+use design_model::{ArtifactKind, BriefRevision, BriefSection, DesignBrief, WorkflowState};
 use dioxus::prelude::*;
 
 use crate::api;
+use crate::select::Select;
+
+/// The artifact kinds as select options: (JSON name, label).
+pub(crate) fn kind_options() -> Vec<(String, String)> {
+    ArtifactKind::ALL
+        .into_iter()
+        .map(|kind| (kind.as_str().to_owned(), kind.label().to_owned()))
+        .collect()
+}
+
+/// True while the kind may still change: before anything is generated.
+pub(crate) fn can_change_kind(state: WorkflowState) -> bool {
+    matches!(
+        state,
+        WorkflowState::Clarifying | WorkflowState::BriefReady | WorkflowState::AwaitingApproval
+    )
+}
 
 /// Which brief actions are enabled in the current state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -197,12 +214,20 @@ pub(crate) fn BriefPanel(
                 span { class: "rev", "rev {revision}" }
             }
             BriefGroupsView { groups: groups.clone() }
+            if can_change_kind(state) {
+                ArtifactKindSelect {
+                    session_id: session_id.clone(),
+                    brief: brief.clone(),
+                    on_error,
+                }
+            }
             BriefFields { brief: brief.clone() }
             if !revisions.is_empty() {
                 div { class: "revision-list",
                     span { class: "kicker", "Revisions" }
                     for entry in revisions.iter() {
-                        div { key: "{entry.revision}",
+                        div {
+                            key: "{entry.revision}",
                             class: if entry.revision == revision { "history-row current" } else { "history-row" },
                             "{revision_label(entry)}"
                         }
@@ -235,8 +260,16 @@ pub(crate) fn BriefPanel(
 fn BriefGroupsView(groups: BriefGroups) -> Element {
     rsx! {
         div { class: "brief-groups",
-            BriefGroup { class: "facts", title: "Confirmed by you", items: groups.facts }
-            BriefGroup { class: "assumptions", title: "Assumed", items: groups.assumptions }
+            BriefGroup {
+                class: "facts",
+                title: "Confirmed by you",
+                items: groups.facts,
+            }
+            BriefGroup {
+                class: "assumptions",
+                title: "Assumed",
+                items: groups.assumptions,
+            }
             BriefGroup { class: "open", title: "Still open", items: groups.open }
         }
     }
@@ -261,11 +294,51 @@ fn BriefGroup(class: String, title: String, items: Vec<String>) -> Element {
     }
 }
 
+/// The artifact kind select: a user edit that writes a new brief
+/// revision and moves the session to the other pipeline.
+#[component]
+fn ArtifactKindSelect(
+    session_id: String,
+    brief: DesignBrief,
+    on_error: EventHandler<String>,
+) -> Element {
+    let current = brief.artifact_kind.as_str().to_owned();
+    rsx! {
+        div { class: "brief-field kind-field",
+            span { class: "brief-field-label", "Artifact kind" }
+            Select {
+                value: current,
+                options: kind_options(),
+                on_change: move |value: String| {
+                    let Some(kind) = ArtifactKind::from_name(&value) else {
+                        return;
+                    };
+                    if kind == brief.artifact_kind {
+                        return;
+                    }
+                    let mut edited = brief.clone();
+                    edited.artifact_kind = kind;
+                    let id = session_id.clone();
+                    spawn(async move {
+                        if let Err(message) = api::save_session_brief(&id, &edited).await {
+                            on_error.call(message);
+                        }
+                    });
+                },
+            }
+        }
+    }
+}
+
 /// The read-only brief fields. Editing is done from the chat for now.
 #[component]
 fn BriefFields(brief: DesignBrief) -> Element {
     rsx! {
         div { class: "brief-fields",
+            BriefField {
+                label: "Artifact kind",
+                value: brief.artifact_kind.label().to_owned(),
+            }
             BriefField { label: "Target artifact", value: brief.target_artifact }
             BriefField { label: "Target platform", value: brief.target_platform }
             BriefField { label: "Audience", value: brief.audience }
@@ -367,6 +440,17 @@ mod tests {
         assert_eq!(groups.facts, vec!["Web"]);
         assert_eq!(groups.assumptions, vec!["Investors"]);
         assert_eq!(groups.open, vec!["Colors?"]);
+    }
+
+    #[test]
+    fn kind_options_name_both_kinds_and_the_kind_locks_after_generation() {
+        let options = kind_options();
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0], ("demo".to_owned(), "Software demo".to_owned()));
+        assert_eq!(options[1].0, "deck");
+        assert!(can_change_kind(WorkflowState::AwaitingApproval));
+        assert!(!can_change_kind(WorkflowState::Generating));
+        assert!(!can_change_kind(WorkflowState::Reviewing));
     }
 
     #[test]
