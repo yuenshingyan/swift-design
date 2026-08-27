@@ -11,20 +11,21 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use design_model::{
-    BriefQuestionSet, Critique, DesignBrief, QuestionAnswer, RevisionSource, WorkflowEvent,
-    WorkflowState, validate_answers, validate_question_set,
+    ArtifactKind, BriefQuestionSet, Critique, DesignBrief, QuestionAnswer, RevisionSource,
+    WorkflowEvent, WorkflowState, validate_answers, validate_question_set,
 };
 use serde::Deserialize;
 
 use crate::agent_runs::AgentRunner;
 use crate::api_error;
 use crate::candidates::CANDIDATE_LIMIT;
+use crate::decks::DeckStore;
 use crate::designs::{DesignStore, is_valid_design_id};
 use crate::events::ChangeNotifier;
 use crate::sessions::{
-    AnswerRecord, ChatMessage, PendingCritique, RunOptions, Session, SessionError, SessionStore,
-    SessionSummary, SessionView, is_valid_session_id, session_id_from_request,
-    session_id_of_design,
+    AnswerRecord, ChatMessage, NewSession, PendingCritique, RunOptions, Session, SessionError,
+    SessionStore, SessionSummary, SessionView, is_valid_session_id, session_id_from_request,
+    session_id_of_artifact,
 };
 
 /// The `/sessions` route table.
@@ -79,10 +80,12 @@ fn title_from_request(request: &str) -> String {
     line.chars().take(80).collect()
 }
 
-/// Builds the full session view.
+/// Builds the full session view. A demo session lists its designs, a
+/// deck session its decks.
 async fn build_view(
     sessions: &SessionStore,
     designs: &DesignStore,
+    decks: &DeckStore,
     session: Session,
 ) -> Result<SessionView, SessionError> {
     let id = session.id.clone();
@@ -92,13 +95,28 @@ async fn build_view(
     let messages = sessions.messages(&id).await?;
     let runs = sessions.runs(&id).await?;
     let open_question_set = open_question_set(&session, &answers);
-    let session_designs = designs
-        .list()
-        .await
-        .map_err(|error| SessionError::Io(error.to_string()))?
-        .into_iter()
-        .filter(|summary| session_id_of_design(&summary.id) == id)
-        .collect();
+    let (session_designs, session_decks) = match session.artifact_kind {
+        ArtifactKind::Demo => (
+            designs
+                .list()
+                .await
+                .map_err(|error| SessionError::Io(error.to_string()))?
+                .into_iter()
+                .filter(|summary| session_id_of_artifact(&summary.id) == id)
+                .collect(),
+            Vec::new(),
+        ),
+        ArtifactKind::Deck => (
+            Vec::new(),
+            decks
+                .list()
+                .await
+                .map_err(|error| SessionError::Io(error.to_string()))?
+                .into_iter()
+                .filter(|summary| session_id_of_artifact(&summary.id) == id)
+                .collect(),
+        ),
+    };
     Ok(SessionView {
         session,
         brief,
@@ -108,6 +126,7 @@ async fn build_view(
         messages,
         runs,
         designs: session_designs,
+        decks: session_decks,
     })
 }
 
@@ -128,6 +147,9 @@ struct CreateRequest {
     title: Option<String>,
     #[serde(default)]
     options: Option<RunOptions>,
+    /// `demo` (the default) or `deck`.
+    #[serde(default)]
+    artifact_kind: Option<ArtifactKind>,
 }
 
 /// Creates a session in the intake state.
@@ -166,14 +188,18 @@ async fn create_session(
         .map(|title| title.trim().to_owned())
         .filter(|title| !title.is_empty())
         .unwrap_or_else(|| title_from_request(prompt));
-    match sessions
-        .create(&id, &title, prompt, request.options.unwrap_or_default())
-        .await
-    {
+    let new = NewSession::demo(&id, &title, prompt)
+        .with_options(request.options.unwrap_or_default())
+        .with_kind(request.artifact_kind.unwrap_or_default());
+    match sessions.create(new).await {
         Ok(session) => {
             notifier.notify();
             try_start(&runner, &id).await;
-            tracing::info!(session_id = %id, "session created");
+            tracing::info!(
+                session_id = %id,
+                artifact_kind = session.artifact_kind.as_str(),
+                "session created"
+            );
             (StatusCode::CREATED, Json(session)).into_response()
         }
         Err(error) => session_error_response(&error),
@@ -192,6 +218,7 @@ async fn list_sessions(State(sessions): State<SessionStore>) -> Response {
 async fn get_session(
     State(sessions): State<SessionStore>,
     State(designs): State<DesignStore>,
+    State(decks): State<DeckStore>,
     Path(id): Path<String>,
 ) -> Response {
     let session = match sessions.read(&id).await {
@@ -201,7 +228,7 @@ async fn get_session(
         }
         Err(error) => return session_error_response(&error),
     };
-    match build_view(&sessions, &designs, session).await {
+    match build_view(&sessions, &designs, &decks, session).await {
         Ok(view) => Json(view).into_response(),
         Err(error) => session_error_response(&error),
     }
@@ -528,6 +555,14 @@ async fn put_brief(
             session.state
         ));
     }
+    // The kind picks the store the candidates live in, so it is fixed
+    // once anything has been generated.
+    if !is_agent
+        && session.state == WorkflowState::Reviewing
+        && request.brief.artifact_kind != session.artifact_kind
+    {
+        return conflict("the artifact kind cannot change after generation");
+    }
     let summary = request
         .summary
         .unwrap_or_else(|| default_summary.to_owned());
@@ -721,7 +756,7 @@ async fn post_critique(
             Vec::new(),
         );
     };
-    if session_id_of_design(&design) != id {
+    if session_id_of_artifact(&design) != id {
         return api_error::error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             &format!("design `{design}` does not belong to session `{id}`"),
