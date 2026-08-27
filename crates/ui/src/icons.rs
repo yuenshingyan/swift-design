@@ -33,6 +33,12 @@ fill=\"none\" aria-hidden=\"true\"><path d=\"M7 2v7M4 6.2L7 9.2l3-3M2.6 11.5h8.8
 stroke=\"currentColor\" stroke-width=\"1.3\" stroke-linecap=\"round\" \
 stroke-linejoin=\"round\"></path></svg>";
 
+/// A paperclip, for the attach button.
+pub(crate) const PAPERCLIP: &str = "<svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" \
+fill=\"none\" aria-hidden=\"true\"><path d=\"M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 \
+0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48\" stroke=\"currentColor\" \
+stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg>";
+
 /// A pencil, for rename.
 #[allow(dead_code)]
 pub(crate) const PENCIL: &str = "<svg width=\"11\" height=\"11\" viewBox=\"0 0 12 12\" \
