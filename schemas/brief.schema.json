@@ -12,6 +12,14 @@
         "type": "string"
       }
     },
+    "answered_questions": {
+      "description": "The answered questions as text, newest last. One entry per\nquestion the user answered or skipped.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AnsweredQuestion"
+      }
+    },
     "answers": {
       "description": "The answers the user gave, newest last.",
       "type": "array",
@@ -111,6 +119,15 @@
         "$ref": "#/$defs/BriefRevision"
       }
     },
+    "slide_count": {
+      "description": "How many slides the user asked for. The app asks; the agent does\nnot. `None` lets the agent choose. Only for a deck.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
     "success_criterion": {
       "description": "How the team knows the design worked, such as `sign-up rate`.",
       "type": "string",
@@ -122,9 +139,17 @@
       "default": ""
     },
     "target_platform": {
-      "description": "Where it runs, such as `desktop web` or `iOS app`.",
+      "description": "Where it runs, such as `desktop web` or `iOS app`. The first\nentry of `target_platforms` when the app set several.",
       "type": "string",
       "default": ""
+    },
+    "target_platforms": {
+      "description": "Every platform the run builds for. The app asks; the agent does\nnot. One design is written per platform, each on that\nplatform's canvas. Empty means the one in `target_platform`.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
     },
     "technical_constraints": {
       "description": "Technical limits, such as `no external fonts`.",
@@ -146,6 +171,29 @@
     }
   },
   "$defs": {
+    "AnsweredQuestion": {
+      "description": "One question the user answered, kept as text.\n\nThe brief must read on its own, so it carries the question wording\nand the answer wording, not only the answer ids in `answers`. The\nstudio shows the two apart, so a reader can tell a question from an\nanswer at a glance.",
+      "type": "object",
+      "properties": {
+        "answer": {
+          "description": "The answer, as the user gave it. Empty when the user skipped.",
+          "type": "string"
+        },
+        "is_assumed": {
+          "description": "True when the user skipped and asked the agent to decide.",
+          "type": "boolean",
+          "default": false
+        },
+        "question": {
+          "description": "The question, as the user saw it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question",
+        "answer"
+      ]
+    },
     "ArtifactKind": {
       "description": "What a session builds: a software demo or a deck.",
       "oneOf": [
