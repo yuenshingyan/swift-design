@@ -14,6 +14,7 @@ mod decks;
 mod designs;
 mod events;
 mod export;
+mod files;
 mod generation;
 mod history;
 mod icon;
