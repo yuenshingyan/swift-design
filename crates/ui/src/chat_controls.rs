@@ -222,8 +222,8 @@ pub(crate) fn ModelChip(
     }
 }
 
-/// The labelled send button at the right of a chat box: a play glyph
-/// and `label`, enabled while `is_enabled`.
+/// The submit button at the right of a composer: a play glyph only.
+/// `label` names the action for the tooltip and screen readers.
 #[component]
 pub(crate) fn SendButton(
     label: &'static str,
@@ -234,10 +234,10 @@ pub(crate) fn SendButton(
         button {
             class: "primary send-button",
             title: "{label} (Enter)",
+            "aria-label": "{label}",
             disabled: !is_enabled,
             onclick: move |_| on_send.call(()),
             span { dangerous_inner_html: icons::PLAY }
-            "{label}"
         }
     }
 }
