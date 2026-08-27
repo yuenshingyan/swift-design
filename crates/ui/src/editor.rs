@@ -11,7 +11,9 @@
 //! wrote the title, theme, css, and notes: the agent, or the user.
 
 use design_model::transition::MAX_TRANSITION_MS;
-use design_model::{Design, Screen, Transition, TransitionAxis, TransitionEffect};
+use design_model::{
+    ArtifactKind, Design, Screen, Theme, Transition, TransitionAxis, TransitionEffect,
+};
 use dioxus::document;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -28,7 +30,7 @@ use crate::uploads::format_size;
 ///
 /// The drag runs in JS with `elementFromPoint` because Safari does not
 /// fire `pointerenter` on other elements while a mouse button is held.
-const PREVIEW_LISTENER: &str = "\
+pub(crate) const PREVIEW_LISTENER: &str = "\
 window.addEventListener('message', (event) => {
   if (event.origin !== window.location.origin) { return; }
   const data = event.data;
@@ -85,7 +87,7 @@ window.addEventListener('blur', endDrag);
 ";
 
 /// Posts one command from the inspector into the preview iframe.
-const APPLY_TO_PREVIEW: &str = "\
+pub(crate) const APPLY_TO_PREVIEW: &str = "\
 const message = await dioxus.recv();
 const frame = document.querySelector('iframe[data-preview]');
 if (frame && frame.contentWindow) {
@@ -96,72 +98,73 @@ if (frame && frame.contentWindow) {
 /// The computed styles of the selected node, as the preview reports
 /// them.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
-struct NodeStyles {
+pub(crate) struct NodeStyles {
     #[serde(default)]
-    font_size: String,
+    pub(crate) font_size: String,
     #[serde(default)]
-    color: String,
+    pub(crate) color: String,
     #[serde(default)]
-    text_align: String,
+    pub(crate) text_align: String,
     #[serde(default)]
-    padding: String,
+    pub(crate) padding: String,
     #[serde(default)]
-    src: String,
+    pub(crate) src: String,
     #[serde(default)]
-    is_leaf: bool,
+    pub(crate) is_leaf: bool,
 }
 
 /// One message posted by the editable preview page.
 #[derive(Debug, Deserialize)]
-struct PreviewMessage {
+pub(crate) struct PreviewMessage {
     /// `swift-design-html`, `swift-design-select`, `swift-design-action`,
     /// `swift-design-navigate`, `swift-design-drag`, or `swift-design-escape`.
     #[serde(rename = "type")]
-    kind: String,
-    /// Screen index the message is about. Absent on navigate messages.
+    pub(crate) kind: String,
+    /// Screen or slide index the message is about. Absent on navigate
+    /// messages.
     #[serde(default)]
-    screen: usize,
-    /// Node path from the screen root, like `0/2/1`. `None` for the screen.
+    pub(crate) screen: usize,
+    /// Node path from the root, like `0/2/1`. `None` for the root.
     #[serde(default)]
-    path: Option<String>,
+    pub(crate) path: Option<String>,
     /// Node tag name.
     #[serde(default)]
-    tag: Option<String>,
+    pub(crate) tag: Option<String>,
     /// Node class attribute.
     #[serde(default)]
-    classes: Option<String>,
+    pub(crate) classes: Option<String>,
     /// Start of the node text.
     #[serde(default)]
-    text: Option<String>,
+    pub(crate) text: Option<String>,
     /// Computed styles of the node.
     #[serde(default)]
-    styles: Option<NodeStyles>,
-    /// The screen root's HTML after a change.
+    pub(crate) styles: Option<NodeStyles>,
+    /// The root's HTML after a change.
     #[serde(default)]
-    html: Option<String>,
+    pub(crate) html: Option<String>,
     /// True when the change should be saved at once.
     #[serde(default)]
-    save: bool,
+    pub(crate) save: bool,
     /// The menu action: `ask`, `properties`, or `delete-screen`.
     #[serde(default)]
-    action: Option<String>,
+    pub(crate) action: Option<String>,
     /// Screens to move by, on navigate messages: 1 or -1.
     #[serde(default)]
-    step: i32,
+    pub(crate) step: i32,
 }
 
 /// The node the user selected in the preview.
 #[derive(Clone, Debug, Default, PartialEq)]
-struct SelectedNode {
-    path: String,
-    tag: String,
-    classes: String,
-    text: String,
-    styles: NodeStyles,
+pub(crate) struct SelectedNode {
+    pub(crate) path: String,
+    pub(crate) tag: String,
+    pub(crate) classes: String,
+    pub(crate) text: String,
+    pub(crate) styles: NodeStyles,
 }
 
 impl SelectedNode {
-    fn from_message(message: &PreviewMessage) -> Option<Self> {
+    pub(crate) fn from_message(message: &PreviewMessage) -> Option<Self> {
         Some(Self {
             path: message.path.clone()?,
             tag: message.tag.clone().unwrap_or_default(),
@@ -174,13 +177,13 @@ impl SelectedNode {
 
 /// A command the inspector sends into the preview.
 #[derive(Clone, Debug, Serialize)]
-struct NodeCommand {
+pub(crate) struct NodeCommand {
     #[serde(rename = "type")]
-    kind: &'static str,
-    screen: usize,
-    path: String,
-    property: &'static str,
-    value: String,
+    pub(crate) kind: &'static str,
+    pub(crate) screen: usize,
+    pub(crate) path: String,
+    pub(crate) property: &'static str,
+    pub(crate) value: String,
 }
 
 /// Loads one design, then hands it to the editor.
@@ -311,7 +314,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                     selected.set(message.screen);
                     let node = SelectedNode::from_message(&message);
                     if let Some(node) = &node {
-                        chat_context.set(Some(node_reference(message.screen, node)));
+                        chat_context.set(Some(node_reference("screen", message.screen, node)));
                     }
                     selected_node.set(node);
                 }
@@ -363,7 +366,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                     Some("ask") => {
                         selected.set(message.screen);
                         chat_context.set(Some(match SelectedNode::from_message(&message) {
-                            Some(node) => node_reference(message.screen, &node),
+                            Some(node) => node_reference("screen", message.screen, &node),
                             None => format!("[screen {}]", message.screen + 1),
                         }));
                     }
@@ -584,11 +587,12 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                             placeholder: "What to say on this screen. Never shown on the screen.",
                             oninput: move |event| {
                                 let index = selected();
-                                design.with_mut(|design| {
-                                    if let Some(screen) = design.screens.get_mut(index) {
-                                        screen.notes = optional(event.value());
-                                    }
-                                });
+                                design
+                                    .with_mut(|design| {
+                                        if let Some(screen) = design.screens.get_mut(index) {
+                                            screen.notes = optional(event.value());
+                                        }
+                                    });
                                 is_dirty.set(true);
                             },
                         }
@@ -619,11 +623,12 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                                             event.stop_propagation();
                                             if pending_screen_delete() == Some(index) {
                                                 pending_screen_delete.set(None);
-                                                design.with_mut(|design| {
-                                                    if design.screens.len() > 1 && index < design.screens.len() {
-                                                        design.screens.remove(index);
-                                                    }
-                                                });
+                                                design
+                                                    .with_mut(|design| {
+                                                        if design.screens.len() > 1 && index < design.screens.len() {
+                                                            design.screens.remove(index);
+                                                        }
+                                                    });
                                                 selected.set(selected().min(screen_count.saturating_sub(2)));
                                                 selected_node.set(None);
                                                 save.call(true);
@@ -694,14 +699,24 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                                 }
                             }
                         }
-                        ThemeForm { design, is_dirty }
+                        ThemeForm {
+                            theme: design().theme.clone(),
+                            on_change: move |theme: Theme| {
+                                design.with_mut(|design| design.theme = theme);
+                                is_dirty.set(true);
+                            },
+                        }
                         TransitionForm {
-                            design,
-                            is_dirty,
-                            on_change: move |_| save.call(false),
+                            transition: design().transition,
+                            on_change: move |transition: Option<Transition>| {
+                                design.with_mut(|design| design.transition = transition);
+                                is_dirty.set(true);
+                                save.call(false);
+                            },
                         }
                         HistorySection {
                             design_id: design_id.clone(),
+                            kind: ArtifactKind::Demo,
                             on_restored: move |_| reload.call(()),
                         }
                     }
@@ -715,11 +730,20 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
 /// first, each with a Restore button. `on_restored` fires after a
 /// restore, so the caller reloads the design.
 #[component]
-fn HistorySection(design_id: String, on_restored: EventHandler<()>) -> Element {
+pub(crate) fn HistorySection(
+    design_id: String,
+    kind: ArtifactKind,
+    on_restored: EventHandler<()>,
+) -> Element {
     let id_for_fetch = design_id.clone();
     let mut snapshots = use_resource(move || {
         let id = id_for_fetch.clone();
-        async move { api::fetch_design_history(&id).await }
+        async move {
+            match kind {
+                ArtifactKind::Demo => api::fetch_design_history(&id).await,
+                ArtifactKind::Deck => api::fetch_deck_history(&id).await,
+            }
+        }
     });
     let mut error = use_signal(|| Option::<String>::None);
     let rows = snapshots.read().clone();
@@ -748,7 +772,15 @@ fn HistorySection(design_id: String, on_restored: EventHandler<()>) -> Element {
                                             let design_id = design_id.clone();
                                             let stamp = stamp.clone();
                                             spawn(async move {
-                                                match api::restore_design_history(&design_id, &stamp).await {
+                                                let restored = match kind {
+                                                    ArtifactKind::Demo => {
+                                                        api::restore_design_history(&design_id, &stamp).await
+                                                    }
+                                                    ArtifactKind::Deck => {
+                                                        api::restore_deck_history(&design_id, &stamp).await
+                                                    }
+                                                };
+                                                match restored {
                                                     Ok(()) => {
                                                         error.set(None);
                                                         on_restored.call(());
@@ -777,7 +809,7 @@ fn HistorySection(design_id: String, on_restored: EventHandler<()>) -> Element {
 }
 
 /// A saved-at time for the history list: `2026-08-25 10:14:02 UTC`.
-fn history_label(saved_at: &str) -> String {
+pub(crate) fn history_label(saved_at: &str) -> String {
     saved_at.replacen('T', " ", 1).replacen('Z', " UTC", 1)
 }
 
@@ -787,24 +819,19 @@ fn history_label(saved_at: &str) -> String {
 /// `None` is a real choice: a design with no transition scrolls, which is
 /// what a design did before this field existed.
 #[component]
-fn TransitionForm(
-    mut design: Signal<Design>,
-    mut is_dirty: Signal<bool>,
-    on_change: EventHandler<()>,
+pub(crate) fn TransitionForm(
+    transition: Option<Transition>,
+    on_change: EventHandler<Option<Transition>>,
 ) -> Element {
-    let current = design().transition;
+    let current = transition;
     let effect = current.map(|transition| transition.effect);
     let axis = current.unwrap_or_default().axis;
     let duration = current.unwrap_or_default().duration_ms;
     let pick_effect = use_callback(move |value: &'static str| {
-        design.with_mut(|design| {
-            design.transition = effect_from_value(value).map(|effect| Transition {
-                effect,
-                ..design.transition.unwrap_or_default()
-            });
-        });
-        is_dirty.set(true);
-        on_change.call(());
+        on_change.call(effect_from_value(value).map(|effect| Transition {
+            effect,
+            ..current.unwrap_or_default()
+        }));
     });
     // Direction and duration show only for effects that move: a scroll
     // page and a cut have nothing to direct or time.
@@ -839,17 +866,13 @@ fn TransitionForm(
                             ],
                             on_change: move |direction: String| {
                                 let is_horizontal = direction == "horizontal";
-                                design.with_mut(|design| {
-                                    let mut transition = design.transition.unwrap_or_default();
-                                    transition.axis = if is_horizontal {
-                                        TransitionAxis::Horizontal
-                                    } else {
-                                        TransitionAxis::Vertical
-                                    };
-                                    design.transition = Some(transition);
-                                });
-                                is_dirty.set(true);
-                                on_change.call(());
+                                let mut transition = current.unwrap_or_default();
+                                transition.axis = if is_horizontal {
+                                    TransitionAxis::Horizontal
+                                } else {
+                                    TransitionAxis::Vertical
+                                };
+                                on_change.call(Some(transition));
                             },
                         }
                     }
@@ -866,13 +889,9 @@ fn TransitionForm(
                                     return;
                                 };
                                 let value = value.min(MAX_TRANSITION_MS);
-                                design.with_mut(|design| {
-                                    let mut transition = design.transition.unwrap_or_default();
-                                    transition.duration_ms = value;
-                                    design.transition = Some(transition);
-                                });
-                                is_dirty.set(true);
-                                on_change.call(());
+                                let mut transition = current.unwrap_or_default();
+                                transition.duration_ms = value;
+                                on_change.call(Some(transition));
                             },
                         }
                     }
@@ -915,7 +934,8 @@ fn effect_from_value(value: &str) -> Option<TransitionEffect> {
 }
 
 /// The chat reference for one node: `[screen 3, node 0/1 <h2.title>: text]`.
-fn node_reference(screen_index: usize, node: &SelectedNode) -> String {
+/// `unit` is `screen` or `slide`.
+pub(crate) fn node_reference(unit: &str, screen_index: usize, node: &SelectedNode) -> String {
     let class = node
         .classes
         .split_whitespace()
@@ -925,14 +945,14 @@ fn node_reference(screen_index: usize, node: &SelectedNode) -> String {
     let text: String = node.text.chars().take(40).collect();
     if text.is_empty() {
         format!(
-            "[screen {}, node {} <{}{class}>]",
+            "[{unit} {}, node {} <{}{class}>]",
             screen_index + 1,
             node.path,
             node.tag
         )
     } else {
         format!(
-            "[screen {}, node {} <{}{class}>: {text}]",
+            "[{unit} {}, node {} <{}{class}>: {text}]",
             screen_index + 1,
             node.path,
             node.tag
@@ -943,7 +963,7 @@ fn node_reference(screen_index: usize, node: &SelectedNode) -> String {
 /// The selected node's quick fields. Every change is sent into the
 /// preview, which applies it and posts the screen's HTML back.
 #[component]
-fn NodeInspector(
+pub(crate) fn NodeInspector(
     screen: usize,
     node: Option<SelectedNode>,
     on_apply: EventHandler<NodeCommand>,
@@ -1171,71 +1191,58 @@ fn FontField(
 /// theme name stays the agent's label for the design; the user never
 /// needs to edit it.
 #[component]
-fn ThemeForm(mut design: Signal<Design>, mut is_dirty: Signal<bool>) -> Element {
+pub(crate) fn ThemeForm(theme: Theme, on_change: EventHandler<Theme>) -> Element {
+    let source = theme.clone();
+    let edit = use_callback(move |(change, value): (fn(&mut Theme, String), String)| {
+        let mut edited = source.clone();
+        change(&mut edited, value);
+        on_change.call(edited);
+    });
     rsx! {
         div { class: "sheet-section theme",
             div { class: "head", "Theme" }
             div { class: "color-list",
                 RequiredColorField {
                     label: "Background color",
-                    value: design().theme.colors.background.clone(),
+                    value: theme.colors.background.clone(),
                     on_change: move |value: String| {
-                        design.with_mut(|design| design.theme.colors.background = value);
-                        is_dirty.set(true);
+                        edit.call((|theme, value| theme.colors.background = value, value))
                     },
                 }
                 RequiredColorField {
                     label: "Text color",
-                    value: design().theme.colors.text.clone(),
-                    on_change: move |value: String| {
-                        design.with_mut(|design| design.theme.colors.text = value);
-                        is_dirty.set(true);
-                    },
+                    value: theme.colors.text.clone(),
+                    on_change: move |value: String| edit.call((|theme, value| theme.colors.text = value, value)),
                 }
                 RequiredColorField {
                     label: "Accent color",
-                    value: design().theme.colors.accent.clone(),
-                    on_change: move |value: String| {
-                        design.with_mut(|design| design.theme.colors.accent = value);
-                        is_dirty.set(true);
-                    },
+                    value: theme.colors.accent.clone(),
+                    on_change: move |value: String| edit.call((|theme, value| theme.colors.accent = value, value)),
                 }
                 RequiredColorField {
                     label: "Muted color",
-                    value: design().theme.colors.muted.clone(),
-                    on_change: move |value: String| {
-                        design.with_mut(|design| design.theme.colors.muted = value);
-                        is_dirty.set(true);
-                    },
+                    value: theme.colors.muted.clone(),
+                    on_change: move |value: String| edit.call((|theme, value| theme.colors.muted = value, value)),
                 }
             }
             div { class: "font-grid",
                 FontField {
                     label: "Heading font",
-                    value: design().theme.fonts.heading.clone(),
+                    value: theme.fonts.heading.clone(),
                     families: &TEXT_FONTS,
-                    on_change: move |value: String| {
-                        design.with_mut(|design| design.theme.fonts.heading = value);
-                        is_dirty.set(true);
-                    },
+                    on_change: move |value: String| edit.call((|theme, value| theme.fonts.heading = value, value)),
                 }
                 FontField {
                     label: "Body font",
-                    value: design().theme.fonts.body.clone(),
+                    value: theme.fonts.body.clone(),
                     families: &TEXT_FONTS,
-                    on_change: move |value: String| {
-                        design.with_mut(|design| design.theme.fonts.body = value);
-                        is_dirty.set(true);
-                    },
+                    on_change: move |value: String| edit.call((|theme, value| theme.fonts.body = value, value)),
                 }
                 FontField {
                     label: "Mono font",
-                    value: design().theme.fonts.mono.clone(),
+                    value: theme.fonts.mono.clone(),
                     families: &MONO_FONTS,
-                    on_change: move |value: String| {
-                        design.with_mut(|design| design.theme.fonts.mono = value);
-                        is_dirty.set(true);
-                    },
+                    on_change: move |value: String| edit.call((|theme, value| theme.fonts.mono = value, value)),
                 }
             }
         }
@@ -1263,8 +1270,8 @@ fn RequiredColorField(
     }
 }
 
-/// Moves the screen at `from` to position `to`, shifting the others.
-fn move_screen(screens: &mut Vec<Screen>, from: usize, to: usize) {
+/// Moves the item at `from` to position `to`, shifting the others.
+pub(crate) fn move_screen<T>(screens: &mut Vec<T>, from: usize, to: usize) {
     if from == to || from >= screens.len() || to >= screens.len() {
         return;
     }
@@ -1275,13 +1282,20 @@ fn move_screen(screens: &mut Vec<Screen>, from: usize, to: usize) {
 /// Short label for a thumbnail: position, then the first heading text,
 /// else the first words of the screen, else `Screen N`.
 fn screen_label(index: usize, screen: &Screen) -> String {
-    let heading = first_heading(&screen.html).map(|text| strip_tags(&text));
+    fragment_label("Screen", index, &screen.html)
+}
+
+/// Short label for one screen or slide of html: position, then the first
+/// heading text, else the first words, else `{unit} N`. `unit` is
+/// `Screen` or `Slide`.
+pub(crate) fn fragment_label(unit: &str, index: usize, html: &str) -> String {
+    let heading = first_heading(html).map(|text| strip_tags(&text));
     let text = match heading {
         Some(text) if !text.is_empty() => text,
-        _ => strip_tags(&screen.html).chars().take(40).collect(),
+        _ => strip_tags(html).chars().take(40).collect(),
     };
     if text.is_empty() {
-        format!("{}. Screen {}", index + 1, index + 1)
+        format!("{}. {unit} {}", index + 1, index + 1)
     } else {
         format!("{}. {text}", index + 1)
     }
@@ -1356,7 +1370,7 @@ fn default_screen() -> Screen {
 }
 
 /// `None` for blank input, so cleared fields leave the design JSON.
-fn optional(value: String) -> Option<String> {
+pub(crate) fn optional(value: String) -> Option<String> {
     if value.trim().is_empty() {
         None
     } else {
@@ -1471,7 +1485,7 @@ mod tests {
             styles: NodeStyles::default(),
         };
         assert_eq!(
-            node_reference(2, &node),
+            node_reference("screen", 2, &node),
             "[screen 3, node 0/1 <h2.title>: What Swift Design does]"
         );
         let image = SelectedNode {
@@ -1481,7 +1495,14 @@ mod tests {
             text: String::new(),
             styles: NodeStyles::default(),
         };
-        assert_eq!(node_reference(0, &image), "[screen 1, node 2 <img>]");
+        assert_eq!(
+            node_reference("screen", 0, &image),
+            "[screen 1, node 2 <img>]"
+        );
+        assert_eq!(
+            node_reference("slide", 0, &image),
+            "[slide 1, node 2 <img>]"
+        );
     }
 
     #[test]
