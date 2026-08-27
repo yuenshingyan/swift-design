@@ -115,6 +115,7 @@ pub struct AgentRunner {
     custom_command: Option<String>,
     settings: SettingsStore,
     designs: DesignStore,
+    decks: Option<crate::decks::DeckStore>,
     sessions: SessionStore,
     address: String,
     templates: Option<crate::templates::TemplateStore>,
@@ -138,6 +139,7 @@ impl AgentRunner {
             custom_command,
             settings,
             designs,
+            decks: None,
             sessions,
             address,
             templates: None,
@@ -158,6 +160,12 @@ impl AgentRunner {
             })),
             notifier,
         }
+    }
+
+    /// Lets deck sessions write their candidates to the deck store.
+    pub fn with_decks(mut self, decks: crate::decks::DeckStore) -> Self {
+        self.decks = Some(decks);
+        self
     }
 
     /// Lets runs style their candidates from a saved template.
@@ -225,6 +233,9 @@ impl AgentRunner {
                     self.address.clone(),
                     self.notifier.clone(),
                 );
+                if let Some(decks) = &self.decks {
+                    engine = engine.with_decks(decks.clone());
+                }
                 if let Some(templates) = &self.templates {
                     engine = engine.with_templates(templates.clone());
                 }
@@ -270,6 +281,7 @@ impl AgentRunner {
                 .arg(command)
                 .env("SWIFT_DESIGN_SESSION_ID", session_id)
                 .env("SWIFT_DESIGN_RUN_MODE", mode.as_str())
+                .env("SWIFT_DESIGN_ARTIFACT_KIND", session.artifact_kind.as_str())
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -709,7 +721,7 @@ mod tests {
     use crate::agent_runs::AgentRunner;
     use crate::designs::DesignStore;
     use crate::events::ChangeNotifier;
-    use crate::sessions::{RunOptions, SessionStore};
+    use crate::sessions::{NewSession, SessionStore};
     use crate::settings::SettingsStore;
 
     fn command_runner(directory: &TempDir, command: &str) -> (AgentRunner, SessionStore) {
@@ -744,7 +756,7 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let (runner, sessions) = command_runner(&directory, "echo custom-agent");
         sessions
-            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .create(NewSession::demo("talk", "Talk", "A talk."))
             .await
             .unwrap();
         runner.start("talk").await.unwrap();
@@ -765,7 +777,7 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let (runner, sessions) = command_runner(&directory, "sleep 5");
         sessions
-            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .create(NewSession::demo("talk", "Talk", "A talk."))
             .await
             .unwrap();
         runner.start("talk").await.unwrap();
@@ -780,7 +792,7 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let (runner, sessions) = command_runner(&directory, "echo hi");
         sessions
-            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .create(NewSession::demo("talk", "Talk", "A talk."))
             .await
             .unwrap();
         sessions
@@ -807,7 +819,7 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let (runner, sessions) = command_runner(&directory, "exit 3");
         sessions
-            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .create(NewSession::demo("talk", "Talk", "A talk."))
             .await
             .unwrap();
         runner.start("talk").await.unwrap();
@@ -827,7 +839,7 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let (runner, sessions) = command_runner(&directory, "echo done");
         sessions
-            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .create(NewSession::demo("talk", "Talk", "A talk."))
             .await
             .unwrap();
         sessions
