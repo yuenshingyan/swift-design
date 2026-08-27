@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Deck",
+  "description": "A complete presentation: one theme applied to an ordered list of slides.",
+  "type": "object",
+  "properties": {
+    "outline": {
+      "description": "The slide titles of the complete deck, in order. A preview deck\nlists more titles than it has slides: the app continues it from\nthis list later. Leave it empty when the deck is complete.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "slides": {
+      "description": "Slides in presentation order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Slide"
+      }
+    },
+    "theme": {
+      "description": "Visual identity applied to every slide.",
+      "$ref": "#/$defs/Theme"
+    },
+    "title": {
+      "description": "Presentation title, shown on the title slide and in the editor.",
+      "type": "string"
+    },
+    "transition": {
+      "description": "How the presentation moves from one slide to the next. Leave it\nout for a deck that scrolls instead of animating.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Transition"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "theme",
+    "slides"
+  ],
+  "$defs": {
+    "FontSet": {
+      "description": "Default CSS font family names.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "Family for every other text element that sets no font.",
+          "type": "string"
+        },
+        "heading": {
+          "description": "Family for text elements with role `title` or `heading`.",
+          "type": "string"
+        },
+        "mono": {
+          "description": "Family for code elements.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "heading",
+        "body",
+        "mono"
+      ]
+    },
+    "Palette": {
+      "description": "Default colors as `#rrggbb` hex strings.",
+      "type": "object",
+      "properties": {
+        "accent": {
+          "description": "Color for highlights, shapes, and chart series that set no color.",
+          "type": "string"
+        },
+        "background": {
+          "description": "Screen background color when a screen sets no background.",
+          "type": "string"
+        },
+        "muted": {
+          "description": "Secondary color for captions, rules, and table stripes.",
+          "type": "string"
+        },
+        "text": {
+          "description": "Text color when an element sets no color.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "background",
+        "text",
+        "accent",
+        "muted"
+      ]
+    },
+    "Slide": {
+      "description": "One slide: an HTML fragment for a 1920 by 1080 px canvas, CSS for\nthat fragment, and presenter notes.",
+      "type": "object",
+      "properties": {
+        "css": {
+          "description": "CSS for this slide only. The server scopes every selector to\nthis slide. Use plain selectors such as `.title` or `h1`. Use the\ntheme through `var(--background)`, `var(--text)`, `var(--accent)`,\n`var(--muted)`, `var(--heading-font)`, `var(--body-font)`,\n`var(--mono-font)`. No `@import`, no viewport units, no `<`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "html": {
+          "description": "The slide as one HTML fragment. The canvas is 1920 by 1080 px;\nuse px units. Allowed: headings, text, lists, tables, `<img>`\nwith `src=\"/uploads/{name}\"`, inline `<svg>`, `<pre><code>`,\n`<blockquote>`, `<a>`. Not allowed: `<script>`, `<style>`,\n`<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, forms,\nmedia, comments, `on*` attributes, `javascript:` and `data:`\nURLs, external images. Close every tag.",
+          "type": "string"
+        },
+        "notes": {
+          "description": "Presenter notes. Never rendered on the slide. The presenter view\nshows them to the speaker.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "html"
+      ]
+    },
+    "Theme": {
+      "description": "Default colors and fonts that elements inherit when they omit their\nown.",
+      "type": "object",
+      "properties": {
+        "colors": {
+          "description": "Default colors.",
+          "$ref": "#/$defs/Palette"
+        },
+        "fonts": {
+          "description": "Default font families.",
+          "$ref": "#/$defs/FontSet"
+        },
+        "name": {
+          "description": "Theme name shown in the editor.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "colors",
+        "fonts"
+      ]
+    },
+    "Transition": {
+      "description": "How the design moves from one screen to the next.",
+      "type": "object",
+      "properties": {
+        "axis": {
+          "description": "The direction the screens travel. Ignored by `none`, `fade`, and\n`zoom`, which do not travel.",
+          "$ref": "#/$defs/TransitionAxis",
+          "default": "vertical"
+        },
+        "duration_ms": {
+          "description": "How long one transition takes, in milliseconds. Use 0 to 3000.\nIgnored by `none`, which always cuts.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 450,
+          "minimum": 0
+        },
+        "effect": {
+          "description": "The visual effect between two screens.",
+          "$ref": "#/$defs/TransitionEffect",
+          "default": "push"
+        }
+      },
+      "additionalProperties": false
+    },
+    "TransitionAxis": {
+      "description": "The direction the screens travel.",
+      "oneOf": [
+        {
+          "description": "The next screen arrives from below.",
+          "type": "string",
+          "const": "vertical"
+        },
+        {
+          "description": "The next screen arrives from the right.",
+          "type": "string",
+          "const": "horizontal"
+        }
+      ]
+    },
+    "TransitionEffect": {
+      "description": "The visual effect between two screens.",
+      "oneOf": [
+        {
+          "description": "The next screen replaces this one at once.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "The two screens cross-fade.",
+          "type": "string",
+          "const": "fade"
+        },
+        {
+          "description": "Both screens travel along the axis. The old screen leaves as the\nnew one arrives. Deck files written by Swift Deck name this\neffect `slide`; that name still loads.",
+          "type": "string",
+          "const": "push"
+        },
+        {
+          "description": "The new screen travels in over the old one. The old one stays\nstill.",
+          "type": "string",
+          "const": "cover"
+        },
+        {
+          "description": "The new screen grows in as the old one shrinks away.",
+          "type": "string",
+          "const": "zoom"
+        }
+      ]
+    }
+  }
+}
