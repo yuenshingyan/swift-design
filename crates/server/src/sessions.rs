@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use design_model::{
-    BriefQuestion, BriefQuestionSet, BriefRevision, Critique, DesignBrief, QuestionAnswer,
-    RevisionSource, WorkflowError, WorkflowEvent, WorkflowState, transition,
+    ArtifactKind, BriefQuestion, BriefQuestionSet, BriefRevision, Critique, DesignBrief,
+    QuestionAnswer, RevisionSource, WorkflowError, WorkflowEvent, WorkflowState, transition,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -203,6 +203,10 @@ pub struct Session {
     pub title: String,
     /// The user's request, in their words.
     pub request: String,
+    /// What the session builds: a software demo (designs) or a deck.
+    /// Set at creation; the brief carries the same value.
+    #[serde(default)]
+    pub artifact_kind: ArtifactKind,
     /// Where the session is in the workflow.
     pub state: WorkflowState,
     /// The state to return to after an error.
@@ -242,13 +246,55 @@ pub struct SessionSummary {
     pub id: String,
     /// The title.
     pub title: String,
+    /// What the session builds.
+    pub artifact_kind: ArtifactKind,
     /// The workflow state.
     pub state: WorkflowState,
     /// When it last changed.
     pub updated_at: String,
-    /// The chosen design, when there is one.
+    /// The chosen design or deck, when there is one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chosen_design: Option<String>,
+}
+
+/// What a new session is made from.
+#[derive(Clone, Debug)]
+pub struct NewSession<'a> {
+    /// The session id, which is the project slug.
+    pub id: &'a str,
+    /// A short title.
+    pub title: &'a str,
+    /// The user's request, in their words.
+    pub request: &'a str,
+    /// The run options.
+    pub options: RunOptions,
+    /// What the session builds.
+    pub artifact_kind: ArtifactKind,
+}
+
+impl<'a> NewSession<'a> {
+    /// A demo session with default options.
+    pub fn demo(id: &'a str, title: &'a str, request: &'a str) -> Self {
+        Self {
+            id,
+            title,
+            request,
+            options: RunOptions::default(),
+            artifact_kind: ArtifactKind::Demo,
+        }
+    }
+
+    /// The same session with these run options.
+    pub fn with_options(mut self, options: RunOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// The same session building this kind of artifact.
+    pub fn with_kind(mut self, artifact_kind: ArtifactKind) -> Self {
+        self.artifact_kind = artifact_kind;
+        self
+    }
 }
 
 /// The full view of one session for `GET /sessions/{id}`.
@@ -270,8 +316,10 @@ pub struct SessionView {
     pub messages: Vec<ChatMessage>,
     /// The run records.
     pub runs: Vec<RunRecord>,
-    /// The designs that belong to this session.
+    /// The designs that belong to this session. Empty for a deck session.
     pub designs: Vec<crate::designs::DesignSummary>,
+    /// The decks that belong to this session. Empty for a demo session.
+    pub decks: Vec<crate::decks::DeckSummary>,
 }
 
 /// What went wrong in a session operation.
@@ -355,22 +403,18 @@ impl SessionStore {
     }
 
     /// Creates a session in the intake state. Fails when one exists.
-    pub async fn create(
-        &self,
-        id: &str,
-        title: &str,
-        request: &str,
-        options: RunOptions,
-    ) -> Result<Session, SessionError> {
+    pub async fn create(&self, new: NewSession<'_>) -> Result<Session, SessionError> {
         let _guard = self.write_lock.lock().await;
+        let id = new.id;
         if self.session_path(id).exists() {
             return Err(SessionError::AlreadyExists { id: id.to_owned() });
         }
         let now = crate::time::rfc3339_now();
         let session = Session {
             id: id.to_owned(),
-            title: title.to_owned(),
-            request: request.to_owned(),
+            title: new.title.to_owned(),
+            request: new.request.to_owned(),
+            artifact_kind: new.artifact_kind,
             state: WorkflowState::Intake,
             state_before_error: None,
             error: None,
@@ -381,7 +425,7 @@ impl SessionStore {
             latest_brief_revision: None,
             latest_question_set: None,
             pending_critique: None,
-            options,
+            options: new.options,
         };
         self.write_session(&session).await?;
         Ok(session)
@@ -438,6 +482,7 @@ impl SessionStore {
                 summaries.push(SessionSummary {
                     id: session.id,
                     title: session.title,
+                    artifact_kind: session.artifact_kind,
                     state: session.state,
                     updated_at: session.updated_at,
                     chosen_design: session.chosen_design,
@@ -516,7 +561,9 @@ impl SessionStore {
     }
 
     /// Writes the next brief revision and records it in the history.
-    /// Returns the new revision number.
+    /// Returns the new revision number. The session and the brief share
+    /// one artifact kind: a user edit moves the session's kind, every
+    /// other source takes the session's kind.
     pub async fn write_brief_revision(
         &self,
         id: &str,
@@ -529,6 +576,11 @@ impl SessionStore {
         let revision = session.latest_brief_revision.unwrap_or(0) + 1;
         brief.request = session.request.clone();
         brief.revision = revision;
+        if source == RevisionSource::UserEdit {
+            session.artifact_kind = brief.artifact_kind;
+        } else {
+            brief.artifact_kind = session.artifact_kind;
+        }
         // Carry the whole history forward, then add this entry.
         if revision > 1
             && let Some(previous) = self.read_brief_unlocked(id, revision - 1).await?
@@ -797,16 +849,16 @@ impl SessionStore {
     }
 }
 
-/// Checks that a design write is allowed now: the owning session must
-/// be generating (agent writes), or generating or reviewing (user
-/// writes from the editor). Returns the design id's session state so the
-/// caller can build a message.
+/// Checks that a design or deck write is allowed now: the owning session
+/// must be generating (agent writes), or generating or reviewing (user
+/// writes from the editor). The message names the session state so the
+/// caller can report it.
 pub async fn write_access(
     sessions: &SessionStore,
-    design_id: &str,
+    artifact_id: &str,
     is_user: bool,
 ) -> Result<(), String> {
-    let session_id = session_id_of_design(design_id);
+    let session_id = session_id_of_artifact(artifact_id);
     let session = sessions
         .read(session_id)
         .await
@@ -818,7 +870,7 @@ pub async fn write_access(
         Ok(())
     } else {
         Err(format!(
-            "design writes to `{design_id}` are not allowed while session `{session_id}` is in state `{}`",
+            "writes to `{artifact_id}` are not allowed while session `{session_id}` is in state `{}`",
             session.state
         ))
     }
@@ -840,12 +892,12 @@ pub fn is_valid_session_id(id: &str) -> bool {
     is_valid_design_id(id) && !id.contains(CANDIDATE_MARKER)
 }
 
-/// The session id a design belongs to: the design id with any
-/// `-candidate-N` suffix removed.
-pub fn session_id_of_design(design_id: &str) -> &str {
-    match design_id.find(CANDIDATE_MARKER) {
-        Some(position) => &design_id[..position],
-        None => design_id,
+/// The session id a design or deck belongs to: the artifact id with
+/// any `-candidate-N` suffix removed.
+pub fn session_id_of_artifact(artifact_id: &str) -> &str {
+    match artifact_id.find(CANDIDATE_MARKER) {
+        Some(position) => &artifact_id[..position],
+        None => artifact_id,
     }
 }
 
@@ -919,18 +971,18 @@ mod tests {
     async fn creating_a_session_starts_in_intake_and_survives_a_new_store() {
         let (directory, store) = store();
         let session = store
-            .create(
+            .create(NewSession::demo(
                 "finance-app",
                 "Finance app",
                 "Design a landing page.",
-                RunOptions::default(),
-            )
+            ))
             .await
             .unwrap();
         assert_eq!(session.state, WorkflowState::Intake);
+        assert_eq!(session.artifact_kind, ArtifactKind::Demo);
         assert!(
             store
-                .create("finance-app", "x", "y", RunOptions::default())
+                .create(NewSession::demo("finance-app", "x", "y"))
                 .await
                 .is_err()
         );
@@ -945,7 +997,7 @@ mod tests {
     async fn brief_revisions_number_from_one_and_keep_history() {
         let (_directory, store) = store();
         store
-            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .create(NewSession::demo("talk", "Talk", "A talk."))
             .await
             .unwrap();
         let first = store
@@ -983,7 +1035,7 @@ mod tests {
     async fn question_sets_number_in_order_and_answers_attach_to_the_latest() {
         let (_directory, store) = store();
         store
-            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .create(NewSession::demo("talk", "Talk", "A talk."))
             .await
             .unwrap();
         assert_eq!(
@@ -1023,7 +1075,7 @@ mod tests {
     async fn apply_rejects_illegal_events_and_keeps_the_file() {
         let (_directory, store) = store();
         store
-            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .create(NewSession::demo("talk", "Talk", "A talk."))
             .await
             .unwrap();
         assert!(store.apply("talk", WorkflowEvent::Approved).await.is_err());
@@ -1040,7 +1092,7 @@ mod tests {
     async fn run_failed_remembers_the_previous_state_for_retry() {
         let (_directory, store) = store();
         store
-            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .create(NewSession::demo("talk", "Talk", "A talk."))
             .await
             .unwrap();
         store
@@ -1078,7 +1130,7 @@ mod tests {
     async fn runs_record_revision_runtime_and_result() {
         let (_directory, store) = store();
         store
-            .create("talk", "Talk", "A talk.", RunOptions::default())
+            .create(NewSession::demo("talk", "Talk", "A talk."))
             .await
             .unwrap();
         let run_id = store
@@ -1121,7 +1173,7 @@ mod tests {
     async fn rename_moves_the_directory() {
         let (_directory, store) = store();
         store
-            .create("old-name", "Old", "A talk.", RunOptions::default())
+            .create(NewSession::demo("old-name", "Old", "A talk."))
             .await
             .unwrap();
         assert!(store.rename("old-name", "new-name").await.unwrap());
@@ -1131,12 +1183,76 @@ mod tests {
         assert!(!store.rename("missing", "x").await.unwrap());
     }
 
-    #[test]
-    fn session_id_of_design_strips_the_candidate_suffix() {
-        assert_eq!(session_id_of_design("talk-candidate-2"), "talk");
-        assert_eq!(session_id_of_design("talk"), "talk");
+    #[tokio::test]
+    async fn a_session_carries_its_artifact_kind() {
+        let (_directory, store) = store();
+        store
+            .create(NewSession::demo("talk", "Talk", "A talk.").with_kind(ArtifactKind::Deck))
+            .await
+            .unwrap();
+        let session = store.read("talk").await.unwrap().unwrap();
+        assert_eq!(session.artifact_kind, ArtifactKind::Deck);
         assert_eq!(
-            session_id_of_design("finance-app-candidate-10"),
+            store.list().await.unwrap()[0].artifact_kind,
+            ArtifactKind::Deck
+        );
+        // A record written before the field existed loads as a demo.
+        let raw = std::fs::read_to_string(store.session_path("talk")).unwrap();
+        let without_kind = raw.replace("\"artifact_kind\": \"deck\",", "");
+        let old: Session = serde_json::from_str(&without_kind).unwrap();
+        assert_eq!(old.artifact_kind, ArtifactKind::Demo);
+    }
+
+    #[tokio::test]
+    async fn agent_briefs_take_the_session_kind() {
+        let (_directory, store) = store();
+        store
+            .create(NewSession::demo("talk", "Talk", "A talk.").with_kind(ArtifactKind::Deck))
+            .await
+            .unwrap();
+        let brief = DesignBrief {
+            artifact_kind: ArtifactKind::Demo,
+            ..DesignBrief::default()
+        };
+        store
+            .write_brief_revision("talk", brief, RevisionSource::Agent, "Drafted")
+            .await
+            .unwrap();
+        let stored = store.latest_brief("talk").await.unwrap().unwrap();
+        assert_eq!(stored.artifact_kind, ArtifactKind::Deck);
+        assert_eq!(
+            store.read("talk").await.unwrap().unwrap().artifact_kind,
+            ArtifactKind::Deck
+        );
+    }
+
+    #[tokio::test]
+    async fn user_edits_move_the_session_kind() {
+        let (_directory, store) = store();
+        store
+            .create(NewSession::demo("talk", "Talk", "A talk."))
+            .await
+            .unwrap();
+        let brief = DesignBrief {
+            artifact_kind: ArtifactKind::Deck,
+            ..DesignBrief::default()
+        };
+        store
+            .write_brief_revision("talk", brief, RevisionSource::UserEdit, "Edited")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.read("talk").await.unwrap().unwrap().artifact_kind,
+            ArtifactKind::Deck
+        );
+    }
+
+    #[test]
+    fn session_id_of_artifact_strips_the_candidate_suffix() {
+        assert_eq!(session_id_of_artifact("talk-candidate-2"), "talk");
+        assert_eq!(session_id_of_artifact("talk"), "talk");
+        assert_eq!(
+            session_id_of_artifact("finance-app-candidate-10"),
             "finance-app"
         );
     }
