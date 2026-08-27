@@ -76,12 +76,7 @@ pub(crate) fn CritiqueBar(
                 oninput: move |event: FormEvent| text.set(event.value()),
             }
             div { class: "critique-actions",
-                button {
-                    class: "primary",
-                    disabled: !ready,
-                    onclick: request,
-                    "Request revision"
-                }
+                button { class: "primary", disabled: !ready, onclick: request, "Request revision" }
             }
         }
     }
