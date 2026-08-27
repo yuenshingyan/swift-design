@@ -2,20 +2,25 @@
 
 ## What Swift Design Is
 
-Swift Design is a brief-first harness that guides LLM agents to design HTML artifacts ("designs"): landing pages, app screens, and similar layouts.
+Swift Design is a brief-first harness that guides LLM agents to build HTML artifacts of two kinds:
 
-- The user sends a request. The agent asks at most three material questions per turn, then writes a design brief.
-- The user approves the brief, edits it, or generates with assumptions. Only then does the agent write a design.
-- Agents build designs by writing JSON files: a theme, a viewport, and screens with HTML and CSS.
-- The user critiques the design in the browser. Each critique creates a brief revision and a focused edit run.
-- **Generation runs on the user's own accounts, never on Swift Design's.** Two paths: an external agent CLI the user already runs (Claude Code, pi), or the built-in provider loop (`model_client.rs`, `briefing.rs`, `generation.rs`) that calls any LLM provider with the user's own keys. Swift Design supplies schemas, prompts, validation, the state machine, and the editor.
+- **Software demos** ("designs"): landing pages, app screens, and similar layouts on a device viewport. A design is a theme, a viewport, and `screens` with HTML and CSS.
+- **Decks**: slide presentations on a fixed 1920 by 1080 px canvas. A deck is a theme and `slides` with HTML and CSS. Decks keep the Swift Deck JSON shape and routes, with a presenter view and HTML, PDF, and PPTX exports.
+
+The workflow is the same for both kinds:
+
+- The user picks the kind and sends a request. The agent asks at most three material questions per turn, then writes a design brief.
+- The user approves the brief, edits it, or generates with assumptions. Only then does the agent write a design or a deck.
+- Agents build artifacts by writing JSON files that conform to the served schemas.
+- The user critiques the result in the browser. Each critique creates a brief revision and a focused edit run.
+- **Generation runs on the user's own accounts, never on Swift Design's.** Two paths: an external agent CLI the user already runs (Claude Code, pi), or the built-in provider loop (`model_client.rs`, `briefing.rs`, `generation.rs`, `deck_generation.rs`) that calls any LLM provider with the user's own keys. Swift Design supplies schemas, prompts, validation, the state machine, and the editors.
 
 ## Languages & Stack
 
 - Rust everywhere. Edition 2024.
-- Server: axum on tokio. Serves the studio UI, design files, sessions, and uploads.
+- Server: axum on tokio. Serves the studio UI, design and deck files, sessions, and uploads.
 - Studio UI: Dioxus, compiled to WASM.
-- Design, brief, and question definitions: JSON. serde structs are the source of truth. schemars generates the JSON Schemas that guide agents.
+- Design, deck, brief, and question definitions: JSON. serde structs are the source of truth. schemars generates the JSON Schemas that guide agents.
 - Logging: tracing.
 
 ## Project Layout
@@ -24,7 +29,7 @@ Cargo workspace with three crates:
 
 ```
 crates/
-  design-model/ # serde + schemars types for designs, briefs, questions, and the workflow. No IO.
+  design-model/ # serde + schemars types for designs, decks, briefs, questions, and the workflow. No IO.
   server/       # axum binary: API, sessions, engines, static assets, uploads, validation.
   ui/           # Dioxus studio (WASM).
 ```
@@ -33,12 +38,23 @@ crates/
 - Declare shared dependency versions in `[workspace.dependencies]`.
 - Organize modules by feature (`sessions.rs`, `briefing.rs`, `render.rs`), not by layer.
 
+## Two Pipelines
+
+Designs and decks are separate pipelines that share one workflow.
+
+- Separate per kind: the model types (`design.rs`, `screen.rs` and `deck.rs`, `slide.rs`), the stores (`designs.rs`, `decks.rs`), the routes (`/designs/*`, `/decks/*`), the render entry points (`render.rs`, `deck_render.rs`), the patches (`patch.rs`, `deck_patch.rs`), the polish prompts (`polish.rs`, `deck_polish.rs`), the generation prompts (`generation.rs`, `deck_generation.rs`), and the editors (`editor.rs`, `deck_editor.rs`). Deck-only modules: `presenter.rs` and `pptx.rs`.
+- Shared only where the code is identical modulo names: `history.rs`, `provenance.rs`, `events.rs`, `api_error.rs`, `screen_css.rs`, the Chrome runner in `screenshots.rs`, the font and upload inlining in `export.rs`, the page scripts in `render.rs`, the fix-round loop and attachments in `generation.rs`, `model_client.rs`, `sessions.rs`, `briefing.rs`.
+- A session has one `artifact_kind` (`demo` or `deck`), set at creation. The brief carries the same value. The engine, the chooser, the critique route, and the studio read that one value. Do not infer the kind from ids or file contents.
+- A deck page uses the same DOM vocabulary as a design page (`main.design`, `data-swift-design-*`), so the layout, navigation, editing, and audit scripts serve both. Only the audience-follow script and the PPTX measurement script are deck-only.
+- `PATCH_FORMAT` and the polish wording are duplicated on purpose: the model sees one vocabulary per kind (screens or slides).
+
 ## Workflow State
 
 - A session has one persisted `WorkflowState`: `intake`, `clarifying`, `brief_ready`, `awaiting_approval`, `generating`, `reviewing`, or `error`.
 - Every state change goes through `design_model::workflow::transition` and `SessionStore::apply`. Do not infer state from chat text, files, or UI flags.
 - The approved brief revision is the only content input to generation. Confirmed facts, assumptions, and open questions stay in separate fields.
-- Briefing mode never writes designs. The server answers 409 to design writes unless the session is `generating` (or `reviewing`, for user saves from the editor).
+- Briefing mode never writes designs or decks. The server answers 409 to design and deck writes unless the session is `generating` (or `reviewing`, for user saves from the editor).
+- The artifact kind may change through a user brief edit before generation. After generation it is fixed: the server answers 409.
 
 ## Naming
 
@@ -46,6 +62,7 @@ crates/
 - Never abbreviate: `configuration` not `config`, `context` not `ctx`, `request` not `req`. Keep Rust-universal tokens (`id`, `impl`) and names a crate's API mandates.
 - Boolean names start with `is_`, `has_`, `should_`, or `can_`.
 - Dioxus components: `PascalCase` function names under `#[component]`.
+- Vocabulary: a design has screens; a deck has slides. Use `artifact` only for code that serves both.
 
 ## Formatting & Linting
 
@@ -65,7 +82,7 @@ crates/
 
 - No `unwrap()` or `expect()` outside tests. Configure `[workspace.lints.clippy] unwrap_used = "warn"`.
 - Library code returns `Result`. It does not panic on expected failures.
-- Validate agent-written JSON (designs, question sets, briefs) at the server boundary with serde and the model crate's validators. Report every validation error, not only the first — agents fix output from these messages.
+- Validate agent-written JSON (designs, decks, question sets, briefs) at the server boundary with serde and the model crate's validators. Report every validation error, not only the first — agents fix output from these messages.
 
 ## Error Handling
 
@@ -78,7 +95,7 @@ crates/
 
 - Use tracing with structured fields: `tracing::info!(session_id = %session_id, "brief drafted")`.
 - Levels: `error` = broken, needs action. `warn` = degraded. `info` = state change. `debug` = development detail.
-- Never log upload contents, prompts, or full design bodies. Log identifiers and sizes.
+- Never log upload contents, prompts, or full design or deck bodies. Log identifiers and sizes.
 
 ## Comments & Documentation
 
@@ -95,21 +112,22 @@ crates/
 - Every type in `design-model` gets a JSON round-trip test (JSON → struct → JSON).
 - Test names are snake_case sentences: `fn rejects_a_fourth_question()`.
 - Mock nothing internal. Fake real boundaries only: the filesystem with tempfile, the model provider with the fake HTTP server in `test_support.rs`.
-- Shared test data: builder functions in a `test_support` module, plus sample designs under `fixtures/`.
+- Shared test data: builder functions in a `test_support` module, plus sample designs and decks under `fixtures/`.
 
 ## Agent Harness Rules
 
 - All LLM access goes through the provider registry in `crates/server/src/model_client.rs`: OpenAI-compatible chat endpoints keyed by the user's own environment variables, pi-style. Do not add provider-specific SDK crates; a provider is a name, a URL, and key variables.
 - Swift Design never ships or requires its own API keys. Model calls happen only with the user's keys, and only when a run starts.
-- Agents receive everything from the running app, never from repo files: instructions at `GET /instructions`, the schemas at `GET /schemas/{design,brief,question-set}`, the session at `GET /sessions/{id}`. Do not add agent-facing markdown or prompt files to the repo.
-- The instructions payload lives in `crates/server/src/instructions.rs`. Update it whenever agent-visible behavior changes.
+- Agents receive everything from the running app, never from repo files: instructions at `GET /instructions`, the schemas at `GET /schemas/{design,deck,brief,question-set}`, the session at `GET /sessions/{id}`. Do not add agent-facing markdown or prompt files to the repo.
+- The instructions payload lives in `crates/server/src/instructions.rs`. It carries one rule list per kind (`DEMO_RULES`, `DECK_RULES`) and one example per kind. Update it whenever agent-visible behavior changes.
 - The app serves the schemas from the Rust types at runtime, so they cannot go stale. `schemas/` holds generated copies for review diffs only: regenerate and commit them whenever `design-model` types change (`cargo run -p server --bin generate_schema`). CI fails on a stale copy.
-- Sample designs live in `fixtures/` for tests; the instructions payload embeds the example for agents.
+- Sample artifacts live in `fixtures/` (`sample-design.json`, `sample-deck.json`) for tests; the instructions payload embeds both examples for agents.
 - Write schema descriptions, prompts, and instruction strings in Simplified Technical English: short imperative sentences, one instruction per sentence, one term per concept.
 
 ## Server API
 
-- Routes: plural nouns, kebab-case: `/sessions`, `/sessions/{id}/brief`, `/designs`, `/uploads`.
+- Routes: plural nouns, kebab-case: `/sessions`, `/sessions/{id}/brief`, `/designs`, `/decks`, `/uploads`.
+- Deck-only routes: `/decks/{id}/present`, `/decks/{id}/render?audience=true`, `/decks/{id}/slides/{n}.png`, `/decks/{id}/export.pptx`.
 - JSON fields: `snake_case` (serde default). Do not rename to camelCase.
 - Success responses return the payload directly. Errors return `{ "error": { "message": "...", "details": [...] } }`.
 - Timestamps: RFC 3339 strings.
