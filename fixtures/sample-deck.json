@@ -1,0 +1,33 @@
+{
+  "title": "Swift Design Deck Overview",
+  "theme": {
+    "name": "midnight",
+    "colors": {
+      "background": "#101418",
+      "text": "#f5f5f5",
+      "accent": "#4f8cff",
+      "muted": "#8a94a6"
+    },
+    "fonts": {
+      "heading": "Inter",
+      "body": "Inter",
+      "mono": "JetBrains Mono"
+    }
+  },
+  "slides": [
+    {
+      "html": "<div class='s1-hero'><div class='s1-panel'></div><div class='s1-copy'><h1>Swift Design</h1><p class='s1-caption'>Decks from HTML, written by your agent.</p></div></div>",
+      "css": ".s1-hero { display: grid; grid-template-columns: 42fr 58fr; height: 100%; } .s1-panel { background: var(--accent); } .s1-copy { align-self: center; padding: 0 96px; } h1 { font-size: 120px; font-weight: 700; } .s1-caption { font-size: 40px; color: var(--muted); margin-top: 24px; }",
+      "notes": "Open with the one-line pitch."
+    },
+    {
+      "html": "<div class='s2-page'><h2>What Swift Design does</h2><div class='s2-rule'></div><div class='s2-columns'><ul><li>Agents read the schema and write deck JSON.</li><li>The server validates and renders every slide.</li><li>The user edits slides in the browser.</li></ul><img src='/uploads/editor.png' alt='The editor'></div></div>",
+      "css": ".s2-page { padding: 96px 120px; height: 100%; display: flex; flex-direction: column; } h2 { font-size: 72px; font-weight: 600; } .s2-rule { width: 160px; height: 8px; background: var(--accent); margin: 28px 0 48px; } .s2-columns { display: grid; grid-template-columns: 3fr 2fr; gap: 96px; align-items: start; } .s2-columns li { font-size: 40px; line-height: 1.5; margin-bottom: 20px; } .s2-columns img { width: 100%; border-radius: 16px; }"
+    },
+    {
+      "html": "<div class='s3-page'><h2>Drafting time per deck</h2><svg class='s3-chart' viewBox='0 0 1000 520' role='img'><line x1='80' y1='440' x2='960' y2='440' stroke='#101418' stroke-opacity='0.3'/><rect x='160' y='80' width='160' height='360' rx='6' fill='#4f8cff'/><rect x='420' y='230' width='160' height='210' rx='6' fill='#4f8cff'/><rect x='680' y='380' width='160' height='60' rx='6' fill='#4f8cff'/><text x='240' y='490' text-anchor='middle' font-size='28' fill='#101418'>Manual · 6h</text><text x='500' y='490' text-anchor='middle' font-size='28' fill='#101418'>Template · 3.5h</text><text x='760' y='490' text-anchor='middle' font-size='28' fill='#101418'>Swift Design · 1h</text></svg></div>",
+      "css": ".s3-page { background: #f5f5f5; color: #101418; height: 100%; padding: 96px 120px; display: flex; flex-direction: column; gap: 48px; } h2 { font-size: 72px; font-weight: 600; } .s3-chart { width: 100%; height: 720px; }",
+      "notes": "Swift Design makes no LLM API calls of its own."
+    }
+  ]
+}
