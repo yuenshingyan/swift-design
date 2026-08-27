@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use design_model::ArtifactKind;
+use design_model::{ArtifactKind, DECK_VIEWPORT, Viewport};
 use dioxus::prelude::*;
 
 use crate::api;
@@ -23,6 +23,9 @@ pub(crate) struct CanvasCard {
     pub outline_count: usize,
     /// The CSS aspect-ratio of the preview frame.
     pub ratio: String,
+    /// The canvas the artifact was written for. A demo run writes one
+    /// design per canvas, and the tabs group by this.
+    pub viewport: Viewport,
 }
 
 impl CanvasCard {
@@ -67,6 +70,7 @@ pub(crate) fn cards_from_designs(
             count: summary.screen_count,
             outline_count: summary.outline_count,
             ratio: summary.aspect_ratio(),
+            viewport: summary.viewport,
         })
         .collect();
     mine.sort_by_key(|card| Some(card.id.as_str()) != chosen);
@@ -88,6 +92,7 @@ pub(crate) fn cards_from_decks(
             count: summary.slide_count,
             outline_count: summary.outline_count,
             ratio: summary.aspect_ratio(),
+            viewport: DECK_VIEWPORT,
         })
         .collect();
     mine.sort_by_key(|card| Some(card.id.as_str()) != chosen);
@@ -121,6 +126,28 @@ pub(crate) fn card_label(card: &CanvasCard, chosen: Option<&str>) -> String {
     }
 }
 
+/// The name of one canvas, for a tab: `Desktop · 1440 × 900`.
+pub(crate) fn canvas_label(viewport: Viewport) -> String {
+    let name = match (viewport.width, viewport.height) {
+        (390, 844) => "Phone",
+        (1024, 768) => "Tablet",
+        (1920, 1080) => "Slides",
+        _ => "Desktop",
+    };
+    format!("{name} · {} × {}", viewport.width, viewport.height)
+}
+
+/// The canvases the cards were written for, in first-seen order.
+pub(crate) fn canvas_tabs(cards: &[CanvasCard]) -> Vec<Viewport> {
+    let mut tabs: Vec<Viewport> = Vec::new();
+    for card in cards {
+        if !tabs.contains(&card.viewport) {
+            tabs.push(card.viewport);
+        }
+    }
+    tabs
+}
+
 /// The candidate canvas for a session.
 #[component]
 pub(crate) fn CandidateCanvas(
@@ -132,15 +159,41 @@ pub(crate) fn CandidateCanvas(
     on_open: EventHandler<(ArtifactKind, String)>,
 ) -> Element {
     let mut shown = use_signal(HashMap::<String, usize>::new);
+    let mut open_tab = use_signal(usize::default);
     // Placeholder ids the run reports that are not on disk yet.
     let placeholders: Vec<String> = run_designs
         .keys()
         .filter(|id| !cards.iter().any(|card| &card.id == *id))
         .cloned()
         .collect();
+    // A run writes one design per canvas. Showing every canvas at once
+    // would put a phone card next to a desktop card at different
+    // scales, so each canvas gets a tab.
+    let tabs = canvas_tabs(&cards);
+    let tab = open_tab().min(tabs.len().saturating_sub(1));
+    let shown_cards: Vec<CanvasCard> = match tabs.len() > 1 {
+        true => cards
+            .iter()
+            .filter(|card| Some(&card.viewport) == tabs.get(tab))
+            .cloned()
+            .collect(),
+        false => cards.clone(),
+    };
     rsx! {
+        if tabs.len() > 1 {
+            div { class: "canvas-tabs",
+                for (index, viewport) in tabs.iter().enumerate() {
+                    button {
+                        key: "{index}",
+                        class: if index == tab { "canvas-tab open" } else { "canvas-tab" },
+                        onclick: move |_| open_tab.set(index),
+                        "{canvas_label(*viewport)}"
+                    }
+                }
+            }
+        }
         div { class: "canvas-grid",
-            for card in cards {
+            for card in shown_cards {
                 {
                     let id = card.id.clone();
                     let kind = card.kind;
@@ -215,6 +268,34 @@ pub(crate) fn CandidateCanvas(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn the_tabs_are_the_canvases_in_first_seen_order() {
+        let card = |id: &str, viewport: Viewport| CanvasCard {
+            id: id.to_owned(),
+            kind: ArtifactKind::Demo,
+            count: 3,
+            outline_count: 0,
+            ratio: viewport.aspect_ratio_css(),
+            viewport,
+        };
+        let phone = Viewport {
+            width: 390,
+            height: 844,
+        };
+        let cards = vec![
+            card("a-candidate-1", Viewport::default()),
+            card("a-candidate-2", Viewport::default()),
+            card("a-candidate-3", phone),
+        ];
+        assert_eq!(canvas_tabs(&cards), vec![Viewport::default(), phone]);
+        assert_eq!(canvas_tabs(&[]), Vec::new());
+        assert_eq!(canvas_label(Viewport::default()), "Desktop · 1440 × 900");
+        assert_eq!(canvas_label(phone), "Phone · 390 × 844");
+        assert_eq!(canvas_label(DECK_VIEWPORT), "Slides · 1920 × 1080");
+    }
+
     use design_model::ArtifactKind;
 
     use super::{CanvasCard, card_label, cards_from_decks, cards_from_designs};
