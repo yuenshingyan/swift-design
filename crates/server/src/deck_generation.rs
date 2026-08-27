@@ -19,7 +19,7 @@ use crate::generation::{
     ArtifactRequest, Attachments, CONTINUE_DRAFT_SHARE, ContinueChunk, DRAFT_SHARE,
     GenerationContext, GenerationEngine, GenerationOutcome, GenerationStop, GenerationTask,
     ShareSink, brief_input, candidate_template, complete_array_items, continue_chunks,
-    stop_to_string, template_note, user_content_with_images, writing_effort,
+    failure_message, stop_to_string, template_note, user_content_with_images, writing_effort,
 };
 use crate::instructions::DECK_RULES;
 use crate::model_client::LogSink;
@@ -108,7 +108,10 @@ impl GenerationEngine {
                             outcome.as_ref().err().map(|error| format!("{id}: {error}"))
                         })
                         .collect();
-                    return Err(GenerationStop::Failed(failures.join("; ")));
+                    return Err(GenerationStop::Failed(failure_message(
+                        &failures,
+                        "no deck was continued",
+                    )));
                 }
                 Ok(GenerationOutcome::Wrote {
                     design_ids: deck_ids,
@@ -189,7 +192,10 @@ impl GenerationEngine {
             }
         }
         if saved.is_empty() {
-            return Err(GenerationStop::Failed(failures.join("; ")));
+            return Err(GenerationStop::Failed(failure_message(
+                &failures,
+                "no deck candidate reached the store",
+            )));
         }
         for failure in &failures {
             log(&format!("candidate failed: {failure}"));
@@ -665,6 +671,10 @@ struct DeckLiveSaver {
     deck_id: String,
     saved_rank: Arc<std::sync::Mutex<Option<usize>>>,
     write_lock: Arc<tokio::sync::Mutex<()>>,
+    /// True once `finish` has written the final deck. A partial save
+    /// spawned earlier can still be waiting for the write lock, and it
+    /// must not put a half-written draft back over the final one.
+    is_finished: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl DeckLiveSaver {
@@ -675,6 +685,7 @@ impl DeckLiveSaver {
             deck_id: deck_id.to_owned(),
             saved_rank: Arc::new(std::sync::Mutex::new(None)),
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            is_finished: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -696,6 +707,9 @@ impl DeckLiveSaver {
         let saver = self.clone();
         tokio::spawn(async move {
             let _guard = saver.write_lock.lock().await;
+            if saver.is_finished.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
             if saver.decks.save(&saver.deck_id, &deck).await.is_ok() {
                 saver.notifier.notify();
             }
@@ -705,6 +719,8 @@ impl DeckLiveSaver {
     /// Saves the final deck after every partial save landed.
     async fn finish(&self, deck: &Deck) -> Result<(), String> {
         let _guard = self.write_lock.lock().await;
+        self.is_finished
+            .store(true, std::sync::atomic::Ordering::Release);
         self.decks
             .save(&self.deck_id, deck)
             .await
@@ -884,6 +900,21 @@ fn deck_preview_note(count: usize) -> String {
     )
 }
 
+/// The prompt line that holds the deck to the length the user asked
+/// for. Empty when the user set no length. A preview writes fewer
+/// slides than the length, so the count goes to the outline instead.
+fn slide_count_note(slide_count: Option<u32>, preview_slides: Option<usize>) -> String {
+    let Some(count) = slide_count else {
+        return String::new();
+    };
+    match preview_slides {
+        Some(_) => {
+            format!("The user asked for {count} slides. Put exactly {count} titles in `outline`.\n")
+        }
+        None => format!("The user asked for {count} slides. Write exactly {count} slides.\n"),
+    }
+}
+
 /// The user prompt for one deck candidate: the approved brief is
 /// authoritative, plus the template, preview, concept, and effort notes.
 fn deck_candidate_prompt(request: &DeckCandidateRequest<'_>) -> String {
@@ -904,6 +935,7 @@ fn deck_candidate_prompt(request: &DeckCandidateRequest<'_>) -> String {
     if let Some(count) = request.preview_slides {
         prompt.push_str(&deck_preview_note(count));
     }
+    prompt.push_str(&slide_count_note(brief.slide_count, request.preview_slides));
     let count = options.variation_count();
     if count > 1 {
         prompt.push_str(&format!(
@@ -1016,7 +1048,7 @@ mod tests {
 
     use super::{
         apply_deck_continuation, continuation_slides, deck_system_prompt, parse_deck, partial_deck,
-        placeholder_slide, shown_deck,
+        placeholder_slide, shown_deck, slide_count_note,
     };
     use crate::decks::DeckStore;
     use crate::designs::DesignStore;
@@ -1025,6 +1057,21 @@ mod tests {
     use crate::model_client::LogSink;
     use crate::sessions::{NewSession, SessionStore};
     use crate::test_support::{FakeModelServer, SAMPLE_DECK, low_effort_options, sample_deck};
+
+    #[test]
+    fn the_slide_count_holds_the_deck_to_the_length_the_user_asked_for() {
+        assert_eq!(slide_count_note(None, None), "");
+        assert_eq!(slide_count_note(None, Some(3)), "");
+        assert_eq!(
+            slide_count_note(Some(12), None),
+            "The user asked for 12 slides. Write exactly 12 slides.\n"
+        );
+        // A preview writes three slides, so the length goes to the outline.
+        assert_eq!(
+            slide_count_note(Some(12), Some(3)),
+            "The user asked for 12 slides. Put exactly 12 titles in `outline`.\n"
+        );
+    }
 
     fn silent_log() -> LogSink {
         Arc::new(|_line: &str| {})
