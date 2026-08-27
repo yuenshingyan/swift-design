@@ -20,6 +20,11 @@
         "$ref": "#/$defs/QuestionAnswer"
       }
     },
+    "artifact_kind": {
+      "description": "`demo` or `deck`. The session sets it. A demo run writes a\ndesign; a deck run writes a deck.",
+      "$ref": "#/$defs/ArtifactKind",
+      "default": "demo"
+    },
     "assumptions": {
       "description": "Choices the app or the agent made without the user. Use only\nwhere a confirmed fact does not cover the need.",
       "type": "array",
@@ -141,6 +146,21 @@
     }
   },
   "$defs": {
+    "ArtifactKind": {
+      "description": "What a session builds: a software demo or a deck.",
+      "oneOf": [
+        {
+          "description": "A software demo: a landing page, app screens, or a similar layout\non a device viewport. Written as a design.",
+          "type": "string",
+          "const": "demo"
+        },
+        {
+          "description": "A slide presentation on a 1920 by 1080 px canvas. Written as a\ndeck.",
+          "type": "string",
+          "const": "deck"
+        }
+      ]
+    },
     "BriefRevision": {
       "description": "One entry in a brief's revision history.",
       "type": "object",
