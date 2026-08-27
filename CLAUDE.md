@@ -43,7 +43,7 @@ crates/
 Designs and decks are separate pipelines that share one workflow.
 
 - Separate per kind: the model types (`design.rs`, `screen.rs` and `deck.rs`, `slide.rs`), the stores (`designs.rs`, `decks.rs`), the routes (`/designs/*`, `/decks/*`), the render entry points (`render.rs`, `deck_render.rs`), the patches (`patch.rs`, `deck_patch.rs`), the polish prompts (`polish.rs`, `deck_polish.rs`), the generation prompts (`generation.rs`, `deck_generation.rs`), and the editors (`editor.rs`, `deck_editor.rs`). Deck-only modules: `presenter.rs` and `pptx.rs`.
-- Shared only where the code is identical modulo names: `history.rs`, `provenance.rs`, `events.rs`, `api_error.rs`, `screen_css.rs`, the Chrome runner in `screenshots.rs`, the font and upload inlining in `export.rs`, the page scripts in `render.rs`, the fix-round loop and attachments in `generation.rs`, `model_client.rs`, `sessions.rs`, `briefing.rs`.
+- Shared only where the code is identical modulo names: `history.rs`, `provenance.rs`, `events.rs`, `api_error.rs`, `files.rs`, `screen_css.rs`, the Chrome runner in `screenshots.rs`, the font and upload inlining in `export.rs`, the page scripts in `render.rs`, the fix-round loop and attachments in `generation.rs`, `model_client.rs`, `sessions.rs`, `briefing.rs`.
 - A session has one `artifact_kind` (`demo` or `deck`), set at creation. The brief carries the same value. The engine, the chooser, the critique route, and the studio read that one value. Do not infer the kind from ids or file contents.
 - A deck page uses the same DOM vocabulary as a design page (`main.design`, `data-swift-design-*`), so the layout, navigation, editing, and audit scripts serve both. Only the audience-follow script and the PPTX measurement script are deck-only.
 - `PATCH_FORMAT` and the polish wording are duplicated on purpose: the model sees one vocabulary per kind (screens or slides).
@@ -55,6 +55,10 @@ Designs and decks are separate pipelines that share one workflow.
 - The approved brief revision is the only content input to generation. Confirmed facts, assumptions, and open questions stay in separate fields.
 - Briefing mode never writes designs or decks. The server answers 409 to design and deck writes unless the session is `generating` (or `reviewing`, for user saves from the editor).
 - The artifact kind may change through a user brief edit before generation. After generation it is fixed: the server answers 409.
+- A question with a closed set of answers belongs to the app, not to the model: the artifact kind, the variation count (1 to `CANDIDATE_LIMIT`), the canvases for a demo (1 to `PLATFORM_LIMIT`), and the slide count for a deck. The studio asks with a control next to the questions; the prompts in `briefing.rs` and `instructions.rs` tell the agent never to ask about them.
+- The app's answers live on `Session.options`, not in the brief. `write_brief_revision` mirrors them into every revision, so an agent that rewrites the brief cannot drop them. A control that wrote a brief revision instead would move the session to `awaiting_approval` mid-clarification.
+- A demo run writes one design per canvas per variation: `candidate_plans` in `generation.rs` names them, and the studio groups the cards under one tab per canvas.
+- The brief keeps the answered questions in `answered_questions`, as question text plus answer text. Never write an answer into `confirmed_facts` as `question: answer`: a fact is one short sentence.
 
 ## Naming
 
@@ -82,6 +86,8 @@ Designs and decks are separate pipelines that share one workflow.
 
 - No `unwrap()` or `expect()` outside tests. Configure `[workspace.lints.clippy] unwrap_used = "warn"`.
 - Library code returns `Result`. It does not panic on expected failures.
+- Every store writes through `files::write_atomically`: a temporary file, then a rename. `tokio::fs::write` truncates first, and the studio polls the stores while a run writes them, so a plain write lets a reader see an empty file.
+- A background save must stop once the final save has landed. `LiveSaver` and `DeckLiveSaver` set `is_finished` under the write lock, so a partial draft spawned earlier cannot overwrite the finished artifact.
 - Validate agent-written JSON (designs, decks, question sets, briefs) at the server boundary with serde and the model crate's validators. Report every validation error, not only the first — agents fix output from these messages.
 
 ## Error Handling
