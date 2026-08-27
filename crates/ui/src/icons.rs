@@ -39,6 +39,24 @@ fill=\"none\" aria-hidden=\"true\"><path d=\"M21.44 11.05l-9.19 9.19a6 6 0 0 1-8
 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48\" stroke=\"currentColor\" \
 stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg>";
 
+/// A desktop monitor, for the desktop canvas.
+pub(crate) const MONITOR: &str = "<svg width=\"22\" height=\"22\" viewBox=\"0 0 24 24\" \
+fill=\"none\" aria-hidden=\"true\"><rect x=\"2\" y=\"4\" width=\"20\" height=\"13\" rx=\"1.5\" \
+stroke=\"currentColor\" stroke-width=\"1.6\"></rect><path d=\"M9 20h6M12 17v3\" \
+stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\"></path></svg>";
+
+/// A phone, for the phone canvas.
+pub(crate) const PHONE: &str = "<svg width=\"22\" height=\"22\" viewBox=\"0 0 24 24\" \
+fill=\"none\" aria-hidden=\"true\"><rect x=\"7\" y=\"2\" width=\"10\" height=\"20\" rx=\"2\" \
+stroke=\"currentColor\" stroke-width=\"1.6\"></rect><path d=\"M10.75 18.5h2.5\" \
+stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\"></path></svg>";
+
+/// A tablet, for the tablet canvas.
+pub(crate) const TABLET: &str = "<svg width=\"22\" height=\"22\" viewBox=\"0 0 24 24\" \
+fill=\"none\" aria-hidden=\"true\"><rect x=\"4\" y=\"2.5\" width=\"16\" height=\"19\" rx=\"2\" \
+stroke=\"currentColor\" stroke-width=\"1.6\"></rect><path d=\"M10.5 18.75h3\" \
+stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\"></path></svg>";
+
 /// A pencil, for rename.
 #[allow(dead_code)]
 pub(crate) const PENCIL: &str = "<svg width=\"11\" height=\"11\" viewBox=\"0 0 12 12\" \
