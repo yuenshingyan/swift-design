@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 
 use crate::api;
 use crate::chat_controls::{ModelChip, SendButton};
-use crate::settings::{SettingsPanel, design_project, pause_briefly};
+use crate::settings::{SettingsPanel, artifact_project, pause_briefly};
 use crate::status::RunStatusCard;
 use crate::uploads::{AttachButton, AttachmentChips};
 
@@ -37,7 +37,7 @@ pub fn DesignChat(
     /// Called when a run finishes, so the editor can reload the design.
     on_run_finished: EventHandler<()>,
 ) -> Element {
-    let session_id = design_project(&design_id);
+    let session_id = artifact_project(&design_id);
     let mut messages = use_signal(Vec::<api::ChatMessage>::new);
     let mut agent_run = use_signal(|| Option::<api::AgentRun>::None);
     let mut settings = use_signal(|| Option::<api::SettingsView>::None);
@@ -170,12 +170,12 @@ pub fn DesignChat(
                     p { class: "error", "{message}" }
                 }
             }
-            if show_setup {
-                div { class: "chat-settings",
-                    SettingsPanel { settings, is_configuring }
-                }
-            }
             div { class: "chat-box",
+                if show_setup {
+                    div { class: "chat-settings",
+                        SettingsPanel { settings, is_configuring }
+                    }
+                }
                 if let Some(reference) = context() {
                     div { class: "context-chip mono",
                         span { "{reference}" }
