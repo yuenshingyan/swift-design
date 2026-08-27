@@ -2,7 +2,7 @@
 //!
 //! `SettingsPanel` is the three-step wizard that chooses a provider, an
 //! access method (API key or login), and a model. The small helpers
-//! (`stepped_screen`, `design_project`, `pause_briefly`) are shared by
+//! (`stepped_screen`, `artifact_project`, `pause_briefly`) are shared by
 //! the session workspace and the canvas.
 
 use dioxus::document;
@@ -29,8 +29,9 @@ pub(crate) async fn pause_briefly() {
     let _ = sleeper.recv::<i32>().await;
 }
 
-/// The project a design belongs to: its id up to any candidate suffix.
-pub(crate) fn design_project(id: &str) -> String {
+/// The project a design or deck belongs to: its id up to any candidate
+/// suffix.
+pub(crate) fn artifact_project(id: &str) -> String {
     match id.find("-candidate-") {
         Some(position) => id[..position].to_owned(),
         None => id.to_owned(),
@@ -733,7 +734,7 @@ fn ModelStep(
 #[cfg(test)]
 mod tests {
     use crate::api::CatalogModel;
-    use crate::settings::{ModelRow, design_project, model_rows, stepped_screen};
+    use crate::settings::{ModelRow, artifact_project, model_rows, stepped_screen};
 
     fn catalog() -> Vec<CatalogModel> {
         vec![
@@ -763,9 +764,9 @@ mod tests {
     }
 
     #[test]
-    fn design_projects_strip_candidate_suffixes() {
-        assert_eq!(design_project("talk-candidate-2"), "talk");
-        assert_eq!(design_project("talk"), "talk");
+    fn artifact_projects_strip_candidate_suffixes() {
+        assert_eq!(artifact_project("talk-candidate-2"), "talk");
+        assert_eq!(artifact_project("talk"), "talk");
     }
 
     #[test]
