@@ -54,8 +54,10 @@ pub enum TransitionEffect {
     /// The two screens cross-fade.
     Fade,
     /// Both screens travel along the axis. The old screen leaves as the
-    /// new one arrives.
+    /// new one arrives. Deck files written by Swift Deck name this
+    /// effect `slide`; that name still loads.
     #[default]
+    #[serde(alias = "slide")]
     Push,
     /// The new screen travels in over the old one. The old one stays
     /// still.
@@ -136,6 +138,17 @@ mod tests {
     fn unknown_effects_and_fields_are_rejected() {
         assert!(serde_json::from_str::<Transition>(r#"{"effect":"spin"}"#).is_err());
         assert!(serde_json::from_str::<Transition>(r#"{"speed":2}"#).is_err());
+    }
+
+    #[test]
+    fn the_slide_effect_name_loads_as_push() {
+        let transition: Transition = serde_json::from_str(r#"{"effect":"slide"}"#).unwrap();
+        assert_eq!(transition.effect, TransitionEffect::Push);
+        assert!(
+            serde_json::to_string(&transition)
+                .unwrap()
+                .contains("\"push\"")
+        );
     }
 
     #[test]
