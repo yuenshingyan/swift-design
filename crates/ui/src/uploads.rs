@@ -10,6 +10,7 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 
 use crate::api;
+use crate::icons;
 
 /// Posts the files of the panel's file input as one multipart request,
 /// clears the input, and reports the outcome back to Dioxus.
@@ -76,7 +77,7 @@ pub fn AttachButton(on_uploaded: EventHandler<()>, on_error: EventHandler<String
         label {
             class: if is_uploading() { "attach-button busy" } else { "attach-button" },
             title: "Attach files as sources: images, PDFs, text. Up to 50 MB each.",
-            "+"
+            span { dangerous_inner_html: icons::PAPERCLIP }
             input {
                 r#type: "file",
                 multiple: true,
