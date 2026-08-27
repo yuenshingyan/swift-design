@@ -2240,7 +2240,7 @@ fn parse_design(content: &str) -> Result<Design, String> {
 mod tests {
     use std::sync::Arc;
 
-    use design_model::{Critique, CritiqueCategory, DesignBrief, RevisionSource, WorkflowState};
+    use design_model::{Critique, DesignBrief, RevisionSource, WorkflowState};
 
     use super::{GenerationEngine, GenerationOutcome, brief_input, candidate_plans, system_prompt};
     use crate::designs::DesignStore;
@@ -2482,7 +2482,6 @@ mod tests {
                 session.pending_critique = Some(crate::sessions::PendingCritique {
                     design: "talk-candidate-1".to_owned(),
                     critique: Critique {
-                        category: CritiqueCategory::Structure,
                         text: "Tighten the hero.".to_owned(),
                     },
                 });
