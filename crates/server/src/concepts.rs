@@ -76,6 +76,7 @@ pub fn concept_prompt(count: usize) -> String {
 /// The user input for the concept call: the approved brief.
 pub fn concept_input(brief: &DesignBrief) -> String {
     let mut input = format!("Request:\n{}\n", brief.request);
+    input.push_str(&format!("Kind: {}\n", brief.artifact_kind.label()));
     if !brief.target_artifact.is_empty() {
         input.push_str(&format!("Artifact: {}\n", brief.target_artifact));
     }
