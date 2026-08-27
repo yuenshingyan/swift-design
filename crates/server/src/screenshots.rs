@@ -1,11 +1,11 @@
-//! Screen screenshots: how a model sees its own work.
+//! Screen and slide screenshots: how a model sees its own work.
 //!
-//! The server renders one screen to HTML and asks an installed Chrome or
-//! Chromium to draw it as a PNG. No browser crate is shipped: the
-//! binary is the user's own. `GET /designs/{id}/screens/{n}.png` serves a
-//! screenshot to external agents, and the polish pass sends the images
-//! to vision-capable models. Without Chrome, everything falls back to
-//! text.
+//! The server renders one screen or slide to HTML and asks an installed
+//! Chrome or Chromium to draw it as a PNG. No browser crate is shipped:
+//! the binary is the user's own. `GET /designs/{id}/screens/{n}.png` and
+//! `GET /decks/{id}/slides/{n}.png` serve a screenshot to external
+//! agents, and the polish pass sends the images to vision-capable
+//! models. Without Chrome, everything falls back to text.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,9 +16,11 @@ use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use design_model::{Design, Viewport};
+use design_model::{DECK_VIEWPORT, Deck, Design, Viewport};
 
 use crate::api_error;
+use crate::deck_render;
+use crate::decks::{DeckStore, is_valid_deck_id};
 use crate::designs::{DesignStore, is_valid_design_id};
 use crate::render::{RenderOptions, render_design_with};
 use crate::settings::SettingsStore;
@@ -151,6 +153,43 @@ pub async fn dump_design_dom(design: &Design, base_url: &str) -> anyhow::Result<
         },
     );
     dump_rendered_dom(&html, base_url, design.viewport).await
+}
+
+/// Renders slide `index` (zero-based) of `deck` to a PNG. `base_url`
+/// resolves relative image paths like `/uploads/…`.
+pub async fn screenshot_slide(
+    deck: &Deck,
+    index: usize,
+    base_url: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let chrome = find_chrome().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
+        )
+    })?;
+    let html = deck_render::render_deck_with(
+        deck,
+        deck_render::RenderOptions {
+            only_slide: Some(index),
+            asset_origin: Some(base_url.to_owned()),
+            ..deck_render::RenderOptions::default()
+        },
+    );
+    screenshot_html(&chrome, &with_base_href(&html, base_url), DECK_VIEWPORT).await
+}
+
+/// Renders the whole deck with the layout audit script and returns the
+/// DOM after the audit ran, as Chrome dumps it.
+pub async fn dump_deck_dom(deck: &Deck, base_url: &str) -> anyhow::Result<String> {
+    let html = deck_render::render_deck_with(
+        deck,
+        deck_render::RenderOptions {
+            is_auditing: true,
+            asset_origin: Some(base_url.to_owned()),
+            ..deck_render::RenderOptions::default()
+        },
+    );
+    dump_rendered_dom(&html, base_url, DECK_VIEWPORT).await
 }
 
 /// Loads a rendered page in Chrome and returns the DOM after its
@@ -357,9 +396,30 @@ async fn run_chrome(
     )
 }
 
-/// The `/designs/{id}/screens/{n}.png` route table.
+/// The `/designs/{id}/screens/{n}.png` and `/decks/{id}/slides/{n}.png`
+/// route table.
 pub fn routes() -> Router<crate::AppState> {
-    Router::new().route("/designs/{id}/screens/{file}", get(get_screen_image))
+    Router::new()
+        .route("/designs/{id}/screens/{file}", get(get_screen_image))
+        .route("/decks/{id}/slides/{file}", get(get_slide_image))
+}
+
+/// The 1-based number in a `{n}.png` file name. `None` for any other
+/// name.
+fn image_number(file: &str) -> Option<usize> {
+    file.strip_suffix(".png")
+        .and_then(|stem| stem.parse::<usize>().ok())
+        .filter(|number| *number >= 1)
+}
+
+/// The 404 for an image file name that is not `{n}.png`. `unit` is
+/// `screen` or `slide`.
+fn bad_image_name(unit: &str, file: &str) -> Response {
+    api_error::error_response(
+        StatusCode::NOT_FOUND,
+        &format!("no {unit} image `{file}`: use {{n}}.png with n from 1"),
+        Vec::new(),
+    )
 }
 
 /// Serves a PNG of one screen. `file` is `{n}.png` with a 1-based `n`.
@@ -371,16 +431,8 @@ async fn get_screen_image(
     if !is_valid_design_id(&id) {
         return api_error::invalid_design_id(&id);
     }
-    let Some(number) = file
-        .strip_suffix(".png")
-        .and_then(|stem| stem.parse::<usize>().ok())
-        .filter(|number| *number >= 1)
-    else {
-        return api_error::error_response(
-            StatusCode::NOT_FOUND,
-            &format!("no screen image `{file}`: use {{n}}.png with n from 1"),
-            Vec::new(),
-        );
+    let Some(number) = image_number(&file) else {
+        return bad_image_name("screen", &file);
     };
     let design = match designs.load(&id).await {
         Ok(Some(design)) => design,
@@ -407,9 +459,55 @@ async fn get_screen_image(
     }
 }
 
+/// Serves a PNG of one slide. `file` is `{n}.png` with a 1-based `n`.
+async fn get_slide_image(
+    State(decks): State<DeckStore>,
+    State(settings): State<SettingsStore>,
+    Path((id, file)): Path<(String, String)>,
+) -> Response {
+    if !is_valid_deck_id(&id) {
+        return api_error::invalid_deck_id(&id);
+    }
+    let Some(number) = image_number(&file) else {
+        return bad_image_name("slide", &file);
+    };
+    let deck = match decks.load(&id).await {
+        Ok(Some(deck)) => deck,
+        Ok(None) => return api_error::deck_not_found(&id),
+        Err(error) => return api_error::internal_error(&error),
+    };
+    if number > deck.slides.len() {
+        return api_error::error_response(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "deck `{id}` has no slide {number}: use 1 to {}",
+                deck.slides.len()
+            ),
+            Vec::new(),
+        );
+    }
+    if find_chrome().is_none() {
+        return chrome_missing_response("slide images");
+    }
+    let base_url = format!("http://{}", settings.address());
+    match screenshot_slide(&deck, number - 1, &base_url).await {
+        Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_numbers_come_from_png_names() {
+        assert_eq!(image_number("1.png"), Some(1));
+        assert_eq!(image_number("12.png"), Some(12));
+        assert_eq!(image_number("0.png"), None);
+        assert_eq!(image_number("1.jpg"), None);
+        assert_eq!(image_number("cover.png"), None);
+    }
 
     #[test]
     fn window_sizes_follow_the_viewport() {
