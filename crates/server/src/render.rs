@@ -19,7 +19,7 @@ use crate::screen_css::{google_fonts_link, scope_css};
 /// CSS-only fallback, but container units inside `atan2()` do not
 /// resolve in every browser, so the script is the primary path. The
 /// canvas width comes from `data-swift-design-width` on `main.design`.
-const LAYOUT_SCRIPT: &str = r##"(() => {
+pub(crate) const LAYOUT_SCRIPT: &str = r##"(() => {
   const main = document.querySelector('main.design');
   const canvasWidth = Number(main && main.dataset.swiftDesignWidth) || 1440;
   const sections = Array.from(document.querySelectorAll('[data-swift-design-screen]'));
@@ -40,12 +40,14 @@ const LAYOUT_SCRIPT: &str = r##"(() => {
 /// A design with no transition scrolls. A design with one stacks its frames
 /// and swaps the `data-swift-design-state` attribute, which the transition
 /// CSS animates. On a single-screen page inside the editor, asks the
-/// editor instead.
-const NAVIGATION_SCRIPT: &str = r##"const frames = Array.from(document.querySelectorAll('[data-swift-design-frame]'));
+/// editor instead. A page that follows a presenter (`isFollowing`)
+/// ignores its own keys and wheel; the deck audience script moves it.
+pub(crate) const NAVIGATION_SCRIPT: &str = r##"const frames = Array.from(document.querySelectorAll('[data-swift-design-frame]'));
 const design = document.querySelector('main.design');
 const effect = design && design.getAttribute('data-swift-design-effect');
 const canvasWidth = Number(design && design.dataset.swiftDesignWidth) || 1440;
 const canvasHeight = Number(design && design.dataset.swiftDesignHeight) || 900;
+const isFollowing = !!(design && design.dataset.swiftDesignChannel);
 function scrollIndex() {
   return Math.round(design.scrollTop / (design.clientHeight || 1));
 }
@@ -87,13 +89,13 @@ function step(amount) {
 }
 if (effect && frames.length) { frames[0].setAttribute('data-swift-design-state', 'current'); }
 document.addEventListener('keydown', (event) => {
-  if (event.target && event.target.isContentEditable) { return; }
+  if (isFollowing || (event.target && event.target.isContentEditable)) { return; }
   const isNext = event.key === 'ArrowRight' || event.key === 'PageDown';
   const isPrevious = event.key === 'ArrowLeft' || event.key === 'PageUp';
   if (!isNext && !isPrevious) { return; }
   step(isNext ? 1 : -1);
 });
-if (effect) {
+if (effect && !isFollowing) {
   let wheelAt = 0;
   window.addEventListener('wheel', (event) => {
     const amount = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
@@ -110,7 +112,7 @@ if (effect) {
 /// it; double-clicking a text node edits it in place; a right-click menu
 /// applies quick actions in the DOM; every change posts the screen root's
 /// HTML back to the editor. Same-origin messages only.
-const EDITING_SCRIPT: &str = r##"const origin = window.location.origin;
+pub(crate) const EDITING_SCRIPT: &str = r##"const origin = window.location.origin;
 const editingStyle = document.createElement('style');
 editingStyle.textContent = `
 [data-swift-design-root] *:hover:not(:has(:hover)) { outline: 1px dashed rgba(14, 110, 99, 0.6) !important; outline-offset: -1px; cursor: pointer; }
@@ -595,7 +597,7 @@ pub struct RenderOptions {
 /// Print rules appended after the base stylesheet, so they override it.
 /// Every frame is one page the size of the canvas, so the root needs no
 /// scaling at all.
-fn print_stylesheet(viewport: Viewport) -> String {
+pub(crate) fn print_stylesheet(viewport: Viewport) -> String {
     let width = viewport.width;
     let height = viewport.height;
     format!(
@@ -694,7 +696,7 @@ fn page_script(options: &RenderOptions) -> String {
 
 /// The `script-src` value and the `<script>` element for `script`. An
 /// empty script allows no script at all and emits no element.
-fn script_markup(script: &str) -> (String, String) {
+pub(crate) fn script_markup(script: &str) -> (String, String) {
     if script.is_empty() {
         return ("'none'".to_owned(), String::new());
     }
@@ -707,7 +709,7 @@ fn script_markup(script: &str) -> (String, String) {
 /// The `main.design` attributes that name the design's transition. The
 /// navigation script reads the duration; the CSS reads the effect and
 /// the axis.
-fn design_attributes(transition: Transition) -> String {
+pub(crate) fn design_attributes(transition: Transition) -> String {
     format!(
         " data-swift-design-effect=\"{effect}\" data-swift-design-axis=\"{axis}\" \
          data-swift-design-duration=\"{duration}\"",
@@ -732,7 +734,7 @@ fn transition_ms(transition: Transition) -> u32 {
 /// carries a `data-swift-design-state`. The script moves a frame through
 /// `entering` then `current`, which animates it from the effect's start
 /// state to none, and marks the old frame `leaving`.
-fn transition_styles(transition: Transition) -> String {
+pub(crate) fn transition_styles(transition: Transition) -> String {
     let frame = "main.design[data-swift-design-effect] > [data-swift-design-frame]";
     let motion = "transition: opacity var(--swift-design-duration) ease, \
                   transform var(--swift-design-duration) ease;";
@@ -795,7 +797,7 @@ fn render_screen(screen: &Screen, index: usize) -> String {
 /// Builds the base stylesheet: page chrome, the viewport-shaped frame,
 /// the scaled viewport-sized root, theme variables, and small defaults
 /// that screen CSS always overrides.
-fn stylesheet(theme: &Theme, viewport: Viewport) -> String {
+pub(crate) fn stylesheet(theme: &Theme, viewport: Viewport) -> String {
     let background = css_safe(&theme.colors.background);
     let text = css_safe(&theme.colors.text);
     let accent = css_safe(&theme.colors.accent);
