@@ -45,7 +45,7 @@
           "type": "string"
         },
         "kind": {
-          "description": "How the user answers.",
+          "description": "How the user answers. `type` is accepted as an alias when a model\nnames the field that way.",
           "$ref": "#/$defs/QuestionKind"
         },
         "label": {
