@@ -55,7 +55,9 @@ pub struct BriefQuestion {
     /// Why the answer changes the design. Shown under the question.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
-    /// How the user answers.
+    /// How the user answers. `type` is accepted as an alias when a model
+    /// names the field that way.
+    #[serde(alias = "type")]
     pub kind: QuestionKind,
     /// True when the user must answer or skip. False when an empty
     /// answer is fine.
@@ -460,6 +462,13 @@ mod tests {
         let question: BriefQuestion = serde_json::from_str(raw).unwrap();
         assert_eq!(question.kind, QuestionKind::ShortText);
         assert!(!question.required);
+    }
+
+    #[test]
+    fn a_question_kind_named_type_loads() {
+        let raw = r#"{"id":"a","label":"A?","type":"short_text"}"#;
+        let question: BriefQuestion = serde_json::from_str(raw).unwrap();
+        assert_eq!(question.kind, QuestionKind::ShortText);
     }
 
     #[test]
