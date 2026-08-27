@@ -1,17 +1,18 @@
-//! Field-level authorship: which design fields the user changed.
+//! Field-level authorship: which design or deck fields the user changed.
 //!
-//! Designs start agent-authored. When the editor saves with the
+//! Artifacts start agent-authored. When the editor saves with the
 //! `x-swift-design-author: user` header, the server diffs the incoming
-//! design against the stored one and records every changed field path.
+//! artifact against the stored one and records every changed field path.
 //! An agent save clears the marks on paths it overwrites. The editor
 //! shows the result as `agent` / `you` badges.
 //!
 //! Paths are slash-separated: `title`, `theme/colors/background`,
-//! `screens/0/body`.
+//! `screens/0/html`, `slides/0/html`. The functions work on any
+//! serializable value, so the design and the deck store share them.
 
 use std::collections::BTreeMap;
 
-use design_model::Design;
+use serde::Serialize;
 
 /// Header the editor sends so its saves count as user edits.
 pub const AUTHOR_HEADER: &str = "x-swift-design-author";
@@ -44,9 +45,9 @@ fn leaf_values(
     }
 }
 
-/// Every leaf field path of a design.
-pub fn field_paths(design: &Design) -> anyhow::Result<Vec<String>> {
-    let value = serde_json::to_value(design)?;
+/// Every leaf field path of an artifact.
+pub fn field_paths<T: Serialize>(artifact: &T) -> anyhow::Result<Vec<String>> {
+    let value = serde_json::to_value(artifact)?;
     let mut leaves = BTreeMap::new();
     leaf_values(&value, "", &mut leaves);
     Ok(leaves.into_keys().collect())
@@ -54,7 +55,7 @@ pub fn field_paths(design: &Design) -> anyhow::Result<Vec<String>> {
 
 /// Paths whose value differs between `old` and `new`, plus paths that
 /// exist only in `old` (removed fields, whose marks must be dropped).
-pub fn diff_paths(old: &Design, new: &Design) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+pub fn diff_paths<T: Serialize>(old: &T, new: &T) -> anyhow::Result<(Vec<String>, Vec<String>)> {
     let old_value = serde_json::to_value(old)?;
     let new_value = serde_json::to_value(new)?;
     let mut old_leaves = BTreeMap::new();
@@ -77,12 +78,16 @@ pub fn diff_paths(old: &Design, new: &Design) -> anyhow::Result<(Vec<String>, Ve
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use design_model::Design;
+    use design_model::{Deck, Design};
 
     use crate::provenance::{diff_paths, field_paths};
 
     fn sample_design() -> Design {
         serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap()
+    }
+
+    fn sample_deck() -> Deck {
+        serde_json::from_str(include_str!("../../../fixtures/sample-deck.json")).unwrap()
     }
 
     #[test]
@@ -112,6 +117,19 @@ mod tests {
         let design = sample_design();
         let (changed, removed) = diff_paths(&design, &design).unwrap();
         assert!(changed.is_empty());
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn diff_paths_work_for_a_deck() {
+        let old = sample_deck();
+        let paths = field_paths(&old).unwrap();
+        assert!(paths.contains(&"slides/0/html".to_owned()));
+        assert!(!paths.iter().any(|path| path.starts_with("screens/")));
+        let mut new = old.clone();
+        new.slides[1].html = "<p>Changed</p>".to_owned();
+        let (changed, removed) = diff_paths(&old, &new).unwrap();
+        assert_eq!(changed, ["slides/1/html"]);
         assert!(removed.is_empty());
     }
 }
