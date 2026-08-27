@@ -27,6 +27,14 @@ use crate::{AppState, router};
 /// The canonical valid design, as JSON.
 pub(crate) const SAMPLE_DESIGN: &str = include_str!("../../../fixtures/sample-design.json");
 
+/// The canonical valid deck, as JSON.
+pub(crate) const SAMPLE_DECK: &str = include_str!("../../../fixtures/sample-deck.json");
+
+/// The canonical valid deck, parsed.
+pub(crate) fn sample_deck() -> design_model::Deck {
+    serde_json::from_str(SAMPLE_DECK).unwrap()
+}
+
 /// The multipart boundary the upload helper uses.
 pub(crate) const MULTIPART_BOUNDARY: &str = "swiftdesignboundary";
 
@@ -45,6 +53,9 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
     let designs = DesignStore::new(directory.path().join("designs")).with_history(
         crate::history::HistoryStore::new(directory.path().join("history")),
     );
+    let decks = DeckStore::new(directory.path().join("decks")).with_history(
+        crate::history::HistoryStore::new(directory.path().join("deck-history")),
+    );
     let sessions = SessionStore::new(directory.path().join("data/sessions"));
     let settings = crate::settings::SettingsStore::new(
         directory.path().join("data/settings.json"),
@@ -57,9 +68,11 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
         sessions.clone(),
         "http://127.0.0.1:3000".to_owned(),
         changes.clone(),
-    );
+    )
+    .with_decks(decks.clone());
     router(AppState {
         designs,
+        decks,
         uploads: UploadStore::new(directory.path().join("uploads")),
         sessions,
         settings,
@@ -70,6 +83,7 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
     })
 }
 
+use crate::decks::DeckStore;
 use crate::designs::DesignStore;
 use crate::uploads::UploadStore;
 
@@ -172,11 +186,25 @@ pub(crate) fn invalid_sample_design() -> String {
     design.to_string()
 }
 
-/// Creates a session and drives it to the generating state, so design
-/// writes are allowed. Asserts the two calls succeed.
+/// Creates a demo session and drives it to the generating state, so
+/// design writes are allowed. Asserts the two calls succeed.
 pub(crate) async fn open_generating_session(application: &Router, id: &str) {
     let body = format!("{{\"id\":\"{id}\",\"request\":\"Design {id}.\"}}");
-    let (status, _) = send(application.clone(), "POST", "/sessions", Some(&body)).await;
+    open_generating_session_with(application, id, &body).await;
+}
+
+/// Creates a deck session and drives it to the generating state, so
+/// deck writes are allowed.
+pub(crate) async fn open_generating_deck_session(application: &Router, id: &str) {
+    let body = format!(
+        "{{\"id\":\"{id}\",\"request\":\"A deck about {id}.\",\"artifact_kind\":\"deck\"}}"
+    );
+    open_generating_session_with(application, id, &body).await;
+}
+
+/// Creates a session from `body` and opens it for generation.
+async fn open_generating_session_with(application: &Router, id: &str, body: &str) {
+    let (status, _) = send(application.clone(), "POST", "/sessions", Some(body)).await;
     assert!(
         status == StatusCode::CREATED,
         "creating session {id}: {status}"
