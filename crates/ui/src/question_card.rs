@@ -216,17 +216,19 @@ pub(crate) fn QuestionSetCard(
         div { class: "question-set",
             p { class: "question-set-title", "{set.title}" }
             p { class: "question-set-message", "{set.message}" }
-            for question in questions {
-                QuestionCard {
-                    key: "{question.id}",
-                    question: question.clone(),
-                    draft: drafts.read().get(&question.id).cloned().unwrap_or_default(),
-                    on_change: {
-                        let id = question.id.clone();
-                        move |next: DraftAnswer| {
-                            drafts.write().insert(id.clone(), next);
-                        }
-                    },
+            div { class: "question-cards",
+                for question in questions {
+                    QuestionCard {
+                        key: "{question.id}",
+                        question: question.clone(),
+                        draft: drafts.read().get(&question.id).cloned().unwrap_or_default(),
+                        on_change: {
+                            let id = question.id.clone();
+                            move |next: DraftAnswer| {
+                                drafts.write().insert(id.clone(), next);
+                            }
+                        },
+                    }
                 }
             }
             div { class: "question-set-actions",
@@ -354,8 +356,14 @@ pub(crate) fn AnsweredCard(
     answers: Vec<QuestionAnswer>,
     state: QuestionCardState,
 ) -> Element {
+    let kicker = if state == QuestionCardState::Stale {
+        "Superseded"
+    } else {
+        "Your answers"
+    };
     rsx! {
         div { class: "answered-card",
+            span { class: "answered-kicker", "{kicker}" }
             for question in set.questions.iter() {
                 {
                     let answer = answers.iter().find(|answer| answer.question_id == question.id);
@@ -363,19 +371,18 @@ pub(crate) fn AnsweredCard(
                         .map(|answer| answer_summary(question, answer))
                         .unwrap_or_else(|| "—".to_owned());
                     let skipped = answer.map(|answer| answer.skipped).unwrap_or(false);
+                    let summary_class = if skipped {
+                        "answered-summary skipped"
+                    } else {
+                        "answered-summary"
+                    };
                     rsx! {
                         div { key: "{question.id}", class: "answered-row",
                             span { class: "answered-label", "{question.label}" }
-                            span { class: "answered-summary", "{summary}" }
-                            if skipped {
-                                span { class: "badge skipped", "skipped" }
-                            }
+                            span { class: "{summary_class}", "{summary}" }
                         }
                     }
                 }
-            }
-            if state == QuestionCardState::Stale {
-                p { class: "answered-note", "superseded" }
             }
         }
     }
