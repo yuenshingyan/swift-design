@@ -18,7 +18,7 @@ use serde::Deserialize;
 
 use crate::agent_runs::AgentRunner;
 use crate::api_error;
-use crate::candidates::CANDIDATE_LIMIT;
+use crate::candidates::{CANDIDATE_LIMIT, PLATFORM_LIMIT};
 use crate::decks::DeckStore;
 use crate::designs::{DesignStore, is_valid_design_id};
 use crate::events::ChangeNotifier;
@@ -27,6 +27,10 @@ use crate::sessions::{
     SessionStore, SessionSummary, SessionView, is_valid_session_id, session_id_from_request,
     session_id_of_artifact,
 };
+
+/// Most slides a deck run may be asked for. Past this the run costs
+/// more than a user waits for.
+const SLIDE_COUNT_LIMIT: u32 = 60;
 
 /// The `/sessions` route table.
 pub fn routes() -> Router<crate::AppState> {
@@ -80,6 +84,32 @@ fn title_from_request(request: &str) -> String {
     line.chars().take(80).collect()
 }
 
+/// Prepares a stored brief for a reader: fills `answered_questions`
+/// when the brief has none, then drops the lines a reader has already
+/// read.
+///
+/// A brief written before the app recorded them kept the answers only
+/// as `question: answer` lines among the confirmed facts. The studio no
+/// longer shows those lines, so without this the answers would vanish
+/// from an old session. The session store still holds every question
+/// set and every answer, so the entries are rebuilt from there.
+async fn with_answered_questions(
+    sessions: &SessionStore,
+    id: &str,
+    brief: Option<DesignBrief>,
+) -> Result<Option<DesignBrief>, SessionError> {
+    let Some(mut brief) = brief else {
+        return Ok(None);
+    };
+    if !brief.answered_questions.is_empty() {
+        return Ok(Some(brief));
+    }
+    let answered = sessions.answered_questions(id).await?;
+    brief.answered_questions = crate::briefing::answered_questions_from_answers(&answered);
+    crate::briefing::tidy_brief(&mut brief);
+    Ok(Some(brief))
+}
+
 /// Builds the full session view. A demo session lists its designs, a
 /// deck session its decks.
 async fn build_view(
@@ -89,7 +119,7 @@ async fn build_view(
     session: Session,
 ) -> Result<SessionView, SessionError> {
     let id = session.id.clone();
-    let brief = sessions.latest_brief(&id).await?;
+    let brief = with_answered_questions(sessions, &id, sessions.latest_brief(&id).await?).await?;
     let question_sets = sessions.question_sets(&id).await?;
     let answers = sessions.answers(&id).await?;
     let messages = sessions.messages(&id).await?;
@@ -289,6 +319,19 @@ fn option_problem(options: &RunOptions) -> Option<String> {
                 "{name} `{level}` is unknown: use low, medium, or high"
             ));
         }
+    }
+    if options.platforms.len() > PLATFORM_LIMIT {
+        return Some(format!(
+            "at most {PLATFORM_LIMIT} canvases, got {}",
+            options.platforms.len()
+        ));
+    }
+    if let Some(count) = options.slide_count
+        && (count == 0 || count > SLIDE_COUNT_LIMIT)
+    {
+        return Some(format!(
+            "slide_count must be between 1 and {SLIDE_COUNT_LIMIT}, got {count}"
+        ));
     }
     if let Some(variations) = options.variations
         && (variations == 0 || variations > CANDIDATE_LIMIT)
@@ -566,8 +609,12 @@ async fn put_brief(
     let summary = request
         .summary
         .unwrap_or_else(|| default_summary.to_owned());
+    let mut brief = request.brief;
+    if is_agent {
+        crate::briefing::tidy_brief(&mut brief);
+    }
     let revision = match sessions
-        .write_brief_revision(&id, request.brief, source, &summary)
+        .write_brief_revision(&id, brief, source, &summary)
         .await
     {
         Ok(revision) => revision,
@@ -601,6 +648,10 @@ async fn get_brief(
     let brief = match query.revision {
         Some(revision) => sessions.read_brief(&id, revision).await,
         None => sessions.latest_brief(&id).await,
+    };
+    let brief = match brief {
+        Ok(brief) => with_answered_questions(&sessions, &id, brief).await,
+        Err(error) => Err(error),
     };
     match brief {
         Ok(Some(brief)) => Json(brief).into_response(),
@@ -682,7 +733,7 @@ async fn generate_with_assumptions(
         Err(error) => return session_error_response(&error),
     };
     let skipped = match sessions.answered_questions(&id).await {
-        Ok(answered) => crate::briefing::assumptions_from_answers(&answered),
+        Ok(answered) => crate::briefing::assumptions_from_skipped_answers(&answered),
         Err(error) => return session_error_response(&error),
     };
     let brief = base.with_assumed_open_questions(skipped);
@@ -959,6 +1010,52 @@ mod tests {
             view(&application, "talk").await["session"]["state"],
             "generating"
         );
+    }
+
+    #[tokio::test]
+    async fn an_old_brief_gets_its_answered_questions_back() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "talk").await;
+        send(
+            application.clone(),
+            "PUT",
+            "/sessions/talk/question-set",
+            Some(r#"{"title":"T","message":"m","questions":[{"id":"tone","label":"Which tone?","kind":"single_select","required":false,"options":[{"value":"warm","label":"Warm"}]}]}"#),
+        )
+        .await;
+        send(
+            application.clone(),
+            "POST",
+            "/sessions/talk/answers",
+            Some(r#"{"question_set":1,"answers":[{"question_id":"tone","values":["warm"]}]}"#),
+        )
+        .await;
+        // A brief written the way the old server wrote them: the answer
+        // is a fact line, and answered_questions is empty.
+        send(
+            application.clone(),
+            "PUT",
+            "/sessions/talk/brief",
+            Some(
+                r#"{"brief":{"audience":"devs","confirmed_facts":["Which tone?: Warm"]},"source":"agent"}"#,
+            ),
+        )
+        .await;
+        for path in ["/sessions/talk/brief", "/sessions/talk"] {
+            let (_, body) = send(application.clone(), "GET", path, None).await;
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let brief = if path == "/sessions/talk" {
+                value["brief"].clone()
+            } else {
+                value
+            };
+            let entries = brief["answered_questions"].as_array().unwrap();
+            assert_eq!(entries.len(), 1, "no answers rebuilt for {path}");
+            assert_eq!(entries[0]["question"], "Which tone?");
+            assert_eq!(entries[0]["answer"], "Warm");
+            assert_eq!(entries[0]["is_assumed"], false);
+        }
     }
 
     #[tokio::test]
