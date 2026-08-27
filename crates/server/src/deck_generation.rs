@@ -1042,9 +1042,7 @@ fn parse_deck(content: &str) -> Result<Deck, String> {
 mod tests {
     use std::sync::Arc;
 
-    use design_model::{
-        ArtifactKind, Critique, CritiqueCategory, DesignBrief, RevisionSource, WorkflowState,
-    };
+    use design_model::{ArtifactKind, Critique, DesignBrief, RevisionSource, WorkflowState};
 
     use super::{
         apply_deck_continuation, continuation_slides, deck_system_prompt, parse_deck, partial_deck,
@@ -1245,7 +1243,6 @@ mod tests {
                 session.pending_critique = Some(crate::sessions::PendingCritique {
                     design: "talk-candidate-1".to_owned(),
                     critique: Critique {
-                        category: CritiqueCategory::Structure,
                         text: "Tighten the title.".to_owned(),
                     },
                 });
