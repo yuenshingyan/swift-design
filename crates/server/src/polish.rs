@@ -7,7 +7,9 @@
 //! screen, tiny text, overlapping text blocks, empty screens, low
 //! contrast, long lines) and the findings go to the model together with
 //! screen screenshots. An improved design that validates replaces the
-//! original. The audit script itself is `render::AUDIT_SCRIPT`.
+//! original. The audit script itself is `render::AUDIT_SCRIPT`. The deck
+//! twin, `deck_polish.rs`, shares the audit and the parser and differs in
+//! wording only.
 
 use design_model::Design;
 use serde::Deserialize;
@@ -16,19 +18,19 @@ use crate::model_client::LogSink;
 
 /// One finding from the in-browser audit script.
 #[derive(Debug, Deserialize)]
-struct Finding {
-    /// Zero-based screen index.
-    screen: usize,
+pub(crate) struct Finding {
+    /// Zero-based screen or slide index.
+    pub(crate) screen: usize,
     /// The node, like `h2.title (0/1)`, or `root`.
     #[serde(default)]
-    node: String,
+    pub(crate) node: String,
     /// `overflow`, `off_screen`, `tiny_text`, `overlap`, `empty`,
     /// `contrast`, or `long_lines`.
     #[serde(default)]
-    kind: String,
+    pub(crate) kind: String,
     /// What was measured.
     #[serde(default)]
-    detail: String,
+    pub(crate) detail: String,
 }
 
 /// Polish rounds per candidate, by effort level.
@@ -72,6 +74,12 @@ pub async fn dom_findings(
 /// Reads the audit report out of a dumped DOM: the JSON in the
 /// `data-swift-design-findings` attribute on `<html>`.
 pub fn parse_findings(dom: &str) -> Vec<String> {
+    raw_findings(dom).iter().map(format_finding).collect()
+}
+
+/// The audit findings in a dumped DOM, as records. Empty when the page
+/// carries no report or the report does not parse.
+pub(crate) fn raw_findings(dom: &str) -> Vec<Finding> {
     let marker = "data-swift-design-findings=\"";
     let Some(start) = dom.find(marker) else {
         return Vec::new();
@@ -85,25 +93,31 @@ pub fn parse_findings(dom: &str) -> Vec<String> {
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&amp;", "&");
-    let findings: Vec<Finding> = serde_json::from_str(&json).unwrap_or_default();
-    findings.iter().map(format_finding).collect()
+    serde_json::from_str(&json).unwrap_or_default()
+}
+
+/// The fix advice for one finding kind.
+pub(crate) fn finding_advice(kind: &str) -> &'static str {
+    match kind {
+        "overflow" => "shorten the text, enlarge the box, or reduce the font size",
+        "off_screen" => "move or shrink it so it stays inside the canvas",
+        "tiny_text" => "use a larger font size",
+        "overlap" => "move or resize one of them",
+        "empty" => "add content or delete it",
+        "contrast" => "use a darker or lighter text color, or change the background",
+        "long_lines" => "narrow the box, split the text, or use a larger font size",
+        _ => "fix it",
+    }
 }
 
 /// One finding as a fix instruction for the model.
 fn format_finding(finding: &Finding) -> String {
-    let advice = match finding.kind.as_str() {
-        "overflow" => "shorten the text, enlarge the box, or reduce the font size",
-        "off_screen" => "move or shrink it so it stays inside the screen",
-        "tiny_text" => "use a larger font size",
-        "overlap" => "move or resize one of them",
-        "empty" => "add content or delete the screen",
-        "contrast" => "use a darker or lighter text color, or change the background",
-        "long_lines" => "narrow the box, split the text, or use a larger font size",
-        _ => "fix it",
-    };
     format!(
-        "screens[{}] {}: {}: {advice}",
-        finding.screen, finding.node, finding.detail
+        "screens[{}] {}: {}: {}",
+        finding.screen,
+        finding.node,
+        finding.detail,
+        finding_advice(&finding.kind)
     )
 }
 
@@ -112,7 +126,7 @@ fn format_finding(finding: &Finding) -> String {
 /// when the model can see.
 pub fn polish_prompt(design_json: &str, findings: &[String], image_count: usize) -> String {
     let mut prompt = format!(
-        "Review this candidate design as a presentation designer and improve it.\n\
+        "Review this candidate design as a product designer and improve it.\n\
          Design JSON:\n{design_json}\n"
     );
     if image_count > 0 {
