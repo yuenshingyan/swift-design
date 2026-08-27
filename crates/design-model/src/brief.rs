@@ -9,6 +9,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::artifact_kind::ArtifactKind;
 use crate::question::QuestionAnswer;
 use crate::viewport::Viewport;
 
@@ -143,6 +144,9 @@ pub struct DesignBrief {
     pub assumptions: Vec<String>,
     /// Questions still without an answer.
     pub open_questions: Vec<String>,
+    /// `demo` or `deck`. The session sets it. A demo run writes a
+    /// design; a deck run writes a deck.
+    pub artifact_kind: ArtifactKind,
     /// What to make, such as `landing page` or `onboarding flow`.
     pub target_artifact: String,
     /// Where it runs, such as `desktop web` or `iOS app`.
@@ -258,6 +262,20 @@ mod tests {
         assert!(json.contains("\"source\":\"agent\""));
         let restored: DesignBrief = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, brief);
+    }
+
+    #[test]
+    fn a_brief_without_a_kind_is_a_demo() {
+        let brief: DesignBrief = serde_json::from_str(r#"{"request":"x"}"#).unwrap();
+        assert_eq!(brief.artifact_kind, crate::ArtifactKind::Demo);
+        let deck: DesignBrief =
+            serde_json::from_str(r#"{"request":"x","artifact_kind":"deck"}"#).unwrap();
+        assert_eq!(deck.artifact_kind, crate::ArtifactKind::Deck);
+        assert!(
+            serde_json::to_string(&deck)
+                .unwrap()
+                .contains("\"artifact_kind\":\"deck\"")
+        );
     }
 
     #[test]
