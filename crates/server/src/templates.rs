@@ -1,10 +1,12 @@
 //! Template storage and the `/templates` routes.
 //!
-//! A template is a design the user liked, kept as a style reference. It
-//! holds the design's theme and its first few screens. A run that names a
-//! template puts both into the candidate prompt, so the model writes new
-//! content in that look. A template never carries content forward: the
-//! screens are examples of layout and CSS, not text to reuse.
+//! A template is a design or a deck the user liked, kept as a style
+//! reference. It holds the theme and the first few screens or slides,
+//! stored as screens. A run that names a template puts both into the
+//! candidate prompt, so the model writes new content in that look. A
+//! template never carries content forward: the screens are examples of
+//! layout and CSS, not text to reuse. One template store serves both
+//! artifact kinds.
 //!
 //! Templates live as `<id>.json` files in one directory, like designs.
 
@@ -15,10 +17,11 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use design_model::{Design, Screen, Theme};
+use design_model::{DECK_VIEWPORT, Design, Screen, Theme, Viewport};
 use serde::{Deserialize, Serialize};
 
 use crate::api_error;
+use crate::decks::{DeckStore, is_pending_slide};
 use crate::designs::{DesignStore, is_pending_screen};
 use crate::events::ChangeNotifier;
 
@@ -39,7 +42,7 @@ pub struct Template {
     pub name: String,
     /// When the template was saved, as an RFC 3339 UTC string.
     pub saved_at: String,
-    /// The design the template was saved from.
+    /// The design or deck the template was saved from.
     pub source_design: String,
     /// The theme every design from this template starts with.
     pub theme: Theme,
@@ -65,13 +68,44 @@ pub struct TemplateSummary {
     pub screen_count: usize,
 }
 
-/// Body of `POST /templates`.
+/// Body of `POST /templates`. Exactly one of `design_id` and `deck_id`
+/// names the source.
 #[derive(Debug, Deserialize)]
 struct SaveRequest {
     /// The design to save the style of.
-    design_id: String,
+    #[serde(default)]
+    design_id: Option<String>,
+    /// The deck to save the style of.
+    #[serde(default)]
+    deck_id: Option<String>,
     /// The name to show in the template list.
     name: String,
+}
+
+/// Where a template's style comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TemplateSource {
+    /// The design with this id.
+    Design(String),
+    /// The deck with this id.
+    Deck(String),
+}
+
+/// The one source a save request names, or the message when it names
+/// none or both.
+fn template_source(request: &SaveRequest) -> Result<TemplateSource, String> {
+    match (&request.design_id, &request.deck_id) {
+        (Some(design_id), None) => Ok(TemplateSource::Design(design_id.clone())),
+        (None, Some(deck_id)) => Ok(TemplateSource::Deck(deck_id.clone())),
+        _ => Err("name exactly one source: `design_id` or `deck_id`".to_owned()),
+    }
+}
+
+/// The theme, canvas, and example screens of a source.
+struct SourceStyle {
+    theme: Theme,
+    viewport: Viewport,
+    screens: Vec<Screen>,
 }
 
 /// Filesystem-backed template storage: one `<id>.json` file per template.
@@ -265,10 +299,71 @@ async fn get_template(State(store): State<TemplateStore>, Path(id): Path<String>
     }
 }
 
-/// Saves the style of one design as a template.
+/// The style of a stored design: its theme, canvas, and first written
+/// screens. A placeholder holds no layout, so it teaches the model
+/// nothing.
+async fn design_style(designs: &DesignStore, id: &str) -> Result<SourceStyle, Response> {
+    let design = match designs.load(id).await {
+        Ok(Some(design)) => design,
+        Ok(None) => {
+            return Err(api_error::error_response(
+                StatusCode::NOT_FOUND,
+                &format!("no design `{id}`: run `GET /designs` for the list"),
+                Vec::new(),
+            ));
+        }
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    Ok(SourceStyle {
+        theme: design.theme,
+        viewport: design.viewport,
+        screens: design
+            .screens
+            .iter()
+            .filter(|screen| !is_pending_screen(screen))
+            .take(TEMPLATE_SCREEN_LIMIT)
+            .cloned()
+            .collect(),
+    })
+}
+
+/// The style of a stored deck: its theme, the deck canvas, and its
+/// first written slides as screens.
+async fn deck_style(decks: &DeckStore, id: &str) -> Result<SourceStyle, Response> {
+    let deck = match decks.load(id).await {
+        Ok(Some(deck)) => deck,
+        Ok(None) => {
+            return Err(api_error::error_response(
+                StatusCode::NOT_FOUND,
+                &format!("no deck `{id}`: run `GET /decks` for the list"),
+                Vec::new(),
+            ));
+        }
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    Ok(SourceStyle {
+        theme: deck.theme,
+        viewport: DECK_VIEWPORT,
+        screens: deck
+            .slides
+            .iter()
+            .filter(|slide| !is_pending_slide(slide))
+            .take(TEMPLATE_SCREEN_LIMIT)
+            .map(|slide| Screen {
+                name: String::new(),
+                html: slide.html.clone(),
+                css: slide.css.clone(),
+                notes: slide.notes.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// Saves the style of one design or deck as a template.
 async fn save_template(
     State(store): State<TemplateStore>,
     State(designs): State<DesignStore>,
+    State(decks): State<DeckStore>,
     State(notifier): State<ChangeNotifier>,
     Json(request): Json<SaveRequest>,
 ) -> Response {
@@ -280,35 +375,24 @@ async fn save_template(
             Vec::new(),
         );
     }
-    let design = match designs.load(&request.design_id).await {
-        Ok(Some(design)) => design,
-        Ok(None) => {
-            return api_error::error_response(
-                StatusCode::NOT_FOUND,
-                &format!(
-                    "no design `{}`: run `GET /designs` for the list",
-                    request.design_id
-                ),
-                Vec::new(),
-            );
+    let source = match template_source(&request) {
+        Ok(source) => source,
+        Err(message) => {
+            return api_error::error_response(StatusCode::BAD_REQUEST, &message, Vec::new());
         }
-        Err(error) => return api_error::internal_error(&error),
     };
-    // A placeholder holds no layout, so it teaches the model nothing.
-    let screens: Vec<Screen> = design
-        .screens
-        .iter()
-        .filter(|screen| !is_pending_screen(screen))
-        .take(TEMPLATE_SCREEN_LIMIT)
-        .cloned()
-        .collect();
-    if screens.is_empty() {
+    let (source_id, style) = match &source {
+        TemplateSource::Design(id) => (id.clone(), design_style(&designs, id).await),
+        TemplateSource::Deck(id) => (id.clone(), deck_style(&decks, id).await),
+    };
+    let style = match style {
+        Ok(style) => style,
+        Err(response) => return response,
+    };
+    if style.screens.is_empty() {
         return api_error::error_response(
             StatusCode::BAD_REQUEST,
-            &format!(
-                "design `{}` has no written screens to save as a template",
-                request.design_id
-            ),
+            &format!("`{source_id}` has no written screens or slides to save as a template"),
             Vec::new(),
         );
     }
@@ -316,10 +400,10 @@ async fn save_template(
         id: template_id(name),
         name: name.to_owned(),
         saved_at: crate::time::rfc3339_now(),
-        source_design: request.design_id,
-        theme: design.theme,
-        viewport: design.viewport,
-        screens,
+        source_design: source_id,
+        theme: style.theme,
+        viewport: style.viewport,
+        screens: style.screens,
     };
     match store.save(&template).await {
         Ok(()) => {
@@ -399,6 +483,47 @@ mod tests {
 
     fn sample_design() -> design_model::Design {
         serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap()
+    }
+
+    #[test]
+    fn a_save_request_needs_exactly_one_source() {
+        let both = SaveRequest {
+            design_id: Some("a".to_owned()),
+            deck_id: Some("b".to_owned()),
+            name: "x".to_owned(),
+        };
+        assert!(template_source(&both).is_err());
+        let none = SaveRequest {
+            design_id: None,
+            deck_id: None,
+            name: "x".to_owned(),
+        };
+        assert!(template_source(&none).is_err());
+        let deck = SaveRequest {
+            design_id: None,
+            deck_id: Some("talk".to_owned()),
+            name: "x".to_owned(),
+        };
+        assert_eq!(
+            template_source(&deck).unwrap(),
+            TemplateSource::Deck("talk".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_template_saves_from_a_deck() {
+        let directory = tempfile::tempdir().unwrap();
+        let decks = DeckStore::new(directory.path().join("decks"));
+        decks
+            .save("talk", &crate::test_support::sample_deck())
+            .await
+            .unwrap();
+        let style = deck_style(&decks, "talk").await.ok().unwrap();
+        assert_eq!(style.viewport, DECK_VIEWPORT);
+        assert_eq!(style.screens.len(), 3);
+        assert!(style.screens[0].name.is_empty());
+        assert!(style.screens[0].html.contains("Swift Design"));
+        assert!(deck_style(&decks, "missing").await.is_err());
     }
 
     #[test]
