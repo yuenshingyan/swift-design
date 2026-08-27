@@ -6,7 +6,7 @@ Do not implement a prompt-to-immediate-artifact flow. The required product loop 
 
 > Discover → clarify → summarize/confirm brief → generate → critique → iterate
 
-The agent must not generate an artifact until the brief is sufficiently complete or the user explicitly selects **Generate with assumptions**.
+The agent must not generate an artifact until the brief is sufficiently complete or the user explicitly selects **Skip the questions and generate** or **Decide automatically**.
 
 ## Product goal
 
@@ -122,10 +122,10 @@ Build a conversational UI, not a blocking form wizard. Include:
 - structured question cards
 - answer summary
 - editable brief panel
-- `Approve brief and generate` and `Generate with assumptions` actions
+- `Go`, `Decide automatically`, and `Skip the questions and generate` actions
 - distinct facts, assumptions, and open questions
 - meaningful generation progress
-- critique controls for visual direction, structure, accessibility, content, and free-form feedback
+- a critique input in the chat while reviewing: the message becomes a focused edit run
 
 ### 6. Separate agent modes
 
