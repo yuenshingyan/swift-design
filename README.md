@@ -35,7 +35,7 @@ Both kinds share the theme, the HTML and CSS rules, the brief, the workflow, the
 - Ask no more than three questions at once.
 - Preserve answers, assumptions, and open questions separately.
 - Treat the approved brief as the source of truth.
-- Do not generate before approval unless the user explicitly selects **Generate with assumptions**.
+- Do not generate before approval unless the user explicitly selects **Skip the questions and generate** or **Decide automatically**.
 - Make design decisions inspectable and revisable.
 
 ## Workflow
