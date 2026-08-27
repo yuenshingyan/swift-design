@@ -9,7 +9,8 @@
 use std::sync::Arc;
 
 use design_model::{
-    BriefQuestionSet, Critique, Design, DesignBrief, QuestionSetError, validate_question_set,
+    AnsweredQuestion, BriefQuestionSet, Critique, Design, DesignBrief, QuestionSetError,
+    validate_question_set,
 };
 
 use crate::concepts::{Concept, concept_input, concept_note, concept_prompt, parse_concepts};
@@ -441,7 +442,10 @@ impl GenerationEngine {
                             outcome.as_ref().err().map(|error| format!("{id}: {error}"))
                         })
                         .collect();
-                    return Err(GenerationStop::Failed(failures.join("; ")));
+                    return Err(GenerationStop::Failed(failure_message(
+                        &failures,
+                        "no design was continued",
+                    )));
                 }
                 Ok(GenerationOutcome::Wrote { design_ids })
             }
@@ -559,38 +563,52 @@ impl GenerationEngine {
         };
         self.report_progress(10);
         let base = context.session_id.clone();
-        let ids: Vec<String> = (1..=count)
-            .map(|candidate_number| {
-                if count > 1 {
-                    format!("{base}-candidate-{candidate_number}")
-                } else {
-                    format!("{base}-candidate-1")
-                }
-            })
-            .collect();
+        // One design per platform per variation: the same concept drawn
+        // on each canvas the user picked. The studio groups them by
+        // canvas, so the numbering runs straight through.
+        // The canvases are the app's answer, held on the session. The
+        // brief mirrors them, but only from the revision after the pick,
+        // and a user who picks a canvas at approval writes no revision.
+        let platforms = match context.options.platforms.is_empty() {
+            true => context.brief.platforms(),
+            false => context.options.platforms.clone(),
+        };
+        let plans = candidate_plans(&base, &platforms, count);
+        let ids: Vec<String> = plans.iter().map(|plan| plan.design_id.clone()).collect();
+        if plans.len() > count {
+            log(&format!(
+                "writing {} candidates: {count} variations across {} canvases",
+                plans.len(),
+                platforms.len()
+            ));
+        }
         let shares = self.shared_progress(&ids, 10, 90);
         let templates = self.brief_templates(&context.options, log).await;
         // Every candidate runs at the same time; each saves itself as
         // soon as it is ready.
         let mut tasks = tokio::task::JoinSet::new();
-        for candidate_number in 1..=count {
+        for (index, plan) in plans.iter().enumerate() {
             let engine = self.clone();
             let client = client.clone();
             let context = context.clone();
             let concepts = concepts.clone();
-            // One look per candidate, wrapping when the user picked
-            // fewer templates than candidates.
-            let template = candidate_template(&templates, candidate_number);
+            let candidate_number = plan.candidate_number;
+            let variation = plan.variation;
+            let viewport = plan.viewport;
+            // One look per variation, wrapping when the user picked
+            // fewer templates than variations.
+            let template = candidate_template(&templates, variation);
             let attachments = Arc::clone(&attachments);
-            let share = Arc::clone(&shares[candidate_number - 1]);
+            let share = Arc::clone(&shares[index]);
             let log = Arc::clone(log);
-            let id = ids[candidate_number - 1].clone();
+            let id = plan.design_id.clone();
             // The card appears at once, as a placeholder with its bar.
             share(0.0);
             tasks.spawn(async move {
                 let request = CandidateRequest {
                     context: &context,
-                    candidate_number,
+                    candidate_number: variation,
+                    viewport,
                     concepts: &concepts,
                     preview_screens: context.preview_screens(),
                     design_id: id.clone(),
@@ -624,7 +642,10 @@ impl GenerationEngine {
             }
         }
         if saved.is_empty() {
-            return Err(GenerationStop::Failed(failures.join("; ")));
+            return Err(GenerationStop::Failed(failure_message(
+                &failures,
+                "no candidate reached the store",
+            )));
         }
         for failure in &failures {
             log(&format!("candidate failed: {failure}"));
@@ -909,7 +930,7 @@ impl GenerationEngine {
             if let Err(error) = saver.finish(&preview).await {
                 log(&format!("{label}: restoring the preview failed: {error}"));
             }
-            return Err(failures.join("; "));
+            return Err(failure_message(&failures, "no screens were added"));
         }
         // A failed chunk leaves the design continuable: the outline stays
         // until every title has a screen.
@@ -1571,6 +1592,10 @@ struct LiveSaver {
     design_id: String,
     saved_rank: Arc<std::sync::Mutex<Option<usize>>>,
     write_lock: Arc<tokio::sync::Mutex<()>>,
+    /// True once `finish` has written the final design. A partial save
+    /// spawned earlier can still be waiting for the write lock, and it
+    /// must not put a half-written draft back over the final one.
+    is_finished: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl LiveSaver {
@@ -1581,6 +1606,7 @@ impl LiveSaver {
             design_id: design_id.to_owned(),
             saved_rank: Arc::new(std::sync::Mutex::new(None)),
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            is_finished: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -1605,6 +1631,9 @@ impl LiveSaver {
         let saver = self.clone();
         tokio::spawn(async move {
             let _guard = saver.write_lock.lock().await;
+            if saver.is_finished.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
             if saver.designs.save(&saver.design_id, &design).await.is_ok() {
                 saver.notifier.notify();
             }
@@ -1614,6 +1643,8 @@ impl LiveSaver {
     /// Saves the final design after every partial save landed.
     async fn finish(&self, design: &Design) -> Result<(), String> {
         let _guard = self.write_lock.lock().await;
+        self.is_finished
+            .store(true, std::sync::atomic::Ordering::Release);
         self.designs
             .save(&self.design_id, design)
             .await
@@ -1720,6 +1751,22 @@ fn push_field(input: &mut String, title: &str, value: &str) {
     }
 }
 
+/// Adds a labelled field unless an answer in the same prompt already
+/// says it.
+///
+/// The prompt carries the answers, so a field that only restates one
+/// spends the model's attention on the same fact twice. The canvas does
+/// not depend on this: the candidate prompt states the viewport in px.
+fn push_new_field(input: &mut String, title: &str, value: &str, answers: &[AnsweredQuestion]) {
+    let is_answered = answers
+        .iter()
+        .any(|entry| design_model::text::mostly_repeats(&entry.answer, value));
+    if is_answered {
+        return;
+    }
+    push_field(input, title, value);
+}
+
 /// Appends a bullet list under `title` when it has items.
 fn push_list(input: &mut String, title: &str, items: &[String]) {
     if !items.is_empty() {
@@ -1733,14 +1780,53 @@ fn push_list(input: &mut String, title: &str, items: &[String]) {
 /// The brief, rendered as labelled sections for a generation prompt.
 pub(crate) fn brief_input(brief: &DesignBrief) -> String {
     let mut input = String::new();
+    let answers = &brief.answered_questions;
     push_field(&mut input, "Request", &brief.request);
-    push_field(&mut input, "Target artifact", &brief.target_artifact);
-    push_field(&mut input, "Target platform", &brief.target_platform);
-    push_field(&mut input, "Audience", &brief.audience);
-    push_field(&mut input, "User problem", &brief.user_problem);
-    push_field(&mut input, "Primary job", &brief.primary_job);
-    push_field(&mut input, "Success criterion", &brief.success_criterion);
-    push_field(&mut input, "Visual direction", &brief.visual_direction);
+    push_new_field(
+        &mut input,
+        "Target artifact",
+        &brief.target_artifact,
+        answers,
+    );
+    push_new_field(
+        &mut input,
+        "Target platform",
+        &brief.target_platform,
+        answers,
+    );
+    push_new_field(&mut input, "Audience", &brief.audience, answers);
+    push_new_field(&mut input, "User problem", &brief.user_problem, answers);
+    push_new_field(&mut input, "Primary job", &brief.primary_job, answers);
+    push_new_field(
+        &mut input,
+        "Success criterion",
+        &brief.success_criterion,
+        answers,
+    );
+    push_new_field(
+        &mut input,
+        "Visual direction",
+        &brief.visual_direction,
+        answers,
+    );
+    if let Some(count) = brief.slide_count {
+        push_field(
+            &mut input,
+            "Slide count the user asked for",
+            &count.to_string(),
+        );
+    }
+    if !brief.answered_questions.is_empty() {
+        input.push_str("Answers from the user:\n");
+        for entry in &brief.answered_questions {
+            let answer = if entry.is_assumed {
+                "use your best judgment"
+            } else {
+                entry.answer.as_str()
+            };
+            input.push_str(&format!("- {} -> {answer}\n", entry.question));
+        }
+    }
     push_list(&mut input, "Confirmed facts", &brief.confirmed_facts);
     push_list(
         &mut input,
@@ -1849,6 +1935,9 @@ fn edit_prompt(brief: &DesignBrief, critique: &Critique, design_json: &str) -> S
 struct CandidateRequest<'request> {
     context: &'request GenerationContext,
     candidate_number: usize,
+    /// The canvas this candidate is written for. One platform the brief
+    /// names, not always the brief's first.
+    viewport: design_model::Viewport,
     concepts: &'request [Concept],
     /// `Some(n)`: write only the first `n` screens plus the outline.
     preview_screens: Option<usize>,
@@ -1994,6 +2083,62 @@ fn apply_continuation(original: &Design, content: &str) -> Result<Design, String
     Ok(continued)
 }
 
+/// The message for a run that produced nothing.
+///
+/// `failures` is empty when every task reported success and the work
+/// still is not there, which is a bug in this engine rather than a
+/// model failure. An empty message told the user nothing, so each site
+/// names itself instead.
+pub(crate) fn failure_message(failures: &[String], fallback: &str) -> String {
+    if failures.is_empty() {
+        return fallback.to_owned();
+    }
+    failures.join("; ")
+}
+
+/// One candidate to write: which variation, which canvas, which id.
+///
+/// A run writes one design per platform per variation. The variation
+/// number picks the concept and the template; the viewport picks the
+/// canvas. The id numbers every candidate straight through, so the
+/// existing `{base}-candidate-{n}` naming still holds.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CandidatePlan {
+    /// The id the candidate is saved under.
+    pub design_id: String,
+    /// Position in the whole run, from one.
+    pub candidate_number: usize,
+    /// Which variation this is, from one.
+    pub variation: usize,
+    /// The canvas to write for.
+    pub viewport: design_model::Viewport,
+}
+
+/// Every candidate a run writes: `variations` concepts on each canvas,
+/// canvas by canvas.
+pub(crate) fn candidate_plans(
+    base: &str,
+    platforms: &[String],
+    variations: usize,
+) -> Vec<CandidatePlan> {
+    let mut plans = Vec::new();
+    for viewport in platforms
+        .iter()
+        .map(|platform| design_model::Viewport::for_platform(platform))
+    {
+        for variation in 1..=variations.max(1) {
+            let candidate_number = plans.len() + 1;
+            plans.push(CandidatePlan {
+                design_id: format!("{base}-candidate-{candidate_number}"),
+                candidate_number,
+                variation,
+                viewport,
+            });
+        }
+    }
+    plans
+}
+
 /// The user prompt for one candidate: the approved brief is
 /// authoritative, plus the template, preview, concept, and effort notes.
 fn candidate_prompt(request: &CandidateRequest<'_>) -> String {
@@ -2026,9 +2171,11 @@ fn candidate_prompt(request: &CandidateRequest<'_>) -> String {
         }
         _ => {}
     }
-    let viewport = brief.viewport();
+    // The canvas comes from the request, not the brief: a run writes
+    // one design per platform, and each is drawn for its own canvas.
+    let viewport = request.viewport;
     prompt.push_str(&format!(
-        "Set `viewport` to {} by {} px.\n",
+        "Set `viewport` to {} by {} px. Design every screen for that canvas.\n",
         viewport.width, viewport.height
     ));
     prompt.push_str("Reply with only the design JSON.");
@@ -2095,7 +2242,7 @@ mod tests {
 
     use design_model::{Critique, CritiqueCategory, DesignBrief, RevisionSource, WorkflowState};
 
-    use super::{GenerationEngine, GenerationOutcome, brief_input, system_prompt};
+    use super::{GenerationEngine, GenerationOutcome, brief_input, candidate_plans, system_prompt};
     use crate::designs::DesignStore;
     use crate::events::ChangeNotifier;
     use crate::model_client::LogSink;
@@ -2158,6 +2305,75 @@ mod tests {
         assert!(text.contains("Confirmed facts:\n- Platform: web"));
         assert!(text.contains("Assumptions (use only where a confirmed fact"));
         assert!(text.contains("- Audience: investors"));
+    }
+
+    #[test]
+    fn a_run_writes_one_candidate_per_canvas_per_variation() {
+        let platforms = vec!["desktop web".to_owned(), "phone".to_owned()];
+        let plans = candidate_plans("talk", &platforms, 2);
+        assert_eq!(plans.len(), 4);
+        let ids: Vec<&str> = plans.iter().map(|plan| plan.design_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "talk-candidate-1",
+                "talk-candidate-2",
+                "talk-candidate-3",
+                "talk-candidate-4"
+            ]
+        );
+        // The canvases run in the order the user picked them, and the
+        // same two concepts are drawn on each.
+        assert_eq!(plans[0].viewport, design_model::Viewport::default());
+        assert_eq!(plans[1].variation, 2);
+        assert_eq!(plans[2].viewport.width, 390);
+        assert_eq!(plans[3].variation, 2);
+    }
+
+    #[test]
+    fn one_canvas_leaves_the_candidate_numbering_alone() {
+        let one = [String::new()];
+        let plans = candidate_plans("talk", &one, 3);
+        assert_eq!(plans.len(), 3);
+        assert_eq!(plans[0].design_id, "talk-candidate-1");
+        assert_eq!(plans[2].variation, 3);
+        // Zero variations still writes one candidate.
+        assert_eq!(candidate_plans("talk", &one, 0).len(), 1);
+    }
+
+    #[test]
+    fn brief_input_carries_the_answers_and_the_slide_count() {
+        let brief = DesignBrief {
+            request: "A talk.".to_owned(),
+            slide_count: Some(12),
+            audience: "seed investors".to_owned(),
+            user_problem: "no one reads the deck".to_owned(),
+            answered_questions: vec![
+                design_model::AnsweredQuestion {
+                    question: "Which audience?".to_owned(),
+                    answer: "Seed investors".to_owned(),
+                    is_assumed: false,
+                },
+                design_model::AnsweredQuestion {
+                    question: "Which tone?".to_owned(),
+                    answer: String::new(),
+                    is_assumed: true,
+                },
+            ],
+            ..DesignBrief::default()
+        };
+        let text = brief_input(&brief);
+        assert!(text.contains("Slide count the user asked for: 12"));
+        assert!(text.contains("- Which audience? -> Seed investors"));
+        assert!(text.contains("- Which tone? -> use your best judgment"));
+        // The audience field says what the answer says, so it is not
+        // sent a second time.
+        assert!(!text.contains("Audience: Seed investors"));
+        assert!(text.contains("User problem: no one reads the deck"));
+        // Nothing is added for a brief the app has not measured.
+        let plain = brief_input(&DesignBrief::default());
+        assert!(!plain.contains("Slide count"));
+        assert!(!plain.contains("Answers from the user"));
     }
 
     #[test]
