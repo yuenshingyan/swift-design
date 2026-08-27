@@ -1,6 +1,6 @@
-# Brief-First Design Harness
+# Swift Design
 
-A conversational design-agent harness that turns ambiguous requests into approved design briefs before generating artifacts.
+A brief-first design harness. It turns an ambiguous request into an approved design brief, then guides an LLM agent to build the artifact: a software demo or a slide deck.
 
 ## Why
 
@@ -18,6 +18,17 @@ request → clarify → brief → approve → generate → critique → revise
 
 The purpose is not to delay output. It is to avoid poor alignment caused by guessing about audience, goals, content, brand direction, or platform.
 
+## Two artifact kinds
+
+Pick the kind on the home page. It is fixed for the session once generation starts.
+
+| Kind | What it is | JSON | Canvas | Saved under |
+|---|---|---|---|---|
+| `demo` | A software demo: a landing page, app screens, a flow | a design with `viewport` and `screens` | the viewport, 1440×900 by default; 390×844 for a phone; 1024×768 for a tablet | `/designs/{id}` |
+| `deck` | A slide presentation | a deck with `slides` and no `viewport` | 1920×1080 | `/decks/{id}` |
+
+Both kinds share the theme, the HTML and CSS rules, the brief, the workflow, the templates, and the uploads. Decks add a presenter view, an audience window that follows it, and a PPTX export. The deck JSON, routes, presenter, and PPTX come from Swift Deck, which is now part of this project.
+
 ## Core principles
 
 - Ask only high-impact questions.
@@ -32,16 +43,16 @@ The purpose is not to delay output. It is to avoid poor alignment caused by gues
 | State | Purpose |
 |---|---|
 | `intake` | Receive the initial request |
-| `clarifying` | Ask focused design questions |
+| `clarifying` | Ask focused questions |
 | `brief_ready` | Present the assembled brief |
 | `awaiting_approval` | User approves, edits, or accepts assumptions |
-| `generating` | Agent creates the artifact |
+| `generating` | Agent creates the design or the deck |
 | `reviewing` | User critiques and requests revisions |
 | `error` | Show a recoverable failure |
 
 ## Design brief
 
-A brief records audience, user need, target artifact/platform, primary action, required content/functionality, information architecture, visual direction, brand assets, accessibility and technical constraints, assumptions, open questions, and revision history.
+A brief records the artifact kind, audience, user need, target artifact/platform, primary action, required content/functionality, information architecture, visual direction, brand assets, accessibility and technical constraints, assumptions, open questions, and revision history. For a deck the agent asks about the scenario and the length in slides first.
 
 ## Architecture
 
@@ -50,9 +61,9 @@ The harness may use a local CLI agent or a remote API, but workflow state, brief
 There are two agent modes:
 
 1. **Briefing mode** — asks, summarizes, and updates the brief; it cannot write artifacts.
-2. **Generation mode** — creates the artifact from an approved brief.
+2. **Generation mode** — creates the design or the deck from an approved brief.
 
-See `AGENT.MD` for implementation rules.
+Designs and decks are two pipelines behind one workflow: separate types, stores, routes, renderers, prompts, and editors, with the shared helpers (history, provenance, CSS scoping, fonts, Chrome, the fix-round loop, the model client) used by both. See `CLAUDE.md` for the rules.
 
 ## Run it
 
@@ -64,8 +75,26 @@ cd crates/ui && dx build --release && cd ../..
 cargo run -p server
 ```
 
-Open `http://127.0.0.1:3000`, pick a model in the studio settings, and
-describe a design. The agent runs on your own model account.
+Open `http://127.0.0.1:3000`, pick a model in the studio settings, choose
+**Software demo** or **Deck**, and describe what you need. The agent runs on
+your own model account.
+
+For a deck, the editor adds **Present** (the presenter view with notes, a
+timer, and an audience window that follows it) and **PPTX** next to the
+HTML and PDF exports. PDF, PPTX, and screenshots need Chrome or Chromium
+on the server machine.
+
+## Agent routes
+
+External agents read `GET /instructions` and the schemas at
+`GET /schemas/{design,deck,brief,question-set}`. A demo session writes to
+`PUT /designs/{session}-candidate-N`; a deck session writes to
+`PUT /decks/{session}-candidate-N`. The run environment carries
+`SWIFT_DESIGN_SESSION_ID`, `SWIFT_DESIGN_RUN_MODE`, and
+`SWIFT_DESIGN_ARTIFACT_KIND`.
+
+Deck-only routes: `GET /decks/{id}/present`, `GET /decks/{id}/render?audience=true`,
+`GET /decks/{id}/slides/{n}.png`, `GET /decks/{id}/export.pptx`.
 
 ## Checks
 
@@ -83,22 +112,26 @@ cargo run -p server --bin generate_schema && git diff --exit-code schemas/
 | `SWIFT_DESIGN_ADDRESS` | `127.0.0.1:3000` | Bind address |
 | `SWIFT_DESIGN_SESSIONS_DIR` | `data/sessions` | Sessions, briefs, answers, runs |
 | `SWIFT_DESIGN_DESIGNS_DIR` | `designs` | Design JSON files |
+| `SWIFT_DESIGN_DECKS_DIR` | `decks` | Deck JSON files |
 | `SWIFT_DESIGN_UPLOADS_DIR` | `uploads` | Source materials |
 | `SWIFT_DESIGN_TEMPLATES_DIR` | `templates` | Saved style templates |
-| `SWIFT_DESIGN_HISTORY_DIR` | `history` | Save snapshots |
+| `SWIFT_DESIGN_HISTORY_DIR` | `history` | Design save snapshots |
+| `SWIFT_DESIGN_DECK_HISTORY_DIR` | `deck-history` | Deck save snapshots |
 | `SWIFT_DESIGN_SETTINGS_PATH` | `data/settings.json` | Provider, model, credential |
 | `SWIFT_DESIGN_UI_DIR` | `target/dx/ui/release/web/public` | Built WASM bundle |
 | `SWIFT_DESIGN_AGENT_COMMAND` | unset | External agent CLI; overrides the built-in engine |
-| `SWIFT_DESIGN_CHROME` | unset | Chrome path for screenshots and PDF export |
+| `SWIFT_DESIGN_CHROME` | unset | Chrome path for screenshots, PDF export, and PPTX export |
 | `SWIFT_DESIGN_PROVIDER` / `_MODEL` / `_PROVIDER_URL` / `_PROVIDER_API_KEY` | `google` | Built-in engine defaults |
 
 ## Layout
 
 ```
 crates/
-  design-model/  # serde + schemars types: design, brief, question, workflow. No IO.
-  server/        # axum: sessions, engines, validation, render, static hosting.
-  ui/            # Dioxus studio (WASM).
+  design-model/  # serde + schemars types: design, deck, brief, question, workflow. No IO.
+  server/        # axum: sessions, engines, validation, render, presenter, exports, static hosting.
+  ui/            # Dioxus studio (WASM): session workspace, design editor, deck editor.
+fixtures/        # sample-design.json and sample-deck.json
+schemas/         # generated copies of the served JSON Schemas
 ```
 
 The workflow state machine, the question protocol, and the brief live in
