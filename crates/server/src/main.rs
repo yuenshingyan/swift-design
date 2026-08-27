@@ -1,10 +1,16 @@
-//! Swift Design server: serves the editor UI, design files, and uploads.
+//! Swift Design server: serves the editor UI, design and deck files,
+//! and uploads.
 
 mod agent_runs;
 mod api_error;
 mod briefing;
 mod candidates;
 mod concepts;
+mod deck_generation;
+mod deck_patch;
+mod deck_polish;
+mod deck_render;
+mod decks;
 mod designs;
 mod events;
 mod export;
@@ -15,6 +21,8 @@ mod instructions;
 mod model_client;
 mod patch;
 mod polish;
+mod pptx;
+mod presenter;
 mod projects;
 mod provenance;
 mod render;
@@ -36,10 +44,11 @@ use axum::extract::FromRef;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use design_model::Design;
+use design_model::{Deck, Design};
 use tracing_subscriber::EnvFilter;
 
 use crate::agent_runs::AgentRunner;
+use crate::decks::DeckStore;
 use crate::designs::DesignStore;
 use crate::events::ChangeNotifier;
 use crate::history::HistoryStore;
@@ -54,6 +63,8 @@ use crate::uploads::UploadStore;
 pub(crate) struct AppState {
     /// Design storage.
     designs: DesignStore,
+    /// Deck storage.
+    decks: DeckStore,
     /// Upload storage.
     uploads: UploadStore,
     /// Session storage.
@@ -73,6 +84,12 @@ pub(crate) struct AppState {
 impl FromRef<AppState> for DesignStore {
     fn from_ref(state: &AppState) -> DesignStore {
         state.designs.clone()
+    }
+}
+
+impl FromRef<AppState> for DeckStore {
+    fn from_ref(state: &AppState) -> DeckStore {
+        state.decks.clone()
     }
 }
 
@@ -139,9 +156,15 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("SWIFT_DESIGN_TEMPLATES_DIR").unwrap_or_else(|_| "templates".to_owned());
     let history_directory =
         std::env::var("SWIFT_DESIGN_HISTORY_DIR").unwrap_or_else(|_| "history".to_owned());
+    let decks_directory =
+        std::env::var("SWIFT_DESIGN_DECKS_DIR").unwrap_or_else(|_| "decks".to_owned());
+    let deck_history_directory = std::env::var("SWIFT_DESIGN_DECK_HISTORY_DIR")
+        .unwrap_or_else(|_| "deck-history".to_owned());
     let changes = ChangeNotifier::new();
     let designs = DesignStore::new(PathBuf::from(designs_directory))
         .with_history(HistoryStore::new(PathBuf::from(history_directory)));
+    let decks = DeckStore::new(PathBuf::from(decks_directory))
+        .with_history(HistoryStore::new(PathBuf::from(deck_history_directory)));
     let sessions = SessionStore::new(PathBuf::from(sessions_directory));
     let settings = SettingsStore::new(PathBuf::from(settings_path), address.clone());
     let templates = TemplateStore::new(PathBuf::from(templates_directory));
@@ -154,10 +177,12 @@ async fn main() -> anyhow::Result<()> {
         format!("http://{address}"),
         changes.clone(),
     )
+    .with_decks(decks.clone())
     .with_templates(templates.clone())
     .with_uploads(uploads.clone());
     let state = AppState {
         designs,
+        decks,
         uploads,
         sessions,
         settings,
@@ -178,12 +203,15 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/designs/render", post(render_design))
+        .route("/decks/render", post(render_deck))
         .merge(agent_runs::routes())
         .merge(candidates::routes())
         .merge(events::routes())
         .merge(icon::routes())
         .merge(instructions::routes())
         .merge(designs::routes())
+        .merge(decks::routes())
+        .merge(presenter::routes())
         .merge(projects::routes())
         .merge(export::routes())
         .merge(session_routes::routes())
@@ -209,6 +237,15 @@ async fn render_design(Json(design): Json<Design>) -> Response {
     api_error::validation_failed(&errors)
 }
 
+/// Renders a posted deck to HTML, or reports every validation error.
+async fn render_deck(Json(deck): Json<Deck>) -> Response {
+    let errors = deck.validate();
+    if errors.is_empty() {
+        return Html(deck_render::render_deck(&deck, false)).into_response();
+    }
+    api_error::deck_validation_failed(&errors)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -219,9 +256,229 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::test_support::{
-        SAMPLE_DESIGN, application_with_command, invalid_sample_design, open_generating_session,
-        send, send_upload, send_user_put, test_application,
+        SAMPLE_DECK, SAMPLE_DESIGN, application_with_command, invalid_sample_design,
+        open_generating_deck_session, open_generating_session, send, send_upload, send_user_put,
+        test_application,
     };
+
+    #[tokio::test]
+    async fn a_deck_session_lists_its_decks_and_chooses_from_the_deck_store() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_deck_session(&application, "talk").await;
+        let (status, body) = send(application.clone(), "GET", "/sessions/talk", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(view["session"]["artifact_kind"], "deck");
+        assert_eq!(view["brief"]["artifact_kind"], "deck");
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/decks/talk-candidate-1",
+            Some(SAMPLE_DECK),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, body) = send(application.clone(), "GET", "/sessions/talk", None).await;
+        let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(view["decks"].as_array().unwrap().len(), 1);
+        assert_eq!(view["designs"].as_array().unwrap().len(), 0);
+        let (status, body) = send(application.clone(), "GET", "/candidates/talk", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Choose this deck"));
+        assert!(body.contains("/decks/talk-candidate-1/render"));
+        let (status, _) = send(
+            application.clone(),
+            "POST",
+            "/candidates/talk/choose",
+            Some(r#"{"id":"talk-candidate-1"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(application.clone(), "GET", "/decks/talk", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(application, "GET", "/designs/talk", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_artifact_kind_is_fixed_after_generation() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_deck_session(&application, "talk").await;
+        send(application.clone(), "PUT", "/decks/talk", Some(SAMPLE_DECK)).await;
+        send(application.clone(), "POST", "/sessions/talk/complete", None).await;
+        let (status, body) = send(
+            application,
+            "PUT",
+            "/sessions/talk/brief",
+            Some(r#"{"brief":{"artifact_kind":"demo","audience":"devs"}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains("cannot change after generation"));
+    }
+
+    #[tokio::test]
+    async fn renders_a_valid_deck_to_html() {
+        let directory = TempDir::new().unwrap();
+        let (status, body) = send(
+            test_application(&directory),
+            "POST",
+            "/decks/render",
+            Some(SAMPLE_DECK),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.starts_with("<!doctype html>"));
+        assert!(body.contains("data-swift-design-width=\"1920\""));
+        let (status, body) = send(
+            test_application(&directory),
+            "POST",
+            "/decks/render",
+            Some(r##"{"title":"","theme":{"name":"x","colors":{"background":"#000000","text":"#ffffff","accent":"#ff0000","muted":"#888888"},"fonts":{"heading":"Inter","body":"Inter","mono":"Inter"}},"slides":[]}"##),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("deck failed validation"));
+        assert!(body.contains("deck has no slides"));
+    }
+
+    #[tokio::test]
+    async fn saving_then_fetching_a_deck_round_trips() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "talk").await;
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/decks/talk-candidate-1",
+            Some(SAMPLE_DECK),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, body) =
+            send(application.clone(), "GET", "/decks/talk-candidate-1", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let deck: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(deck["slides"].as_array().unwrap().len(), 3);
+        let (status, body) = send(application.clone(), "GET", "/decks", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"slide_count\":3"));
+        // The deck is not a design.
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            "/designs/talk-candidate-1",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, body) = send(
+            application,
+            "GET",
+            "/decks/talk-candidate-1/render?slide=2",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("data-swift-design-screen=\"1\""));
+    }
+
+    #[tokio::test]
+    async fn deck_writes_are_rejected_unless_the_session_is_generating() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        let (status, body) =
+            send(application.clone(), "PUT", "/decks/talk", Some(SAMPLE_DECK)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains("no session `talk`"));
+        let (status, _) = send(
+            application.clone(),
+            "POST",
+            "/sessions",
+            Some(r#"{"id":"talk","request":"A talk."}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, body) = send(application, "PUT", "/decks/talk", Some(SAMPLE_DECK)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains("not allowed"));
+    }
+
+    #[tokio::test]
+    async fn presents_a_stored_deck_with_its_notes() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "talk").await;
+        send(application.clone(), "PUT", "/decks/talk", Some(SAMPLE_DECK)).await;
+        let (status, body) = send(application.clone(), "GET", "/decks/talk/present", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<title>Swift Design Deck Overview · presenter</title>"));
+        assert!(body.contains("Open with the one-line pitch."));
+        assert!(body.contains("/decks/talk/render?audience=true"));
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            "/decks/talk/present?slide=9",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send(application, "GET", "/decks/missing/present", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn only_the_audience_render_carries_the_follow_script() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "talk").await;
+        send(application.clone(), "PUT", "/decks/talk", Some(SAMPLE_DECK)).await;
+        let (status, plain) = send(application.clone(), "GET", "/decks/talk/render", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!plain.contains("data-swift-design-channel"));
+        let (status, audience) =
+            send(application, "GET", "/decks/talk/render?audience=true", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(audience.contains("data-swift-design-channel=\"swift-design-presenter:talk\""));
+        assert!(audience.contains("swift-design-audience-hello"));
+    }
+
+    #[tokio::test]
+    async fn exporting_a_deck_returns_an_html_download() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "talk").await;
+        send(application.clone(), "PUT", "/decks/talk", Some(SAMPLE_DECK)).await;
+        let request = Request::builder()
+            .method("GET")
+            .uri("/decks/talk/export")
+            .body(Body::empty())
+            .unwrap();
+        let response = application.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename=\"talk.html\""
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            String::from_utf8(bytes.to_vec())
+                .unwrap()
+                .contains("<h1>Swift Design</h1>")
+        );
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            "/decks/talk/slides/cover.png",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send(application, "GET", "/decks/talk/slides/9.png", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
 
     #[tokio::test]
     async fn health_reports_ok() {
@@ -727,10 +984,11 @@ mod tests {
         assert!(
             payload
                 .to_string()
-                .contains("Do not write designs in briefing mode")
+                .contains("Do not write designs or decks in briefing mode")
         );
         for (path, key) in [
             ("/schemas/design", "screens"),
+            ("/schemas/deck", "slides"),
             ("/schemas/brief", "confirmed_facts"),
             ("/schemas/question-set", "can_proceed_with_assumptions"),
         ] {
