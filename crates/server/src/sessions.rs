@@ -61,6 +61,15 @@ pub struct RunOptions {
     /// True to write preview candidates first.
     #[serde(default = "default_true")]
     pub preview: bool,
+    /// The canvases a demo run builds for, such as `desktop web` and
+    /// `phone`. One design is written per canvas per variation. Empty
+    /// means the default desktop canvas.
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    /// How many slides a deck run writes. `None` leaves it to the
+    /// agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slide_count: Option<u32>,
 }
 
 impl Default for RunOptions {
@@ -68,6 +77,8 @@ impl Default for RunOptions {
         Self {
             effort: default_effort(),
             variations: None,
+            platforms: Vec::new(),
+            slide_count: None,
             variety: default_effort(),
             templates: Vec::new(),
             preview: true,
@@ -581,12 +592,28 @@ impl SessionStore {
         } else {
             brief.artifact_kind = session.artifact_kind;
         }
-        // Carry the whole history forward, then add this entry.
-        if revision > 1
-            && let Some(previous) = self.read_brief_unlocked(id, revision - 1).await?
-        {
-            brief.revision_history = previous.revision_history;
+        // The canvas and the slide count are the app's answers, not the
+        // agent's. Mirror them into every revision so a brief the agent
+        // rewrites cannot drop them.
+        if !session.options.platforms.is_empty() {
+            brief.target_platform = session.options.platforms[0].clone();
+            brief.target_platforms = session.options.platforms.clone();
         }
+        if session.options.slide_count.is_some() {
+            brief.slide_count = session.options.slide_count;
+        }
+        // The history belongs to the store. A brief arrives with whatever
+        // history its writer invented, and a model writes an entry for
+        // the revision it thinks it is creating, which would double the
+        // row. Take the previous revision's history and nothing else.
+        brief.revision_history = match revision > 1 {
+            true => self
+                .read_brief_unlocked(id, revision - 1)
+                .await?
+                .map(|previous| previous.revision_history)
+                .unwrap_or_default(),
+            false => Vec::new(),
+        };
         brief.revision_history.push(BriefRevision {
             revision,
             source,
@@ -991,6 +1018,33 @@ mod tests {
         assert_eq!(loaded.request, "Design a landing page.");
         assert_eq!(loaded.state, WorkflowState::Intake);
         assert_eq!(store.list().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_history_the_writer_invented_is_thrown_away() {
+        let (_directory, store) = store();
+        store
+            .create(NewSession::demo("talk", "Talk", "A talk."))
+            .await
+            .unwrap();
+        // A model that writes its own entry for the revision it thinks
+        // it is creating used to double the row in the panel.
+        let invented = DesignBrief {
+            revision_history: vec![BriefRevision {
+                revision: 1,
+                source: RevisionSource::Agent,
+                summary: "Created initial design brief".to_owned(),
+                at: "2026-08-27T00:00:00Z".to_owned(),
+            }],
+            ..DesignBrief::default()
+        };
+        store
+            .write_brief_revision("talk", invented, RevisionSource::Agent, "Drafted")
+            .await
+            .unwrap();
+        let brief = store.latest_brief("talk").await.unwrap().unwrap();
+        assert_eq!(brief.revision_history.len(), 1);
+        assert_eq!(brief.revision_history[0].summary, "Drafted");
     }
 
     #[tokio::test]
