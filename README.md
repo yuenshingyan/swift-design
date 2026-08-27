@@ -52,7 +52,13 @@ Both kinds share the theme, the HTML and CSS rules, the brief, the workflow, the
 
 ## Design brief
 
-A brief records the artifact kind, audience, user need, target artifact/platform, primary action, required content/functionality, information architecture, visual direction, brand assets, accessibility and technical constraints, assumptions, open questions, and revision history. For a deck the agent asks about the scenario and the length in slides first.
+A brief records the artifact kind, audience, user need, target artifact/platform, primary action, required content/functionality, information architecture, visual direction, brand assets, accessibility and technical constraints, assumptions, open questions, the answered questions, and revision history.
+
+The panel shows the answers, the assumptions, and the open questions first. The full field list is one click away.
+
+The app asks for the settings with a closed set of answers, so the agent does not spend a question on them: the artifact kind, the number of variations (1 to 5), the canvases for a demo, and the number of slides for a deck. The canvas picker sits next to the questions, where the rest of the requirements are answered.
+
+Pick more than one canvas and the run writes one design per canvas per variation — desktop and phone with two variations is four candidates, grouped on the canvas under one tab per device.
 
 ## Architecture
 
