@@ -220,7 +220,7 @@ impl DeckStore {
         tokio::fs::create_dir_all(&self.directory).await?;
         self.snapshot_current(id).await;
         let json = serde_json::to_string_pretty(deck)?;
-        tokio::fs::write(self.path_of(id), json + "\n").await?;
+        crate::files::write_atomically(&self.path_of(id), &(json + "\n")).await?;
         Ok(())
     }
 
