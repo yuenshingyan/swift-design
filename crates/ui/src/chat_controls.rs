@@ -222,6 +222,36 @@ pub(crate) fn ModelChip(
     }
 }
 
+/// A row of number chips, 1 to `limit`, for a count the user picks.
+///
+/// The app asks for the count instead of the model: the answer is a
+/// number in a fixed range, so a chip row settles it in one click and
+/// spends no clarification turn on it.
+#[component]
+pub(crate) fn CountChips(
+    label: &'static str,
+    value: usize,
+    limit: usize,
+    on_change: EventHandler<usize>,
+) -> Element {
+    rsx! {
+        div { class: "count-chips",
+            span { class: "count-chips-label", "{label}" }
+            div { class: "effect-chips",
+                for number in 1..=limit {
+                    button {
+                        key: "{number}",
+                        class: if number == value { "selected" } else { "" },
+                        title: "{number}",
+                        onclick: move |_| on_change.call(number),
+                        "{number}"
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The submit button at the right of a composer: a play glyph only.
 /// `label` names the action for the tooltip and screen readers.
 #[component]
