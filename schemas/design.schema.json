@@ -215,7 +215,7 @@
           "const": "fade"
         },
         {
-          "description": "Both screens travel along the axis. The old screen leaves as the\nnew one arrives.",
+          "description": "Both screens travel along the axis. The old screen leaves as the\nnew one arrives. Deck files written by Swift Deck name this\neffect `slide`; that name still loads.",
           "type": "string",
           "const": "push"
         },
