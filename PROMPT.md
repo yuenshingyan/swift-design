@@ -14,6 +14,17 @@ Given an underspecified request such as “Design a landing page for my finance 
 
 The product should feel like a design partner, not a code-generation form.
 
+### Two artifact kinds
+
+The harness builds two kinds of artifact through the same workflow:
+
+- `demo` — a software demo: a landing page, app screens, or a similar layout. Written as a design with a device `viewport` and `screens`. Saved under `/designs`.
+- `deck` — a slide presentation on a 1920 by 1080 px canvas. Written as a deck with `slides` and no `viewport`. Saved under `/decks`, with a presenter view, an audience window, and HTML, PDF, and PPTX exports. This is the Swift Deck model and route set, merged into this project.
+
+The user picks the kind at intake. The session stores it as `artifact_kind`; the brief carries the same value. A user may change it by editing the brief before generation; after generation it is fixed. The two kinds are separate pipelines (types, stores, routes, renderers, prompts, editors) that share the brief, the workflow, and the helpers that are identical modulo names.
+
+For a deck, the clarification order is: the scenario (talk, pitch, lesson, report, read-only deck); the length in slides; the audience and the takeaway; required content, data, and constraints; brand and visual direction and accessibility; technical constraints.
+
 ## Required behavior
 
 ### 1. Persisted workflow state machine
@@ -79,6 +90,7 @@ Create a durable brief that records:
 
 - request and answers
 - confirmed facts, assumptions, and open questions
+- artifact kind (`demo` or `deck`)
 - target artifact/platform
 - audience and user problem
 - primary job-to-be-done and success criterion
@@ -128,6 +140,10 @@ Add unit, integration, and UI coverage for:
 - brief edits version correctly
 - malformed structured output fails safely
 - critique starts a revision flow
+- a deck session writes decks, not designs, and its chooser and critique use the deck store
+- the artifact kind cannot change after generation
+- deck writes are gated like design writes (409 outside `generating`)
+- the presenter view, the audience render, and the PPTX export serve a stored deck
 
 ## Implementation order
 
@@ -148,4 +164,4 @@ Add unit, integration, and UI coverage for:
 
 ## Definition of done
 
-A user can submit a vague request, answer a few material questions, approve an editable brief, receive an artifact, and request a focused revision without losing context.
+A user can pick a kind, submit a vague request, answer a few material questions, approve an editable brief, receive a design or a deck, and request a focused revision without losing context. A deck can be presented from the presenter view and exported as HTML, PDF, or PPTX.
