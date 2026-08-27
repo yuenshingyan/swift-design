@@ -3,16 +3,20 @@
 //! is the mode boundary in code, not only in the prompt.
 
 use design_model::{
-    BriefQuestion, BriefQuestionSet, DesignBrief, QuestionAnswer, QuestionSetError, RevisionSource,
-    WorkflowEvent, validate_question_set,
+    ArtifactKind, BriefQuestion, BriefQuestionSet, DesignBrief, QuestionAnswer, QuestionSetError,
+    RevisionSource, WorkflowEvent, validate_question_set,
 };
 
 use crate::events::ChangeNotifier;
 use crate::model_client::{LogSink, ModelClient};
 use crate::sessions::{ChatMessage, RunMode, RunRecord, SessionStore};
 
+/// How many times a reply that cannot be read is sent back for a
+/// correction before the run fails.
+const REPAIR_ROUND_LIMIT: usize = 2;
+
 /// The reply the model must send in briefing mode.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct BriefingReply {
     /// Text for the user.
     #[serde(default)]
@@ -55,7 +59,7 @@ pub enum BriefingReplyError {
     #[error("the reply has the wrong shape: {0}")]
     Shape(String),
     /// The question set failed validation.
-    #[error("the question set is invalid")]
+    #[error("the question set is invalid: {}", join_problems(.0))]
     InvalidQuestionSet(Vec<QuestionSetError>),
     /// The reply said complete but sent no brief.
     #[error("is_complete is true but no brief was sent")]
@@ -63,6 +67,23 @@ pub enum BriefingReplyError {
     /// The reply asked and presented at once.
     #[error("send a question set or a complete brief, not both")]
     AskedAndPresented,
+}
+
+/// The question set problems on one line, separated by `; `.
+fn join_problems(problems: &[QuestionSetError]) -> String {
+    problems
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The message that sends a reply error back to the model.
+fn repair_request(error: &BriefingReplyError) -> String {
+    format!(
+        "Your reply could not be read: {error}.\n\
+         Send one corrected JSON object only. Use the field names from the JSON Schema in the system prompt. No prose, no code fences."
+    )
 }
 
 /// Parses a briefing reply from the model text. Slices the outermost
@@ -245,20 +266,16 @@ impl BriefingEngine {
             .map_err(|error| error.to_string())?;
         let client = ModelClient::build_http_client()?;
         let request = vec![
-            serde_json::json!({ "role": "system", "content": briefing_prompt() }),
+            serde_json::json!({ "role": "system", "content": briefing_prompt(session.artifact_kind) }),
             serde_json::json!({
                 "role": "user",
                 "content": briefing_input(&session.request, &messages, &answered, latest_brief.as_ref()),
             }),
         ];
         log("briefing: asking the model");
-        let content = self
-            .model
-            .chat(&client, &request, &session.options.effort)
+        let reply = self
+            .ask_for_reply(&client, request, &session.options.effort, log)
             .await?;
-        let reply = parse_briefing_reply(&content).map_err(|error| {
-            format!("the model reply could not be read ({error}). Your answers are kept; run again to retry.")
-        })?;
         if let Some(set) = reply.question_set {
             return self.ask(session_id, &set, &reply.reply, log).await;
         }
@@ -272,6 +289,37 @@ impl BriefingEngine {
         // A plain reply: keep the state and record the turn.
         self.say(session_id, &reply.reply).await?;
         Ok(BriefingOutcome::Replied)
+    }
+
+    /// Asks the model for a reply. When the reply cannot be read, sends
+    /// the error back and asks for a corrected reply, up to
+    /// `REPAIR_ROUND_LIMIT` times.
+    async fn ask_for_reply(
+        &self,
+        client: &reqwest::Client,
+        mut request: Vec<serde_json::Value>,
+        effort: &str,
+        log: &LogSink,
+    ) -> Result<BriefingReply, String> {
+        let mut round = 0;
+        loop {
+            let content = self.model.chat(client, &request, effort).await?;
+            let error = match parse_briefing_reply(&content) {
+                Ok(reply) => return Ok(reply),
+                Err(error) => error,
+            };
+            if round >= REPAIR_ROUND_LIMIT {
+                return Err(format!(
+                    "the model reply could not be read ({error}). Your answers are kept; run again to retry."
+                ));
+            }
+            round += 1;
+            log(&format!(
+                "briefing: the reply could not be read ({error}); asking for a correction, round {round}"
+            ));
+            request.push(serde_json::json!({ "role": "assistant", "content": content }));
+            request.push(serde_json::json!({ "role": "user", "content": repair_request(&error) }));
+        }
     }
 
     /// Saves a question set and moves to clarifying.
@@ -389,21 +437,42 @@ fn merge_unique(items: &mut Vec<String>, extra: Vec<String>) {
 }
 
 /// The briefing system prompt. Simplified Technical English.
-pub fn briefing_prompt() -> String {
+pub fn briefing_prompt(kind: ArtifactKind) -> String {
+    let (role, order) = match kind {
+        ArtifactKind::Demo => (
+            "This session builds a software demo: a landing page, app screens, or a similar layout on a device viewport.",
+            "1. the artifact type and the target platform;\n\
+             2. the audience and the primary user goal;\n\
+             3. the primary action or conversion goal;\n\
+             4. required content, features, and constraints;\n\
+             5. brand assets, visual direction, and accessibility needs;\n\
+             6. technical constraints, when they matter.",
+        ),
+        ArtifactKind::Deck => (
+            "This session builds a deck: a slide presentation on a 1920 by 1080 px canvas.",
+            "1. the scenario: a talk, a pitch, a lesson, a report, or a read-only deck;\n\
+             2. the length in slides;\n\
+             3. the audience and what they must take away;\n\
+             4. required content, data, and constraints;\n\
+             5. brand assets, visual direction, and accessibility needs;\n\
+             6. technical constraints, when they matter.",
+        ),
+    };
+    let schema = serde_json::to_string(&schemars::schema_for!(BriefingReply)).unwrap_or_default();
     format!(
         "You are a design partner. You turn a vague request into a clear design brief.\n\
-         Ask only questions that change the design. Ask in this order of importance:\n\
-         1. the artifact type and the target platform;\n\
-         2. the audience and the primary user goal;\n\
-         3. the primary action or conversion goal;\n\
-         4. required content, features, and constraints;\n\
-         5. brand assets, visual direction, and accessibility needs;\n\
-         6. technical constraints, when they matter.\n\
+         {role}\n\
+         Ask only questions that change the result. Ask in this order of importance:\n\
+         {order}\n\
          Ask at most {limit} questions per turn. Offer concise choices and set allow_other when free text helps.\n\
          Set required to false for a question the user may skip. The app adds a skip choice itself.\n\
          Never invent a brand, an audience, or a conversion goal. Ask, or leave it as an open question.\n\
          Reply with only one JSON object in this shape:\n\
          {{\"reply\":\"text for the user\",\"question_set\":{{...}}|null,\"brief\":{{...}}|null,\"is_complete\":false}}\n\
+         The reply must conform to this JSON Schema:\n{schema}\n\
+         Each question needs id, label, and kind. kind is one of single_select, multi_select, short_text, or long_text. \
+         A select question needs options, each with value and label.\n\
+         Example question: {{\"id\":\"platform\",\"label\":\"Which platform?\",\"kind\":\"single_select\",\"required\":true,\"options\":[{{\"value\":\"web\",\"label\":\"Web\"}}],\"allow_other\":true}}\n\
          Send question_set when you need answers. Do not set is_complete then.\n\
          Send brief and set is_complete to true when the brief is ready to present.\n\
          Keep confirmed_facts for what the user stated. Keep assumptions for what you decided. Keep open_questions for what is still unknown.\n\
@@ -468,7 +537,7 @@ mod tests {
     };
     use crate::events::ChangeNotifier;
     use crate::model_client::{LogSink, ModelClient};
-    use crate::sessions::{RunOptions, SessionStore};
+    use crate::sessions::{NewSession, SessionStore};
     use crate::test_support::FakeModelServer;
     use design_model::{
         BriefQuestion, QuestionAnswer, QuestionKind, QuestionOption, WorkflowState,
@@ -490,12 +559,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = SessionStore::new(directory.path().join("sessions"));
         store
-            .create(
-                "talk",
-                "Talk",
-                "Design a landing page.",
-                RunOptions::default(),
-            )
+            .create(NewSession::demo("talk", "Talk", "Design a landing page."))
             .await
             .unwrap();
         (directory, store)
@@ -544,6 +608,48 @@ mod tests {
         assert_eq!(runs[0].result.as_deref(), Some("brief_presented"));
     }
 
+    const BAD_SHAPE: &str = r#"{"reply":"Two things.","question_set":{"title":"T","message":"m","questions":[{"id":"platform","label":"Which platform?"}]}}"#;
+
+    #[tokio::test]
+    async fn a_reply_with_the_wrong_shape_is_sent_back_for_a_correction() {
+        let server = FakeModelServer::start().await;
+        server.push_text(BAD_SHAPE);
+        server.push_text(
+            r#"{"reply":"Two things.","question_set":{"title":"T","message":"m","questions":[{"id":"platform","label":"Which platform?","kind":"single_select","options":[{"value":"web","label":"Web"}]}]}}"#,
+        );
+        let (_directory, sessions) = store().await;
+        let outcome = engine(&server, &sessions)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, BriefingOutcome::AskedQuestions { .. }));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        let messages = requests[1]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[2]["content"].as_str().unwrap(), BAD_SHAPE);
+        let correction = messages[3]["content"].as_str().unwrap();
+        assert!(correction.contains("could not be read"));
+        assert!(correction.contains("missing field `kind`"));
+    }
+
+    #[tokio::test]
+    async fn correction_rounds_stop_after_the_limit() {
+        let server = FakeModelServer::start().await;
+        for _ in 0..=super::REPAIR_ROUND_LIMIT {
+            server.push_text(BAD_SHAPE);
+        }
+        let (_directory, sessions) = store().await;
+        let message = engine(&server, &sessions)
+            .run("talk", silent_log())
+            .await
+            .unwrap_err();
+        assert!(message.contains("could not be read"));
+        assert_eq!(server.requests().len(), super::REPAIR_ROUND_LIMIT + 1);
+        let runs = sessions.runs("talk").await.unwrap();
+        assert_eq!(runs[0].result.as_deref(), Some("failed"));
+    }
+
     #[tokio::test]
     async fn a_prose_reply_keeps_the_state_and_prior_answers() {
         let server = FakeModelServer::start().await;
@@ -564,7 +670,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let sessions = SessionStore::new(directory.path().join("sessions"));
         sessions
-            .create("talk", "Talk", "A page.", RunOptions::default())
+            .create(NewSession::demo("talk", "Talk", "A page."))
             .await
             .unwrap();
         engine(&server, &sessions)
@@ -685,11 +791,39 @@ mod tests {
     }
 
     #[test]
+    fn briefing_prompts_carry_the_reply_schema_and_the_question_fields() {
+        let prompt = briefing_prompt(design_model::ArtifactKind::Demo);
+        assert!(prompt.contains("JSON Schema"));
+        assert!(prompt.contains("\"single_select\""));
+        assert!(prompt.contains("\"allow_other\""));
+        assert!(prompt.contains("\"confirmed_facts\""));
+        assert!(prompt.contains("Each question needs id, label, and kind."));
+    }
+
+    #[test]
+    fn an_invalid_question_set_error_names_every_problem() {
+        let raw = r#"{"question_set":{"title":"T","message":"m","questions":[]}}"#;
+        let error = parse_briefing_reply(raw).unwrap_err();
+        assert!(error.to_string().contains("has no questions"));
+    }
+
+    #[test]
     fn briefing_prompts_state_the_priorities_and_the_three_question_limit() {
-        let prompt = briefing_prompt();
+        let prompt = briefing_prompt(design_model::ArtifactKind::Demo);
         assert!(prompt.contains("at most 3 questions"));
         assert!(prompt.contains("the artifact type and the target platform"));
+        assert!(prompt.contains("software demo"));
         assert!(prompt.contains("Never invent a brand"));
         assert!(prompt.contains("is_complete"));
+    }
+
+    #[test]
+    fn the_deck_briefing_prompt_asks_scenario_and_length_first() {
+        let prompt = briefing_prompt(design_model::ArtifactKind::Deck);
+        assert!(prompt.contains("builds a deck"));
+        assert!(prompt.contains("1. the scenario"));
+        assert!(prompt.contains("2. the length in slides"));
+        assert!(prompt.contains("at most 3 questions"));
+        assert!(!prompt.contains("target platform"));
     }
 }
