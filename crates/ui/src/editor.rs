@@ -19,9 +19,11 @@ use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::api;
+use crate::canvas::is_narrow_canvas;
 use crate::chat::DesignChat;
 use crate::icons;
 use crate::select::{Select, plain_options};
+use crate::settings::artifact_project;
 use crate::uploads::format_size;
 
 /// Forwards preview-iframe messages into the Dioxus event loop, turns
@@ -405,6 +407,19 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
     });
 
     let screen_count = design().screens.len();
+    // The render page fits the screen to its frame, so a frame with the
+    // canvas ratio shows the screen edge to edge. A narrow canvas, like
+    // a phone, is limited by height instead of width.
+    let viewport = design().viewport;
+    let ratio = viewport.aspect_ratio_css();
+    let preview_class = match is_narrow_canvas(viewport) {
+        true => "narrow",
+        false => "",
+    };
+    let thumbnail_frame_height = format!(
+        "{:.2}",
+        70.0 * f64::from(viewport.height) / f64::from(viewport.width)
+    );
     let outline_count = design().outline.len();
     let total_fields = field_count(&design());
     let user_count = user_paths().len().min(total_fields);
@@ -562,6 +577,8 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                     }
                     iframe {
                         title: "Design preview",
+                        class: preview_class,
+                        style: "aspect-ratio: {ratio}",
                         "data-preview": "true",
                         src: "/designs/{design_id}/render?version={preview_version()}&editable=true&screen={selected() + 1}",
                     }
@@ -579,12 +596,12 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                     }
                     label { class: "notes-box",
                         span { class: "notes-heading",
-                            "Presenter notes"
+                            "Design notes"
                             span { class: "screen-no", "screen {selected() + 1}" }
                         }
                         textarea {
                             value: "{current_notes}",
-                            placeholder: "What to say on this screen. Never shown on the screen.",
+                            placeholder: "Intent, states, and handoff remarks for this screen. Never shown on the screen.",
                             oninput: move |event| {
                                 let index = selected();
                                 design
@@ -603,6 +620,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                                 key: "{index}",
                                 class: if dragged() == Some(index) { "thumbnail current dragging" } else if index == selected() { "thumbnail current" } else { "thumbnail" },
                                 title: "{label} · drag to reorder",
+                                style: "aspect-ratio: {ratio}",
                                 "data-index": "{index}",
                                 onclick: move |_| {
                                     selected.set(index);
@@ -612,6 +630,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                                 iframe {
                                     title: "Screen {index + 1}",
                                     tabindex: "-1",
+                                    style: "height: {thumbnail_frame_height}rem",
                                     src: "/designs/{design_id}/render?version={preview_version()}&screen={index + 1}",
                                 }
                                 span { class: "thumbnail-number", {format!("{:02}", index + 1)} }
@@ -645,11 +664,27 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                                 }
                             }
                         }
+                        // An outline thumbnail is a planned screen nobody has
+                        // written. A click asks the app to write every one of
+                        // them from the outline.
                         for index in screen_count..outline_count {
-                            div {
+                            button {
                                 key: "outline-{index}",
                                 class: "thumbnail outline",
-                                title: "{outline_title(&design(), index)} · not written yet",
+                                title: "{outline_title(&design(), index)} · click to write the remaining screens",
+                                onclick: {
+                                    let design_id = design_id.clone();
+                                    move |_| {
+                                        let design_id = design_id.clone();
+                                        spawn(async move {
+                                            let session_id = artifact_project(&design_id);
+                                            let sent = api::continue_artifact(&session_id, &design_id).await;
+                                            if let Err(message) = sent {
+                                                messages.write().push(message);
+                                            }
+                                        });
+                                    }
+                                },
                                 span { class: "thumbnail-number", {format!("{:02}", index + 1)} }
                                 span { class: "outline-label", "outline" }
                             }
