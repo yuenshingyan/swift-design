@@ -286,6 +286,8 @@ struct MessageRequest<'value> {
     content: &'value str,
     #[serde(skip_serializing_if = "Option::is_none")]
     design: Option<&'value str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action: Option<&'value str>,
 }
 
 /// Appends a user turn to the conversation.
@@ -295,9 +297,28 @@ pub async fn send_session_message(
     design: Option<&str>,
 ) -> Result<(), String> {
     let builder = Request::post(&format!("/sessions/{id}/messages"))
-        .json(&MessageRequest { content, design })
+        .json(&MessageRequest {
+            content,
+            design,
+            action: None,
+        })
         .map_err(|error| error.to_string())?;
     send_checked(builder, "POST /sessions/messages")
+        .await
+        .map(|_| ())
+}
+
+/// Asks the app to write the remaining screens or slides of a preview
+/// artifact from its outline. The server starts the run itself.
+pub async fn continue_artifact(session_id: &str, artifact_id: &str) -> Result<(), String> {
+    let builder = Request::post(&format!("/sessions/{session_id}/messages"))
+        .json(&MessageRequest {
+            content: "Write the remaining screens from the outline.",
+            design: Some(artifact_id),
+            action: Some("continue"),
+        })
+        .map_err(|error| error.to_string())?;
+    send_checked(builder, "POST /sessions/messages continue")
         .await
         .map(|_| ())
 }
