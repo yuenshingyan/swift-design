@@ -4,11 +4,12 @@
 //! session, starts the briefing run, and opens the session workspace.
 //! Existing sessions are listed underneath.
 
+use design_model::ArtifactKind;
 use dioxus::prelude::*;
 
 use crate::api;
 use crate::brief_panel::state_label;
-use crate::chat_controls::ModelChip;
+use crate::chat_controls::{ModelChip, SendButton};
 use crate::icons;
 use crate::settings::{SettingsPanel, pause_briefly};
 use crate::uploads::{AttachButton, AttachmentChips};
@@ -19,6 +20,14 @@ fn template_button_label(chosen: usize) -> String {
         0 => "none".to_owned(),
         1 => "1 chosen".to_owned(),
         count => format!("{count} chosen"),
+    }
+}
+
+/// The composer placeholder for an artifact kind.
+fn composer_placeholder(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::Demo => "A landing page for my finance app, for retail investors…",
+        ArtifactKind::Deck => "A ten-slide pitch deck for my finance app, for seed investors…",
     }
 }
 
@@ -41,6 +50,7 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
     let mut is_configuring = use_signal(|| false);
     let mut is_loaded = use_signal(|| false);
     let mut request = use_signal(String::new);
+    let mut kind = use_signal(|| ArtifactKind::Demo);
     let effort = use_signal(|| "medium".to_owned());
     let mut templates = use_signal(Vec::<api::TemplateSummary>::new);
     let chosen_templates = use_signal(Vec::<String>::new);
@@ -86,7 +96,7 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
         }
     });
 
-    let create = move |_| {
+    let create = move |_: ()| {
         let text = request().trim().to_owned();
         if text.is_empty() {
             error.set(Some("Describe the design first.".to_owned()));
@@ -94,9 +104,11 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
         }
         let level = effort();
         let picked = chosen_templates();
+        let chosen_kind = kind();
         spawn(async move {
             let body = api::CreateSessionRequest {
                 request: &text,
+                artifact_kind: chosen_kind.as_str(),
                 options: api::CreateOptions {
                     effort: &level,
                     preview: true,
@@ -121,12 +133,24 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
         main { class: "home",
             section { class: "home-hero",
                 h1 { "What are we designing?" }
-                p { class: "lede", "Describe it once. We'll ask a few questions, agree a brief, then generate." }
+                p { class: "lede",
+                    "Describe it once. We'll ask a few questions, agree a brief, then generate."
+                }
             }
             section { class: "home-composer",
                 div { class: "brief-card",
+                    div { class: "effect-chips kind-chips",
+                        for choice in ArtifactKind::ALL {
+                            button {
+                                key: "{choice.as_str()}",
+                                class: if kind() == choice { "selected" } else { "" },
+                                onclick: move |_| kind.set(choice),
+                                "{choice.label()}"
+                            }
+                        }
+                    }
                     textarea {
-                        placeholder: "A landing page for my finance app, for retail investors…",
+                        placeholder: composer_placeholder(kind()),
                         value: "{request()}",
                         oninput: move |event| request.set(event.value()),
                     }
@@ -150,18 +174,23 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                                     onclick: move |_| is_picking_templates.set(true),
                                     span { dangerous_inner_html: icons::LAYOUT }
                                     if !chosen_templates().is_empty() {
-                                        span { class: "template-button-count", "{chosen_templates().len()}" }
+                                        span { class: "template-button-count",
+                                            "{chosen_templates().len()}"
+                                        }
                                     }
                                 }
                             }
                             span { class: "divider" }
-                            ModelChip { settings, is_configuring, effort: Some(effort) }
+                            ModelChip {
+                                settings,
+                                is_configuring,
+                                effort: Some(effort),
+                            }
                         }
-                        button {
-                            class: "primary",
-                            disabled: !is_model_chosen,
-                            onclick: create,
-                            "Create →"
+                        SendButton {
+                            label: "Create",
+                            is_enabled: is_model_chosen,
+                            on_send: create,
                         }
                     }
                 }
@@ -191,7 +220,8 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                     p { class: "home-empty", "No sessions yet. Describe a design above to start one." }
                 }
                 for summary in session_list {
-                    div { class: "project-row session-row",
+                    div {
+                        class: "project-row session-row",
                         key: "{summary.id}",
                         tabindex: "0",
                         onclick: {
@@ -199,7 +229,10 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                             move |_| on_open_session.call(id.clone())
                         },
                         span { class: "project-title", "{summary.title}" }
-                        span { class: "state-badge {state_class(summary.state)}", "{state_label(summary.state)}" }
+                        span { class: "project-kind", "{summary.artifact_kind.label()}" }
+                        span { class: "state-badge {state_class(summary.state)}",
+                            "{state_label(summary.state)}"
+                        }
                         button {
                             class: "row-delete",
                             title: "Delete this session",
@@ -237,7 +270,11 @@ fn TemplatePicker(
     let count = chosen().len();
     rsx! {
         div { class: "modal-backdrop", onclick: close }
-        div { class: "modal", role: "dialog", aria_modal: true, aria_label: "Choose templates",
+        div {
+            class: "modal",
+            role: "dialog",
+            aria_modal: true,
+            aria_label: "Choose templates",
             div { class: "modal-head",
                 span { class: "kicker", "Templates" }
                 button { class: "icon-button", title: "Close", onclick: close, "×" }
@@ -259,7 +296,9 @@ fn TemplatePicker(
                                             move |_| {
                                                 let mut ids = chosen();
                                                 match ids.iter().position(|chosen_id| chosen_id == &id) {
-                                                    Some(index) => { ids.remove(index); }
+                                                    Some(index) => {
+                                                        ids.remove(index);
+                                                    }
                                                     None => ids.push(id.clone()),
                                                 }
                                                 chosen.set(ids);
@@ -313,12 +352,18 @@ fn TemplatePicker(
 
 #[cfg(test)]
 mod tests {
-    use crate::home::template_button_label;
+    use crate::home::{composer_placeholder, template_button_label};
 
     #[test]
     fn the_template_button_counts_what_is_chosen() {
         assert_eq!(template_button_label(0), "none");
         assert_eq!(template_button_label(1), "1 chosen");
         assert_eq!(template_button_label(4), "4 chosen");
+    }
+
+    #[test]
+    fn composer_placeholders_differ_per_kind() {
+        assert!(composer_placeholder(design_model::ArtifactKind::Demo).contains("landing page"));
+        assert!(composer_placeholder(design_model::ArtifactKind::Deck).contains("deck"));
     }
 }
