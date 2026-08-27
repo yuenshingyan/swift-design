@@ -10,6 +10,7 @@ mod canvas;
 mod chat;
 mod chat_controls;
 mod critique;
+mod deck_editor;
 mod editor;
 mod home;
 mod icons;
@@ -101,7 +102,7 @@ button.primary:disabled { box-shadow: none; }
 .home-hero h1 { margin: 0; font-size: 2.625rem; line-height: 1.05; letter-spacing: -0.04em;
   font-weight: 600; text-align: center; }
 .home-composer { width: 100%; max-width: 46rem; display: flex;
-  flex-direction: column; gap: 1rem; }
+  flex-direction: column; gap: 1rem; position: relative; }
 .home-controls { display: flex; align-items: center; gap: 0.5rem;
   flex-wrap: nowrap; white-space: nowrap; min-width: 0; }
 .control-group { display: flex; align-items: stretch; flex: none; overflow: hidden;
@@ -184,8 +185,14 @@ button.control-cell:focus-visible { outline-offset: -2px; }
 .model-chip::before { content: ''; width: 6px; height: 6px; border-radius: 999px;
   background: var(--teal); flex: none; }
 .model-chip.unset::before { background: var(--faint); }
-.home-setup, .chat-settings { background: var(--raised); border: 1px solid var(--line-soft);
-  border-radius: var(--r-card); box-shadow: var(--sh-float); overflow: hidden; }
+/* The setup panel lies over the composer instead of pushing it down:
+   nothing below it is usable until a model is chosen. */
+.home-setup, .chat-settings { position: absolute; left: 0; right: 0; z-index: 7;
+  min-height: 100%; box-sizing: border-box; background: var(--raised);
+  border: 1px solid var(--line-soft); border-radius: var(--r-card);
+  box-shadow: var(--sh-float); overflow: hidden; }
+.home-setup { top: 0; }
+.chat-settings { bottom: 0; max-height: 60vh; overflow-y: auto; }
 .home-projects { width: 100%; max-width: 46rem; display: flex;
   flex-direction: column; }
 .projects-head { display: flex; align-items: baseline; justify-content: space-between;
@@ -249,8 +256,7 @@ button.control-cell:focus-visible { outline-offset: -2px; }
   background: var(--raised); overflow: hidden; min-height: 0; }
 .thread { display: flex; flex-direction: column; gap: 0.875rem; flex: 1;
   min-height: 0; overflow-y: auto; padding: 1.125rem 1.25rem 0; }
-.conversation > .chat-settings, .conversation > .chat-box { margin: 0 1.25rem; }
-.chat-settings { max-height: 50vh; overflow-y: auto; }
+.conversation > .chat-box { margin: 0 1.25rem; }
 .brief-summary { display: flex; flex-direction: column; gap: 0.625rem;
   border: 1px solid var(--hairline); border-radius: var(--r-panel); background: var(--subtle);
   padding: 0.8125rem 0.9375rem; }
@@ -260,7 +266,7 @@ button.control-cell:focus-visible { outline-offset: -2px; }
 .brief-tags .badge { text-transform: none; letter-spacing: 0; font-size: 0.656rem;
   background: var(--raised); border-color: var(--hairline); }
 .chat-box { border: 1px solid var(--line); border-radius: var(--r-card); background: var(--raised);
-  display: flex; flex-direction: column; flex: none;
+  display: flex; flex-direction: column; flex: none; position: relative;
   box-shadow: 0 1px 2px rgba(21,24,28,.04), 0 10px 24px -22px rgba(21,24,28,.4); }
 .chat-box textarea { border: 0; outline: none; resize: none; min-height: 4.2rem;
   padding: 0.8rem 0.9rem; font: inherit; font-size: 0.9rem; line-height: 1.45;
@@ -277,8 +283,8 @@ button.control-cell:focus-visible { outline-offset: -2px; }
 .chat-note { font-size: 0.7rem; color: var(--muted); }
 .chat-box-left .chat-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   min-width: 0; }
-button.primary.send-button { display: inline-flex; align-items: center; gap: 0.4rem; flex: none;
-  padding: 0.5rem 0.9rem 0.5rem 0.75rem; font-size: 0.8rem; border-radius: var(--r-primary); }
+button.primary.send-button { display: inline-flex; align-items: center; justify-content: center;
+  flex: none; width: 2rem; height: 2rem; padding: 0; border-radius: var(--r-primary); }
 .send-button span { display: flex; }
 .bubble { padding: 0.6875rem 0.875rem; font-size: 0.875rem; line-height: 1.5; max-width: 92%; }
 .bubble p { margin: 0; white-space: pre-wrap; }
@@ -622,6 +628,10 @@ button.primary.send-button { display: inline-flex; align-items: center; gap: 0.4
   flex: none; }
 .color-list .color-name { font-size: 0.8125rem; color: var(--ink); }
 .color-list .color-code { margin-left: auto; font-size: 0.72rem; color: var(--muted); }
+.kind-chips { padding: 0.75rem 0.75rem 0; }
+.kind-field { margin-bottom: 0.75rem; }
+.project-kind { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.72rem;
+  color: #6C7178; white-space: nowrap; }
 .effect-chips { display: flex; flex-wrap: wrap; gap: 0.375rem; }
 .effect-chips button { border-radius: 999px; padding: 0.375rem 0.8125rem; font-size: 0.78rem;
   color: var(--ink-2); box-shadow: none; }
@@ -630,11 +640,12 @@ button.primary.send-button { display: inline-flex; align-items: center; gap: 0.4
 
 /* Uploads panel */
 .attach-button { position: relative; overflow: hidden; display: inline-flex; align-items: center;
-  justify-content: center; width: 1.875rem; height: 1.875rem; flex: none;
-  border: 1px solid var(--line); border-radius: 999px; background: var(--raised);
-  color: var(--ink-2); font-size: 1rem; line-height: 1; cursor: pointer;
+  justify-content: center; width: 2rem; height: 2rem; flex: none;
+  border: 1px solid var(--line); border-radius: var(--r-primary); background: var(--raised);
+  color: var(--ink-2); line-height: 1; cursor: pointer;
   box-shadow: var(--sh-control); transition: background-color 120ms ease, border-color 120ms ease; }
-.attach-button:hover { background: var(--subtle); border-color: #B4B0A7; }
+.attach-button span { display: flex; }
+.attach-button:hover { background: var(--subtle); border-color: #B4B0A7; color: var(--ink); }
 .attach-button.busy { color: var(--faint); cursor: default; }
 .attach-button input[type='file'] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 .brief-attachments { list-style: none; margin: 0; padding: 0 1.5rem 0.8rem; display: flex;
@@ -783,6 +794,16 @@ button.primary.send-button { display: inline-flex; align-items: center; gap: 0.4
   padding: 0.9rem 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
 .question-set-title { font-size: 0.85rem; font-weight: 600; }
 .question-set-message { font-size: 0.8rem; color: var(--ink-2); }
+.question-cards { display: flex; flex-direction: column; gap: 0.75rem; }
+/* The open question set sits in the workbench, where the questions
+   can share the width. */
+.workbench-questions .question-set { padding: 1.1rem 1.25rem; gap: 0.9rem; }
+.workbench-questions .question-set-title { font-size: 1rem; }
+.workbench-questions .question-set-message { font-size: 0.85rem; }
+.workbench-questions .question-cards { display: grid; gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); align-items: start; }
+.workbench-questions .question-card { padding: 0.9rem 1rem; }
+.workbench-questions .question-label { font-size: 0.92rem; }
 .question-set-actions { display: flex; align-items: center; gap: 0.625rem; }
 .question-hint { font-size: 0.72rem; color: var(--muted); }
 .question-card { background: var(--subtle); border-radius: 10px; padding: 0.75rem 0.875rem;
@@ -794,14 +815,17 @@ button.primary.send-button { display: inline-flex; align-items: center; gap: 0.4
   border-radius: 4px; padding: 0 0.3rem; }
 .answer-textarea, .other-input { width: 100%; font: inherit; font-size: 0.84rem;
   border: 1px solid var(--line); border-radius: 6px; padding: 0.4rem 0.5rem; background: var(--raised); }
-.answered-card { align-self: stretch; background: var(--sunken); border-radius: 10px;
-  padding: 0.625rem 0.875rem; display: flex; flex-direction: column; gap: 0.3rem; }
-.answered-row { display: grid; grid-template-columns: 1fr auto; gap: 0.5rem; align-items: baseline;
-  font-size: 0.78rem; }
-.answered-summary { color: var(--ink-2); }
-.answered-note { font-size: 0.7rem; color: var(--faint); }
-.badge.skipped { font-size: 0.62rem; color: var(--muted); border: 1px solid var(--ghost);
-  border-radius: 4px; padding: 0 0.3rem; }
+/* Answered questions read as a user turn: right-aligned, one block per
+   question, the label above the answer. */
+.answered-card { align-self: flex-end; max-width: 92%; background: var(--raised);
+  border: 1px solid var(--line-soft); border-radius: 12px; padding: 0.75rem 0.9rem;
+  display: flex; flex-direction: column; gap: 0.6rem; box-shadow: var(--sh-control); }
+.answered-kicker { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--faint); }
+.answered-row { display: flex; flex-direction: column; gap: 0.15rem; }
+.answered-label { font-size: 0.72rem; line-height: 1.4; color: var(--muted); }
+.answered-summary { font-size: 0.84rem; line-height: 1.45; font-weight: 500; color: var(--ink); }
+.answered-summary.skipped { font-weight: 400; font-style: italic; color: var(--muted); }
 
 .brief-panel { background: var(--raised); border: 1px solid var(--line-soft); border-radius: 12px;
   box-shadow: var(--sh-card, 0 1px 2px rgba(21,24,28,.06)); padding: 1rem 1.1rem;
@@ -957,7 +981,9 @@ fn App() -> Element {
             }
         }
         match view() {
-            None => rsx! { p { class: "lede", "Loading…" } },
+            None => rsx! {
+                p { class: "lede", "Loading…" }
+            },
             Some(View::Home) => rsx! {
                 home::Home { on_open_session: move |id| view.set(Some(View::Session(id))) }
             },
@@ -965,13 +991,26 @@ fn App() -> Element {
                 session::SessionWorkspace {
                     session_id: id,
                     on_open_design: move |design_id| view.set(Some(View::Design(design_id))),
+                    on_open_deck: move |deck_id| view.set(Some(View::Deck(deck_id))),
                     on_home: move |_| view.set(Some(View::Home)),
                 }
             },
             Some(View::Design(id)) => {
-                let session = settings::design_project(&id);
+                let session = settings::artifact_project(&id);
                 rsx! {
-                    editor::Editor { design_id: id, on_back: move |_| view.set(Some(View::Session(session.clone()))) }
+                    editor::Editor {
+                        design_id: id,
+                        on_back: move |_| view.set(Some(View::Session(session.clone()))),
+                    }
+                }
+            }
+            Some(View::Deck(id)) => {
+                let session = settings::artifact_project(&id);
+                rsx! {
+                    deck_editor::DeckEditor {
+                        deck_id: id,
+                        on_back: move |_| view.set(Some(View::Session(session.clone()))),
+                    }
                 }
             }
         }
