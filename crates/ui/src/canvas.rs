@@ -29,14 +29,6 @@ pub(crate) struct CanvasCard {
 }
 
 impl CanvasCard {
-    /// The word for one unit of this card: `screen` or `slide`.
-    pub fn unit(&self) -> &'static str {
-        match self.kind {
-            ArtifactKind::Demo => "screen",
-            ArtifactKind::Deck => "slide",
-        }
-    }
-
     /// True when the artifact is a preview that waits for more units.
     pub fn is_preview(&self) -> bool {
         self.outline_count > self.count
@@ -99,11 +91,12 @@ pub(crate) fn cards_from_decks(
     mine
 }
 
-/// A short card label for one candidate.
+/// A short card label for one candidate. The pager next to it counts
+/// the screens or slides, and the `Finish` button marks a preview, so
+/// the label only names the card.
 pub(crate) fn card_label(card: &CanvasCard, chosen: Option<&str>) -> String {
-    let unit = card.unit();
     if Some(card.id.as_str()) == chosen {
-        return format!("Chosen · {} {unit}s", card.count);
+        return "Chosen".to_owned();
     }
     let number = card
         .id
@@ -111,19 +104,10 @@ pub(crate) fn card_label(card: &CanvasCard, chosen: Option<&str>) -> String {
         .next()
         .filter(|tail| tail.chars().all(|character| character.is_ascii_digit()))
         .unwrap_or("");
-    let name = if number.is_empty() {
-        "Candidate".to_owned()
-    } else {
-        format!("Candidate {number}")
-    };
-    if card.is_preview() {
-        format!(
-            "{name} · preview {} of {} {unit}s",
-            card.count, card.outline_count
-        )
-    } else {
-        format!("{name} · {} {unit}s", card.count)
+    if number.is_empty() {
+        return "Candidate".to_owned();
     }
+    format!("Candidate {number}")
 }
 
 /// The name of one canvas, for a tab: `Desktop · 1440 × 900`.
@@ -135,6 +119,13 @@ pub(crate) fn canvas_label(viewport: Viewport) -> String {
         _ => "Desktop",
     };
     format!("{name} · {} × {}", viewport.width, viewport.height)
+}
+
+/// True for a canvas narrower than 16:10, like a phone or a tablet. A
+/// card is as wide as its grid column and keeps the canvas ratio, so
+/// the grid gives a narrow canvas narrower columns.
+pub(crate) fn is_narrow_canvas(viewport: Viewport) -> bool {
+    viewport.width * 10 < viewport.height * 16
 }
 
 /// The canvases the cards were written for, in first-seen order.
@@ -157,6 +148,7 @@ pub(crate) fn CandidateCanvas(
     revision: u64,
     chosen: Option<String>,
     on_open: EventHandler<(ArtifactKind, String)>,
+    on_continue: EventHandler<String>,
 ) -> Element {
     let mut shown = use_signal(HashMap::<String, usize>::new);
     let mut open_tab = use_signal(usize::default);
@@ -179,6 +171,9 @@ pub(crate) fn CandidateCanvas(
             .collect(),
         false => cards.clone(),
     };
+    let is_narrow = shown_cards
+        .first()
+        .is_some_and(|card| is_narrow_canvas(card.viewport));
     rsx! {
         if tabs.len() > 1 {
             div { class: "canvas-tabs",
@@ -192,7 +187,7 @@ pub(crate) fn CandidateCanvas(
                 }
             }
         }
-        div { class: "canvas-grid",
+        div { class: if is_narrow { "canvas-grid narrow" } else { "canvas-grid" },
             for card in shown_cards {
                 {
                     let id = card.id.clone();
@@ -203,18 +198,29 @@ pub(crate) fn CandidateCanvas(
                     let is_chosen = chosen.as_deref() == Some(id.as_str());
                     let ratio = card.ratio.clone();
                     let preview = card.preview_url(revision, current);
+                    let open = {
+                        let id = id.clone();
+                        move |_| on_open.call((kind, id.clone()))
+                    };
                     rsx! {
-                        article { key: "{id}", class: if is_chosen { "canvas-card chosen" } else { "canvas-card" },
+                        article {
+                            key: "{id}",
+                            class: if is_chosen { "canvas-card chosen" } else { "canvas-card" },
+                            onclick: open,
                             div { class: "card-preview",
                                 iframe { src: "{preview}", style: "aspect-ratio: {ratio}", title: "{id}" }
                             }
                             div { class: "card-footer",
                                 span { class: "card-label", "{card_label(&card, chosen.as_deref())}" }
                                 div { class: "card-pager",
+                                    // The pager sits inside the card, and the
+                                    // card opens on click, so the pager must
+                                    // keep its clicks to itself.
                                     button {
                                         onclick: {
                                             let id = id.clone();
-                                            move |_| {
+                                            move |event: MouseEvent| {
+                                                event.stop_propagation();
                                                 shown.write().insert(id.clone(), stepped_screen(current, -1, count));
                                             }
                                         },
@@ -224,20 +230,30 @@ pub(crate) fn CandidateCanvas(
                                     button {
                                         onclick: {
                                             let id = id.clone();
-                                            move |_| {
+                                            move |event: MouseEvent| {
+                                                event.stop_propagation();
                                                 shown.write().insert(id.clone(), stepped_screen(current, 1, count));
                                             }
                                         },
                                         "›"
                                     }
                                 }
-                                button {
-                                    class: "open-card",
-                                    onclick: {
-                                        let id = id.clone();
-                                        move |_| on_open.call((kind, id.clone()))
-                                    },
-                                    "Open"
+                                // A preview waits for the rest of its outline.
+                                // The button asks the app for it, and the run
+                                // shows its progress on this card.
+                                if card.is_preview() && progress.is_none() {
+                                    button {
+                                        class: "card-continue",
+                                        title: "Write the remaining screens from the outline",
+                                        onclick: {
+                                            let id = id.clone();
+                                            move |event: MouseEvent| {
+                                                event.stop_propagation();
+                                                on_continue.call(id.clone());
+                                            }
+                                        },
+                                        "Finish"
+                                    }
                                 }
                             }
                             if let Some(percent) = progress {
@@ -296,6 +312,22 @@ mod tests {
         assert_eq!(canvas_label(DECK_VIEWPORT), "Slides · 1920 × 1080");
     }
 
+    #[test]
+    fn phones_and_tablets_are_narrow_canvases() {
+        let phone = Viewport {
+            width: 390,
+            height: 844,
+        };
+        let tablet = Viewport {
+            width: 1024,
+            height: 768,
+        };
+        assert!(is_narrow_canvas(phone));
+        assert!(is_narrow_canvas(tablet));
+        assert!(!is_narrow_canvas(Viewport::default()));
+        assert!(!is_narrow_canvas(DECK_VIEWPORT));
+    }
+
     use design_model::ArtifactKind;
 
     use super::{CanvasCard, card_label, cards_from_decks, cards_from_designs};
@@ -344,17 +376,9 @@ mod tests {
     #[test]
     fn card_labels_shorten_candidate_ids() {
         let cards = cards_from_designs(&[summary("talk-candidate-2")], "talk", None);
-        assert_eq!(card_label(&cards[0], None), "Candidate 2 · 3 screens");
+        assert_eq!(card_label(&cards[0], None), "Candidate 2");
         let chosen = cards_from_designs(&[summary("talk")], "talk", Some("talk"));
-        assert_eq!(card_label(&chosen[0], Some("talk")), "Chosen · 3 screens");
-        let preview = CanvasCard {
-            outline_count: 12,
-            ..cards[0].clone()
-        };
-        assert_eq!(
-            card_label(&preview, None),
-            "Candidate 2 · preview 3 of 12 screens"
-        );
+        assert_eq!(card_label(&chosen[0], Some("talk")), "Chosen");
     }
 
     #[test]
@@ -364,7 +388,7 @@ mod tests {
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].kind, ArtifactKind::Deck);
         assert_eq!(cards[0].ratio, "1920 / 1080");
-        assert_eq!(card_label(&cards[0], None), "Candidate 1 · 5 slides");
+        assert_eq!(card_label(&cards[0], None), "Candidate 1");
         assert_eq!(
             cards[0].preview_url(3, 4),
             "/decks/talk-candidate-1/render?v=3&slide=4"
