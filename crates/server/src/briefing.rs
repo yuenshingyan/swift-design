@@ -2,9 +2,10 @@
 //! brief. It holds no `DesignStore`, so it cannot write a design. That
 //! is the mode boundary in code, not only in the prompt.
 
+use design_model::text::repeats;
 use design_model::{
-    ArtifactKind, BriefQuestion, BriefQuestionSet, DesignBrief, QuestionAnswer, QuestionSetError,
-    RevisionSource, WorkflowEvent, validate_question_set,
+    AnsweredQuestion, ArtifactKind, BriefQuestion, BriefQuestionSet, DesignBrief, QuestionAnswer,
+    QuestionSetError, RevisionSource, WorkflowEvent, validate_question_set,
 };
 
 use crate::events::ChangeNotifier;
@@ -112,25 +113,92 @@ pub fn parse_briefing_reply(content: &str) -> Result<BriefingReply, BriefingRepl
     Ok(reply)
 }
 
-/// The assumptions the skipped answers imply: one line per question the
-/// user asked the agent to decide.
-pub fn assumptions_from_answers(answered: &[(BriefQuestion, QuestionAnswer)]) -> Vec<String> {
+/// Removes the lines a reader has already read.
+///
+/// The model restates the answers and the structured fields as
+/// "confirmed facts": `The audience is developers.` next to the answer
+/// `Developers` and the `audience` field. The prompt forbids it; this
+/// enforces it, because a prompt is not a guarantee. The match is
+/// lexical and deliberately conservative: a fact goes only when it
+/// contains a value the panel already shows.
+pub fn tidy_brief(brief: &mut DesignBrief) {
+    let mut shown: Vec<String> = brief
+        .answered_questions
+        .iter()
+        .map(|entry| entry.answer.clone())
+        .collect();
+    for field in [
+        &brief.target_artifact,
+        &brief.target_platform,
+        &brief.audience,
+        &brief.user_problem,
+        &brief.primary_job,
+        &brief.success_criterion,
+        &brief.visual_direction,
+    ] {
+        shown.push(field.clone());
+    }
+    brief
+        .confirmed_facts
+        .retain(|fact| !is_answer_line(fact) && !shown.iter().any(|value| repeats(fact, value)));
+    brief.assumptions.retain(|line| !is_answer_line(line));
+    drop_repeats(&mut brief.confirmed_facts);
+    drop_repeats(&mut brief.assumptions);
+    drop_repeats(&mut brief.open_questions);
+}
+
+/// True when a line restates a question and its answer instead of
+/// stating one thing: `Which platform?: Web`, or `Assumed for `x`: y`.
+/// Briefs written before the app recorded the answers are full of them.
+fn is_answer_line(line: &str) -> bool {
+    line.starts_with("Assumed for ") || line.contains("?: ")
+}
+
+/// Drops later lines that say the same as an earlier one, keeping order.
+fn drop_repeats(lines: &mut Vec<String>) {
+    let mut kept: Vec<String> = Vec::new();
+    lines.retain(|line| {
+        let key = design_model::text::normalized(line);
+        if key.trim().is_empty() || kept.contains(&key) {
+            return false;
+        }
+        kept.push(key);
+        true
+    });
+}
+
+/// The assumptions the skipped answers imply: one sentence per question
+/// the user asked the agent to decide. Used when the user generates
+/// with assumptions.
+pub fn assumptions_from_skipped_answers(
+    answered: &[(BriefQuestion, QuestionAnswer)],
+) -> Vec<String> {
     answered
         .iter()
         .filter(|(_, answer)| answer.skipped)
-        .map(|(question, _)| format!("Assumed for `{}`: best judgment", question.label))
+        .map(|(question, _)| format!("The agent chooses the answer to: {}", question.label.trim()))
         .collect()
 }
 
-/// The confirmed facts the answered questions state: one line per
-/// question the user answered, with the option labels.
-fn confirmed_facts_from_answers(answered: &[(BriefQuestion, QuestionAnswer)]) -> Vec<String> {
+/// The answered questions as brief entries: the question wording and
+/// the answer wording, kept apart.
+///
+/// The brief keeps these out of `confirmed_facts`. A run of
+/// `question: answer` lines inside a prose fact list is what makes a
+/// brief hard to read: the reader cannot tell a question from a fact.
+pub fn answered_questions_from_answers(
+    answered: &[(BriefQuestion, QuestionAnswer)],
+) -> Vec<AnsweredQuestion> {
     answered
         .iter()
-        .filter(|(_, answer)| !answer.skipped)
-        .filter_map(|(question, answer)| {
-            let value = answer_text(question, answer);
-            (!value.is_empty()).then(|| format!("{}: {value}", question.label))
+        .map(|(question, answer)| AnsweredQuestion {
+            question: question.label.clone(),
+            answer: if answer.skipped {
+                String::new()
+            } else {
+                answer_text(question, answer)
+            },
+            is_assumed: answer.skipped,
         })
         .collect()
 }
@@ -365,11 +433,8 @@ impl BriefingEngine {
         answered: &[(BriefQuestion, QuestionAnswer)],
     ) -> Result<BriefingOutcome, String> {
         brief.answers = answered.iter().map(|(_, answer)| answer.clone()).collect();
-        merge_unique(
-            &mut brief.confirmed_facts,
-            confirmed_facts_from_answers(answered),
-        );
-        merge_unique(&mut brief.assumptions, assumptions_from_answers(answered));
+        brief.answered_questions = answered_questions_from_answers(answered);
+        tidy_brief(&mut brief);
         let revision = self
             .sessions
             .write_brief_revision(
@@ -427,35 +492,27 @@ impl BriefingEngine {
     }
 }
 
-/// Adds every item of `extra` to `items` that is not already there.
-fn merge_unique(items: &mut Vec<String>, extra: Vec<String>) {
-    for item in extra {
-        if !items.iter().any(|existing| existing == &item) {
-            items.push(item);
-        }
-    }
-}
-
 /// The briefing system prompt. Simplified Technical English.
 pub fn briefing_prompt(kind: ArtifactKind) -> String {
-    let (role, order) = match kind {
+    let (role, order, owned) = match kind {
         ArtifactKind::Demo => (
             "This session builds a software demo: a landing page, app screens, or a similar layout on a device viewport.",
-            "1. the artifact type and the target platform;\n\
+            "1. the artifact type;\n\
              2. the audience and the primary user goal;\n\
              3. the primary action or conversion goal;\n\
              4. required content, features, and constraints;\n\
              5. brand assets, visual direction, and accessibility needs;\n\
              6. technical constraints, when they matter.",
+            "the artifact kind, the canvases to build for (desktop, phone, or tablet, one design each), and the number of variations",
         ),
         ArtifactKind::Deck => (
             "This session builds a deck: a slide presentation on a 1920 by 1080 px canvas.",
             "1. the scenario: a talk, a pitch, a lesson, a report, or a read-only deck;\n\
-             2. the length in slides;\n\
-             3. the audience and what they must take away;\n\
-             4. required content, data, and constraints;\n\
-             5. brand assets, visual direction, and accessibility needs;\n\
-             6. technical constraints, when they matter.",
+             2. the audience and what they must take away;\n\
+             3. required content, data, and constraints;\n\
+             4. brand assets, visual direction, and accessibility needs;\n\
+             5. technical constraints, when they matter.",
+            "the artifact kind, the number of slides, and the number of variations",
         ),
     };
     let schema = serde_json::to_string(&schemars::schema_for!(BriefingReply)).unwrap_or_default();
@@ -464,6 +521,7 @@ pub fn briefing_prompt(kind: ArtifactKind) -> String {
          {role}\n\
          Ask only questions that change the result. Ask in this order of importance:\n\
          {order}\n\
+         The app asks the user for {owned}. Never ask about these. Read them from the brief.\n\
          Ask at most {limit} questions per turn. Offer concise choices and set allow_other when free text helps.\n\
          Set required to false for a question the user may skip. The app adds a skip choice itself.\n\
          Never invent a brand, an audience, or a conversion goal. Ask, or leave it as an open question.\n\
@@ -476,6 +534,9 @@ pub fn briefing_prompt(kind: ArtifactKind) -> String {
          Send question_set when you need answers. Do not set is_complete then.\n\
          Send brief and set is_complete to true when the brief is ready to present.\n\
          Keep confirmed_facts for what the user stated. Keep assumptions for what you decided. Keep open_questions for what is still unknown.\n\
+         Write a confirmed fact only when no answer and no brief field already states it. The app shows the answers and the fields next to your facts. A fact that repeats one is deleted.\n\
+         Write each fact and each assumption as one sentence of at most 12 words. Never write a fact as `question: answer`.\n\
+         Ask instead of assuming when the choice changes the layout, the content, or the visual direction. Assume only the details a design must fill in either way.\n\
          When the request is already specific, skip the questions and send a complete brief.\n\
          Keep reply to 1 to 3 sentences.",
         limit = design_model::QUESTIONS_PER_TURN_LIMIT
@@ -532,8 +593,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        BriefingEngine, BriefingOutcome, BriefingReplyError, assumptions_from_answers,
-        briefing_prompt, confirmed_facts_from_answers, parse_briefing_reply,
+        BriefingEngine, BriefingOutcome, BriefingReplyError, answered_questions_from_answers,
+        assumptions_from_skipped_answers, briefing_prompt, parse_briefing_reply, tidy_brief,
     };
     use crate::events::ChangeNotifier;
     use crate::model_client::{LogSink, ModelClient};
@@ -761,7 +822,65 @@ mod tests {
     }
 
     #[test]
-    fn skipped_answers_become_assumptions_and_answered_become_facts() {
+    fn tidy_brief_drops_the_facts_the_panel_already_shows() {
+        let mut brief = design_model::DesignBrief {
+            audience: "developers".to_owned(),
+            target_platform: "desktop web app".to_owned(),
+            primary_job: "organize project or coding work".to_owned(),
+            answered_questions: vec![
+                design_model::AnsweredQuestion {
+                    question: "What platform?".to_owned(),
+                    answer: "Desktop web app".to_owned(),
+                    is_assumed: false,
+                },
+                design_model::AnsweredQuestion {
+                    question: "Primary action?".to_owned(),
+                    answer: "All.".to_owned(),
+                    is_assumed: false,
+                },
+            ],
+            confirmed_facts: vec![
+                "What should be the primary action?: All.".to_owned(),
+                "The artifact is a TODO app demo.".to_owned(),
+                "The target platform is desktop web app.".to_owned(),
+                "The audience is developers.".to_owned(),
+                "The main goal is to organize project or coding work.".to_owned(),
+                // `All.` is too short to match, so this one survives.
+                "The primary action covers all core task actions.".to_owned(),
+                "the artifact is a todo app demo".to_owned(),
+            ],
+            assumptions: vec![
+                "Use sample tasks.".to_owned(),
+                "Use sample tasks!".to_owned(),
+                "Assumed for `Which features?`: best judgment".to_owned(),
+                String::new(),
+            ],
+            ..design_model::DesignBrief::default()
+        };
+        tidy_brief(&mut brief);
+        assert_eq!(
+            brief.confirmed_facts,
+            vec![
+                "The artifact is a TODO app demo.",
+                "The primary action covers all core task actions.",
+            ]
+        );
+        assert_eq!(brief.assumptions, vec!["Use sample tasks."]);
+    }
+
+    #[test]
+    fn a_brief_with_nothing_to_drop_is_left_alone() {
+        let mut brief = design_model::DesignBrief {
+            confirmed_facts: vec!["The deadline is March.".to_owned()],
+            ..design_model::DesignBrief::default()
+        };
+        let original = brief.clone();
+        tidy_brief(&mut brief);
+        assert_eq!(brief, original);
+    }
+
+    #[test]
+    fn answered_questions_keep_the_question_and_the_answer_apart() {
         let answered = vec![
             (
                 question("platform", "Which platform?"),
@@ -780,13 +899,20 @@ mod tests {
                 },
             ),
         ];
+        let entries = answered_questions_from_answers(&answered);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].question, "Which platform?");
+        assert_eq!(entries[0].answer, "Web");
+        assert!(!entries[0].is_assumed);
+        assert_eq!(entries[1].question, "Which tone?");
+        assert_eq!(entries[1].answer, "");
+        assert!(entries[1].is_assumed);
+        // No entry reads as `question: answer`, so nothing lands in the
+        // fact list looking like a fact.
+        assert!(!entries.iter().any(|entry| entry.answer.contains(':')));
         assert_eq!(
-            assumptions_from_answers(&answered),
-            vec!["Assumed for `Which tone?`: best judgment"]
-        );
-        assert_eq!(
-            confirmed_facts_from_answers(&answered),
-            vec!["Which platform?: Web"]
+            assumptions_from_skipped_answers(&answered),
+            vec!["The agent chooses the answer to: Which tone?"]
         );
     }
 
@@ -811,19 +937,43 @@ mod tests {
     fn briefing_prompts_state_the_priorities_and_the_three_question_limit() {
         let prompt = briefing_prompt(design_model::ArtifactKind::Demo);
         assert!(prompt.contains("at most 3 questions"));
-        assert!(prompt.contains("the artifact type and the target platform"));
+        assert!(prompt.contains("1. the artifact type;"));
         assert!(prompt.contains("software demo"));
         assert!(prompt.contains("Never invent a brand"));
         assert!(prompt.contains("is_complete"));
     }
 
     #[test]
-    fn the_deck_briefing_prompt_asks_scenario_and_length_first() {
+    fn the_deck_briefing_prompt_asks_the_scenario_first() {
         let prompt = briefing_prompt(design_model::ArtifactKind::Deck);
         assert!(prompt.contains("builds a deck"));
         assert!(prompt.contains("1. the scenario"));
-        assert!(prompt.contains("2. the length in slides"));
+        assert!(prompt.contains("2. the audience"));
         assert!(prompt.contains("at most 3 questions"));
-        assert!(!prompt.contains("target platform"));
+    }
+
+    #[test]
+    fn the_prompt_caps_the_lines_and_says_when_to_ask_instead_of_assume() {
+        let prompt = briefing_prompt(design_model::ArtifactKind::Demo);
+        assert!(prompt.contains("one sentence of at most 12 words"));
+        assert!(prompt.contains("A fact that repeats one is deleted."));
+        assert!(prompt.contains(
+            "Ask instead of assuming when the choice changes the layout, the content, or the visual direction."
+        ));
+    }
+
+    #[test]
+    fn each_prompt_names_what_the_app_asks_so_the_model_does_not() {
+        let demo = briefing_prompt(design_model::ArtifactKind::Demo);
+        assert!(demo.contains(
+            "The app asks the user for the artifact kind, the canvases to build for (desktop, phone, or tablet, one design each), and the number of variations. Never ask about these."
+        ));
+        assert!(demo.contains("Never write a fact as `question: answer`"));
+        let deck = briefing_prompt(design_model::ArtifactKind::Deck);
+        assert!(deck.contains(
+            "The app asks the user for the artifact kind, the number of slides, and the number of variations. Never ask about these."
+        ));
+        // The deck prompt still must not send the model after a viewport.
+        assert!(!deck.contains("1. the artifact type"));
     }
 }
