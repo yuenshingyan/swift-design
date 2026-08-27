@@ -31,8 +31,7 @@ pub mod workflow;
 
 pub use artifact_kind::ArtifactKind;
 pub use brief::{
-    AnsweredQuestion, BriefRevision, BriefSection, Critique, CritiqueCategory, DesignBrief,
-    RevisionSource,
+    AnsweredQuestion, BriefRevision, BriefSection, Critique, DesignBrief, RevisionSource,
 };
 pub use deck::{DECK_HEIGHT, DECK_VIEWPORT, DECK_WIDTH, Deck};
 pub use design::Design;
