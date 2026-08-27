@@ -23,7 +23,17 @@ The harness builds two kinds of artifact through the same workflow:
 
 The user picks the kind at intake. The session stores it as `artifact_kind`; the brief carries the same value. A user may change it by editing the brief before generation; after generation it is fixed. The two kinds are separate pipelines (types, stores, routes, renderers, prompts, editors) that share the brief, the workflow, and the helpers that are identical modulo names.
 
-For a deck, the clarification order is: the scenario (talk, pitch, lesson, report, read-only deck); the length in slides; the audience and the takeaway; required content, data, and constraints; brand and visual direction and accessibility; technical constraints.
+For a deck, the clarification order is: the scenario (talk, pitch, lesson, report, read-only deck); the audience and the takeaway; required content, data, and constraints; brand and visual direction and accessibility; technical constraints.
+
+### What the app asks, not the agent
+
+A question with a closed set of answers is a control, not a chat turn. The app asks these itself and writes them to the session or the brief. The agent never asks about them:
+
+- the artifact kind (`demo` or `deck`)
+- the number of variations, 1 to 5
+- the canvases: which devices a demo is drawn for (desktop, phone, tablet — one design each), the number of slides for a deck
+
+The agent spends its three questions per turn on what needs judgment: the audience, the goal, the content, and the visual direction.
 
 ## Required behavior
 
@@ -89,8 +99,9 @@ type BriefQuestionSet = {
 Create a durable brief that records:
 
 - request and answers
+- the answered questions as text, so the brief reads on its own
 - confirmed facts, assumptions, and open questions
-- artifact kind (`demo` or `deck`)
+- artifact kind (`demo` or `deck`) and, for a deck, the slide count the user asked for
 - target artifact/platform
 - audience and user problem
 - primary job-to-be-done and success criterion
