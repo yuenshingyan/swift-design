@@ -1,40 +1,73 @@
 //! The agent contract, served by the app.
 //!
 //! Agents get everything over HTTP: `GET /instructions` returns the
-//! full build procedure as JSON, and `GET /schemas/design` returns the
-//! design JSON Schema generated from the Rust types at runtime, so it
-//! can never go stale. No repo file is part of the agent interface.
-//! Instruction strings follow Simplified Technical English.
+//! full build procedure as JSON, and `GET /schemas/{design,deck,brief,
+//! question-set}` return the JSON Schemas generated from the Rust types
+//! at runtime, so they can never go stale. No repo file is part of the
+//! agent interface. Instruction strings follow Simplified Technical
+//! English.
+//!
+//! There are two artifact kinds. A demo session writes designs
+//! (screens on a device viewport). A deck session writes decks (slides
+//! on a 1920 by 1080 px canvas). Each kind has its own rule list.
 
 use axum::routing::get;
 use axum::{Json, Router};
-use design_model::{Design, QUESTIONS_PER_TURN_LIMIT};
+use design_model::{Deck, Design, QUESTIONS_PER_TURN_LIMIT};
 
-/// Design content rules, shared by the agent instructions and the
-/// built-in generation engine. Simplified Technical English.
-pub const CONTENT_RULES: &[&str] = &[
-    "A screen is one HTML fragment in `html` and one CSS block in `css`.",
-    "Design each screen for the px canvas in the design's `viewport`. The default is 1440 by 900 px (desktop web). Use 390 by 844 for a phone and 1024 by 768 for a tablet. Use px units. Do not use vw, vh, vmin, vmax, or container units.",
-    "Lay out with flex, grid, or absolute positioning. The screen root is position: relative, the viewport size, overflow: hidden.",
-    "The server scopes your CSS to the screen. Write plain selectors such as `.title` or `h1`. Do not write `html`, `body`, or `:root` selectors. Do not use `@import`. `@media`, `@keyframes`, and `@font-face` are allowed.",
+/// Rules every screen and every slide follow. Shared by both kinds.
+const SHARED_RULES: [&str; 6] = [
+    "The server scopes your CSS to the screen or slide. Write plain selectors such as `.title` or `h1`. Do not write `html`, `body`, or `:root` selectors. Do not use `@import`. `@media`, `@keyframes`, and `@font-face` are allowed.",
     "Use the theme through CSS variables: `--background`, `--text`, `--accent`, `--muted`, `--heading-font`, `--body-font`, `--mono-font`. Write other colors as #rrggbb.",
     "The server loads the theme fonts from Google Fonts. Base styles: text is 32px in the body font and text color, headings use the heading font with margin 0, paragraphs and lists have margin 0, images are block and max-width 100%.",
     "Allowed HTML: headings, text, lists, tables, `<img>`, inline `<svg>`, `<pre><code>`, `<blockquote>`, `<a>`. Close every tag. Do not write `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, forms, media, comments, on* attributes, javascript: URLs, or data: URLs.",
     "Images: `<img src='/uploads/{name}'>` for files in GET /uploads. Use no other image source. Draw charts, icons, and shapes as inline SVG or CSS.",
-    "Give every id and @keyframes name a prefix unique to the screen, such as `s3-`.",
-    "Font sizes: titles 80 to 120px, body 32 to 44px, captions 24 to 30px. Keep all text inside the screen with margins of at least 80px. Give boxes enough height for every line.",
     "Keep html under 20,000 characters and css under 10,000 characters. Use single quotes for HTML attribute values inside the JSON string.",
-    "Put one idea on each screen. Put speaker text in notes. The renderer does not show notes on the screen.",
+];
+
+/// Design (demo) content rules, shared by the agent instructions and the
+/// built-in generation engine. Simplified Technical English.
+pub const DEMO_RULES: &[&str] = &[
+    "A screen is one HTML fragment in `html` and one CSS block in `css`.",
+    "Design each screen for the px canvas in the design's `viewport`. The default is 1440 by 900 px (desktop web). Use 390 by 844 for a phone and 1024 by 768 for a tablet. Use px units. Do not use vw, vh, vmin, vmax, or container units.",
+    "Lay out with flex, grid, or absolute positioning. The screen root is position: relative, the viewport size, overflow: hidden.",
+    SHARED_RULES[0],
+    SHARED_RULES[1],
+    SHARED_RULES[2],
+    SHARED_RULES[3],
+    SHARED_RULES[4],
+    "Give every id and @keyframes name a prefix unique to the screen, such as `s3-`.",
+    "Size text for the viewport. On a 1440 px desktop canvas: titles 48 to 72px, body 18 to 24px, captions 14 to 16px, margins of at least 64px. On a 390 px phone canvas: titles 28 to 36px, body 16 to 18px, captions 12 to 14px, margins of at least 20px. Give boxes enough height for every line.",
+    SHARED_RULES[5],
+    "Put one idea on each screen. Put intent, states, and handoff remarks in notes. The renderer does not show notes on the screen.",
     "`transition` is optional. Leave it out and the design scrolls. Set it to give the design a page transition: `effect` is `none`, `fade`, `push`, `cover`, or `zoom`; `axis` is `vertical` or `horizontal`; `duration_ms` is 0 to 3000. `axis` moves `push` and `cover` only. Set it only when the user asks for one.",
 ];
 
-/// Chart rules for data screens. Simplified Technical English.
+/// Deck content rules, shared by the agent instructions and the built-in
+/// generation engine. Simplified Technical English.
+pub const DECK_RULES: &[&str] = &[
+    "A slide is one HTML fragment in `html` and one CSS block in `css`.",
+    "Design each slide for a canvas of 1920 by 1080 px. A deck has no `viewport` field. Use px units. Do not use vw, vh, vmin, vmax, or container units.",
+    "Lay out with flex, grid, or absolute positioning. The slide root is position: relative, 1920 by 1080 px, overflow: hidden.",
+    SHARED_RULES[0],
+    SHARED_RULES[1],
+    SHARED_RULES[2],
+    SHARED_RULES[3],
+    SHARED_RULES[4],
+    "Give every id and @keyframes name a prefix unique to the slide, such as `s3-`.",
+    "Font sizes: titles 80 to 120px, body 32 to 44px, captions 24 to 30px. Keep all text inside the slide with margins of at least 80px. Give boxes enough height for every line.",
+    SHARED_RULES[5],
+    "Put one idea on each slide. Put speaker text in notes. The renderer does not show notes on the slide. The presenter view at GET /decks/{id}/present shows the notes to the speaker.",
+    "`transition` is optional. Leave it out and the deck scrolls. Set it to give the deck a page transition: `effect` is `none`, `fade`, `push`, `cover`, or `zoom`; `axis` is `vertical` or `horizontal`; `duration_ms` is 0 to 3000. `axis` moves `push` and `cover` only. Set it only when the user asks for one.",
+];
+
+/// Chart rules for data screens and slides. Simplified Technical English.
 pub const CHART_RULES: &[&str] = &[
-    "Draw a chart as inline SVG in the screen html.",
+    "Draw a chart as inline SVG in the screen or slide html.",
     "Do not load a chart library.",
     "Do not write a `<script>` element.",
     "Give the SVG a `viewBox` attribute. Do not set a fixed pixel width on the SVG.",
-    "Take every chart color from the design theme palette: `var(--accent)`, `var(--text)`, `var(--muted)`, and `var(--background)`.",
+    "Take every chart color from the theme palette: `var(--accent)`, `var(--text)`, `var(--muted)`, and `var(--background)`.",
     "Label each axis.",
     "Write each value in the SVG as text. Do not compute a value at run time.",
     "Give the SVG a `role='img'` attribute and a `<title>` element. The `<title>` states what the chart shows.",
@@ -64,6 +97,7 @@ pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/instructions", get(get_instructions))
         .route("/schemas/design", get(get_design_schema))
+        .route("/schemas/deck", get(get_deck_schema))
         .route("/schemas/brief", get(get_brief_schema))
         .route("/schemas/question-set", get(get_question_set_schema))
 }
@@ -71,6 +105,11 @@ pub fn routes() -> Router<crate::AppState> {
 /// Returns the design JSON Schema, generated from the design types.
 async fn get_design_schema() -> Json<schemars::Schema> {
     Json(schemars::schema_for!(Design))
+}
+
+/// Returns the deck JSON Schema, generated from the deck types.
+async fn get_deck_schema() -> Json<schemars::Schema> {
+    Json(schemars::schema_for!(Deck))
 }
 
 /// Returns the brief JSON Schema, generated from the brief types.
@@ -89,39 +128,54 @@ async fn get_instructions() -> Json<serde_json::Value> {
     Json(instructions())
 }
 
+/// The build steps, in order. One instruction per sentence.
+fn steps() -> Vec<String> {
+    vec![
+        "GET /schemas/design, GET /schemas/deck, GET /schemas/brief, and GET /schemas/question-set. Read the JSON Schemas.".to_owned(),
+        "GET /sessions/{id}. Read the request, the artifact_kind, the state, the messages, the question sets, and the answers. The artifact_kind is `demo` or `deck`. A demo session writes designs. A deck session writes decks.".to_owned(),
+        format!("Briefing mode: ask only questions that change the result. For a demo, ask in this order: artifact type and platform; audience and primary goal; primary action; required content and constraints; brand and visual direction and accessibility; technical constraints. For a deck, ask in this order: the scenario; the length in slides; the audience; required content and constraints; brand and visual direction and accessibility; technical constraints. Ask at most {limit} questions per turn. PUT /sessions/{{id}}/question-set with a BriefQuestionSet. Set required to false for a question the user may skip. The app adds a skip choice. Never invent a brand, an audience, or a conversion goal.", limit = QUESTIONS_PER_TURN_LIMIT),
+        "Briefing mode: wait with the /events loop, then GET /sessions/{id} and read the answers. When the brief is ready, PUT /sessions/{id}/brief with {\"brief\": <DesignBrief>, \"source\": \"agent\"}. Keep confirmed_facts for what the user stated, assumptions for what you decided, and open_questions for what is still unknown. Do not write designs or decks in briefing mode. The server answers 409.".to_owned(),
+        "Generation mode: GET /sessions/{id}/brief. The brief is authoritative. Do not override a confirmed fact. Use an assumption only where no confirmed fact covers the need.".to_owned(),
+        "Generation mode, demo session: write the design as JSON that conforms to GET /schemas/design. PUT it to /designs/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
+        "Generation mode, deck session: write the deck as JSON that conforms to GET /schemas/deck. The deck has `slides`, not `screens`, and no `viewport`. PUT it to /decks/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
+        "A 422 response lists every problem in error.details. Fix each one. PUT again.".to_owned(),
+        "Generation mode: if the brief lacks a detail you cannot design without, do not guess. PUT /sessions/{id}/question-set with the blocking questions. The session returns to clarifying. Then stop.".to_owned(),
+        "GET /uploads lists the user's source files. Each row has name, size_bytes, content_type, and is_image. GET /uploads/{name} returns the file. Use an image row as `<img src='/uploads/{name}'>`.".to_owned(),
+        "After you save a design, look at it: GET /designs/{id}/screens/{n}.png returns a PNG of screen n, 1-based. It needs Chrome or Chromium and answers 503 without one. Review every screen for overlap, overflow, empty space, and weak contrast. Fix what you see and PUT the design again. GET /designs/{id}/export returns the design as one HTML file. GET /designs/{id}/export.pdf returns it as a PDF, one page per screen.".to_owned(),
+        "After you save a deck, look at it: GET /decks/{id}/slides/{n}.png returns a PNG of slide n, 1-based. Review every slide the same way and PUT the deck again. GET /decks/{id}/export returns the deck as one HTML file. GET /decks/{id}/export.pdf returns it as a PDF, one page per slide. GET /decks/{id}/export.pptx returns it as a PowerPoint file. GET /decks/{id}/present is the presenter view with the notes.".to_owned(),
+        "When the design or the deck is written, POST /sessions/{id}/complete, or exit with code 0. The session moves to reviewing.".to_owned(),
+        "GET /events returns {\"revision\": n}. The revision increases when data changes. To wait for a change in one run, call GET /events?after={revision}&wait=25 in a loop. Each call returns within the wait time, so loop; do not treat a timeout as an error.".to_owned(),
+    ]
+}
+
 /// The instructions payload. Kept in one function so tests can check it
 /// without a request.
 fn instructions() -> serde_json::Value {
     let example_design: serde_json::Value =
         serde_json::from_str(include_str!("../../../fixtures/sample-design.json"))
             .unwrap_or_default();
+    let example_deck: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/sample-deck.json"))
+            .unwrap_or_default();
     serde_json::json!({
-        "purpose": "Turn a request into an approved design brief, then build HTML designs from it. Swift Design keeps the workflow state, validates, renders, and lets the user edit. Swift Design makes no LLM API calls.",
-        "session": "The run works on one session. Its id is in the SWIFT_DESIGN_SESSION_ID environment variable. The mode is in SWIFT_DESIGN_RUN_MODE: briefing or generation. GET /sessions/{id} returns the state, the brief, the question sets, the answers, and the messages.",
-        "steps": [
-            "GET /schemas/design, GET /schemas/brief, and GET /schemas/question-set. Read the JSON Schemas.",
-            "GET /sessions/{id}. Read the request, the state, the messages, the question sets, and the answers.",
-            format!("Briefing mode: ask only questions that change the design. Ask in this order: artifact type and platform; audience and primary goal; primary action; required content and constraints; brand and visual direction and accessibility; technical constraints. Ask at most {limit} questions per turn. PUT /sessions/{{id}}/question-set with a BriefQuestionSet. Set required to false for a question the user may skip. The app adds a skip choice. Never invent a brand, an audience, or a conversion goal.", limit = QUESTIONS_PER_TURN_LIMIT),
-            "Briefing mode: wait with the /events loop, then GET /sessions/{id} and read the answers. When the brief is ready, PUT /sessions/{id}/brief with {\"brief\": <DesignBrief>, \"source\": \"agent\"}. Keep confirmed_facts for what the user stated, assumptions for what you decided, and open_questions for what is still unknown. Do not write designs in briefing mode. The server answers 409.",
-            "Generation mode: GET /sessions/{id}/brief. The brief is authoritative. Do not override a confirmed fact. Use an assumption only where no confirmed fact covers the need.",
-            "Generation mode: write the design as JSON that conforms to the schema. PUT it to /designs/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.",
-            "A 422 response lists every problem in error.details. Fix each one. PUT again.",
-            "Generation mode: if the brief lacks a detail you cannot design without, do not guess. PUT /sessions/{id}/question-set with the blocking questions. The session returns to clarifying. Then stop.",
-            "GET /uploads lists the user's source files. Each row has name, size_bytes, content_type, and is_image. GET /uploads/{name} returns the file. Use an image row as `<img src='/uploads/{name}'>`.",
-            "After you save a design, look at it: GET /designs/{id}/screens/{n}.png returns a PNG of screen n, 1-based. It needs Chrome or Chromium and answers 503 without one. Review every screen for overlap, overflow, empty space, and weak contrast. Fix what you see and PUT the design again. GET /designs/{id}/export returns the design as one HTML file. GET /designs/{id}/export.pdf returns it as a PDF, one page per screen.",
-            "When the design is written, POST /sessions/{id}/complete, or exit with code 0. The session moves to reviewing.",
-            "GET /events returns {\"revision\": n}. The revision increases when data changes. To wait for a change in one run, call GET /events?after={revision}&wait=25 in a loop. Each call returns within the wait time, so loop; do not treat a timeout as an error.",
-        ],
-        "rules": CONTENT_RULES,
+        "purpose": "Turn a request into an approved design brief, then build HTML designs or decks from it. Swift Design keeps the workflow state, validates, renders, and lets the user edit. Swift Design makes no LLM API calls.",
+        "session": "The run works on one session. Its id is in the SWIFT_DESIGN_SESSION_ID environment variable. The mode is in SWIFT_DESIGN_RUN_MODE: briefing or generation. The artifact kind is in SWIFT_DESIGN_ARTIFACT_KIND: demo or deck. GET /sessions/{id} returns the state, the artifact_kind, the brief, the question sets, the answers, and the messages.",
+        "kinds": {
+            "demo": "A software demo: a landing page, app screens, or a similar layout on a device viewport. Written as a design with `screens` and a `viewport`. Saved under /designs.",
+            "deck": "A slide presentation on a 1920 by 1080 px canvas. Written as a deck with `slides` and no `viewport`. Saved under /decks.",
+        },
+        "steps": steps(),
+        "demo_rules": DEMO_RULES,
+        "deck_rules": DECK_RULES,
         "charts": {
             "rules": CHART_RULES,
             "example": CHART_EXAMPLE,
         },
         "conventions": {
-            "canvas": "the design's `viewport` in px (default 1440 by 900), px units, scaled by the server to any frame",
+            "canvas": "a design's `viewport` in px (default 1440 by 900); a deck's fixed 1920 by 1080. Use px units. The server scales the canvas to any frame.",
             "css_variables": ["--background", "--text", "--accent", "--muted", "--heading-font", "--body-font", "--mono-font"],
             "base_styles": "32px body text in the body font and text color; headings in the heading font with margin 0; paragraphs and lists margin 0; images block and max-width 100%",
-            "node_reference": "[screen N, node a/b/c <tag.class>: text]",
+            "node_reference": "[screen N, node a/b/c <tag.class>: text] for a design; [slide N, node a/b/c <tag.class>: text] for a deck",
             "upload_reference": "[upload name]",
         },
         "payloads": {
@@ -129,9 +183,12 @@ fn instructions() -> serde_json::Value {
             "PUT /sessions/{id}/brief": {"brief": "a DesignBrief", "source": "agent"},
             "PUT /designs/{id}": "the design JSON",
             "POST /designs/render": "the design JSON; returns the rendered HTML, or every validation error",
+            "PUT /decks/{id}": "the deck JSON",
+            "POST /decks/render": "the deck JSON; returns the rendered HTML, or every validation error",
         },
         "routes": {
             "schema_design": "GET /schemas/design",
+            "schema_deck": "GET /schemas/deck",
             "schema_brief": "GET /schemas/brief",
             "schema_question_set": "GET /schemas/question-set",
             "session": "GET /sessions/{id}",
@@ -149,26 +206,36 @@ fn instructions() -> serde_json::Value {
             "screen_image": "GET /designs/{id}/screens/{n}.png",
             "export_html": "GET /designs/{id}/export",
             "export_pdf": "GET /designs/{id}/export.pdf",
+            "save_deck": "PUT /decks/{id}",
+            "check_deck": "POST /decks/render",
+            "render_deck": "GET /decks/{id}/render",
+            "render_audience": "GET /decks/{id}/render?audience=true",
+            "slide_image": "GET /decks/{id}/slides/{n}.png",
+            "present": "GET /decks/{id}/present",
+            "export_deck_html": "GET /decks/{id}/export",
+            "export_deck_pdf": "GET /decks/{id}/export.pdf",
+            "export_pptx": "GET /decks/{id}/export.pptx",
             "chooser": "GET /candidates/{base}",
             "templates": "GET /templates",
             "template": "GET /templates/{id}",
         },
         "example_design": example_design,
+        "example_deck": example_deck,
     })
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use design_model::Design;
+    use design_model::{Deck, Design};
 
-    use crate::instructions::{CHART_EXAMPLE, instructions};
+    use crate::instructions::{CHART_EXAMPLE, DECK_RULES, DEMO_RULES, instructions};
 
     #[test]
     fn instructions_cover_steps_rules_routes_and_an_example() {
         let payload = instructions();
         assert!(!payload["steps"].as_array().unwrap().is_empty());
-        assert!(!payload["rules"].as_array().unwrap().is_empty());
+        assert!(!payload["demo_rules"].as_array().unwrap().is_empty());
         assert_eq!(payload["routes"]["schema_design"], "GET /schemas/design");
         assert_eq!(payload["routes"]["session"], "GET /sessions/{id}");
         assert_eq!(payload["example_design"]["title"], "Swift Design Overview");
@@ -179,7 +246,7 @@ mod tests {
         let text = instructions().to_string();
         assert!(text.contains("Briefing mode"));
         assert!(text.contains("Generation mode"));
-        assert!(text.contains("Do not write designs in briefing mode"));
+        assert!(text.contains("Do not write designs or decks in briefing mode"));
         assert!(text.contains("at most 3 questions"));
         assert!(text.contains("The brief is authoritative"));
     }
@@ -187,6 +254,7 @@ mod tests {
     #[test]
     fn instructions_serve_every_schema() {
         let payload = instructions();
+        assert_eq!(payload["routes"]["schema_deck"], "GET /schemas/deck");
         assert_eq!(payload["routes"]["schema_brief"], "GET /schemas/brief");
         assert_eq!(
             payload["routes"]["schema_question_set"],
@@ -196,14 +264,74 @@ mod tests {
     }
 
     #[test]
+    fn instructions_carry_rules_for_both_kinds() {
+        let payload = instructions();
+        assert_eq!(
+            payload["demo_rules"].as_array().unwrap().len(),
+            DEMO_RULES.len()
+        );
+        assert_eq!(
+            payload["deck_rules"].as_array().unwrap().len(),
+            DECK_RULES.len()
+        );
+        let demo = payload["demo_rules"].to_string();
+        let deck = payload["deck_rules"].to_string();
+        assert!(demo.contains("`viewport`"));
+        assert!(demo.contains("On a 390 px phone canvas"));
+        assert!(!demo.contains("titles 80 to 120px"));
+        assert!(deck.contains("1920 by 1080 px"));
+        assert!(deck.contains("titles 80 to 120px"));
+        assert!(deck.contains("/decks/{id}/present"));
+        assert!(!deck.contains("`viewport`."));
+        assert!(
+            payload["kinds"]["deck"]
+                .as_str()
+                .unwrap()
+                .contains("`slides`")
+        );
+    }
+
+    #[test]
+    fn instructions_embed_the_deck_example() {
+        let payload = instructions();
+        assert_eq!(
+            payload["example_deck"]["title"],
+            "Swift Design Deck Overview"
+        );
+        assert!(payload["example_deck"]["slides"].is_array());
+        assert!(payload["example_deck"].get("viewport").is_none());
+        let deck: Deck = serde_json::from_value(payload["example_deck"].clone()).unwrap();
+        assert_eq!(deck.validate(), Vec::new());
+    }
+
+    #[test]
+    fn instructions_name_the_deck_routes() {
+        let payload = instructions();
+        assert_eq!(payload["routes"]["save_deck"], "PUT /decks/{id}");
+        assert_eq!(payload["routes"]["check_deck"], "POST /decks/render");
+        assert_eq!(payload["routes"]["present"], "GET /decks/{id}/present");
+        assert_eq!(
+            payload["routes"]["render_audience"],
+            "GET /decks/{id}/render?audience=true"
+        );
+        assert_eq!(
+            payload["routes"]["slide_image"],
+            "GET /decks/{id}/slides/{n}.png"
+        );
+        let text = payload.to_string();
+        assert!(text.contains("PUT it to /decks/{id}-candidate-1"));
+        assert!(text.contains("SWIFT_DESIGN_ARTIFACT_KIND"));
+    }
+
+    #[test]
     fn instructions_describe_charts() {
         let payload = instructions();
         let text = payload.to_string();
-        assert!(text.contains("Draw a chart as inline SVG in the screen html."));
+        assert!(text.contains("Draw a chart as inline SVG in the screen or slide html."));
         assert!(text.contains("Do not load a chart library."));
         assert!(text.contains("Do not write a `<script>` element."));
         assert!(text.contains("Give the SVG a `viewBox` attribute."));
-        assert!(text.contains("Take every chart color from the design theme palette"));
+        assert!(text.contains("Take every chart color from the theme palette"));
         assert!(text.contains("Label each axis."));
         assert!(text.contains("Do not compute a value at run time."));
         assert!(text.contains("`role='img'` attribute and a `<title>` element"));
@@ -225,15 +353,21 @@ mod tests {
     }
 
     #[test]
-    fn instructions_name_both_exports() {
+    fn instructions_name_every_export() {
         let payload = instructions();
         assert_eq!(payload["routes"]["export_html"], "GET /designs/{id}/export");
         assert_eq!(
             payload["routes"]["export_pdf"],
             "GET /designs/{id}/export.pdf"
         );
-        assert!(payload.to_string().contains("one page per screen"));
-        assert!(!payload.to_string().contains("PowerPoint"));
+        assert_eq!(
+            payload["routes"]["export_pptx"],
+            "GET /decks/{id}/export.pptx"
+        );
+        let text = payload.to_string();
+        assert!(text.contains("one page per screen"));
+        assert!(text.contains("one page per slide"));
+        assert!(text.contains("PowerPoint"));
     }
 
     #[test]
