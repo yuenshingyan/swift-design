@@ -7,12 +7,12 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 
 use crate::api;
-use crate::brief_panel::{BriefPanel, brief_actions_for};
+use crate::brief_panel::{BriefPanel, CanvasPicker, brief_actions_for};
 use crate::canvas::{CandidateCanvas, cards_from_decks, cards_from_designs};
 use crate::chat_controls::{ModelChip, SendButton};
 use crate::critique::CritiqueBar;
 use crate::question_card::{
-    AnsweredCard, DraftAnswer, QuestionCardState, QuestionSetCard, question_card_state, set_key,
+    DraftAnswer, QuestionCardState, QuestionSetCard, answered_entries, question_card_state, set_key,
 };
 use crate::settings::{SettingsPanel, pause_briefly};
 use crate::status::{RunStatusCard, working_label};
@@ -257,28 +257,23 @@ pub(crate) fn SessionWorkspace(
                                 });
                             rsx! {
                                 div { class: "{bubble_class}", "{message.content}" }
-                                if let Some((number, set)) = question_set {
+                                if let Some((number, _)) = question_set {
                                     {
+                                        // Questions are answered in the workbench and the
+                                        // answers live in the brief panel. The thread marks
+                                        // the turn and points there.
                                         let card_state = question_card_state(
                                             number,
                                             &answered_sets,
                                             session_view.open_question_set,
                                         );
-                                        let answers = session_view
-                                            .answers
-                                            .iter()
-                                            .find(|record| record.question_set == number)
-                                            .map(|record| record.answers.clone())
-                                            .unwrap_or_default();
-                                        // The open set is answered in the workbench, where
-                                        // it has the width. The thread keeps the summaries.
-                                        match card_state {
-                                            QuestionCardState::Active => rsx! {
-                                                p { class: "chat-note", "Answer the questions in the panel." }
-                                            },
-                                            _ => rsx! {
-                                                AnsweredCard { set: set.clone(), answers, state: card_state }
-                                            },
+                                        let note = match card_state {
+                                            QuestionCardState::Active => "Answer the questions in the panel.",
+                                            QuestionCardState::Answered => "Answered. The brief lists every answer.",
+                                            QuestionCardState::Stale => "Superseded.",
+                                        };
+                                        rsx! {
+                                            p { class: "chat-note", "{note}" }
                                         }
                                     }
                                 }
@@ -341,6 +336,15 @@ pub(crate) fn SessionWorkspace(
                             is_busy: is_running,
                             on_submit: move |answers| submit_answers.call(answers),
                         }
+                        // The canvas is a requirement like any other, so
+                        // it is answered with the questions, not hidden
+                        // in the settings below the brief.
+                        CanvasPicker {
+                            session_id: session_id.clone(),
+                            kind: session.artifact_kind,
+                            options: session.options.clone(),
+                            on_error: move |message| error.set(Some(message)),
+                        }
                     }
                 }
                 if is_brief_panel_shown(session_view.brief.is_some(), open_set_value.is_some()) {
@@ -353,6 +357,8 @@ pub(crate) fn SessionWorkspace(
                             .as_ref()
                             .map(|brief| brief.revision_history.clone())
                             .unwrap_or_default(),
+                        answers: answered_entries(&session_view.question_sets, &session_view.answers),
+                        options: session.options.clone(),
                         actions,
                         on_error: move |message| error.set(Some(message)),
                     }
