@@ -8,6 +8,10 @@
 //! inside text fragments are not rewritten. When the font fetch fails,
 //! the export keeps the online `<link>`. `GET /designs/{id}/export.pdf`
 //! prints the same page with the user's Chrome, one screen per page.
+//!
+//! Decks export the same way under `/decks/{id}/export` and
+//! `/decks/{id}/export.pdf`. `GET /decks/{id}/export.pptx` builds a
+//! PowerPoint file from the measured slides; see `pptx.rs`.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -21,24 +25,50 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use design_model::Design;
+use design_model::{DECK_VIEWPORT, Deck, Design};
 
 use crate::api_error;
+use crate::deck_render;
+use crate::decks::{DeckStore, is_valid_deck_id};
 use crate::designs::{DesignStore, is_valid_design_id};
+use crate::pptx;
 use crate::render::{self, RenderOptions};
 use crate::screenshots;
+use crate::settings::SettingsStore;
 use crate::uploads::{UploadStore, content_type_of, is_stored_name};
 
-/// The `/designs/{id}/export` route table.
+/// The content type of a `.pptx` download.
+const PPTX_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+
+/// The `/designs/{id}/export` and `/decks/{id}/export` route table.
 pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/designs/{id}/export", get(export_design))
         .route("/designs/{id}/export.pdf", get(export_design_pdf))
+        .route("/decks/{id}/export", get(export_deck))
+        .route("/decks/{id}/export.pdf", get(export_deck_pdf))
+        .route("/decks/{id}/export.pptx", get(export_deck_pptx))
 }
 
 /// The `Content-Disposition` value that names the download `{id}.{extension}`.
 fn attachment_disposition(id: &str, extension: &str) -> String {
     format!("attachment; filename=\"{id}.{extension}\"")
+}
+
+/// A file download named `{id}.{extension}` with `content_type`.
+fn file_download(id: &str, extension: &str, content_type: &str, bytes: Vec<u8>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type.to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                attachment_disposition(id, extension),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 /// The User-Agent the font fetch sends. Google Fonts returns `woff2`
@@ -250,17 +280,7 @@ async fn build_pdf_response(
     match screenshots::print_html_to_pdf(&chrome, &html, design.viewport).await {
         Ok(bytes) => {
             tracing::info!(%id, size_bytes = bytes.len(), "design exported as pdf");
-            (
-                [
-                    (header::CONTENT_TYPE, "application/pdf".to_owned()),
-                    (
-                        header::CONTENT_DISPOSITION,
-                        attachment_disposition(id, "pdf"),
-                    ),
-                ],
-                bytes,
-            )
-                .into_response()
+            file_download(id, "pdf", "application/pdf", bytes)
         }
         Err(error) => api_error::internal_error(&error),
     }
@@ -290,17 +310,128 @@ async fn export_design(
     }
     let html = inline_google_fonts(render::render_design(&design, false), fetch_as_browser).await;
     tracing::info!(%id, size_bytes = html.len(), "design exported");
-    (
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8".to_owned()),
-            (
-                header::CONTENT_DISPOSITION,
-                attachment_disposition(&id, "html"),
-            ),
-        ],
-        html,
-    )
-        .into_response()
+    file_download(&id, "html", "text/html; charset=utf-8", html.into_bytes())
+}
+
+/// Loads a stored deck for an export: 400, 404, or 422 as a response
+/// when the id, the file, or the deck is not usable.
+async fn load_deck_for_export(decks: &DeckStore, id: &str) -> Result<Deck, Response> {
+    if !is_valid_deck_id(id) {
+        return Err(api_error::invalid_deck_id(id));
+    }
+    let deck = match decks.load(id).await {
+        Ok(Some(deck)) => deck,
+        Ok(None) => return Err(api_error::deck_not_found(id)),
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    let errors = deck.validate();
+    if !errors.is_empty() {
+        return Err(api_error::deck_validation_failed(&errors));
+    }
+    Ok(deck)
+}
+
+/// Renders a stored deck with uploaded images and theme fonts inlined
+/// and returns it as a file download.
+async fn export_deck(
+    State(decks): State<DeckStore>,
+    State(uploads): State<UploadStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let mut deck = match load_deck_for_export(&decks, &id).await {
+        Ok(deck) => deck,
+        Err(response) => return response,
+    };
+    if let Err(error) = inline_uploaded_slide_images(&mut deck, &uploads).await {
+        return api_error::internal_error(&error);
+    }
+    let html = inline_google_fonts(deck_render::render_deck(&deck, false), fetch_as_browser).await;
+    tracing::info!(%id, size_bytes = html.len(), "deck exported");
+    file_download(&id, "html", "text/html; charset=utf-8", html.into_bytes())
+}
+
+/// Prints a stored deck to a PDF with the user's Chrome and returns it
+/// as a file download. 503 when no Chrome is installed.
+async fn export_deck_pdf(
+    State(decks): State<DeckStore>,
+    State(uploads): State<UploadStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let deck = match load_deck_for_export(&decks, &id).await {
+        Ok(deck) => deck,
+        Err(response) => return response,
+    };
+    build_deck_pdf_response(&id, deck, &uploads, screenshots::find_chrome()).await
+}
+
+/// Inlines uploaded images, renders the deck print page, and prints it
+/// with `chrome`. `chrome` is a parameter so the no-Chrome path is
+/// testable.
+async fn build_deck_pdf_response(
+    id: &str,
+    mut deck: Deck,
+    uploads: &UploadStore,
+    chrome: Option<PathBuf>,
+) -> Response {
+    let Some(chrome) = chrome else {
+        return screenshots::chrome_missing_response("PDF exports");
+    };
+    if let Err(error) = inline_uploaded_slide_images(&mut deck, uploads).await {
+        return api_error::internal_error(&error);
+    }
+    let html = deck_render::render_deck_with(
+        &deck,
+        deck_render::RenderOptions {
+            is_print: true,
+            ..deck_render::RenderOptions::default()
+        },
+    );
+    match screenshots::print_html_to_pdf(&chrome, &html, DECK_VIEWPORT).await {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), "deck exported as pdf");
+            file_download(id, "pdf", "application/pdf", bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Builds a PowerPoint file from a stored deck with the user's Chrome
+/// and returns it as a file download. 503 when no Chrome is installed.
+async fn export_deck_pptx(
+    State(decks): State<DeckStore>,
+    State(uploads): State<UploadStore>,
+    State(settings): State<SettingsStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let deck = match load_deck_for_export(&decks, &id).await {
+        Ok(deck) => deck,
+        Err(response) => return response,
+    };
+    let sources = pptx::ExportSources {
+        uploads: &uploads,
+        base_url: format!("http://{}", settings.address()),
+    };
+    build_pptx_response(&id, &deck, &sources, screenshots::find_chrome()).await
+}
+
+/// Measures and packs the deck. `chrome` is a parameter so the
+/// no-Chrome path is testable.
+async fn build_pptx_response(
+    id: &str,
+    deck: &Deck,
+    sources: &pptx::ExportSources<'_>,
+    chrome: Option<PathBuf>,
+) -> Response {
+    if chrome.is_none() {
+        return screenshots::chrome_missing_response("PPTX exports");
+    }
+    match pptx::export_deck(deck, sources).await {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), "deck exported as pptx");
+            file_download(id, "pptx", PPTX_CONTENT_TYPE, bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
 }
 
 /// Replaces every `/uploads/{name}` reference in screen html and css
@@ -308,12 +439,59 @@ async fn export_design(
 /// and `url()` in the screen CSS. Names that are missing or unsafe stay
 /// as written, so the export still succeeds.
 async fn inline_uploaded_images(design: &mut Design, uploads: &UploadStore) -> anyhow::Result<()> {
-    let mut names: Vec<String> = Vec::new();
-    for screen in &design.screens {
-        collect_upload_names(&screen.html, &mut names);
+    let texts: Vec<&str> = design
+        .screens
+        .iter()
+        .flat_map(|screen| [Some(screen.html.as_str()), screen.css.as_deref()])
+        .flatten()
+        .collect();
+    let data_uris = collect_data_uris(&texts, uploads).await?;
+    if data_uris.is_empty() {
+        return Ok(());
+    }
+    for screen in &mut design.screens {
+        screen.html = replace_upload_references(&screen.html, &data_uris);
         if let Some(css) = &screen.css {
-            collect_upload_names(css, &mut names);
+            screen.css = Some(replace_upload_references(css, &data_uris));
         }
+    }
+    Ok(())
+}
+
+/// The deck twin of `inline_uploaded_images`: rewrites slide html and
+/// css.
+async fn inline_uploaded_slide_images(
+    deck: &mut Deck,
+    uploads: &UploadStore,
+) -> anyhow::Result<()> {
+    let texts: Vec<&str> = deck
+        .slides
+        .iter()
+        .flat_map(|slide| [Some(slide.html.as_str()), slide.css.as_deref()])
+        .flatten()
+        .collect();
+    let data_uris = collect_data_uris(&texts, uploads).await?;
+    if data_uris.is_empty() {
+        return Ok(());
+    }
+    for slide in &mut deck.slides {
+        slide.html = replace_upload_references(&slide.html, &data_uris);
+        if let Some(css) = &slide.css {
+            slide.css = Some(replace_upload_references(css, &data_uris));
+        }
+    }
+    Ok(())
+}
+
+/// One `data:` URI per stored upload that `texts` reference. Names that
+/// are unsafe or missing get no entry.
+async fn collect_data_uris(
+    texts: &[&str],
+    uploads: &UploadStore,
+) -> anyhow::Result<HashMap<String, String>> {
+    let mut names: Vec<String> = Vec::new();
+    for text in texts {
+        collect_upload_names(text, &mut names);
     }
     let mut data_uris: HashMap<String, String> = HashMap::new();
     for name in names {
@@ -331,16 +509,7 @@ async fn inline_uploaded_images(design: &mut Design, uploads: &UploadStore) -> a
             );
         }
     }
-    if data_uris.is_empty() {
-        return Ok(());
-    }
-    for screen in &mut design.screens {
-        screen.html = replace_upload_references(&screen.html, &data_uris);
-        if let Some(css) = &screen.css {
-            screen.css = Some(replace_upload_references(css, &data_uris));
-        }
-    }
-    Ok(())
+    Ok(data_uris)
 }
 
 /// Adds every upload name referenced in `text` to `names`, once.
@@ -435,11 +604,14 @@ mod tests {
     use design_model::Design;
 
     use crate::export::{
-        FONT_LINK_PREFIX, FontLink, attachment_disposition, base64_encode, build_pdf_response,
-        google_fonts_link, inline_font_urls, inline_google_fonts, inline_uploaded_images,
+        FONT_LINK_PREFIX, FontLink, attachment_disposition, base64_encode, build_deck_pdf_response,
+        build_pdf_response, build_pptx_response, google_fonts_link, inline_font_urls,
+        inline_google_fonts, inline_uploaded_images, inline_uploaded_slide_images,
         upload_references,
     };
+    use crate::pptx::ExportSources;
     use crate::render;
+    use crate::test_support::sample_deck;
     use crate::uploads::UploadStore;
 
     const STYLESHEET_URL: &str =
@@ -573,6 +745,54 @@ mod tests {
             attachment_disposition("overview", "html"),
             "attachment; filename=\"overview.html\""
         );
+        assert_eq!(
+            attachment_disposition("overview", "pptx"),
+            "attachment; filename=\"overview.pptx\""
+        );
+    }
+
+    #[tokio::test]
+    async fn deck_pdf_export_without_chrome_is_503() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = UploadStore::new(directory.path().to_path_buf());
+        let response = build_deck_pdf_response("overview", sample_deck(), &store, None).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn pptx_export_without_chrome_is_503() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = UploadStore::new(directory.path().to_path_buf());
+        let sources = ExportSources {
+            uploads: &store,
+            base_url: "http://127.0.0.1:3000".to_owned(),
+        };
+        let response = build_pptx_response("overview", &sample_deck(), &sources, None).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.starts_with("PPTX exports need Chrome"));
+        assert!(message.contains("SWIFT_DESIGN_CHROME"));
+    }
+
+    #[tokio::test]
+    async fn inlines_uploaded_images_in_slides() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = UploadStore::new(directory.path().to_path_buf());
+        store.save("chart.png", b"PNGDATA").await.unwrap();
+        let mut deck = sample_deck();
+        deck.slides[0].html = "<img src='/uploads/chart.png'>".to_owned();
+        deck.slides[0].css = Some(".a { background: url('/uploads/chart.png'); }".to_owned());
+        inline_uploaded_slide_images(&mut deck, &store)
+            .await
+            .unwrap();
+        let expected = format!("data:image/png;base64,{}", base64_encode(b"PNGDATA"));
+        assert!(deck.slides[0].html.contains(&expected));
+        assert!(deck.slides[0].css.as_deref().unwrap().contains(&expected));
+        assert!(!deck.slides[0].html.contains("/uploads/"));
     }
 
     #[tokio::test]
