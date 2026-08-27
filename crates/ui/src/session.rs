@@ -8,15 +8,15 @@ use dioxus::prelude::*;
 
 use crate::api;
 use crate::brief_panel::{BriefPanel, brief_actions_for};
-use crate::canvas::CandidateCanvas;
-use crate::chat_controls::ModelChip;
+use crate::canvas::{CandidateCanvas, cards_from_decks, cards_from_designs};
+use crate::chat_controls::{ModelChip, SendButton};
 use crate::critique::CritiqueBar;
 use crate::question_card::{
     AnsweredCard, DraftAnswer, QuestionCardState, QuestionSetCard, question_card_state, set_key,
 };
 use crate::settings::{SettingsPanel, pause_briefly};
 use crate::status::{RunStatusCard, working_label};
-use design_model::{QuestionAnswer, WorkflowState};
+use design_model::{ArtifactKind, QuestionAnswer, WorkflowState};
 
 /// The status line for the session's current state.
 pub(crate) fn progress_label(state: WorkflowState, run: Option<&api::AgentRun>) -> String {
@@ -51,6 +51,8 @@ pub(crate) fn generation_step(log_tail: &str) -> Option<&'static str> {
         Some("Validating the output")
     } else if lower.contains("polish") {
         Some("Polishing the design")
+    } else if lower.contains("slide") {
+        Some("Writing slides")
     } else if lower.contains("candidate") || lower.contains("screen") || lower.contains("writ") {
         Some("Writing screens")
     } else {
@@ -59,7 +61,7 @@ pub(crate) fn generation_step(log_tail: &str) -> Option<&'static str> {
 }
 
 /// True when the canvas should show: while generating or reviewing, or
-/// whenever any design exists.
+/// whenever any design or deck exists.
 pub(crate) fn is_canvas_shown(state: WorkflowState, has_designs: bool) -> bool {
     matches!(state, WorkflowState::Generating | WorkflowState::Reviewing) || has_designs
 }
@@ -69,10 +71,12 @@ pub(crate) fn is_canvas_shown(state: WorkflowState, has_designs: bool) -> bool {
 pub(crate) fn SessionWorkspace(
     session_id: String,
     on_open_design: EventHandler<String>,
+    on_open_deck: EventHandler<String>,
     on_home: EventHandler<()>,
 ) -> Element {
     let mut view = use_signal(|| Option::<api::SessionView>::None);
     let mut designs = use_signal(Vec::<api::DesignSummary>::new);
+    let mut decks = use_signal(Vec::<api::DeckSummary>::new);
     let mut run = use_signal(|| Option::<api::AgentRun>::None);
     let mut settings = use_signal(|| Option::<api::SettingsView>::None);
     let is_configuring = use_signal(|| false);
@@ -96,6 +100,9 @@ pub(crate) fn SessionWorkspace(
                     }
                     if let Ok(list) = api::fetch_design_list().await {
                         designs.set(list);
+                    }
+                    if let Ok(list) = api::fetch_deck_list().await {
+                        decks.set(list);
                     }
                     if let Ok(fetched) = api::fetch_agent_run().await {
                         run.set(Some(fetched));
@@ -126,7 +133,11 @@ pub(crate) fn SessionWorkspace(
     }
 
     let Some(session_view) = view() else {
-        return rsx! { main { class: "session", p { class: "lede", "Loading…" } } };
+        return rsx! {
+            main { class: "session",
+                p { class: "lede", "Loading…" }
+            }
+        };
     };
     let session = session_view.session.clone();
     let state = session.state;
@@ -138,8 +149,14 @@ pub(crate) fn SessionWorkspace(
     let actions = brief_actions_for(state, can_proceed);
     let run_value = run();
     let is_running = run_value.as_ref().is_some_and(|run| run.is_running);
-    let session_designs =
-        crate::canvas::session_designs(&designs(), &session_id, session.chosen_design.as_deref());
+    let cards = match session.artifact_kind {
+        ArtifactKind::Demo => {
+            cards_from_designs(&designs(), &session_id, session.chosen_design.as_deref())
+        }
+        ArtifactKind::Deck => {
+            cards_from_decks(&decks(), &session_id, session.chosen_design.as_deref())
+        }
+    };
     let run_designs = run_value
         .as_ref()
         .map(|run| run.designs.clone())
@@ -206,8 +223,13 @@ pub(crate) fn SessionWorkspace(
         }
     };
 
-    let can_start =
-        !is_running && matches!(state, WorkflowState::Generating | WorkflowState::Clarifying);
+    let can_start = is_start_offered(state, is_running, open_set.is_some());
+    let open_set_value = open_set.and_then(|number| {
+        session_view
+            .question_sets
+            .get((number as usize).saturating_sub(1))
+            .cloned()
+    });
 
     rsx! {
         main { class: "session",
@@ -216,37 +238,43 @@ pub(crate) fn SessionWorkspace(
                     button { class: "back", onclick: move |_| on_home.call(()), "‹ Sessions" }
                     span { class: "studio-title", "{session.title}" }
                 }
-                SettingsPanel { settings, is_configuring }
                 div { class: "thread",
                     div { class: "bubble user", "{session.request}" }
                     for message in session_view.messages.iter() {
                         {
-                            let bubble_class = if message.role == "user" { "bubble user" } else { "bubble agent" };
-                            let question_set = message.question_set.and_then(|number| {
-                                session_view
-                                    .question_sets
-                                    .get((number as usize).saturating_sub(1))
-                                    .map(|set| (number, set.clone()))
-                            });
+                            let bubble_class = if message.role == "user" {
+                                "bubble user"
+                            } else {
+                                "bubble agent"
+                            };
+                            let question_set = message
+                                .question_set
+                                .and_then(|number| {
+                                    session_view
+                                        .question_sets
+                                        .get((number as usize).saturating_sub(1))
+                                        .map(|set| (number, set.clone()))
+                                });
                             rsx! {
                                 div { class: "{bubble_class}", "{message.content}" }
                                 if let Some((number, set)) = question_set {
                                     {
-                                        let card_state = question_card_state(number, &answered_sets, session_view.open_question_set);
+                                        let card_state = question_card_state(
+                                            number,
+                                            &answered_sets,
+                                            session_view.open_question_set,
+                                        );
                                         let answers = session_view
                                             .answers
                                             .iter()
                                             .find(|record| record.question_set == number)
                                             .map(|record| record.answers.clone())
                                             .unwrap_or_default();
+                                        // The open set is answered in the workbench, where
+                                        // it has the width. The thread keeps the summaries.
                                         match card_state {
                                             QuestionCardState::Active => rsx! {
-                                                QuestionSetCard {
-                                                    set: set.clone(),
-                                                    drafts,
-                                                    is_busy: is_running,
-                                                    on_submit: move |answers| submit_answers.call(answers),
-                                                }
+                                                p { class: "chat-note", "Answer the questions in the panel." }
                                             },
                                             _ => rsx! {
                                                 AnsweredCard { set: set.clone(), answers, state: card_state }
@@ -277,6 +305,11 @@ pub(crate) fn SessionWorkspace(
                     }
                 }
                 div { class: "chat-box",
+                    if is_configuring() {
+                        div { class: "chat-settings",
+                            SettingsPanel { settings, is_configuring }
+                        }
+                    }
                     textarea {
                         placeholder: chat_placeholder(state),
                         disabled: !actions.can_chat,
@@ -291,32 +324,50 @@ pub(crate) fn SessionWorkspace(
                     }
                     div { class: "chat-controls",
                         ModelChip { settings, is_configuring }
-                        button {
-                            class: "primary",
-                            disabled: !actions.can_chat || draft.read().trim().is_empty(),
-                            onclick: move |_| send_message.call(()),
-                            "Send"
+                        SendButton {
+                            label: "Send",
+                            is_enabled: actions.can_chat && !draft.read().trim().is_empty(),
+                            on_send: move |_| send_message.call(()),
                         }
                     }
                 }
             }
             section { class: "workbench",
-                BriefPanel {
-                    session_id: session_id.clone(),
-                    state,
-                    brief: session_view.brief.clone(),
-                    revisions: session_view.brief.as_ref().map(|brief| brief.revision_history.clone()).unwrap_or_default(),
-                    actions,
-                    on_error: move |message| error.set(Some(message)),
+                if let Some(set) = &open_set_value {
+                    div { class: "workbench-questions",
+                        QuestionSetCard {
+                            set: set.clone(),
+                            drafts,
+                            is_busy: is_running,
+                            on_submit: move |answers| submit_answers.call(answers),
+                        }
+                    }
                 }
-                if is_canvas_shown(state, !session_designs.is_empty()) {
+                if is_brief_panel_shown(session_view.brief.is_some(), open_set_value.is_some()) {
+                    BriefPanel {
+                        session_id: session_id.clone(),
+                        state,
+                        brief: session_view.brief.clone(),
+                        revisions: session_view
+                            .brief
+                            .as_ref()
+                            .map(|brief| brief.revision_history.clone())
+                            .unwrap_or_default(),
+                        actions,
+                        on_error: move |message| error.set(Some(message)),
+                    }
+                }
+                if is_canvas_shown(state, !cards.is_empty()) {
                     CandidateCanvas {
                         session_id: session_id.clone(),
-                        designs: session_designs,
+                        cards,
                         run_designs,
                         revision: revision(),
                         chosen: session.chosen_design.clone(),
-                        on_open: move |id| on_open_design.call(id),
+                        on_open: move |(kind, id): (ArtifactKind, String)| match kind {
+                            ArtifactKind::Demo => on_open_design.call(id),
+                            ArtifactKind::Deck => on_open_deck.call(id),
+                        },
                     }
                 }
                 if actions.can_critique {
@@ -334,21 +385,66 @@ pub(crate) fn SessionWorkspace(
     }
 }
 
+/// True when a run should be active and none is, so the studio offers
+/// `Start the agent`: reading the request, drafting after the answers,
+/// or generating. Not while a question set waits for the user.
+fn is_start_offered(state: WorkflowState, is_running: bool, has_open_set: bool) -> bool {
+    if is_running {
+        return false;
+    }
+    match state {
+        WorkflowState::Intake | WorkflowState::Generating => true,
+        WorkflowState::Clarifying => !has_open_set,
+        _ => false,
+    }
+}
+
+/// True when the brief panel has something to show: a brief, or the
+/// placeholder while no question set is open in its place.
+fn is_brief_panel_shown(has_brief: bool, has_open_set: bool) -> bool {
+    has_brief || !has_open_set
+}
+
 /// The chat box placeholder for a state.
 fn chat_placeholder(state: WorkflowState) -> &'static str {
     match state {
         WorkflowState::Intake => "The agent is reading your request…",
-        WorkflowState::Clarifying => "Answer the cards, or reply here…",
+        WorkflowState::Clarifying => "Answer the questions in the panel, or reply here…",
         WorkflowState::Generating => "Generating… send after it finishes",
-        WorkflowState::Reviewing => "Ask for a change, or critique the design…",
+        WorkflowState::Reviewing => "Ask for a change, or critique the result…",
         _ => "Reply, or ask for a change…",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{generation_step, is_canvas_shown, progress_label};
+    use super::{
+        generation_step, is_brief_panel_shown, is_canvas_shown, is_start_offered, progress_label,
+    };
     use design_model::WorkflowState;
+
+    #[test]
+    fn start_is_offered_only_when_a_run_should_be_active_and_none_is() {
+        assert!(is_start_offered(WorkflowState::Intake, false, false));
+        assert!(is_start_offered(WorkflowState::Generating, false, false));
+        assert!(is_start_offered(WorkflowState::Clarifying, false, false));
+        assert!(!is_start_offered(WorkflowState::Clarifying, false, true));
+        assert!(!is_start_offered(WorkflowState::Clarifying, true, false));
+        assert!(!is_start_offered(
+            WorkflowState::AwaitingApproval,
+            false,
+            false
+        ));
+        assert!(!is_start_offered(WorkflowState::Reviewing, false, false));
+    }
+
+    #[test]
+    fn the_open_question_set_takes_the_brief_placeholder_slot() {
+        assert!(is_brief_panel_shown(false, false));
+        assert!(!is_brief_panel_shown(false, true));
+        assert!(is_brief_panel_shown(true, true));
+        assert!(is_brief_panel_shown(true, false));
+    }
 
     fn run(log: &str) -> crate::api::AgentRun {
         crate::api::AgentRun {
@@ -400,6 +496,7 @@ mod tests {
             generation_step("candidate 1: requesting"),
             Some("Writing screens")
         );
+        assert_eq!(generation_step("writing slide 4"), Some("Writing slides"));
         assert_eq!(generation_step("something else"), None);
     }
 
