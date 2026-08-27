@@ -12,7 +12,8 @@
 use std::collections::HashMap;
 
 use design_model::{
-    BriefQuestionSet, BriefRevision, Critique, Design, DesignBrief, QuestionAnswer, WorkflowState,
+    ArtifactKind, BriefQuestionSet, BriefRevision, Critique, DECK_VIEWPORT, Deck, Design,
+    DesignBrief, QuestionAnswer, WorkflowState,
 };
 use gloo_net::http::{Request, RequestBuilder, Response};
 use serde::{Deserialize, Serialize};
@@ -70,11 +71,14 @@ pub struct SessionSummary {
     pub id: String,
     /// The title.
     pub title: String,
+    /// What the session builds.
+    #[serde(default)]
+    pub artifact_kind: ArtifactKind,
     /// The workflow state.
     pub state: WorkflowState,
     /// When it last changed, RFC 3339.
     pub updated_at: String,
-    /// The chosen design, when there is one.
+    /// The chosen design or deck, when there is one.
     #[serde(default)]
     pub chosen_design: Option<String>,
 }
@@ -126,12 +130,15 @@ pub struct Session {
     pub title: String,
     /// The user's request.
     pub request: String,
+    /// What the session builds.
+    #[serde(default)]
+    pub artifact_kind: ArtifactKind,
     /// The workflow state.
     pub state: WorkflowState,
     /// The failure message shown in the error state.
     #[serde(default)]
     pub error: Option<String>,
-    /// The design the user chose.
+    /// The design or deck the user chose.
     #[serde(default)]
     pub chosen_design: Option<String>,
     /// The approved brief revision.
@@ -162,9 +169,12 @@ pub struct SessionView {
     /// The run records.
     #[serde(default)]
     pub runs: Vec<RunRecord>,
-    /// The designs that belong to this session.
+    /// The designs that belong to this session. Empty for a deck session.
     #[serde(default)]
     pub designs: Vec<DesignSummary>,
+    /// The decks that belong to this session. Empty for a demo session.
+    #[serde(default)]
+    pub decks: Vec<DeckSummary>,
 }
 
 /// Body of `POST /sessions`.
@@ -172,6 +182,8 @@ pub struct SessionView {
 pub struct CreateSessionRequest<'value> {
     /// The user's request.
     pub request: &'value str,
+    /// `demo` or `deck`.
+    pub artifact_kind: &'value str,
     /// How hard to work.
     pub options: CreateOptions<'value>,
 }
@@ -476,6 +488,109 @@ pub async fn restore_design_history(id: &str, stamp: &str) -> Result<(), String>
     .await
 }
 
+// -- Decks ---------------------------------------------------------------
+
+/// One row of `GET /decks`, mirrored from the server.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct DeckSummary {
+    /// Deck id used in `/decks/{id}` routes.
+    pub id: String,
+    /// Deck title.
+    pub title: String,
+    /// Theme name.
+    pub theme: String,
+    /// Number of slides.
+    pub slide_count: usize,
+    /// Number of titles in the planned outline.
+    #[serde(default)]
+    pub outline_count: usize,
+    /// Number of placeholder slides a run left behind.
+    #[serde(default)]
+    pub pending_count: usize,
+}
+
+impl DeckSummary {
+    /// True when the deck is a preview that waits for its slides.
+    pub fn is_preview(&self) -> bool {
+        self.outline_count > self.slide_count
+    }
+
+    /// True when the deck still owes slides.
+    pub fn is_unfinished(&self) -> bool {
+        self.is_preview() || self.pending_count > 0
+    }
+
+    /// The CSS aspect-ratio of every deck: 16:9.
+    pub fn aspect_ratio(&self) -> String {
+        DECK_VIEWPORT.aspect_ratio_css()
+    }
+}
+
+/// Fetches the deck listing.
+pub async fn fetch_deck_list() -> Result<Vec<DeckSummary>, String> {
+    get_json("/decks").await
+}
+
+/// Fetches one deck.
+pub async fn fetch_deck(id: &str) -> Result<Deck, String> {
+    get_json(&format!("/decks/{id}")).await
+}
+
+/// How many slides of the deck are placeholders.
+pub fn pending_slide_count(deck: &Deck) -> usize {
+    deck.slides
+        .iter()
+        .filter(|slide| slide.html.contains(PENDING_SCREEN_CLASS))
+        .count()
+}
+
+/// Saves one deck as a user edit. `Err` carries one message per
+/// problem, so the editor can show every validation error at once.
+pub async fn save_deck(id: &str, deck: &Deck) -> Result<(), Vec<String>> {
+    let response = Request::put(&format!("/decks/{id}"))
+        .header("x-swift-design-author", "user")
+        .json(deck)
+        .map_err(|error| vec![error.to_string()])?
+        .send()
+        .await
+        .map_err(|error| vec![error.to_string()])?;
+    if response.ok() {
+        return Ok(());
+    }
+    let status = response.status();
+    match response.json::<ErrorEnvelope>().await {
+        Ok(envelope) if !envelope.error.details.is_empty() => Err(envelope.error.details),
+        Ok(envelope) => Err(vec![envelope.error.message]),
+        Err(_) => Err(vec![format!("PUT /decks/{id} failed with status {status}")]),
+    }
+}
+
+/// Deletes one deck.
+pub async fn delete_deck(id: &str) -> Result<(), String> {
+    send_empty(Request::delete(&format!("/decks/{id}")), "DELETE /decks").await
+}
+
+/// Fetches the field paths the user changed in this deck.
+pub async fn fetch_deck_user_paths(id: &str) -> Result<Vec<String>, String> {
+    get_json::<AuthorsResponse>(&format!("/decks/{id}/authors"))
+        .await
+        .map(|authors| authors.user_paths)
+}
+
+/// Fetches the saved snapshots of one deck.
+pub async fn fetch_deck_history(id: &str) -> Result<Vec<HistorySnapshot>, String> {
+    get_json(&format!("/decks/{id}/history")).await
+}
+
+/// Writes one snapshot back as the current deck.
+pub async fn restore_deck_history(id: &str, stamp: &str) -> Result<(), String> {
+    send_empty(
+        Request::post(&format!("/decks/{id}/history/{stamp}/restore")),
+        "restore",
+    )
+    .await
+}
+
 // -- Templates -----------------------------------------------------------
 
 /// One row of `GET /templates`.
@@ -493,10 +608,13 @@ pub struct TemplateSummary {
     pub screen_count: usize,
 }
 
-/// Body of `POST /templates`.
+/// Body of `POST /templates`. Exactly one source id is set.
 #[derive(Debug, Serialize)]
 struct SaveTemplateRequest<'value> {
-    design_id: &'value str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    design_id: Option<&'value str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deck_id: Option<&'value str>,
     name: &'value str,
 }
 
@@ -507,8 +625,28 @@ pub async fn fetch_templates() -> Result<Vec<TemplateSummary>, String> {
 
 /// Saves the style of one design as a template.
 pub async fn save_template(design_id: &str, name: &str) -> Result<TemplateSummary, String> {
+    save_template_from(SaveTemplateRequest {
+        design_id: Some(design_id),
+        deck_id: None,
+        name,
+    })
+    .await
+}
+
+/// Saves the style of one deck as a template.
+pub async fn save_deck_template(deck_id: &str, name: &str) -> Result<TemplateSummary, String> {
+    save_template_from(SaveTemplateRequest {
+        design_id: None,
+        deck_id: Some(deck_id),
+        name,
+    })
+    .await
+}
+
+/// Posts one template save request.
+async fn save_template_from(request: SaveTemplateRequest<'_>) -> Result<TemplateSummary, String> {
     let builder = Request::post("/templates")
-        .json(&SaveTemplateRequest { design_id, name })
+        .json(&request)
         .map_err(|error| error.to_string())?;
     let response = send_checked(builder, "POST /templates").await?;
     response.json().await.map_err(|error| error.to_string())
