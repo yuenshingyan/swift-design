@@ -22,6 +22,35 @@ pub fn validation_failed(errors: &[ValidationError]) -> Response {
     )
 }
 
+/// 422 with one detail line per deck validation error.
+pub fn deck_validation_failed(errors: &[ValidationError]) -> Response {
+    let details: Vec<String> = errors.iter().map(ToString::to_string).collect();
+    tracing::info!(error_count = details.len(), "rejected invalid deck");
+    error_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "deck failed validation",
+        details,
+    )
+}
+
+/// 404 for a deck id with no file behind it.
+pub fn deck_not_found(id: &str) -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        &format!("no deck with id `{id}`"),
+        Vec::new(),
+    )
+}
+
+/// 400 for a deck id that is not kebab-case.
+pub fn invalid_deck_id(id: &str) -> Response {
+    error_response(
+        StatusCode::BAD_REQUEST,
+        &format!("invalid deck id `{id}`: use lowercase letters, digits, and hyphens"),
+        Vec::new(),
+    )
+}
+
 /// 404 for a design id with no file behind it.
 pub fn design_not_found(id: &str) -> Response {
     error_response(
