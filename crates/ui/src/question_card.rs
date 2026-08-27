@@ -192,14 +192,17 @@ pub(crate) fn set_key(set: &BriefQuestionSet) -> String {
     format!("{}|{}", set.title, ids.join(","))
 }
 
-/// The card for the open question set: up to three questions and a
-/// `Send answers` button, enabled once every question is complete.
+/// The card for the open question set: up to three questions, a
+/// `Send answers` button enabled once every question is complete, and,
+/// when the set allows it, a skip that starts generation at once.
 #[component]
 pub(crate) fn QuestionSetCard(
     set: BriefQuestionSet,
     drafts: Signal<HashMap<String, DraftAnswer>>,
     is_busy: bool,
+    can_skip: bool,
     on_submit: EventHandler<Vec<QuestionAnswer>>,
+    on_skip: EventHandler<()>,
 ) -> Element {
     let questions: Vec<BriefQuestion> = set.questions.iter().take(3).cloned().collect();
     let ready = answers_are_complete(&set, &drafts.read());
@@ -241,6 +244,14 @@ pub(crate) fn QuestionSetCard(
                     disabled: !ready || is_busy,
                     onclick: submit,
                     "Send answers"
+                }
+                if can_skip {
+                    button {
+                        class: "secondary",
+                        disabled: is_busy,
+                        onclick: move |_| on_skip.call(()),
+                        "Skip the questions and generate"
+                    }
                 }
                 span { class: "question-hint",
                     "Required questions need an answer or Use your best judgment."
