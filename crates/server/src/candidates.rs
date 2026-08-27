@@ -21,8 +21,15 @@ use crate::designs::{DesignStore, is_valid_design_id};
 use crate::events::ChangeNotifier;
 use crate::sessions::SessionStore;
 
-/// Most candidates one base id may have. Keeps generation cost bounded.
+/// Most variations one base id may have. Keeps generation cost bounded.
 pub const CANDIDATE_LIMIT: usize = 5;
+
+/// Most canvases a demo run may build for: desktop, phone, and tablet.
+pub const PLATFORM_LIMIT: usize = 3;
+
+/// Most candidate cards the chooser shows: every variation on every
+/// canvas, since a run writes one design per platform per variation.
+pub const CARD_LIMIT: usize = CANDIDATE_LIMIT * PLATFORM_LIMIT;
 
 /// The `/candidates` route table.
 pub fn routes() -> Router<crate::AppState> {
@@ -123,7 +130,7 @@ async fn chooser(
             Vec::new(),
         );
     }
-    cards.truncate(CANDIDATE_LIMIT);
+    cards.truncate(CARD_LIMIT);
     Html(chooser_page(&base, kind, &cards)).into_response()
 }
 
