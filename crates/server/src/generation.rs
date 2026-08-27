@@ -15,12 +15,12 @@ use design_model::{
 use crate::concepts::{Concept, concept_input, concept_note, concept_prompt, parse_concepts};
 use crate::designs::DesignStore;
 use crate::events::ChangeNotifier;
-use crate::instructions::CONTENT_RULES;
+use crate::instructions::DEMO_RULES;
 use crate::model_client::{LogSink, ModelClient, ModelConfiguration, TextSink, UsageSink};
 use crate::sessions::{ChatMessage, RunMode, RunOptions, RunRecord, SessionStore};
 
 /// Fix rounds per candidate before giving up, by effort level.
-fn fix_round_limit(effort: &str) -> usize {
+pub(crate) fn fix_round_limit(effort: &str) -> usize {
     match effort {
         "low" => 2,
         "high" => 4,
@@ -29,7 +29,7 @@ fn fix_round_limit(effort: &str) -> usize {
 }
 
 /// Screens a preview candidate writes before the rest are continued.
-const PREVIEW_SCREEN_COUNT: usize = 3;
+pub(crate) const PREVIEW_SCREEN_COUNT: usize = 3;
 
 /// What a generation run did.
 #[derive(Debug)]
@@ -48,7 +48,7 @@ pub enum GenerationOutcome {
 }
 
 /// What the model must do this run.
-enum GenerationTask {
+pub(crate) enum GenerationTask {
     /// Write the requested candidates.
     Candidates,
     /// Apply a critique to one chosen design.
@@ -64,26 +64,26 @@ enum GenerationTask {
 
 /// The approved brief and options one generation run works from.
 #[derive(Clone)]
-struct GenerationContext {
-    brief: DesignBrief,
-    options: RunOptions,
-    session_id: String,
+pub(crate) struct GenerationContext {
+    pub(crate) brief: DesignBrief,
+    pub(crate) options: RunOptions,
+    pub(crate) session_id: String,
 }
 
 impl GenerationContext {
     /// The effort level for this run.
-    fn effort(&self) -> &str {
+    pub(crate) fn effort(&self) -> &str {
         &self.options.effort
     }
 
     /// The preview screen count, or `None` for complete candidates.
-    fn preview_screens(&self) -> Option<usize> {
+    pub(crate) fn preview_screens(&self) -> Option<usize> {
         self.options.preview.then_some(PREVIEW_SCREEN_COUNT)
     }
 }
 
 /// Why a generation run stopped without writing a design.
-enum GenerationStop {
+pub(crate) enum GenerationStop {
     /// The run failed with this message.
     Failed(String),
     /// The model asked for a blocking detail. The engine writes the set
@@ -100,11 +100,13 @@ impl From<String> for GenerationStop {
 /// The built-in engine: the model client plus the stores it writes.
 #[derive(Clone)]
 pub struct GenerationEngine {
-    model: ModelClient,
-    designs: DesignStore,
-    sessions: SessionStore,
+    pub(crate) model: ModelClient,
+    pub(crate) designs: DesignStore,
+    /// The deck store, for deck sessions. `None` refuses deck runs.
+    pub(crate) decks: Option<crate::decks::DeckStore>,
+    pub(crate) sessions: SessionStore,
     address: String,
-    notifier: ChangeNotifier,
+    pub(crate) notifier: ChangeNotifier,
     progress_sink: Option<ProgressSink>,
     design_progress_sink: Option<DesignProgressSink>,
     templates: Option<crate::templates::TemplateStore>,
@@ -122,7 +124,7 @@ pub type DesignProgressSink = Arc<dyn Fn(&str, u8) + Send + Sync>;
 /// One item's share of a turn's progress, 0.0 to 1.0. Several items
 /// (candidates, continued designs) each report their own share; the mean
 /// goes to the `ProgressSink`.
-type ShareSink = Arc<dyn Fn(f32) + Send + Sync>;
+pub(crate) type ShareSink = Arc<dyn Fn(f32) + Send + Sync>;
 
 /// The screens each continuation chunk has produced so far, shared
 /// between the chunks that run at once.
@@ -130,16 +132,16 @@ type ChunkBoard = Arc<std::sync::Mutex<Vec<Vec<design_model::Screen>>>>;
 
 /// The share of a design request that the first valid draft completes;
 /// the polish rounds fill the rest.
-const DRAFT_SHARE: f32 = 0.6;
+pub(crate) const DRAFT_SHARE: f32 = 0.6;
 
 /// Screens the engine asks for in one continuation request. Small
 /// chunks keep each reply short, and the design grows on the canvas
 /// after every chunk.
-const CONTINUE_CHUNK_SCREENS: usize = 3;
+pub(crate) const CONTINUE_CHUNK_SCREENS: usize = 3;
 
 /// The share of a continuation that writing the screens completes; the
 /// polish rounds fill the rest.
-const CONTINUE_DRAFT_SHARE: f32 = 0.85;
+pub(crate) const CONTINUE_DRAFT_SHARE: f32 = 0.85;
 
 impl GenerationEngine {
     /// Creates an engine over the given stores. `settings` enables
@@ -155,6 +157,7 @@ impl GenerationEngine {
         Self {
             model: ModelClient::new(configuration, settings),
             designs,
+            decks: None,
             sessions,
             address,
             notifier,
@@ -163,6 +166,12 @@ impl GenerationEngine {
             templates: None,
             uploads: None,
         }
+    }
+
+    /// Lets the engine write decks, for deck sessions.
+    pub fn with_decks(mut self, decks: crate::decks::DeckStore) -> Self {
+        self.decks = Some(decks);
+        self
     }
 
     /// Lets the engine read the saved templates, so a brief that names
@@ -182,7 +191,7 @@ impl GenerationEngine {
     /// The uploads to attach to a content request: every stored file
     /// under the size caps. Empty without an upload store. A file that
     /// cannot be read is logged and skipped.
-    async fn load_attachments(&self, log: &LogSink) -> Attachments {
+    pub(crate) async fn load_attachments(&self, log: &LogSink) -> Attachments {
         let mut attachments = Attachments::default();
         let Some(uploads) = &self.uploads else {
             return attachments;
@@ -236,7 +245,7 @@ impl GenerationEngine {
 
     /// A user message with `text` and the attachments as content parts.
     /// Image parts go only to models that can see them.
-    fn user_message(&self, text: &str, attachments: &Attachments) -> serde_json::Value {
+    pub(crate) fn user_message(&self, text: &str, attachments: &Attachments) -> serde_json::Value {
         let can_see_images = crate::screenshots::supports_vision(self.model.model());
         serde_json::json!({
             "role": "user",
@@ -246,7 +255,7 @@ impl GenerationEngine {
 
     /// The templates the options name, in order. A template that was
     /// deleted is skipped, so the run still writes the rest.
-    async fn brief_templates(
+    pub(crate) async fn brief_templates(
         &self,
         options: &RunOptions,
         log: &LogSink,
@@ -367,7 +376,12 @@ impl GenerationEngine {
                 critique: pending.critique.clone(),
             });
         }
-        let continues = self.continue_requests(&context.session_id).await?;
+        let continues = match context.brief.artifact_kind {
+            design_model::ArtifactKind::Demo => self.continue_requests(&context.session_id).await?,
+            design_model::ArtifactKind::Deck => {
+                self.continue_deck_requests(&context.session_id).await?
+            }
+        };
         if !continues.is_empty() {
             return Ok(GenerationTask::Continue(continues));
         }
@@ -405,6 +419,9 @@ impl GenerationEngine {
         task: GenerationTask,
         log: &LogSink,
     ) -> Result<GenerationOutcome, GenerationStop> {
+        if context.brief.artifact_kind == design_model::ArtifactKind::Deck {
+            return self.execute_deck(client, context, task, log).await;
+        }
         match task {
             GenerationTask::Candidates => self.generate_candidates(client, context, log).await,
             GenerationTask::Edit { design, critique } => {
@@ -618,7 +635,7 @@ impl GenerationEngine {
     /// Asks the model for `count` distinct concepts in one call. A reply
     /// that does not parse yields no concepts, and the candidates are
     /// written without them.
-    async fn plan_concepts(
+    pub(crate) async fn plan_concepts(
         &self,
         client: &reqwest::Client,
         context: &GenerationContext,
@@ -681,7 +698,7 @@ impl GenerationEngine {
         ];
         let original = design.clone();
         let effort = context.effort().to_owned();
-        let request = DesignRequest {
+        let request = ArtifactRequest {
             effort: effort.clone(),
             label: format!("edit {design_id}"),
             parse: Box::new(move |content| {
@@ -690,9 +707,7 @@ impl GenerationEngine {
             progress: self.shared_progress(&[design_id.to_owned()], 5, 95).pop(),
             live: None,
         };
-        let edited = self
-            .request_valid_design(client, messages, &request, log)
-            .await?;
+        let edited = self.request_valid(client, messages, &request, log).await?;
         // A polish round costs a full-design rewrite; edits get one only
         // at high effort.
         let final_design = if effort == "high" {
@@ -841,7 +856,7 @@ impl GenerationEngine {
                 let written = preview.screens.len();
                 let live_board = Arc::clone(&board);
                 let live_show = Arc::clone(&show);
-                let request = DesignRequest {
+                let request = ArtifactRequest {
                     effort: context.effort().to_owned(),
                     label: format!("{label} chunk {}", position + 1),
                     parse: Box::new(move |content| apply_continuation(&original, content)),
@@ -859,7 +874,7 @@ impl GenerationEngine {
                     })),
                 };
                 let continued = engine
-                    .request_valid_design(&client, messages, &request, &log)
+                    .request_valid(&client, messages, &request, &log)
                     .await
                     .map_err(stop_to_string)?;
                 let screens: Vec<design_model::Screen> = continued.screens[written..].to_vec();
@@ -904,7 +919,7 @@ impl GenerationEngine {
         saver.finish(&continued).await?;
         // The polish rounds fill the last share.
         let share = Arc::clone(progress);
-        let polish_context = DesignRequest {
+        let polish_context = ArtifactRequest {
             effort: context.effort().to_owned(),
             label: label.clone(),
             parse: Box::new(parse_design),
@@ -930,7 +945,7 @@ impl GenerationEngine {
         &self,
         client: &reqwest::Client,
         mut design: Design,
-        context: &DesignRequest<'_>,
+        context: &ArtifactRequest<'_, Design>,
         log: &LogSink,
     ) -> Result<Design, String> {
         let label = &context.label;
@@ -1030,7 +1045,7 @@ impl GenerationEngine {
     }
 
     /// The server's own URL, for relative image paths in screenshots.
-    fn base_url(&self) -> String {
+    pub(crate) fn base_url(&self) -> String {
         self.address.clone()
     }
 
@@ -1052,7 +1067,7 @@ impl GenerationEngine {
         ];
         let saver = LiveSaver::new(self, &request.design_id);
         let live_saver = saver.clone();
-        let context = DesignRequest {
+        let context = ArtifactRequest {
             effort: request.context.effort().to_owned(),
             label: format!("candidate {}", request.candidate_number),
             parse: Box::new(parse_design),
@@ -1064,9 +1079,7 @@ impl GenerationEngine {
                 }
             })),
         };
-        let draft = self
-            .request_valid_design(client, messages, &context, log)
-            .await?;
+        let draft = self.request_valid(client, messages, &context, log).await?;
         saver.offer(draft.clone(), draft.screens.len());
         let polished = self
             .polish_design(client, draft, &context, log)
@@ -1083,16 +1096,16 @@ impl GenerationEngine {
         Ok(polished)
     }
 
-    /// Sends `messages`, parses the design reply, and repairs it through
+    /// Sends `messages`, parses the artifact reply, and repairs it through
     /// fix rounds until it validates. A reply that asks for a blocking
     /// detail stops the run with a clarification.
-    async fn request_valid_design(
+    pub(crate) async fn request_valid<T: Validated>(
         &self,
         client: &reqwest::Client,
         mut messages: Vec<serde_json::Value>,
-        context: &DesignRequest<'_>,
+        context: &ArtifactRequest<'_, T>,
         log: &LogSink,
-    ) -> Result<Design, GenerationStop> {
+    ) -> Result<T, GenerationStop> {
         let label = &context.label;
         let fix_round_limit = fix_round_limit(&context.effort);
         let effort = writing_effort(&context.effort);
@@ -1128,11 +1141,11 @@ impl GenerationEngine {
                 }
             }
             match (context.parse)(&content) {
-                Ok(design) => {
-                    let errors = design.validate();
+                Ok(artifact) => {
+                    let errors = artifact.problems();
                     if errors.is_empty() {
                         context.report(DRAFT_SHARE);
-                        return Ok(design);
+                        return Ok(artifact);
                     }
                     let error_lines: Vec<String> = errors.iter().map(ToString::to_string).collect();
                     log(&format!("{label}: {} validation errors", error_lines.len()));
@@ -1189,7 +1202,7 @@ impl GenerationEngine {
     }
 
     /// Reports the turn's progress, when a sink is set.
-    fn report_progress(&self, percent: u8) {
+    pub(crate) fn report_progress(&self, percent: u8) {
         if let Some(sink) = &self.progress_sink {
             sink(percent.min(100));
         }
@@ -1199,7 +1212,12 @@ impl GenerationEngine {
     /// same time. Each design reports its own 0.0 to 1.0: the design sink
     /// gets it as a percent under its id, and the turn progress becomes
     /// `base` plus `span` times the mean of all shares.
-    fn shared_progress(&self, design_ids: &[String], base: u8, span: u8) -> Vec<ShareSink> {
+    pub(crate) fn shared_progress(
+        &self,
+        design_ids: &[String],
+        base: u8,
+        span: u8,
+    ) -> Vec<ShareSink> {
         let count = design_ids.len().max(1);
         let shares = Arc::new(std::sync::Mutex::new(vec![0.0f32; count]));
         (0..count)
@@ -1229,7 +1247,7 @@ impl GenerationEngine {
 }
 /// A user message content: the text alone, or OpenAI-style parts with
 /// one `image_url` data URL per PNG when images are present.
-fn user_content_with_images(text: &str, images: &[Vec<u8>]) -> serde_json::Value {
+pub(crate) fn user_content_with_images(text: &str, images: &[Vec<u8>]) -> serde_json::Value {
     if images.is_empty() {
         return serde_json::Value::String(text.to_owned());
     }
@@ -1390,7 +1408,7 @@ fn attachment_parts(file: &UploadAttachment, can_see_images: bool) -> Vec<serde_
 /// under the brief's effort. Writing markup gains little from long
 /// reasoning, and the effort level still sets the fix and polish
 /// rounds.
-fn writing_effort(effort: &str) -> &'static str {
+pub(crate) fn writing_effort(effort: &str) -> &'static str {
     match effort {
         "low" => "minimal",
         "high" => "medium",
@@ -1401,7 +1419,10 @@ fn writing_effort(effort: &str) -> &'static str {
 /// The complete objects of the JSON array under `key` in a partial
 /// JSON text: the index of the array's `[`, and each complete `{…}`
 /// item. `None` until the array has started.
-fn complete_array_items<'text>(text: &'text str, key: &str) -> Option<(usize, Vec<&'text str>)> {
+pub(crate) fn complete_array_items<'text>(
+    text: &'text str,
+    key: &str,
+) -> Option<(usize, Vec<&'text str>)> {
     let quoted = format!("\"{key}\"");
     let key_position = text.find(&quoted)?;
     let after_key = &text[key_position + quoted.len()..];
@@ -1605,14 +1626,14 @@ impl LiveSaver {
 /// One continuation chunk: the zero-based outline index of its first
 /// title and how many titles it covers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ContinueChunk {
-    first: usize,
-    count: usize,
+pub(crate) struct ContinueChunk {
+    pub(crate) first: usize,
+    pub(crate) count: usize,
 }
 
 /// The chunks that cover outline titles `start..planned`, each at most
 /// `CONTINUE_CHUNK_SCREENS` long.
-fn continue_chunks(start: usize, planned: usize) -> Vec<ContinueChunk> {
+pub(crate) fn continue_chunks(start: usize, planned: usize) -> Vec<ContinueChunk> {
     (start..planned)
         .step_by(CONTINUE_CHUNK_SCREENS)
         .map(|first| ContinueChunk {
@@ -1636,7 +1657,7 @@ fn system_prompt() -> String {
          If the brief lacks a detail you cannot design without, do not guess. Reply with only this JSON instead:\n\
          {{\"needs_clarification\":{{\"title\":\"...\",\"message\":\"...\",\"questions\":[{{\"id\":\"...\",\"label\":\"...\",\"kind\":\"single_select\",\"required\":true,\"options\":[{{\"value\":\"...\",\"label\":\"...\"}}]}}],\"can_proceed_with_assumptions\":true}}}}\n\
          Ask at most {limit} questions. Otherwise reply with only one design JSON document. No prose, no code fences.",
-        rules = CONTENT_RULES.join("\n"),
+        rules = DEMO_RULES.join("\n"),
         example = include_str!("../../../fixtures/sample-design.json"),
         limit = design_model::QUESTIONS_PER_TURN_LIMIT,
     )
@@ -1645,7 +1666,9 @@ fn system_prompt() -> String {
 /// A brief question set the model returned instead of a design, when
 /// the reply carries a `needs_clarification` object. `Some(Err)` when
 /// the object is present but invalid.
-fn clarification_request(content: &str) -> Option<Result<BriefQuestionSet, Vec<QuestionSetError>>> {
+pub(crate) fn clarification_request(
+    content: &str,
+) -> Option<Result<BriefQuestionSet, Vec<QuestionSetError>>> {
     let start = content.find('{')?;
     let end = content.rfind('}')?;
     if end <= start {
@@ -1667,7 +1690,7 @@ fn clarification_request(content: &str) -> Option<Result<BriefQuestionSet, Vec<Q
 
 /// Turns a generation stop into a plain message, for callers that do not
 /// carry a clarification.
-fn stop_to_string(stop: GenerationStop) -> String {
+pub(crate) fn stop_to_string(stop: GenerationStop) -> String {
     match stop {
         GenerationStop::Failed(message) => message,
         GenerationStop::NeedsClarification(_) => {
@@ -1708,7 +1731,7 @@ fn push_list(input: &mut String, title: &str, items: &[String]) {
 }
 
 /// The brief, rendered as labelled sections for a generation prompt.
-fn brief_input(brief: &DesignBrief) -> String {
+pub(crate) fn brief_input(brief: &DesignBrief) -> String {
     let mut input = String::new();
     push_field(&mut input, "Request", &brief.request);
     push_field(&mut input, "Target artifact", &brief.target_artifact);
@@ -1755,27 +1778,47 @@ fn brief_input(brief: &DesignBrief) -> String {
     input
 }
 
-/// Turns a model reply into a design: a whole design, or a patch applied
-/// to an existing one.
-type ReplyParser<'request> = Box<dyn Fn(&str) -> Result<Design, String> + Send + Sync + 'request>;
+/// Turns a model reply into an artifact: a whole design or deck, or a
+/// patch applied to an existing one.
+pub(crate) type ReplyParser<'request, T> =
+    Box<dyn Fn(&str) -> Result<T, String> + Send + Sync + 'request>;
 
-/// Effort, log label, and reply parser for one design request: a
-/// candidate (the reply is a design) or an edit (the reply is a patch).
-struct DesignRequest<'request> {
-    effort: String,
-    label: String,
-    parse: ReplyParser<'request>,
-    /// Where this request reports its share of the turn: `DRAFT_SHARE`
-    /// once the draft validates, then up to 1.0 over the polish rounds.
-    progress: Option<ShareSink>,
-    /// Gets the accumulated reply text while it streams, so the caller
-    /// can show partial results.
-    live: Option<Arc<TextSink>>,
+/// An artifact the fix-round loop can validate: a design or a deck.
+pub(crate) trait Validated {
+    /// Every validation problem, empty when the artifact is ready.
+    fn problems(&self) -> Vec<design_model::ValidationError>;
 }
 
-impl DesignRequest<'_> {
+impl Validated for Design {
+    fn problems(&self) -> Vec<design_model::ValidationError> {
+        self.validate()
+    }
+}
+
+impl Validated for design_model::Deck {
+    fn problems(&self) -> Vec<design_model::ValidationError> {
+        self.validate()
+    }
+}
+
+/// Effort, log label, and reply parser for one artifact request: a
+/// candidate (the reply is the artifact) or an edit (the reply is a
+/// patch).
+pub(crate) struct ArtifactRequest<'request, T> {
+    pub(crate) effort: String,
+    pub(crate) label: String,
+    pub(crate) parse: ReplyParser<'request, T>,
+    /// Where this request reports its share of the turn: `DRAFT_SHARE`
+    /// once the draft validates, then up to 1.0 over the polish rounds.
+    pub(crate) progress: Option<ShareSink>,
+    /// Gets the accumulated reply text while it streams, so the caller
+    /// can show partial results.
+    pub(crate) live: Option<Arc<TextSink>>,
+}
+
+impl<T> ArtifactRequest<'_, T> {
     /// Reports this request's share, when it has a sink.
-    fn report(&self, fraction: f32) {
+    pub(crate) fn report(&self, fraction: f32) {
         if let Some(progress) = &self.progress {
             progress(fraction);
         }
@@ -1995,7 +2038,7 @@ fn candidate_prompt(request: &CandidateRequest<'_>) -> String {
 /// The template candidate `candidate_number` takes its look from.
 /// Candidates are numbered from one and wrap around the chosen
 /// templates, so three looks across five candidates run 1, 2, 3, 1, 2.
-fn candidate_template(
+pub(crate) fn candidate_template(
     templates: &[crate::templates::Template],
     candidate_number: usize,
 ) -> Option<crate::templates::Template> {
@@ -2009,7 +2052,7 @@ fn candidate_template(
 
 /// The prompt lines for a template: the theme to copy and the screens to
 /// match. The template gives the look. The brief gives the content.
-fn template_note(template: &crate::templates::Template) -> String {
+pub(crate) fn template_note(template: &crate::templates::Template) -> String {
     let mut note = format!(
         "Use the saved template `{name}` for the look of this design.\n\
          Copy this theme into the design exactly. Use it instead of any palette or fonts \
@@ -2056,7 +2099,7 @@ mod tests {
     use crate::designs::DesignStore;
     use crate::events::ChangeNotifier;
     use crate::model_client::LogSink;
-    use crate::sessions::SessionStore;
+    use crate::sessions::{NewSession, SessionStore};
     use crate::test_support::{FakeModelServer, SAMPLE_DESIGN, low_effort_options};
 
     fn silent_log() -> LogSink {
@@ -2082,7 +2125,10 @@ mod tests {
     /// low-effort brief approved.
     async fn generating_session(sessions: &SessionStore, brief: DesignBrief) {
         sessions
-            .create("talk", "Talk", "A landing page.", low_effort_options())
+            .create(
+                NewSession::demo("talk", "Talk", "A landing page.")
+                    .with_options(low_effort_options()),
+            )
             .await
             .unwrap();
         let revision = sessions
