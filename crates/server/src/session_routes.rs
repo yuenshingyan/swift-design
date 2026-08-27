@@ -742,7 +742,7 @@ async fn generate_with_assumptions(
             &id,
             brief,
             RevisionSource::Assumptions,
-            "Generate with assumptions",
+            "The agent decides the open items",
         )
         .await
     {
@@ -1190,7 +1190,7 @@ mod tests {
             application.clone(),
             "POST",
             "/sessions/talk/critiques",
-            Some(r#"{"category":"structure","text":"Tighten the hero."}"#),
+            Some(r#"{"text":"Tighten the hero."}"#),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
