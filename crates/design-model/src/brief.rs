@@ -62,69 +62,18 @@ pub struct BriefSection {
     pub content: String,
 }
 
-/// What a critique is about.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum CritiqueCategory {
-    /// Colors, type, imagery, mood.
-    VisualDirection,
-    /// Layout, hierarchy, information architecture.
-    Structure,
-    /// Contrast, text size, keyboard and screen-reader needs.
-    Accessibility,
-    /// Copy, data, and what the artifact says.
-    Content,
-    /// Anything else.
-    FreeForm,
-}
-
-impl CritiqueCategory {
-    /// Every category, in the order the UI shows them.
-    pub const ALL: [CritiqueCategory; 5] = [
-        CritiqueCategory::VisualDirection,
-        CritiqueCategory::Structure,
-        CritiqueCategory::Accessibility,
-        CritiqueCategory::Content,
-        CritiqueCategory::FreeForm,
-    ];
-
-    /// The snake_case name used in JSON.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CritiqueCategory::VisualDirection => "visual_direction",
-            CritiqueCategory::Structure => "structure",
-            CritiqueCategory::Accessibility => "accessibility",
-            CritiqueCategory::Content => "content",
-            CritiqueCategory::FreeForm => "free_form",
-        }
-    }
-
-    /// The text the user sees.
-    pub fn label(self) -> &'static str {
-        match self {
-            CritiqueCategory::VisualDirection => "Visual direction",
-            CritiqueCategory::Structure => "Structure",
-            CritiqueCategory::Accessibility => "Accessibility",
-            CritiqueCategory::Content => "Content",
-            CritiqueCategory::FreeForm => "Free-form",
-        }
-    }
-}
-
 /// One critique of a generated design.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Critique {
-    /// What the critique is about.
-    pub category: CritiqueCategory,
     /// What to change.
     pub text: String,
 }
 
 impl Critique {
-    /// The generation instruction this critique adds to the brief, like
-    /// `[Structure] Move pricing above the FAQ.`
+    /// The generation instruction this critique adds to the brief: the
+    /// text, trimmed.
     pub fn as_instruction(&self) -> String {
-        format!("[{}] {}", self.category.label(), self.text.trim())
+        self.text.trim().to_owned()
     }
 }
 
@@ -282,8 +231,7 @@ fn push_unique(items: &mut Vec<String>, item: String) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{
-        AnsweredQuestion, BriefRevision, BriefSection, Critique, CritiqueCategory, DesignBrief,
-        RevisionSource,
+        AnsweredQuestion, BriefRevision, BriefSection, Critique, DesignBrief, RevisionSource,
     };
     use crate::Viewport;
 
@@ -431,25 +379,26 @@ mod tests {
     }
 
     #[test]
-    fn critiques_become_labelled_instructions() {
+    fn critiques_become_trimmed_instructions() {
         let critique = Critique {
-            category: CritiqueCategory::Structure,
             text: " Move pricing above the FAQ. ".to_owned(),
         };
-        assert_eq!(
-            critique.as_instruction(),
-            "[Structure] Move pricing above the FAQ."
-        );
+        assert_eq!(critique.as_instruction(), "Move pricing above the FAQ.");
         let brief = brief()
             .with_instruction(critique.as_instruction())
             .with_instruction(critique.as_instruction());
         assert_eq!(brief.generation_instructions.len(), 1);
-        assert_eq!(
-            serde_json::to_string(&CritiqueCategory::VisualDirection).unwrap(),
-            "\"visual_direction\""
-        );
-        assert_eq!(CritiqueCategory::ALL.len(), 5);
-        assert_eq!(CritiqueCategory::FreeForm.label(), "Free-form");
+    }
+
+    #[test]
+    fn a_critique_round_trips_through_json() {
+        let critique = Critique {
+            text: "Tighten the hero.".to_owned(),
+        };
+        let json = serde_json::to_string(&critique).unwrap();
+        assert_eq!(json, r#"{"text":"Tighten the hero."}"#);
+        let back: Critique = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, critique);
     }
 
     #[test]
