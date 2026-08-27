@@ -628,7 +628,37 @@ button.primary.send-button { display: inline-flex; align-items: center; justify-
   flex: none; }
 .color-list .color-name { font-size: 0.8125rem; color: var(--ink); }
 .color-list .color-code { margin-left: auto; font-size: 0.72rem; color: var(--muted); }
+.kind-badge { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.04em;
+  color: var(--muted); border: 1px solid var(--hairline); border-radius: 4px;
+  padding: 0.05rem 0.35rem; }
 .kind-chips { padding: 0.75rem 0.75rem 0; }
+/* The canvas picker: three device buttons, any number pressed. */
+.canvas-picker { display: flex; flex-direction: column; gap: 0.45rem; }
+.device-choices { display: flex; gap: 0.5rem; }
+button.device-choice { display: flex; flex-direction: column; align-items: center; gap: 0.15rem;
+  flex: 1; padding: 0.6rem 0.4rem; border: 1px solid var(--line); border-radius: var(--r-panel);
+  background: var(--raised); color: var(--ink-2); box-shadow: none; }
+button.device-choice:hover { border-color: #B4B0A7; color: var(--ink); }
+button.device-choice.picked { border-color: var(--ink); background: var(--subtle);
+  color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+.device-glyph { display: flex; }
+.device-name { font-size: 0.78rem; font-weight: 500; }
+.device-size { font-family: var(--mono); font-size: 0.62rem; color: var(--muted); }
+.device-note { margin: 0; font-size: 0.7rem; color: var(--muted); }
+
+/* One tab per canvas a run wrote for. */
+.canvas-tabs { display: flex; gap: 0.375rem; margin-bottom: 0.6rem; }
+button.canvas-tab { padding: 0.3rem 0.7rem; border: 1px solid var(--hairline); border-radius: 999px;
+  background: transparent; box-shadow: none; font-family: var(--mono); font-size: 0.68rem;
+  color: var(--muted); }
+button.canvas-tab:hover { color: var(--ink); }
+button.canvas-tab.open { background: var(--ink); border-color: var(--ink); color: var(--raised); }
+
+.count-chips { display: flex; align-items: center; gap: 0.5rem; }
+.count-chips-label { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--faint); }
+.count-chips .effect-chips button { min-width: 1.8rem; padding: 0.3rem 0.55rem;
+  justify-content: center; }
 .kind-field { margin-bottom: 0.75rem; }
 .project-kind { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.72rem;
   color: #6C7178; white-space: nowrap; }
@@ -815,17 +845,29 @@ button.primary.send-button { display: inline-flex; align-items: center; justify-
   border-radius: 4px; padding: 0 0.3rem; }
 .answer-textarea, .other-input { width: 100%; font: inherit; font-size: 0.84rem;
   border: 1px solid var(--line); border-radius: 6px; padding: 0.4rem 0.5rem; background: var(--raised); }
-/* Answered questions read as a user turn: right-aligned, one block per
-   question, the label above the answer. */
-.answered-card { align-self: flex-end; max-width: 92%; background: var(--raised);
-  border: 1px solid var(--line-soft); border-radius: 12px; padding: 0.75rem 0.9rem;
-  display: flex; flex-direction: column; gap: 0.6rem; box-shadow: var(--sh-control); }
-.answered-kicker { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.08em;
-  text-transform: uppercase; color: var(--faint); }
-.answered-row { display: flex; flex-direction: column; gap: 0.15rem; }
-.answered-label { font-size: 0.72rem; line-height: 1.4; color: var(--muted); }
-.answered-summary { font-size: 0.84rem; line-height: 1.45; font-weight: 500; color: var(--ink); }
-.answered-summary.skipped { font-weight: 400; font-style: italic; color: var(--muted); }
+/* A question and its answer must never read alike. Each line carries a
+   Q or A tag, so the role is legible before the words are. */
+.qa-row { display: flex; flex-direction: column; gap: 0.2rem; padding: 0.1rem 0; }
+.qa-line { display: flex; align-items: flex-start; gap: 0.45rem; }
+.qa-tag { flex: none; width: 1.05rem; height: 1.05rem; margin-top: 0.1rem;
+  display: inline-flex; align-items: center; justify-content: center; border-radius: 4px;
+  font-family: var(--mono); font-size: 0.58rem; font-weight: 600; letter-spacing: 0;
+  background: var(--ghost); color: var(--muted); }
+.qa-tag.answer { background: var(--ink); color: var(--raised); }
+.qa-question { font-size: 0.78rem; line-height: 1.45; color: var(--muted); }
+.qa-answer { font-size: 0.86rem; line-height: 1.45; font-weight: 600; color: var(--ink); }
+.qa-answer.assumed { font-weight: 400; font-style: italic; color: var(--muted); }
+
+.brief-answers { display: flex; flex-direction: column; gap: 0.55rem;
+  border: 1px solid var(--hairline); border-radius: var(--r-panel); background: var(--subtle);
+  padding: 0.7rem 0.85rem; }
+.run-settings { display: flex; flex-direction: column; gap: 0.65rem;
+  border-top: 1px solid var(--hairline); padding-top: 0.8rem; }
+.run-settings .brief-field { margin: 0; }
+button.brief-toggle { align-self: flex-start; padding: 0; border: 0; background: transparent;
+  box-shadow: none; font-size: 0.75rem; color: var(--muted); text-decoration: underline;
+  text-underline-offset: 2px; }
+button.brief-toggle:hover { background: transparent; color: var(--ink); }
 
 .brief-panel { background: var(--raised); border: 1px solid var(--line-soft); border-radius: 12px;
   box-shadow: var(--sh-card, 0 1px 2px rgba(21,24,28,.06)); padding: 1rem 1.1rem;
@@ -838,7 +880,6 @@ button.primary.send-button { display: inline-flex; align-items: center; justify-
   letter-spacing: 0.04em; }
 .brief-list { margin: 0.3rem 0 0; padding-left: 1.1rem; font-size: 0.8rem; display: flex;
   flex-direction: column; gap: 0.2rem; }
-.brief-list-empty { font-size: 0.75rem; color: var(--faint); margin: 0.25rem 0 0; }
 .brief-group.facts { background: var(--teal-tint); border: 1px solid var(--teal-line); }
 .brief-group.facts .brief-group-title { color: var(--teal); }
 .brief-group.assumptions { background: var(--sunken); border: 1px dashed var(--line); }
