@@ -3,7 +3,11 @@
 
 use std::collections::HashMap;
 
-use design_model::{BriefQuestion, BriefQuestionSet, QuestionAnswer, QuestionKind};
+use design_model::{
+    AnsweredQuestion, BriefQuestion, BriefQuestionSet, QuestionAnswer, QuestionKind,
+};
+
+use crate::api::AnswerRecord;
 use dioxus::prelude::*;
 
 /// The answer the user is building for one question, before it is sent.
@@ -349,49 +353,124 @@ pub(crate) fn QuestionCard(
     }
 }
 
-/// A collapsed, answered set: one row per question with its summary.
+/// One question with its answer, each behind its own `Q` or `A` tag.
+///
+/// Styling alone did not separate the two: a reader still had to read
+/// the words to learn which line was the question. The tag says it
+/// before the text does.
 #[component]
-pub(crate) fn AnsweredCard(
-    set: BriefQuestionSet,
-    answers: Vec<QuestionAnswer>,
-    state: QuestionCardState,
-) -> Element {
-    let kicker = if state == QuestionCardState::Stale {
-        "Superseded"
+pub(crate) fn QaRow(question: String, answer: String, is_assumed: bool) -> Element {
+    let shown = if is_assumed {
+        "Use your best judgment".to_owned()
     } else {
-        "Your answers"
+        answer
+    };
+    let answer_class = if is_assumed {
+        "qa-answer assumed"
+    } else {
+        "qa-answer"
     };
     rsx! {
-        div { class: "answered-card",
-            span { class: "answered-kicker", "{kicker}" }
-            for question in set.questions.iter() {
-                {
-                    let answer = answers.iter().find(|answer| answer.question_id == question.id);
-                    let summary = answer
-                        .map(|answer| answer_summary(question, answer))
-                        .unwrap_or_else(|| "—".to_owned());
-                    let skipped = answer.map(|answer| answer.skipped).unwrap_or(false);
-                    let summary_class = if skipped {
-                        "answered-summary skipped"
-                    } else {
-                        "answered-summary"
-                    };
-                    rsx! {
-                        div { key: "{question.id}", class: "answered-row",
-                            span { class: "answered-label", "{question.label}" }
-                            span { class: "{summary_class}", "{summary}" }
-                        }
-                    }
-                }
+        div { class: "qa-row",
+            div { class: "qa-line",
+                span { class: "qa-tag", "Q" }
+                span { class: "qa-question", "{question}" }
+            }
+            div { class: "qa-line",
+                span { class: "qa-tag answer", "A" }
+                span { class: "{answer_class}", "{shown}" }
             }
         }
     }
+}
+
+/// Every answered question of the session, oldest first.
+///
+/// The answers live in one place, the brief panel. The conversation
+/// keeps the turns; it does not restate what the panel already holds.
+/// This reads the session's own question sets and answers, so the panel
+/// can show them before the agent has drafted a brief.
+pub(crate) fn answered_entries(
+    sets: &[BriefQuestionSet],
+    records: &[AnswerRecord],
+) -> Vec<AnsweredQuestion> {
+    let mut entries = Vec::new();
+    for record in records {
+        let Some(set) = sets.get((record.question_set as usize).saturating_sub(1)) else {
+            continue;
+        };
+        for question in &set.questions {
+            let Some(answer) = record
+                .answers
+                .iter()
+                .find(|answer| answer.question_id == question.id)
+            else {
+                continue;
+            };
+            entries.push(AnsweredQuestion {
+                question: question.label.clone(),
+                answer: if answer.skipped {
+                    String::new()
+                } else {
+                    answer_summary(question, answer)
+                },
+                is_assumed: answer.skipped,
+            });
+        }
+    }
+    entries
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use design_model::QuestionOption;
+
+    #[test]
+    fn answered_entries_read_every_round_in_order() {
+        let question_set = |question: BriefQuestion| BriefQuestionSet {
+            title: "T".to_owned(),
+            message: "m".to_owned(),
+            questions: vec![question],
+            can_proceed_with_assumptions: false,
+        };
+        let first = question_set(select("platform", true));
+        let second = question_set(select("tone", false));
+        let records = vec![
+            AnswerRecord {
+                question_set: 1,
+                answers: vec![QuestionAnswer {
+                    question_id: "platform".to_owned(),
+                    values: vec!["web".to_owned()],
+                    ..QuestionAnswer::default()
+                }],
+                at: String::new(),
+            },
+            AnswerRecord {
+                question_set: 2,
+                answers: vec![QuestionAnswer {
+                    question_id: "tone".to_owned(),
+                    skipped: true,
+                    ..QuestionAnswer::default()
+                }],
+                at: String::new(),
+            },
+        ];
+        let entries = answered_entries(&[first, second], &records);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].question, "Which platform?");
+        assert_eq!(entries[0].answer, "Web");
+        assert!(!entries[0].is_assumed);
+        assert_eq!(entries[1].question, "Which tone?");
+        assert!(entries[1].is_assumed);
+        // A record for a set the session does not have is skipped, not a panic.
+        let orphan = vec![AnswerRecord {
+            question_set: 9,
+            answers: Vec::new(),
+            at: String::new(),
+        }];
+        assert!(answered_entries(&[], &orphan).is_empty());
+    }
 
     fn select(id: &str, required: bool) -> BriefQuestion {
         BriefQuestion {
