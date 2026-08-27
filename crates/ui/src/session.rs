@@ -10,13 +10,12 @@ use crate::api;
 use crate::brief_panel::{BriefPanel, CanvasPicker, brief_actions_for};
 use crate::canvas::{CandidateCanvas, cards_from_decks, cards_from_designs};
 use crate::chat_controls::{ModelChip, SendButton};
-use crate::critique::CritiqueBar;
 use crate::question_card::{
     DraftAnswer, QuestionCardState, QuestionSetCard, answered_entries, question_card_state, set_key,
 };
 use crate::settings::{SettingsPanel, pause_briefly};
 use crate::status::{RunStatusCard, working_label};
-use design_model::{ArtifactKind, QuestionAnswer, WorkflowState};
+use design_model::{ArtifactKind, Critique, QuestionAnswer, WorkflowState};
 
 /// The status line for the session's current state.
 pub(crate) fn progress_label(state: WorkflowState, run: Option<&api::AgentRun>) -> String {
@@ -177,8 +176,23 @@ pub(crate) fn SessionWorkspace(
             }
             draft.set(String::new());
             let session_id = session_id.clone();
+            // While reviewing, the chat is the critique input: the
+            // message becomes a focused edit run on the chosen design.
+            let critique = view.read().as_ref().and_then(|session_view| {
+                let session = &session_view.session;
+                (session.state == WorkflowState::Reviewing).then(|| {
+                    let critique = Critique { text: text.clone() };
+                    (critique, session.chosen_design.clone())
+                })
+            });
             spawn(async move {
-                if let Err(message) = api::send_session_message(&session_id, &text, None).await {
+                let sent = match critique {
+                    Some((critique, design)) => {
+                        api::send_critique(&session_id, &critique, design.as_deref()).await
+                    }
+                    None => api::send_session_message(&session_id, &text, None).await,
+                };
+                if let Err(message) = sent {
                     error.set(Some(message));
                 }
             });
@@ -186,6 +200,17 @@ pub(crate) fn SessionWorkspace(
     });
 
     let open_set = session_view.open_question_set;
+    let skip_questions = use_callback({
+        let session_id = session_id.clone();
+        move |_: ()| {
+            let session_id = session_id.clone();
+            spawn(async move {
+                if let Err(message) = api::generate_with_assumptions(&session_id).await {
+                    error.set(Some(message));
+                }
+            });
+        }
+    });
     let submit_answers = use_callback({
         let session_id = session_id.clone();
         move |answers: Vec<QuestionAnswer>| {
@@ -231,6 +256,10 @@ pub(crate) fn SessionWorkspace(
             .cloned()
     });
 
+    let send_label = match actions.can_critique {
+        true => "Request revision",
+        false => "Send",
+    };
     rsx! {
         main { class: "session",
             section { class: "conversation",
@@ -320,7 +349,7 @@ pub(crate) fn SessionWorkspace(
                     div { class: "chat-controls",
                         ModelChip { settings, is_configuring }
                         SendButton {
-                            label: "Send",
+                            label: send_label,
                             is_enabled: actions.can_chat && !draft.read().trim().is_empty(),
                             on_send: move |_| send_message.call(()),
                         }
@@ -334,7 +363,9 @@ pub(crate) fn SessionWorkspace(
                             set: set.clone(),
                             drafts,
                             is_busy: is_running,
+                            can_skip: actions.can_generate_with_assumptions,
                             on_submit: move |answers| submit_answers.call(answers),
+                            on_skip: move |_| skip_questions.call(()),
                         }
                         // The canvas is a requirement like any other, so
                         // it is answered with the questions, not hidden
@@ -374,13 +405,18 @@ pub(crate) fn SessionWorkspace(
                             ArtifactKind::Demo => on_open_design.call(id),
                             ArtifactKind::Deck => on_open_deck.call(id),
                         },
-                    }
-                }
-                if actions.can_critique {
-                    CritiqueBar {
-                        session_id: session_id.clone(),
-                        design: session.chosen_design.clone(),
-                        on_error: move |message| error.set(Some(message)),
+                        on_continue: {
+                            let session_id = session_id.clone();
+                            move |artifact_id: String| {
+                                let session_id = session_id.clone();
+                                spawn(async move {
+                                    let sent = api::continue_artifact(&session_id, &artifact_id).await;
+                                    if let Err(message) = sent {
+                                        error.set(Some(message));
+                                    }
+                                });
+                            }
+                        },
                     }
                 }
                 if let Some(message) = error() {
@@ -417,7 +453,7 @@ fn chat_placeholder(state: WorkflowState) -> &'static str {
         WorkflowState::Intake => "The agent is reading your request…",
         WorkflowState::Clarifying => "Answer the questions in the panel, or reply here…",
         WorkflowState::Generating => "Generating… send after it finishes",
-        WorkflowState::Reviewing => "Ask for a change, or critique the result…",
+        WorkflowState::Reviewing => "What should change?",
         _ => "Reply, or ask for a change…",
     }
 }
