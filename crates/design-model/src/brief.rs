@@ -128,6 +128,23 @@ impl Critique {
     }
 }
 
+/// One question the user answered, kept as text.
+///
+/// The brief must read on its own, so it carries the question wording
+/// and the answer wording, not only the answer ids in `answers`. The
+/// studio shows the two apart, so a reader can tell a question from an
+/// answer at a glance.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AnsweredQuestion {
+    /// The question, as the user saw it.
+    pub question: String,
+    /// The answer, as the user gave it. Empty when the user skipped.
+    pub answer: String,
+    /// True when the user skipped and asked the agent to decide.
+    #[serde(default)]
+    pub is_assumed: bool,
+}
+
 /// The design brief. Every field has a default, so a partial draft from
 /// the agent loads and the user fills the rest.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -137,6 +154,9 @@ pub struct DesignBrief {
     pub request: String,
     /// The answers the user gave, newest last.
     pub answers: Vec<QuestionAnswer>,
+    /// The answered questions as text, newest last. One entry per
+    /// question the user answered or skipped.
+    pub answered_questions: Vec<AnsweredQuestion>,
     /// Facts the user stated or confirmed. Never guessed.
     pub confirmed_facts: Vec<String>,
     /// Choices the app or the agent made without the user. Use only
@@ -147,10 +167,19 @@ pub struct DesignBrief {
     /// `demo` or `deck`. The session sets it. A demo run writes a
     /// design; a deck run writes a deck.
     pub artifact_kind: ArtifactKind,
+    /// How many slides the user asked for. The app asks; the agent does
+    /// not. `None` lets the agent choose. Only for a deck.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slide_count: Option<u32>,
     /// What to make, such as `landing page` or `onboarding flow`.
     pub target_artifact: String,
-    /// Where it runs, such as `desktop web` or `iOS app`.
+    /// Where it runs, such as `desktop web` or `iOS app`. The first
+    /// entry of `target_platforms` when the app set several.
     pub target_platform: String,
+    /// Every platform the run builds for. The app asks; the agent does
+    /// not. One design is written per platform, each on that
+    /// platform's canvas. Empty means the one in `target_platform`.
+    pub target_platforms: Vec<String>,
     /// Who it is for.
     pub audience: String,
     /// The problem the audience has.
@@ -184,6 +213,32 @@ impl DesignBrief {
     /// The viewport the brief's target platform implies.
     pub fn viewport(&self) -> Viewport {
         Viewport::for_platform(&self.target_platform)
+    }
+
+    /// Every platform the run builds for, never empty.
+    ///
+    /// Falls back to `target_platform` for a brief written before the
+    /// app asked for more than one. An empty name is still a platform:
+    /// it stands for the default desktop canvas.
+    pub fn platforms(&self) -> Vec<String> {
+        let listed: Vec<String> = self
+            .target_platforms
+            .iter()
+            .filter(|platform| !platform.trim().is_empty())
+            .cloned()
+            .collect();
+        if listed.is_empty() {
+            return vec![self.target_platform.clone()];
+        }
+        listed
+    }
+
+    /// The canvas of every platform the run builds for, in order.
+    pub fn viewports(&self) -> Vec<Viewport> {
+        self.platforms()
+            .iter()
+            .map(|platform| Viewport::for_platform(platform))
+            .collect()
     }
 
     /// Moves every open question into `assumptions` as `Assumed: …`
@@ -227,8 +282,10 @@ fn push_unique(items: &mut Vec<String>, item: String) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{
-        BriefRevision, BriefSection, Critique, CritiqueCategory, DesignBrief, RevisionSource,
+        AnsweredQuestion, BriefRevision, BriefSection, Critique, CritiqueCategory, DesignBrief,
+        RevisionSource,
     };
+    use crate::Viewport;
 
     fn brief() -> DesignBrief {
         DesignBrief {
@@ -275,6 +332,73 @@ mod tests {
             serde_json::to_string(&deck)
                 .unwrap()
                 .contains("\"artifact_kind\":\"deck\"")
+        );
+    }
+
+    #[test]
+    fn answered_questions_keep_the_question_and_the_answer_apart() {
+        let brief = DesignBrief {
+            answered_questions: vec![
+                AnsweredQuestion {
+                    question: "Which platform?".to_owned(),
+                    answer: "Desktop web".to_owned(),
+                    is_assumed: false,
+                },
+                AnsweredQuestion {
+                    question: "Which tone?".to_owned(),
+                    answer: String::new(),
+                    is_assumed: true,
+                },
+            ],
+            ..DesignBrief::default()
+        };
+        let json = serde_json::to_string(&brief).unwrap();
+        let restored: DesignBrief = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.answered_questions, brief.answered_questions);
+        assert_eq!(restored.answered_questions[0].question, "Which platform?");
+        assert_eq!(restored.answered_questions[0].answer, "Desktop web");
+        assert!(restored.answered_questions[1].is_assumed);
+    }
+
+    #[test]
+    fn the_platforms_fall_back_to_the_single_one() {
+        let mut brief = DesignBrief {
+            target_platform: "desktop web".to_owned(),
+            ..DesignBrief::default()
+        };
+        assert_eq!(brief.platforms(), vec!["desktop web"]);
+        assert_eq!(brief.viewports(), vec![Viewport::default()]);
+
+        brief.target_platforms = vec![
+            "desktop web".to_owned(),
+            "  ".to_owned(),
+            "phone".to_owned(),
+        ];
+        assert_eq!(brief.platforms(), vec!["desktop web", "phone"]);
+        let viewports = brief.viewports();
+        assert_eq!(viewports.len(), 2);
+        assert_eq!(viewports[0], Viewport::default());
+        assert_eq!(viewports[1].width, 390);
+        // The first platform still decides the single-viewport reading.
+        assert_eq!(brief.viewport(), Viewport::default());
+    }
+
+    #[test]
+    fn a_slide_count_is_absent_until_the_app_sets_one() {
+        let brief: DesignBrief = serde_json::from_str(r#"{"request":"x"}"#).unwrap();
+        assert_eq!(brief.slide_count, None);
+        assert!(
+            !serde_json::to_string(&brief)
+                .unwrap()
+                .contains("slide_count")
+        );
+        let counted: DesignBrief =
+            serde_json::from_str(r#"{"request":"x","slide_count":12}"#).unwrap();
+        assert_eq!(counted.slide_count, Some(12));
+        assert!(
+            serde_json::to_string(&counted)
+                .unwrap()
+                .contains("\"slide_count\":12")
         );
     }
 
