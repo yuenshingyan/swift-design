@@ -257,6 +257,20 @@ fn state_class(state: WorkflowState) -> &'static str {
     }
 }
 
+/// True when the brief panel offers to let the agent decide the open
+/// items: only once a brief can be approved, and only while there is
+/// something open. While the questions are still open, the question
+/// card carries the skip instead.
+pub(crate) fn is_decide_open_offered(actions: BriefActions, open_count: usize) -> bool {
+    actions.can_approve && actions.can_generate_with_assumptions && open_count > 0
+}
+
+/// True when the brief panel starts collapsed: once a run starts, the
+/// candidates are the thing to look at, and the brief is a reference.
+pub(crate) fn is_brief_collapsed_by_default(state: WorkflowState) -> bool {
+    matches!(state, WorkflowState::Generating | WorkflowState::Reviewing)
+}
+
 /// The brief panel for one session.
 #[component]
 pub(crate) fn BriefPanel(
@@ -270,6 +284,15 @@ pub(crate) fn BriefPanel(
     on_error: EventHandler<String>,
 ) -> Element {
     let mut is_expanded = use_signal(|| false);
+    // The user's own collapse choice. A state change clears it, so a
+    // click on `Go` collapses the panel even after the user opened it.
+    let mut collapse_choice = use_signal(|| None::<bool>);
+    let mut seen_state = use_signal(|| state);
+    if seen_state() != state {
+        seen_state.set(state);
+        collapse_choice.set(None);
+    }
+    let is_collapsed = collapse_choice().unwrap_or(is_brief_collapsed_by_default(state));
     let Some(brief) = brief else {
         return rsx! {
             section { class: "brief-panel",
@@ -285,7 +308,7 @@ pub(crate) fn BriefPanel(
     let groups = facts_assumptions_open(&brief);
     let is_full_brief_offered = has_full_brief(&brief, &answers) || !revisions.is_empty();
     let revision = brief.revision;
-    let assumption_count = groups.assumptions.len();
+    let open_count = groups.open.len();
     let approve = {
         let id = session_id.clone();
         move |_| {
@@ -311,63 +334,68 @@ pub(crate) fn BriefPanel(
         }
     };
     rsx! {
-        section { class: "brief-panel",
-            div { class: "brief-head",
+        section { class: if is_collapsed { "brief-panel collapsed" } else { "brief-panel" },
+            button {
+                class: "brief-head",
+                onclick: move |_| collapse_choice.set(Some(!is_collapsed)),
+                span { class: "chevron",
+                    if is_collapsed {
+                        "▸"
+                    } else {
+                        "▾"
+                    }
+                }
                 span { class: "kicker", "Brief" }
                 span { class: "state-badge {state_class(state)}", "{state_label(state)}" }
                 span { class: "kind-badge", "{brief.artifact_kind.label()}" }
                 span { class: "rev", "rev {revision}" }
             }
-            AnswersView { entries: answers.clone() }
-            BriefGroupsView { groups: groups.clone() }
-            RunSettings {
-                session_id: session_id.clone(),
-                state,
-                brief: brief.clone(),
-                options,
-                on_error,
-            }
-            if is_full_brief_offered {
-                button {
-                    class: "brief-toggle",
-                    onclick: move |_| is_expanded.set(!is_expanded()),
-                    if is_expanded() {
-                        "Hide the full brief"
-                    } else {
-                        "Show the full brief"
+            if !is_collapsed {
+                AnswersView { entries: answers.clone() }
+                BriefGroupsView { groups: groups.clone() }
+                if is_full_brief_offered {
+                    button {
+                        class: "brief-toggle",
+                        onclick: move |_| is_expanded.set(!is_expanded()),
+                        if is_expanded() {
+                            "Hide the full brief"
+                        } else {
+                            "Show the full brief"
+                        }
                     }
                 }
-            }
-            if is_expanded() {
-                BriefFields { brief: brief.clone(), answers: answers.clone() }
-                if !revisions.is_empty() {
-                    div { class: "revision-list",
-                        span { class: "kicker", "Revisions" }
-                        for entry in revisions.iter() {
-                            div {
-                                key: "{entry.revision}",
-                                class: if entry.revision == revision { "history-row current" } else { "history-row" },
-                                "{revision_label(entry)}"
+                if is_expanded() {
+                    BriefFields { brief: brief.clone(), answers: answers.clone() }
+                    if !revisions.is_empty() {
+                        div { class: "revision-list",
+                            span { class: "kicker", "Revisions" }
+                            for entry in revisions.iter() {
+                                div {
+                                    key: "{entry.revision}",
+                                    class: if entry.revision == revision { "history-row current" } else { "history-row" },
+                                    "{revision_label(entry)}"
+                                }
                             }
                         }
                     }
                 }
-            }
-            div { class: "brief-actions",
-                button {
-                    class: "primary",
-                    disabled: !actions.can_approve,
-                    onclick: approve,
-                    "Approve brief and generate"
+                RunSettings {
+                    session_id: session_id.clone(),
+                    state,
+                    brief: brief.clone(),
+                    options,
+                    on_error,
                 }
-                button {
-                    class: "secondary",
-                    disabled: !actions.can_generate_with_assumptions,
-                    onclick: generate,
-                    "Generate with assumptions"
-                }
-                if actions.can_generate_with_assumptions && assumption_count > 0 {
-                    span { class: "brief-note", "{assumption_count} assumptions will be used" }
+                div { class: "brief-actions",
+                    button {
+                        class: "primary",
+                        disabled: !actions.can_approve,
+                        onclick: approve,
+                        "Go"
+                    }
+                    if is_decide_open_offered(actions, open_count) {
+                        button { class: "secondary", onclick: generate, "Decide automatically" }
+                    }
                 }
             }
         }
@@ -735,6 +763,25 @@ mod tests {
         assert!(brief_actions_for(WorkflowState::Clarifying, true).can_generate_with_assumptions);
         assert!(!brief_actions_for(WorkflowState::Clarifying, false).can_generate_with_assumptions);
         assert!(brief_actions_for(WorkflowState::BriefReady, false).can_generate_with_assumptions);
+    }
+
+    #[test]
+    fn deciding_open_items_is_offered_only_with_open_items_and_an_approvable_brief() {
+        let approvable = brief_actions_for(WorkflowState::AwaitingApproval, false);
+        assert!(is_decide_open_offered(approvable, 2));
+        assert!(!is_decide_open_offered(approvable, 0));
+        let clarifying = brief_actions_for(WorkflowState::Clarifying, true);
+        assert!(!is_decide_open_offered(clarifying, 2));
+    }
+
+    #[test]
+    fn the_brief_collapses_once_a_run_starts() {
+        assert!(is_brief_collapsed_by_default(WorkflowState::Generating));
+        assert!(is_brief_collapsed_by_default(WorkflowState::Reviewing));
+        assert!(!is_brief_collapsed_by_default(
+            WorkflowState::AwaitingApproval
+        ));
+        assert!(!is_brief_collapsed_by_default(WorkflowState::Clarifying));
     }
 
     #[test]
