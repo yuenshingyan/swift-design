@@ -2,7 +2,9 @@
 //! app's own choices. There is no brief: the model reads the request
 //! and the answers, as Swift Deck did.
 
-use design_model::{AnsweredQuestion, ArtifactKind, BriefQuestion, QuestionAnswer, Viewport};
+use design_model::{
+    AnsweredQuestion, ArtifactKind, BriefQuestion, QuestionAnswer, Viewport, axis_label,
+};
 
 use crate::sessions::RunOptions;
 
@@ -66,6 +68,14 @@ pub(crate) fn request_input(request: &SessionRequest) -> String {
             if let Some(count) = request.options.slide_count {
                 input.push_str(&format!("Slide count the user asked for: {count}\n"));
             }
+        }
+    }
+    // The app's own answers, which recur in every session. An axis
+    // the user has not picked is absent, so the agent decides it.
+    // The value is stored as a slug; the prompt reads the label.
+    for (name, value) in request.options.axes(request.kind) {
+        if let Some(label) = axis_label(name, value) {
+            input.push_str(&format!("{name}: {label}\n"));
         }
     }
     if !request.answers.is_empty() {
@@ -160,6 +170,71 @@ mod tests {
         assert!(input.contains("Scenario: Training"));
         assert!(input.contains("Slide count the user asked for: 8"));
         assert!(!input.contains("Canvases"));
+    }
+
+    #[test]
+    fn the_apps_own_answers_reach_the_prompt() {
+        let mut demo = request(ArtifactKind::Demo);
+        demo.options.audience = Some("practitioners".to_owned());
+        demo.options.tone = Some("executive".to_owned());
+        demo.options.scope = Some("short_flow".to_owned());
+        demo.options.color_mode = Some("dark".to_owned());
+        demo.options.product_kind = Some("developer_tool".to_owned());
+        demo.options.data_state = Some("populated".to_owned());
+        let input = request_input(&demo);
+        // The stored value is a slug; the prompt reads the label.
+        assert!(input.contains("Audience: Practitioners in the field"));
+        assert!(input.contains("Tone: Executive overview"));
+        assert!(input.contains("Color mode: Dark"));
+        assert!(input.contains("Scope: A short flow of screens"));
+        assert!(input.contains("Product kind: Developer tool"));
+        assert!(input.contains("Screen state: A full, realistic working state"));
+    }
+
+    #[test]
+    fn a_deck_gets_the_deck_axes_and_a_demo_gets_the_demo_ones() {
+        let mut deck = request(ArtifactKind::Deck);
+        deck.options.slide_density = Some("sparse".to_owned());
+        deck.options.evidence_style = Some("data_heavy".to_owned());
+        // A demo-only value on a deck reaches no prompt line.
+        deck.options.product_kind = Some("developer_tool".to_owned());
+        let input = request_input(&deck);
+        assert!(input.contains("Slide density: One idea in large type"));
+        assert!(input.contains("Evidence: Data-heavy throughout"));
+        assert!(!input.contains("Product kind"));
+    }
+
+    #[test]
+    fn an_unpicked_axis_is_left_out_so_the_agent_decides_it() {
+        let input = request_input(&request(ArtifactKind::Demo));
+        for axis in [
+            "Audience:",
+            "Tone:",
+            "Color mode:",
+            "Scope:",
+            "Product kind:",
+        ] {
+            assert!(!input.contains(axis), "{axis}");
+        }
+    }
+
+    #[test]
+    fn a_deck_says_its_size_with_slides_not_scope() {
+        let mut deck = request(ArtifactKind::Deck);
+        deck.options.audience = Some("newcomers".to_owned());
+        // Scope is a demo question; a deck must not print it even when
+        // an old record carries one.
+        deck.options.scope = Some("short_flow".to_owned());
+        let input = request_input(&deck);
+        assert!(input.contains("Audience: Newcomers to the subject"));
+        assert!(!input.contains("Scope:"));
+    }
+
+    #[test]
+    fn an_unknown_axis_value_is_left_out_rather_than_passed_through() {
+        let mut demo = request(ArtifactKind::Demo);
+        demo.options.audience = Some("astronauts".to_owned());
+        assert!(!request_input(&demo).contains("Audience:"));
     }
 
     #[test]
