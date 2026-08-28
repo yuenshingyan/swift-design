@@ -1,6 +1,6 @@
 # Swift Design
 
-A brief-first design harness. It turns an ambiguous request into an approved design brief, then guides an LLM agent to build the artifact: a software demo or a slide deck.
+A design harness. You describe what you need, the agent asks a few questions in the chat, writes candidates, and edits them from the chat: a software demo or a slide deck.
 
 ## Why
 
@@ -10,13 +10,13 @@ Most design-generation tools optimize for:
 prompt → artifact
 ```
 
-This harness optimizes for:
+This harness adds one round of questions and keeps the conversation:
 
 ```text
-request → clarify → brief → approve → generate → critique → revise
+request → questions in the chat → candidates → chat edits
 ```
 
-The purpose is not to delay output. It is to avoid poor alignment caused by guessing about audience, goals, content, brand direction, or platform.
+The questions are short choices with `Use your best judgment` on each, and you can skip them all with **Skip the questions and generate**. There is no brief to approve.
 
 ## Two artifact kinds
 
@@ -27,53 +27,39 @@ Pick the kind on the home page. It is fixed for the session once generation star
 | `demo` | A software demo: a landing page, app screens, a flow | a design with `viewport` and `screens` | the viewport, 1440×900 by default; 390×844 for a phone; 1024×768 for a tablet | `/designs/{id}` |
 | `deck` | A slide presentation | a deck with `slides` and no `viewport` | 1920×1080 | `/decks/{id}` |
 
-Both kinds share the theme, the HTML and CSS rules, the brief, the workflow, the templates, and the uploads. Decks add a presenter view, an audience window that follows it, and a PPTX export. The deck JSON, routes, presenter, and PPTX come from Swift Deck, which is now part of this project.
+Both kinds share the theme, the HTML and CSS rules, the workflow, the templates, and the uploads. Decks add a presenter view, an audience window that follows it, and a PPTX export. The deck JSON, routes, presenter, and PPTX come from Swift Deck, which is now part of this project.
 
 ## Core principles
 
-- Ask only high-impact questions.
-- Ask no more than three questions at once.
-- Preserve answers, assumptions, and open questions separately.
-- Treat the approved brief as the source of truth.
-- Do not generate before approval unless the user explicitly selects **Skip the questions and generate** or **Decide automatically**.
-- Make design decisions inspectable and revisable.
+- Ask only choices that change the result, with 2 to 4 short options each.
+- Ask at most three questions per turn, and no more once five are answered.
+- Never require an answer: every question has `Use your best judgment`, and the whole set can be skipped.
+- The app asks its own closed questions itself: the canvas and the number of variations for a demo; the scenario, the length, the candidates, and the variety for a deck.
+- After the candidates exist, the chat edits: a message with a candidate open changes that candidate, a message without one writes new candidates.
 
 ## Workflow
 
 | State | Purpose |
 |---|---|
-| `intake` | Receive the initial request |
-| `clarifying` | Ask focused questions |
-| `brief_ready` | Present the assembled brief |
-| `awaiting_approval` | User approves, edits, or accepts assumptions |
-| `generating` | Agent creates the design or the deck |
-| `reviewing` | User critiques and requests revisions |
-| `error` | Show a recoverable failure |
+| `intake` | The request arrived; the first turn is running |
+| `clarifying` | The agent asked questions and waits for answers |
+| `generating` | The agent writes or edits candidates |
+| `reviewing` | Candidates exist; the chat asks for changes |
+| `error` | A run failed; retry keeps the data |
 
-## Design brief
-
-A brief records the artifact kind, audience, user need, target artifact/platform, primary action, required content/functionality, information architecture, visual direction, brand assets, accessibility and technical constraints, assumptions, open questions, the answered questions, and revision history. Every edit, critique, and automatic decision makes a new revision. The brief panel lists them under `Show the full brief`: click a row to read that revision, and `Restore this revision` writes it back as a new revision.
-
-The panel shows the answers, the assumptions, and the open questions first. The full field list is one click away.
-
-The app asks for the settings with a closed set of answers, so the agent does not spend a question on them: the artifact kind, the number of variations (1 to 5), the canvases for a demo, and the number of slides for a deck. The canvas picker sits next to the questions, where the rest of the requirements are answered.
-
-Pick more than one canvas and the run writes one design per canvas per variation — desktop and phone with two variations is four candidates, grouped on the canvas under one tab per device.
+Every turn is one run of the planner, copied from Swift Deck: it reads the request, the answers, and the conversation, and replies with questions, a decision to write, a decision to edit the open candidate, or plain text.
 
 ## Candidates
 
 Every candidate is a card with a live preview. Cards on one tab share a height, so a desktop card is wide and a phone card is a tall bezel. Click a card to open it in the editor. Arrows at the edges of the preview, or `←` and `→` on a focused card, step through the screens or slides; the pill in the corner shows `n/m`. A preview candidate (the first screens plus an outline) carries a `Finish` button that writes the rest. The chosen card is marked `Chosen`.
 
-In `reviewing`, the chat input sends a critique: type what should change and press **Request revision**.
+In `reviewing`, the chat is the edit input: type what should change and press **Send**. With a candidate chosen, the change is applied to it; otherwise new candidates are written.
 
 ## Architecture
 
-The harness may use a local CLI agent or a remote API, but workflow state, briefs, artifacts, and user decisions remain under application control.
+The harness may use a local CLI agent or a remote API, but workflow state, answers, artifacts, and user decisions remain under application control.
 
-There are two agent modes:
-
-1. **Briefing mode** — asks, summarizes, and updates the brief; it cannot write artifacts.
-2. **Generation mode** — creates the design or the deck from an approved brief.
+One run does one turn: plan, then ask, write, edit, or reply. The built-in engine runs the planner, the concept planner, the candidate writers, the fix-round loop, and the polish pass.
 
 Designs and decks are two pipelines behind one workflow: separate types, stores, routes, renderers, prompts, and editors, with the shared helpers (history, provenance, CSS scoping, fonts, Chrome, the fix-round loop, the model client) used by both. See `CLAUDE.md` for the rules.
 
@@ -99,16 +85,16 @@ on the server machine.
 ## Agent routes
 
 External agents read `GET /instructions` and the schemas at
-`GET /schemas/{design,deck,brief,question-set}`. A demo session writes to
+`GET /schemas/{design,deck,question-set}`. A demo session writes to
 `PUT /designs/{session}-candidate-N`; a deck session writes to
 `PUT /decks/{session}-candidate-N`. The run environment carries
 `SWIFT_DESIGN_SESSION_ID`, `SWIFT_DESIGN_RUN_MODE`, and
 `SWIFT_DESIGN_ARTIFACT_KIND`.
 
-Brief revisions: `GET /sessions/{id}/brief/revisions` lists them,
-`GET /sessions/{id}/brief?revision=N` returns one, and
-`POST /sessions/{id}/brief/revisions/N/restore` writes revision N back as
-a new user revision.
+Turns: `POST /sessions/{id}/messages` sends a chat turn and starts a run;
+`PUT /sessions/{id}/question-set` asks; `POST /sessions/{id}/answers` answers;
+`POST /sessions/{id}/generate` opens the session for writing without more
+questions; `POST /sessions/{id}/complete` ends a run.
 
 Deck-only routes: `GET /decks/{id}/present`, `GET /decks/{id}/render?audience=true`,
 `GET /decks/{id}/slides/{n}.png`, `GET /decks/{id}/export.pptx`.
@@ -127,7 +113,7 @@ cargo run -p server --bin generate_schema && git diff --exit-code schemas/
 | Variable | Default | Purpose |
 |---|---|---|
 | `SWIFT_DESIGN_ADDRESS` | `127.0.0.1:3000` | Bind address |
-| `SWIFT_DESIGN_SESSIONS_DIR` | `data/sessions` | Sessions, briefs, answers, runs |
+| `SWIFT_DESIGN_SESSIONS_DIR` | `data/sessions` | Sessions, question sets, answers, runs |
 | `SWIFT_DESIGN_DESIGNS_DIR` | `designs` | Design JSON files |
 | `SWIFT_DESIGN_DECKS_DIR` | `decks` | Deck JSON files |
 | `SWIFT_DESIGN_UPLOADS_DIR` | `uploads` | Source materials |
@@ -144,13 +130,13 @@ cargo run -p server --bin generate_schema && git diff --exit-code schemas/
 
 ```
 crates/
-  design-model/  # serde + schemars types: design, deck, brief, question, workflow. No IO.
+  design-model/  # serde + schemars types: design, deck, question, workflow. No IO.
   server/        # axum: sessions, engines, validation, render, presenter, exports, static hosting.
   ui/            # Dioxus studio (WASM): session workspace, design editor, deck editor.
 fixtures/        # sample-design.json and sample-deck.json
 schemas/         # generated copies of the served JSON Schemas
 ```
 
-The workflow state machine, the question protocol, and the brief live in
+The workflow state machine and the question protocol live in
 `design-model`, so the server and the studio share one definition. See
 `CLAUDE.md` for project conventions.
