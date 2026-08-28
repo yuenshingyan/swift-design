@@ -12,14 +12,14 @@
 
 use design_model::transition::MAX_TRANSITION_MS;
 use design_model::{
-    ArtifactKind, Design, Screen, Theme, Transition, TransitionAxis, TransitionEffect,
+    ArtifactKind, Design, Screen, Theme, Transition, TransitionAxis, TransitionEffect, Viewport,
 };
 use dioxus::document;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::api;
-use crate::canvas::is_narrow_canvas;
+use crate::canvas::{frame_width_rem, is_narrow_canvas, is_portrait_canvas};
 use crate::chat::DesignChat;
 use crate::icons;
 use crate::select::{Select, plain_options};
@@ -407,20 +407,16 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
     });
 
     let screen_count = design().screens.len();
+    let outline_count = design().outline.len();
     // The render page fits the screen to its frame, so a frame with the
-    // canvas ratio shows the screen edge to edge. A narrow canvas, like
-    // a phone, is limited by height instead of width.
+    // canvas ratio shows the screen edge to edge. Every thumbnail is
+    // the same height, and as wide as the ratio says.
     let viewport = design().viewport;
     let ratio = viewport.aspect_ratio_css();
-    let preview_class = match is_narrow_canvas(viewport) {
-        true => "narrow",
-        false => "",
-    };
-    let thumbnail_frame_height = format!(
-        "{:.2}",
-        70.0 * f64::from(viewport.height) / f64::from(viewport.width)
-    );
-    let outline_count = design().outline.len();
+    let stage_class = preview_stage_class(viewport);
+    let is_portrait = is_portrait_canvas(viewport);
+    let tile_width = frame_width_rem(viewport, STRIP_TILE_HEIGHT_REM);
+    let summary = strip_summary(screen_count, outline_count.saturating_sub(screen_count));
     let total_fields = field_count(&design());
     let user_count = user_paths().len().min(total_fields);
     let agent_count = total_fields - user_count;
@@ -575,12 +571,13 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                     for message in messages() {
                         p { class: "error", "{message}" }
                     }
-                    iframe {
-                        title: "Design preview",
-                        class: preview_class,
-                        style: "aspect-ratio: {ratio}",
-                        "data-preview": "true",
-                        src: "/designs/{design_id}/render?version={preview_version()}&editable=true&screen={selected() + 1}",
+                    div { class: stage_class,
+                        iframe {
+                            title: "Design preview",
+                            style: "aspect-ratio: {ratio}",
+                            "data-preview": "true",
+                            src: "/designs/{design_id}/render?version={preview_version()}&editable=true&screen={selected() + 1}",
+                        }
                     }
                     p { class: "preview-hint",
                         span { "Click a node to reference it in the chat and edit its text" }
@@ -614,91 +611,107 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                             },
                         }
                     }
+                    div { class: "strip-head",
+                        "Screens"
+                        span { class: "strip-counts", "{summary}" }
+                    }
                     div { class: "thumbnails",
                         for (index, label) in thumbnail_labels.into_iter().enumerate() {
-                            div {
-                                key: "{index}",
-                                class: if dragged() == Some(index) { "thumbnail current dragging" } else if index == selected() { "thumbnail current" } else { "thumbnail" },
-                                title: "{label} · drag to reorder",
-                                style: "aspect-ratio: {ratio}",
-                                "data-index": "{index}",
-                                onclick: move |_| {
-                                    selected.set(index);
-                                    selected_node.set(None);
-                                    pending_screen_delete.set(None);
-                                },
-                                iframe {
-                                    title: "Screen {index + 1}",
-                                    tabindex: "-1",
-                                    style: "height: {thumbnail_frame_height}rem",
-                                    src: "/designs/{design_id}/render?version={preview_version()}&screen={index + 1}",
-                                }
-                                span { class: "thumbnail-number", {format!("{:02}", index + 1)} }
-                                if screen_count > 1 {
-                                    button {
-                                        class: if pending_screen_delete() == Some(index) { "thumbnail-delete confirm" } else { "thumbnail-delete" },
-                                        title: "Delete this screen",
-                                        onclick: move |event: Event<MouseData>| {
-                                            event.stop_propagation();
-                                            if pending_screen_delete() == Some(index) {
-                                                pending_screen_delete.set(None);
-                                                design
-                                                    .with_mut(|design| {
-                                                        if design.screens.len() > 1 && index < design.screens.len() {
-                                                            design.screens.remove(index);
-                                                        }
-                                                    });
-                                                selected.set(selected().min(screen_count.saturating_sub(2)));
-                                                selected_node.set(None);
-                                                save.call(true);
-                                            } else {
-                                                pending_screen_delete.set(Some(index));
-                                            }
+                            {
+                                let is_deleting = pending_screen_delete() == Some(index);
+                                let class = thumbnail_class(ThumbnailState {
+                                    is_current: index == selected(),
+                                    is_dragging: dragged() == Some(index),
+                                    is_portrait,
+                                    is_deleting,
+                                });
+                                rsx! {
+                                    div {
+                                        key: "{index}",
+                                        class: "{class}",
+                                        title: "{label} · drag to reorder",
+                                        style: "--tile-width: {tile_width}rem",
+                                        "data-index": "{index}",
+                                        onclick: move |_| {
+                                            selected.set(index);
+                                            selected_node.set(None);
+                                            pending_screen_delete.set(None);
                                         },
-                                        if pending_screen_delete() == Some(index) {
-                                            "Delete?"
-                                        } else {
-                                            "×"
+                                        iframe {
+                                            title: "Screen {index + 1}",
+                                            tabindex: "-1",
+                                            src: "/designs/{design_id}/render?version={preview_version()}&screen={index + 1}",
+                                        }
+                                        span { class: "thumbnail-number", {format!("{:02}", index + 1)} }
+                                        if screen_count > 1 {
+                                            button {
+                                                class: if is_deleting { "thumbnail-delete confirm" } else { "thumbnail-delete" },
+                                                title: "Delete this screen",
+                                                onclick: move |event: Event<MouseData>| {
+                                                    event.stop_propagation();
+                                                    if pending_screen_delete() == Some(index) {
+                                                        pending_screen_delete.set(None);
+                                                        design
+                                                            .with_mut(|design| {
+                                                                if design.screens.len() > 1 && index < design.screens.len() {
+                                                                    design.screens.remove(index);
+                                                                }
+                                                            });
+                                                        selected.set(selected().min(screen_count.saturating_sub(2)));
+                                                        selected_node.set(None);
+                                                        save.call(true);
+                                                    } else {
+                                                        pending_screen_delete.set(Some(index));
+                                                    }
+                                                },
+                                                "×"
+                                                if is_deleting {
+                                                    span { class: "delete-text", "delete?" }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                        // An outline thumbnail is a planned screen nobody has
-                        // written. A click asks the app to write every one of
-                        // them from the outline.
-                        for index in screen_count..outline_count {
-                            button {
-                                key: "outline-{index}",
-                                class: "thumbnail outline",
-                                title: "{outline_title(&design(), index)} · click to write the remaining screens",
-                                onclick: {
-                                    let design_id = design_id.clone();
-                                    move |_| {
-                                        let design_id = design_id.clone();
-                                        spawn(async move {
-                                            let session_id = artifact_project(&design_id);
-                                            let sent = api::continue_artifact(&session_id, &design_id).await;
-                                            if let Err(message) = sent {
-                                                messages.write().push(message);
-                                            }
-                                        });
-                                    }
-                                },
-                                span { class: "thumbnail-number", {format!("{:02}", index + 1)} }
-                                span { class: "outline-label", "outline" }
-                            }
+                        if outline_count > screen_count {
+                            span { class: "strip-divider" }
                         }
-                        button {
-                            class: "thumbnail add",
-                            title: "Add a screen",
-                            onclick: move |_| {
-                                design.with_mut(|design| design.screens.push(default_screen()));
-                                selected.set(screen_count);
-                                selected_node.set(None);
-                                save.call(true);
-                            },
-                            "+"
+                        // A planned tile is an outline entry nobody has
+                        // written. A click asks the app to write every one
+                        // of them from the outline.
+                        for index in screen_count..outline_count {
+                            {
+                                let (number, title) = outline_entry(&design().outline, index, "Screen");
+                                let design_id = design_id.clone();
+                                rsx! {
+                                    button {
+                                        key: "outline-{index}",
+                                        class: if is_portrait { "thumbnail outline portrait" } else { "thumbnail outline" },
+                                        style: "--tile-width: {tile_width}rem",
+                                        title: "{outline_title(&design(), index)} · click to write the remaining screens",
+                                        onclick: move |_| {
+                                            let design_id = design_id.clone();
+                                            spawn(async move {
+                                                let session_id = artifact_project(&design_id);
+                                                let sent = api::continue_artifact(&session_id, &design_id).await;
+                                                if let Err(message) = sent {
+                                                    messages.write().push(message);
+                                                }
+                                            });
+                                        },
+                                        span { class: "outline-kicker",
+                                            "{number}"
+                                            span { class: "planned-text", " planned" }
+                                        }
+                                        span { class: "outline-title", "{title}" }
+                                        span { class: "outline-write",
+                                            span { dangerous_inner_html: icons::PLAY }
+                                            span { class: "write-text", "write" }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1345,6 +1358,73 @@ fn outline_title(design: &Design, index: usize) -> String {
     }
 }
 
+/// The height in rem of every tile in the thumbnail strip.
+pub(crate) const STRIP_TILE_HEIGHT_REM: f64 = 5.5;
+
+/// The number tag and the planned title of outline entry `index`:
+/// `("07", "Task detail")`, or `("07", "Screen 7")` when the outline has
+/// no title there. `unit` is `Screen` or `Slide`.
+pub(crate) fn outline_entry(outline: &[String], index: usize, unit: &str) -> (String, String) {
+    let number = format!("{:02}", index + 1);
+    let title = match outline.get(index).map(|title| title.trim()) {
+        Some(title) if !title.is_empty() => title.to_owned(),
+        _ => format!("{unit} {}", index + 1),
+    };
+    (number, title)
+}
+
+/// The counts in the strip heading: `6 written · 2 planned`, or
+/// `6 written` when nothing is planned.
+pub(crate) fn strip_summary(written: usize, planned: usize) -> String {
+    if planned == 0 {
+        return format!("{written} written");
+    }
+    format!("{written} written · {planned} planned")
+}
+
+/// What decides a written tile's class list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ThumbnailState {
+    /// The tile is the screen or slide in the main preview.
+    pub is_current: bool,
+    /// The user drags the tile to a new position.
+    pub is_dragging: bool,
+    /// The canvas is portrait, so the tile is a narrow column.
+    pub is_portrait: bool,
+    /// The delete button waits for its confirm click.
+    pub is_deleting: bool,
+}
+
+/// The class list of a written tile: `thumbnail` plus one word per flag.
+pub(crate) fn thumbnail_class(state: ThumbnailState) -> String {
+    let mut class = String::from("thumbnail");
+    if state.is_current {
+        class.push_str(" current");
+    }
+    if state.is_dragging {
+        class.push_str(" dragging");
+    }
+    if state.is_portrait {
+        class.push_str(" portrait");
+    }
+    if state.is_deleting {
+        class.push_str(" deleting");
+    }
+    class
+}
+
+/// The class of the stage around the main preview. A narrow canvas is
+/// limited by height, and a portrait canvas also gets the bezel.
+pub(crate) fn preview_stage_class(viewport: Viewport) -> &'static str {
+    if is_portrait_canvas(viewport) {
+        return "preview-stage narrow phone";
+    }
+    if is_narrow_canvas(viewport) {
+        return "preview-stage narrow";
+    }
+    "preview-stage"
+}
+
 /// The inner HTML of the first `<h1>`, `<h2>`, or `<h3>` in `html`.
 fn first_heading(html: &str) -> Option<String> {
     let lowered = html.to_ascii_lowercase();
@@ -1391,7 +1471,8 @@ fn strip_tags(html: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The screen the + tile inserts: a heading and a paragraph.
+/// A sample screen for tests: a heading and a paragraph.
+#[cfg(test)]
 fn default_screen() -> Screen {
     Screen {
         name: String::new(),
@@ -1430,9 +1511,10 @@ mod tests {
     use design_model::TransitionEffect;
 
     use crate::editor::{
-        MONO_FONTS, NodeStyles, SelectedNode, TEXT_FONTS, default_screen, effect_uses_motion,
-        field_count, first_heading, font_options, history_label, move_screen, node_reference,
-        optional, outline_title, screen_label, strip_tags,
+        MONO_FONTS, NodeStyles, SelectedNode, TEXT_FONTS, ThumbnailState, default_screen,
+        effect_uses_motion, field_count, first_heading, font_options, history_label, move_screen,
+        node_reference, optional, outline_entry, outline_title, preview_stage_class, screen_label,
+        strip_summary, strip_tags, thumbnail_class,
     };
 
     #[test]
@@ -1461,6 +1543,66 @@ mod tests {
         assert_eq!(outline_title(&planned, 0), "1. Intro");
         assert_eq!(outline_title(&planned, 1), "2. Screen 2");
         assert_eq!(outline_title(&planned, 5), "6. Screen 6");
+    }
+
+    #[test]
+    fn outline_entries_split_the_number_from_the_title() {
+        let outline = vec!["Intro".to_owned(), "  ".to_owned()];
+        assert_eq!(
+            outline_entry(&outline, 0, "Screen"),
+            ("01".to_owned(), "Intro".to_owned())
+        );
+        assert_eq!(
+            outline_entry(&outline, 1, "Screen"),
+            ("02".to_owned(), "Screen 2".to_owned())
+        );
+        assert_eq!(
+            outline_entry(&outline, 6, "Slide"),
+            ("07".to_owned(), "Slide 7".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_strip_summary_counts_written_and_planned() {
+        assert_eq!(strip_summary(6, 2), "6 written · 2 planned");
+        assert_eq!(strip_summary(6, 0), "6 written");
+    }
+
+    #[test]
+    fn a_dragged_tile_is_current_only_when_selected() {
+        let dragging = ThumbnailState {
+            is_dragging: true,
+            ..ThumbnailState::default()
+        };
+        assert_eq!(thumbnail_class(dragging), "thumbnail dragging");
+        let everything = ThumbnailState {
+            is_current: true,
+            is_dragging: true,
+            is_portrait: true,
+            is_deleting: true,
+        };
+        assert_eq!(
+            thumbnail_class(everything),
+            "thumbnail current dragging portrait deleting"
+        );
+    }
+
+    #[test]
+    fn the_preview_stage_knows_narrow_and_portrait_canvases() {
+        let phone = design_model::Viewport {
+            width: 390,
+            height: 844,
+        };
+        let tablet = design_model::Viewport {
+            width: 1024,
+            height: 768,
+        };
+        assert_eq!(preview_stage_class(phone), "preview-stage narrow phone");
+        assert_eq!(preview_stage_class(tablet), "preview-stage narrow");
+        assert_eq!(
+            preview_stage_class(design_model::Viewport::default()),
+            "preview-stage"
+        );
     }
 
     fn design() -> design_model::Design {
