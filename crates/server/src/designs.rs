@@ -289,7 +289,6 @@ impl DesignStore {
         Ok(Some(design))
     }
 
-    /// Deletes one design and its authorship sidecar. Returns false when
     /// Moves a design and its authorship sidecar to a new id. Returns
     /// false when no design with the old id exists.
     pub async fn rename(&self, old_id: &str, new_id: &str) -> anyhow::Result<bool> {
@@ -299,23 +298,74 @@ impl DesignStore {
         let user_paths = self.user_paths(old_id).await?;
         self.save(new_id, &design).await?;
         self.save_user_paths(new_id, &user_paths).await?;
-        self.delete(old_id).await?;
+        // The history moves before the delete, because a delete now
+        // drops the history of the id it deletes.
         if let Some(history) = &self.history
             && let Err(error) = history.rename(old_id, new_id).await
         {
             tracing::warn!(old_id, new_id, %error, "could not move the design history");
         }
+        self.delete(old_id).await?;
         Ok(true)
     }
 
-    /// no file with that id exists.
+    /// Deletes one design, its authorship sidecar, and its history.
+    /// Returns false when no file with that id exists.
     pub async fn delete(&self, id: &str) -> anyhow::Result<bool> {
         self.clear_user_paths(id).await?;
+        // The history goes with the file. A later design with the same
+        // id is a different design and must start with no snapshots.
+        if let Some(history) = &self.history
+            && let Err(error) = history.delete(id).await
+        {
+            tracing::warn!(%id, %error, "could not delete the design history");
+        }
         match tokio::fs::remove_file(self.path_of(id)).await {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Every stored design id, malformed files included. A session
+    /// delete must remove those too, so this reads the directory
+    /// instead of the listing.
+    async fn stored_ids(&self) -> anyhow::Result<Vec<String>> {
+        let mut entries = match tokio::fs::read_dir(&self.directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut ids = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            if let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) {
+                ids.push(id.to_owned());
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    /// Deletes every design of one session: the session's own design and
+    /// its candidates, with their sidecars and history. Returns how many
+    /// files went. Session ids come from the request text, so the same
+    /// request makes the same id: without this sweep a new session would
+    /// show the deleted session's candidates.
+    pub async fn delete_session(&self, session_id: &str) -> anyhow::Result<usize> {
+        let mut deleted = 0;
+        for id in self.stored_ids().await? {
+            if crate::sessions::session_id_of_artifact(&id) != session_id {
+                continue;
+            }
+            if self.delete(&id).await? {
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
     }
 }
 
@@ -484,6 +534,7 @@ async fn restore_history(
 /// Deletes one stored design.
 async fn delete_design(
     State(store): State<DesignStore>,
+    State(sessions): State<crate::sessions::SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path(id): Path<String>,
 ) -> Response {
@@ -492,6 +543,7 @@ async fn delete_design(
     }
     match store.delete(&id).await {
         Ok(true) => {
+            sessions.forget_artifact(&id).await;
             notifier.notify();
             tracing::info!(%id, "design deleted");
             StatusCode::NO_CONTENT.into_response()
@@ -635,6 +687,46 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn a_delete_takes_the_history_with_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_with_history(directory.path());
+        store.save("design", &sample_design()).await.unwrap();
+        store.save("design", &sample_design()).await.unwrap();
+        assert_eq!(store.history("design").await.unwrap().len(), 1);
+        assert!(store.delete("design").await.unwrap());
+        assert!(store.history("design").await.unwrap().is_empty());
+        assert!(!directory.path().join("history/design").exists());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_session_takes_its_candidates_and_their_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_with_history(directory.path());
+        for id in [
+            "talk",
+            "talk-candidate-1",
+            "talk-candidate-2",
+            "talking-shop",
+        ] {
+            store.save(id, &sample_design()).await.unwrap();
+            // The second save gives the design a snapshot to leave behind.
+            store.save(id, &sample_design()).await.unwrap();
+        }
+        assert_eq!(store.delete_session("talk").await.unwrap(), 3);
+        let left: Vec<String> = store
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.id)
+            .collect();
+        assert_eq!(left, ["talking-shop"]);
+        assert!(!directory.path().join("history/talk-candidate-1").exists());
+        // A session id that only starts the same way keeps everything.
+        assert!(directory.path().join("history/talking-shop").exists());
     }
 
     #[tokio::test]
