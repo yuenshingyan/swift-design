@@ -6,7 +6,7 @@
 //! canvas ratio, so a desktop card is wide, a deck card wider, and a
 //! phone card is a small device inside a bezel.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use design_model::{ArtifactKind, DECK_VIEWPORT, Viewport};
 use dioxus::prelude::*;
@@ -194,6 +194,8 @@ pub(crate) struct CardFlags {
     pub is_phone: bool,
     /// The card stands in for an artifact the run has not saved yet.
     pub is_placeholder: bool,
+    /// The user ticked this card for a bulk action.
+    pub is_selected: bool,
 }
 
 /// The class list of a card: `canvas-card` plus one word per flag.
@@ -208,6 +210,9 @@ pub(crate) fn card_class(flags: CardFlags) -> String {
     if flags.is_placeholder {
         class.push_str(" placeholder");
     }
+    if flags.is_selected {
+        class.push_str(" selected");
+    }
     class
 }
 
@@ -221,9 +226,14 @@ pub(crate) fn CandidateCanvas(
     chosen: Option<String>,
     on_open: EventHandler<(ArtifactKind, String)>,
     on_continue: EventHandler<String>,
+    on_error: EventHandler<String>,
 ) -> Element {
     let mut shown = use_signal(HashMap::<String, usize>::new);
     let mut open_tab = use_signal(usize::default);
+    // The ticked cards, and whether the next Delete is the confirming
+    // one. A delete cannot be undone, so it takes two clicks.
+    let mut selected = use_signal(HashSet::<String>::new);
+    let mut is_confirming_delete = use_signal(|| false);
     // Placeholder ids the run reports that are not on disk yet.
     let placeholders: Vec<String> = run_designs
         .keys()
@@ -241,7 +251,67 @@ pub(crate) fn CandidateCanvas(
         .filter(|card| tabs.len() <= 1 || card.viewport == tab_viewport)
         .cloned()
         .collect();
+    let kinds: HashMap<String, ArtifactKind> = cards
+        .iter()
+        .map(|card| (card.id.clone(), card.kind))
+        .collect();
+    let selected_count = selected().len();
+    let delete_selected = use_callback(move |_: ()| {
+        let ids: Vec<String> = selected().iter().cloned().collect();
+        let kinds = kinds.clone();
+        spawn(async move {
+            for id in ids {
+                let deleted = match kinds.get(&id) {
+                    Some(ArtifactKind::Deck) => api::delete_deck(&id).await,
+                    _ => api::delete_design(&id).await,
+                };
+                if let Err(message) = deleted {
+                    on_error.call(message);
+                }
+            }
+            selected.write().clear();
+            is_confirming_delete.set(false);
+        });
+    });
     rsx! {
+        // The bar is always here. Showing it only with a selection moved
+        // the whole canvas down on the first tick.
+        div { class: "selection-bar",
+            span { class: "selection-count",
+                if selected_count > 0 {
+                    "{selected_count} selected"
+                } else {
+                    "Tick a card to select it"
+                }
+            }
+            button {
+                class: if is_confirming_delete() { "selection-delete confirm" } else { "selection-delete" },
+                disabled: selected_count == 0,
+                onclick: move |_| {
+                    if is_confirming_delete() {
+                        delete_selected.call(());
+                    } else {
+                        is_confirming_delete.set(true);
+                    }
+                },
+                if is_confirming_delete() {
+                    "Delete {selected_count}? This cannot be undone"
+                } else if selected_count > 0 {
+                    "Delete {selected_count}"
+                } else {
+                    "Delete"
+                }
+            }
+            button {
+                class: "selection-clear",
+                disabled: selected_count == 0,
+                onclick: move |_| {
+                    selected.write().clear();
+                    is_confirming_delete.set(false);
+                },
+                "Clear"
+            }
+        }
         if !tabs.is_empty() {
             div { class: "canvas-tabs", role: "tablist",
                 for (index, viewport) in tabs.iter().enumerate() {
@@ -264,6 +334,7 @@ pub(crate) fn CandidateCanvas(
                     let current = shown.read().get(&id).copied().unwrap_or(1);
                     let progress = run_designs.get(&id).copied();
                     let is_chosen = chosen.as_deref() == Some(id.as_str());
+                    let is_selected = selected().contains(&id);
                     rsx! {
                         CandidateCard {
                             key: "{id}",
@@ -271,9 +342,17 @@ pub(crate) fn CandidateCanvas(
                             current,
                             progress,
                             is_chosen,
+                            is_selected,
                             revision,
                             on_open,
                             on_continue,
+                            on_select: move |id: String| {
+                                let mut picks = selected.write();
+                                if !picks.remove(&id) {
+                                    picks.insert(id);
+                                }
+                                is_confirming_delete.set(false);
+                            },
                             on_page: move |(id, next): (String, usize)| {
                                 shown.write().insert(id, next);
                             },
@@ -310,9 +389,11 @@ fn CandidateCard(
     current: usize,
     progress: Option<u8>,
     is_chosen: bool,
+    is_selected: bool,
     revision: u64,
     on_open: EventHandler<(ArtifactKind, String)>,
     on_continue: EventHandler<String>,
+    on_select: EventHandler<String>,
     on_page: EventHandler<(String, usize)>,
 ) -> Element {
     let id = card.id.clone();
@@ -325,6 +406,7 @@ fn CandidateCard(
         is_chosen,
         is_phone,
         is_placeholder: false,
+        is_selected,
     });
     let ratio = card.ratio.clone();
     let preview = card.preview_url(revision, current);
@@ -382,6 +464,22 @@ fn CandidateCard(
                         style: "aspect-ratio: {ratio}",
                         title: "{id}",
                         tabindex: "-1",
+                    }
+                }
+                button {
+                    class: if is_selected { "card-select ticked" } else { "card-select" },
+                    title: "Select this candidate",
+                    "aria-pressed": "{is_selected}",
+                    tabindex: "-1",
+                    onclick: {
+                        let id = id.clone();
+                        move |event: MouseEvent| {
+                            event.stop_propagation();
+                            on_select.call(id.clone());
+                        }
+                    },
+                    if is_selected {
+                        span { dangerous_inner_html: icons::CHECK }
                     }
                 }
                 if has_pages {
@@ -459,6 +557,7 @@ fn PlaceholderCard(id: String, viewport: Viewport, percent: Option<u8>) -> Eleme
         is_chosen: false,
         is_phone,
         is_placeholder: true,
+        is_selected: false,
     });
     let frame_width = card_frame_width(viewport);
     rsx! {
@@ -616,8 +715,12 @@ mod tests {
             is_chosen: true,
             is_phone: true,
             is_placeholder: true,
+            is_selected: true,
         };
-        assert_eq!(card_class(flags), "canvas-card chosen phone placeholder");
+        assert_eq!(
+            card_class(flags),
+            "canvas-card chosen phone placeholder selected"
+        );
     }
 
     #[test]
