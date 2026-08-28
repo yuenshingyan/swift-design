@@ -209,6 +209,8 @@ pub(crate) fn QuestionSetCard(
     app_questions: Option<Element>,
 ) -> Element {
     let questions: Vec<BriefQuestion> = set.questions.iter().take(3).cloned().collect();
+    // The grid consumes the list, so the hint reads this instead.
+    let has_questions = !questions.is_empty();
     let ready = answers_are_complete(&set, &drafts.read());
     let submit_set = set.clone();
     let submit = move |_| {
@@ -263,8 +265,13 @@ pub(crate) fn QuestionSetCard(
                         "Skip the questions and generate"
                     }
                 }
-                span { class: "question-hint",
-                    "Required questions need an answer or Use your best judgment."
+                // With no question of the agent's own, the card holds
+                // only the app's cards, and the hint has nothing to
+                // point at.
+                if has_questions {
+                    span { class: "question-hint",
+                        "Required questions need an answer or Use your best judgment."
+                    }
                 }
             }
         }
