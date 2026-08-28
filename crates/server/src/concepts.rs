@@ -5,7 +5,7 @@
 //! concept and told what the other concepts are, so candidates differ
 //! by design rather than by chance.
 
-use design_model::DesignBrief;
+use crate::request::{SessionRequest, request_input};
 use serde::{Deserialize, Serialize};
 
 /// One design direction for a candidate design.
@@ -60,7 +60,7 @@ fn shared_note(variety: &str) -> &'static str {
 /// The system prompt for the concept call.
 pub fn concept_prompt(count: usize) -> String {
     format!(
-        "You plan {count} distinct candidate designs for one brief.\n\
+        "You plan {count} distinct candidate designs for one request.\n\
          {shared}\n\
          Reply with only this JSON:\n\
          {{\"concepts\":[{{\"name\":\"...\",\"angle\":\"...\",\"outline\":[\"screen title\"],\
@@ -73,25 +73,9 @@ pub fn concept_prompt(count: usize) -> String {
     )
 }
 
-/// The user input for the concept call: the approved brief.
-pub fn concept_input(brief: &DesignBrief) -> String {
-    let mut input = format!("Request:\n{}\n", brief.request);
-    input.push_str(&format!("Kind: {}\n", brief.artifact_kind.label()));
-    if !brief.target_artifact.is_empty() {
-        input.push_str(&format!("Artifact: {}\n", brief.target_artifact));
-    }
-    if !brief.audience.is_empty() {
-        input.push_str(&format!("Audience: {}\n", brief.audience));
-    }
-    if !brief.visual_direction.is_empty() {
-        input.push_str(&format!("Visual direction: {}\n", brief.visual_direction));
-    }
-    if !brief.information_architecture.is_empty() {
-        input.push_str(&format!(
-            "Information architecture: {}\n",
-            brief.information_architecture.join("; ")
-        ));
-    }
+/// The user input for the concept call: the request and the answers.
+pub fn concept_input(request: &SessionRequest) -> String {
+    let mut input = request_input(request);
     input.push_str("Reply with only the JSON.");
     input
 }
@@ -152,13 +136,19 @@ mod tests {
     fn prompts_state_the_count_and_the_variety_contract() {
         let prompt = concept_prompt(3);
         assert!(prompt.contains("plan 3 distinct"));
-        let brief = DesignBrief {
+        let request = SessionRequest {
             request: "A finance landing page.".to_owned(),
-            audience: "retail investors".to_owned(),
-            ..DesignBrief::default()
+            kind: design_model::ArtifactKind::Demo,
+            answers: vec![design_model::AnsweredQuestion {
+                question: "Who is it for?".to_owned(),
+                answer: "retail investors".to_owned(),
+                is_assumed: false,
+            }],
+            options: crate::sessions::RunOptions::default(),
         };
-        assert!(concept_input(&brief).contains("Audience: retail investors"));
-        assert!(concept_input(&brief).contains("A finance landing page."));
+        assert!(concept_input(&request).contains("Who is it for? -> retail investors"));
+        assert!(concept_input(&request).contains("A finance landing page."));
+        assert!(concept_input(&request).ends_with("Reply with only the JSON."));
     }
 
     #[test]
