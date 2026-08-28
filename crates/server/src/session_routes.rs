@@ -43,6 +43,10 @@ pub fn routes() -> Router<crate::AppState> {
         .route("/sessions/{id}/answers", post(post_answers))
         .route("/sessions/{id}/brief", get(get_brief).put(put_brief))
         .route("/sessions/{id}/brief/revisions", get(get_revisions))
+        .route(
+            "/sessions/{id}/brief/revisions/{revision}/restore",
+            post(restore_revision),
+        )
         .route("/sessions/{id}/approve", post(approve))
         .route(
             "/sessions/{id}/generate-with-assumptions",
@@ -551,6 +555,18 @@ struct BriefRequest {
     summary: Option<String>,
 }
 
+/// True when the user may write a brief revision in `state`: while
+/// the brief is being settled, and while a result is under review.
+fn is_user_edit_allowed(state: WorkflowState) -> bool {
+    matches!(
+        state,
+        WorkflowState::Clarifying
+            | WorkflowState::BriefReady
+            | WorkflowState::AwaitingApproval
+            | WorkflowState::Reviewing
+    )
+}
+
 /// Saves a new brief revision. A user edit moves the session to
 /// awaiting approval; an agent draft presents the brief.
 async fn put_brief(
@@ -583,13 +599,7 @@ async fn put_brief(
             WorkflowState::Intake | WorkflowState::Clarifying
         )
     } else {
-        matches!(
-            session.state,
-            WorkflowState::Clarifying
-                | WorkflowState::BriefReady
-                | WorkflowState::AwaitingApproval
-                | WorkflowState::Reviewing
-        )
+        is_user_edit_allowed(session.state)
     };
     if !allowed {
         return conflict(&format!(
@@ -673,6 +683,56 @@ async fn get_revisions(State(sessions): State<SessionStore>, Path(id): Path<Stri
         Ok(revisions) => Json(revisions).into_response(),
         Err(error) => session_error_response(&error),
     }
+}
+
+/// Writes an old brief revision back as a new user revision. The
+/// history keeps every step, and the session returns to awaiting
+/// approval like any user edit.
+async fn restore_revision(
+    State(sessions): State<SessionStore>,
+    State(notifier): State<ChangeNotifier>,
+    Path((id, revision)): Path<(String, u32)>,
+) -> Response {
+    let session = match require_session(&sessions, &id).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if !is_user_edit_allowed(session.state) {
+        return conflict(&format!(
+            "a brief restore is not allowed in state `{}`",
+            session.state
+        ));
+    }
+    if session.latest_brief_revision == Some(revision) {
+        return conflict(&format!("revision {revision} is already the latest"));
+    }
+    let brief = match sessions.read_brief(&id, revision).await {
+        Ok(Some(brief)) => brief,
+        Ok(None) => {
+            return api_error::error_response(
+                StatusCode::NOT_FOUND,
+                &format!("no brief revision {revision} for this session"),
+                Vec::new(),
+            );
+        }
+        Err(error) => return session_error_response(&error),
+    };
+    if session.state == WorkflowState::Reviewing && brief.artifact_kind != session.artifact_kind {
+        return conflict("the artifact kind cannot change after generation");
+    }
+    let summary = format!("Restored revision {revision}");
+    let written = match sessions
+        .write_brief_revision(&id, brief, RevisionSource::UserEdit, &summary)
+        .await
+    {
+        Ok(written) => written,
+        Err(error) => return session_error_response(&error),
+    };
+    if let Err(error) = sessions.apply(&id, WorkflowEvent::BriefEdited).await {
+        return session_error_response(&error);
+    }
+    notifier.notify();
+    Json(serde_json::json!({ "revision": written })).into_response()
 }
 
 /// Approves the latest brief and starts generation.
@@ -1137,6 +1197,77 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn restoring_a_revision_writes_it_back_as_a_new_user_revision() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "talk").await;
+        send(
+            application.clone(),
+            "PUT",
+            "/sessions/talk/brief",
+            Some(r#"{"source":"agent","brief":{"audience":"devs"}}"#),
+        )
+        .await;
+        send(
+            application.clone(),
+            "PUT",
+            "/sessions/talk/brief",
+            Some(r#"{"brief":{"audience":"designers"}}"#),
+        )
+        .await;
+        let (status, body) = send(
+            application.clone(),
+            "POST",
+            "/sessions/talk/brief/revisions/1/restore",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["revision"],
+            3
+        );
+        let session = view(&application, "talk").await;
+        assert_eq!(session["session"]["state"], "awaiting_approval");
+        assert_eq!(session["brief"]["audience"], "devs");
+        assert_eq!(session["brief"]["revision"], 3);
+        let history = &session["brief"]["revision_history"];
+        assert_eq!(history.as_array().unwrap().len(), 3);
+        assert_eq!(history[2]["source"], "user_edit");
+        assert_eq!(history[2]["summary"], "Restored revision 1");
+    }
+
+    #[tokio::test]
+    async fn restoring_the_latest_or_a_missing_revision_is_refused() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "talk").await;
+        send(
+            application.clone(),
+            "PUT",
+            "/sessions/talk/brief",
+            Some(r#"{"source":"agent","brief":{"audience":"devs"}}"#),
+        )
+        .await;
+        let (status, _) = send(
+            application.clone(),
+            "POST",
+            "/sessions/talk/brief/revisions/1/restore",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, _) = send(
+            application.clone(),
+            "POST",
+            "/sessions/talk/brief/revisions/7/restore",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
