@@ -20,7 +20,9 @@ The questions are short choices with `Use your best judgment` on each, and you c
 
 ## Two artifact kinds
 
-Pick the kind on the home page. It is fixed for the session once generation starts.
+Describe what you need and press **Create**. The app then asks which kind to
+build, in a modal over the home page. The kind is fixed for the session; start a
+new session to build the other kind.
 
 | Kind | What it is | JSON | Canvas | Saved under |
 |---|---|---|---|---|
@@ -34,7 +36,8 @@ Both kinds share the theme, the HTML and CSS rules, the workflow, the templates,
 - Ask only choices that change the result, with 2 to 4 short options each.
 - Ask at most three questions per turn, and no more once five are answered.
 - Never require an answer: every question has `Use your best judgment`, and the whole set can be skipped.
-- The app asks its own closed questions itself: the canvas and the number of variations for a demo; the scenario, the length, the candidates, and the variety for a deck.
+- The app asks its own closed questions itself, from fixed lists: the audience, the tone, and light or dark for both kinds; the canvas, how much to build, the product kind, the screen state, and the number of variations for a demo; the scenario, the length, the slide density, how much it leans on data, the candidates, and the variety for a deck. Their wording and options are the same in every session.
+- The agent asks 0 to 3 more, only what the request raises and the fixed list does not cover, such as which features a demo must show. Asking nothing is a normal turn.
 - After the candidates exist, the chat edits: a message with a candidate open changes that candidate, a message without one writes new candidates.
 
 ## Workflow
@@ -45,7 +48,13 @@ Both kinds share the theme, the HTML and CSS rules, the workflow, the templates,
 | `clarifying` | The agent asked questions and waits for answers |
 | `generating` | The agent writes or edits candidates |
 | `reviewing` | Candidates exist; the chat asks for changes |
+| `stopped` | You stopped a run, or it was cut short; resume keeps the data |
 | `error` | A run failed; retry keeps the data |
+
+Stopping is not a failure. A run you stop, or one cut short by the server
+going away, leaves the session `stopped` with its data intact and no error
+message; **Resume** returns it to the state the run halted in. Only a real
+failure reaches `error`. Both leave through the same `Recovered` event.
 
 Every turn is one run of the planner, copied from Swift Deck: it reads the request, the answers, and the conversation, and replies with questions, a decision to write, a decision to edit the open candidate, or plain text.
 
@@ -59,7 +68,9 @@ In `reviewing`, the chat is the edit input: type what should change and press **
 
 The harness may use a local CLI agent or a remote API, but workflow state, answers, artifacts, and user decisions remain under application control.
 
-One run does one turn: plan, then ask, write, edit, or reply. The built-in engine runs the planner, the concept planner, the candidate writers, the fix-round loop, and the polish pass.
+One run does one turn: plan, then ask, write, edit, or reply. The built-in engine runs the planner, the concept planner, the candidate writers, the fix-round loop, and the polish loop.
+
+Two loops tighten a candidate. The **fix-round loop** feeds validation errors back until the JSON is valid. The **polish loop** renders the candidate in Chrome, measures it (contrast, line length, overflow, overlap), screenshots every screen, and sends the findings and the images back for a patch. It repeats until the page measures clean, or a round fixes nothing, or the effort's ceiling runs out: 1 round on `low`, 3 on `medium`, 5 on `high`. The version that measured best is the one kept, so a round that makes the page worse is discarded. The run log says which of the three ended it.
 
 Designs and decks are two pipelines behind one workflow: separate types, stores, routes, renderers, prompts, and editors, with the shared helpers (history, provenance, CSS scoping, fonts, Chrome, the fix-round loop, the model client) used by both. See `CLAUDE.md` for the rules.
 
@@ -73,9 +84,9 @@ cd crates/ui && dx build --release && cd ../..
 cargo run -p server
 ```
 
-Open `http://127.0.0.1:3000`, pick a model in the studio settings, choose
-**Software demo** or **Deck**, and describe what you need. The agent runs on
-your own model account.
+Open `http://127.0.0.1:3000`, pick a model in the studio settings, and describe
+what you need. Pressing **Create** asks whether to build a software demo or a
+deck. The agent runs on your own model account.
 
 For a deck, the editor adds **Present** (the presenter view with notes, a
 timer, and an audience window that follows it) and **PPTX** next to the
