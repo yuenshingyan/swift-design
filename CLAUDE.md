@@ -11,6 +11,7 @@ The workflow is the same for both kinds, copied from Swift Deck:
 
 - The user picks the kind and sends a request. A run starts at once.
 - Every run is one planner turn (`planner.rs`): the model reads the request, the answers so far, and the conversation, and replies with questions, a decision to write, a decision to edit the open candidate, or plain text. Questions are choices with 2 to 4 short options, never required, at most three per turn, none after five answers. The user can skip them all.
+- The first turn of a session always ends in the question card. The app asks its own fixed list before anything is written, whatever the planner decided; `app_question_set` carries the card when the planner adds no question of its own. The planner only adds to that card.
 - The app asks its own closed questions itself, on the same card, from fixed lists in `design-model` (`run_questions.rs`, `deck_questions.rs`): the audience, the tone, and light or dark for both kinds; the canvas, the scope, the product kind, the screen state, and the variations for a demo; the scenario, the length, the slide density, the evidence style, the candidates, and the variety for a deck. These recur in every session, so hardcoding them keeps the wording and the options identical between runs. The agent asks only what the request itself raises.
 - Agents build artifacts by writing JSON files that conform to the served schemas. There is no brief: `request.rs` renders the request, the app's choices, and the answers as the prompt input.
 - After candidates exist, a chat message is a turn: with a candidate open or chosen the planner edits it; otherwise it writes new candidates.
@@ -46,6 +47,7 @@ Designs and decks are separate pipelines that share one workflow.
 - Separate per kind: the model types (`design.rs`, `screen.rs` and `deck.rs`, `slide.rs`), the stores (`designs.rs`, `decks.rs`), the routes (`/designs/*`, `/decks/*`), the render entry points (`render.rs`, `deck_render.rs`), the patches (`patch.rs`, `deck_patch.rs`), the polish prompts (`polish.rs`, `deck_polish.rs`), the generation prompts (`generation.rs`, `deck_generation.rs`), and the editors (`editor.rs`, `deck_editor.rs`). Deck-only modules: `presenter.rs` and `pptx.rs`.
 - Shared only where the code is identical modulo names: `history.rs`, `provenance.rs`, `events.rs`, `api_error.rs`, `files.rs`, `screen_css.rs`, the Chrome runner in `screenshots.rs`, the font and upload inlining in `export.rs`, the page scripts in `render.rs`, the fix-round loop, the polish loop, and attachments in `generation.rs`, `model_client.rs`, `sessions.rs`, `planner.rs`, `request.rs`.
 - A session has one `artifact_kind` (`demo` or `deck`), set at creation. The engine, the chooser, and the studio read that one value. Do not infer the kind from ids or file contents.
+- `render::FIT_SCRIPT` runs on every rendered page, print included. A root whose content needs more than the canvas grows to the largest box that fits and scales back through `--swift-design-fit`, so nothing is ever cut off. The audit reports the shrink as `overfull`; the PPTX measurement divides it out.
 - A deck page uses the same DOM vocabulary as a design page (`main.design`, `data-swift-design-*`), so the layout, navigation, editing, and audit scripts serve both. Only the audience-follow script and the PPTX measurement script are deck-only.
 - `PATCH_FORMAT` and the polish wording are duplicated on purpose: the model sees one vocabulary per kind (screens or slides).
 
@@ -54,11 +56,18 @@ Designs and decks are separate pipelines that share one workflow.
 - A session has one persisted `WorkflowState`: `intake`, `clarifying`, `generating`, `reviewing`, or `error`.
 - Every state change goes through `design_model::workflow::transition` and `SessionStore::apply`. Do not infer state from chat text, files, or UI flags.
 - Events: `QuestionsAsked` (to clarifying), `GenerationStarted` (to generating, from intake, clarifying, or reviewing), `GenerationSucceeded` (to reviewing), `ContinueRequested`, `RunFailed`, `Recovered`.
+- A run from `intake` always ends in `clarifying`: it opens the setup card and writes nothing.
+- A continue request is allowed in `reviewing` and in `generating`. Pressing Finish on a second candidate joins the running turn: `continue_requests` returns every trailing continue request whose artifact is still a preview, and `run_late_continues` runs the ones that arrive mid-run.
 - A run may start in every state but `error`. A message, an answer set, and `POST /sessions/{id}/generate` each start one. A session already in `generating` at run start writes candidates without a planner turn (the user skipped the questions).
 - Design and deck writes answer 409 unless the session is `generating` (or `reviewing`, for user saves from the editor). An external agent posts `/sessions/{id}/generate` before it writes.
 - The app's answers live on `Session.options`, not in a question set: the artifact kind, the variation count (1 to `CANDIDATE_LIMIT`), the axes in `SHARED_AXES`, `DEMO_AXES`, and `DECK_AXES`, the canvases for a demo (1 to `PLATFORM_LIMIT`), and for a deck the scenario (`DECK_SCENARIOS`), the slide count, and the variety. `RunOptions::axes` lists the picked axes for a kind, and `request_input` renders them; adding an axis means one entry in each table, not a new branch. `option_problem` refuses any value outside the fixed list. The prompts tell the agent never to ask about them.
 - A demo run writes one design per canvas per variation: `candidate_plans` in `generation.rs` names them, and the studio groups the cards under one tab per canvas.
 - Every question set is relaxed on write (`relax_question_set`): no question required, skip always allowed. An external agent's own flags are not trusted.
+
+- A session id is a random version 4 UUID (`new_session_id`), not a name. The name is `title`, and the times are `created_at` and `updated_at`; the listing carries all three. An id built from the request text made the same request produce the same id, so two sessions with the same wording collided. A caller may still pass its own `id` to `POST /sessions`.
+- Deleting a session deletes everything it owns: its designs and decks with their candidates, sidecars, and history (`DesignStore::delete_session`, `DeckStore::delete_session`), and its uploads. A session id comes from the request text, so the same request makes the same id; without the sweep the next session would open on the deleted one's candidates. Deleting one artifact deletes its history too.
+
+- An upload belongs to one scope: the session id, or `_draft` for a file attached before the session exists. `uploads/owners.json` records it, the path stays flat (`/uploads/{name}`) because stored designs and the export inliner name files that way, and `UploadStore::adopt` hands the draft files to a new session. `load_attachments` reads one session's files only.
 
 ## Studio
 
