@@ -228,6 +228,8 @@ button.control-cell:focus-visible { outline-offset: -2px; }
   font-family: var(--mono); font-size: 0.65rem; }
 .project-title { flex: 1; font-size: 0.9375rem; font-weight: 600; letter-spacing: -0.01em; }
 .project-count { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
+.project-time { font-family: var(--mono); font-size: 0.68rem; color: var(--faint);
+  white-space: nowrap; }
 .project-chevron { display: flex; color: var(--ink); opacity: .4; transition: opacity 120ms ease; }
 .project-row:hover .project-chevron { opacity: 1; }
 
@@ -502,10 +504,44 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
   padding: 0.5rem; border-radius: 1.375rem; background: #15181C; overflow: hidden;
   box-shadow: 0 0 0 1px rgba(21,24,28,.15); }
 .bezel iframe, .bezel .card-blank { width: 100%; height: 100%; border-radius: 0.875rem; }
-.card-pills { position: absolute; top: 0.5rem; left: 0.5rem; z-index: 2; display: flex;
+/* The tick box owns the top-left corner, so the pills start to its right. */
+.card-pills { position: absolute; top: 0.5rem; left: 2.375rem; z-index: 2; display: flex;
   align-items: center; gap: 0.375rem; }
 /* Below the count, which owns the top-right corner of a narrow card. */
-.canvas-card.phone .card-pills { top: 2.25rem; flex-direction: column; align-items: flex-start; }
+.canvas-card.phone .card-pills { top: 2.25rem; left: 0.5rem; flex-direction: column;
+  align-items: flex-start; }
+/* The selection box: empty until ticked, and always visible so the card
+   says whether it is selected without a hover. */
+.card-select { position: absolute; top: 0.5rem; left: 0.5rem; z-index: 3; display: flex;
+  align-items: center; justify-content: center; width: 1.375rem; height: 1.375rem; padding: 0;
+  border: 1px solid var(--line); border-radius: var(--r-badge); background: rgba(255,255,255,.96);
+  color: var(--teal); box-shadow: var(--sh-control); }
+.card-select:hover:not(:disabled) { border-color: var(--teal); background: rgba(255,255,255,.96); }
+.card-select.ticked, .card-select.ticked:hover:not(:disabled) { border-color: var(--teal);
+  background: var(--teal); color: #FFFFFF; }
+.card-select span { display: flex; }
+.canvas-card.selected, .canvas-card.selected:hover { border: 1.5px solid var(--teal); }
+/* The bulk actions for the ticked cards. */
+.selection-bar { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;
+  padding: 0.375rem 0.5rem; border: 1px solid var(--hairline); border-radius: var(--r-panel);
+  background: var(--sunken); }
+/* One line always: a wrapped label made the bar taller and moved the
+   canvas on the first tick. */
+.selection-count { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-2);
+  margin-right: auto; white-space: nowrap; }
+/* An empty selection keeps the bar's shape: the buttons stay in place,
+   greyed, so nothing on the canvas moves on the first tick. */
+.selection-bar button:disabled { opacity: 0.45; cursor: default; }
+.selection-delete:disabled, .selection-delete:disabled:hover { background: var(--raised);
+  border-color: var(--line); color: var(--muted); }
+.selection-delete { padding: 0.3rem 0.75rem; border: 1px solid var(--danger);
+  border-radius: var(--r-button); background: var(--raised); color: var(--danger);
+  font-family: var(--mono); font-size: 0.72rem; }
+.selection-delete:hover:not(:disabled), .selection-delete.confirm { background: var(--danger);
+  border-color: var(--danger); color: #FFFFFF; }
+.selection-clear { padding: 0.3rem 0.75rem; border: 1px solid var(--hairline);
+  border-radius: var(--r-button); background: var(--raised); color: var(--ink-2);
+  font-family: var(--mono); font-size: 0.72rem; }
 .card-pill { display: inline-flex;
   align-items: center; gap: 0.375rem; padding: 0.2rem 0.6rem; border-radius: 999px;
   border: 1px solid var(--hairline); background: rgba(255,255,255,.96); color: var(--teal);
@@ -777,24 +813,26 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
 .thumbnail.portrait .thumbnail-delete.confirm .delete-text { display: none; }
 .strip-divider { flex: none; align-self: stretch; width: 1px; margin: 0 0.25rem;
   background: var(--line); }
-/* A planned tile is the size of a written tile. On a phone tile only the
-   number and the play glyph fit; the tooltip carries the title. */
-.thumbnail.outline { cursor: pointer; display: flex; flex-direction: column; gap: 0.1rem;
+/* A planned tile is the size of a written tile and reads as a label, not
+   a control. On a phone tile only the number fits; the tooltip carries
+   the title. */
+.thumbnail.outline { cursor: default; display: flex; flex-direction: column; gap: 0.1rem;
   justify-content: space-between; padding: 0.3rem 0.4rem; text-align: left; font: inherit;
   box-shadow: none; border: 1px dashed var(--teal-line); border-radius: var(--r-control);
   background: var(--teal-tint); }
-.thumbnail.outline:hover:not(:disabled) { border-color: var(--teal); background: var(--teal-tint); }
+.strip-write { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.2rem 0.6rem;
+  border: 1px solid var(--teal-line); border-radius: var(--r-badge); background: var(--raised);
+  color: var(--teal); font-family: var(--mono); font-size: 0.65rem; letter-spacing: 0;
+  text-transform: none; cursor: pointer; }
+.strip-write:hover { background: var(--teal-tint); border-color: var(--teal); }
+.strip-write span { display: flex; }
 .outline-kicker { font-family: var(--mono); font-size: 0.6rem; color: var(--teal);
   white-space: nowrap; }
 .outline-title { font-size: 0.7rem; font-weight: 500; line-height: 1.25; color: var(--ink);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.outline-write { display: inline-flex; align-items: center; justify-content: center; gap: 0.3rem;
-  padding: 0.1rem 0.4rem; border: 1px solid var(--teal-line); border-radius: var(--r-badge);
-  background: var(--raised); color: var(--teal); font-family: var(--mono); font-size: 0.62rem; }
-.outline-write span { display: flex; }
 .thumbnail.outline.portrait { padding: 0.25rem 0.15rem; align-items: center; }
-.thumbnail.outline.portrait .planned-text, .thumbnail.outline.portrait .outline-title,
-.thumbnail.outline.portrait .write-text { display: none; }
+.thumbnail.outline.portrait .planned-text,
+.thumbnail.outline.portrait .outline-title { display: none; }
 .notes-box { display: flex; flex-direction: column; gap: 0.375rem; }
 .notes-heading { font-family: var(--mono); font-size: 0.7rem;
   letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
