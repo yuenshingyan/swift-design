@@ -60,6 +60,16 @@ Designs and decks are separate pipelines that share one workflow.
 - A demo run writes one design per canvas per variation: `candidate_plans` in `generation.rs` names them, and the studio groups the cards under one tab per canvas.
 - The brief keeps the answered questions in `answered_questions`, as question text plus answer text. Never write an answer into `confirmed_facts` as `question: answer`: a fact is one short sentence.
 
+## Studio
+
+- The server serves the built bundle from `target/dx/ui/release/web/public`. After any change under `crates/ui`, run `cd crates/ui && dx build --release`, then reload. A server change needs `cargo build -p server` and a restart.
+- All studio CSS lives in `STYLESHEET` in `crates/ui/src/main.rs`. Verify a visual change with a screenshot before reporting it: a static mock built from the extracted stylesheet, or the live page on a spare port (`SWIFT_DESIGN_ADDRESS=127.0.0.1:3001`). Port 3000 belongs to the user's own server.
+- Candidate cards fix the height and let the width follow the canvas ratio: `frame_width_rem` in `canvas.rs` emits `--frame-width`, and the strip tiles do the same with `--tile-width`. A portrait canvas (`is_portrait_canvas`, the phone) gets a bezel; a narrow canvas (`is_narrow_canvas`, the tablet too) only changes the main preview height. Do not mix the two.
+- Cards page with the edge arrows and the arrow keys only. A swipe was tried and removed: a trackpad swipe reads as history navigation in Safari unless a real scroll container consumes it, and the sliding preview showed blank panes. Do not bring it back.
+- The brief panel shows no workflow state. The state and the run error live in the chat column (the status card and the error card), so a failed run does not read as a broken brief.
+- A brief restore (`POST /sessions/{id}/brief/revisions/{n}/restore`) writes the old revision back as a new `user_edit` revision. History is append-only: never rewrite or drop a revision.
+- `dx fmt` duplicates an `.await` that is split across lines. Bind every await on one line: `let sent = api::continue_artifact(&session_id, &id).await;`.
+
 ## Naming
 
 - Rust defaults: `snake_case` functions, variables, modules, and files. `PascalCase` types. `SCREAMING_SNAKE_CASE` constants.
