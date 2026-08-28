@@ -2,25 +2,26 @@
 
 ## What Swift Design Is
 
-Swift Design is a brief-first harness that guides LLM agents to build HTML artifacts of two kinds:
+Swift Design is a harness that guides LLM agents to build HTML artifacts of two kinds:
 
 - **Software demos** ("designs"): landing pages, app screens, and similar layouts on a device viewport. A design is a theme, a viewport, and `screens` with HTML and CSS.
 - **Decks**: slide presentations on a fixed 1920 by 1080 px canvas. A deck is a theme and `slides` with HTML and CSS. Decks keep the Swift Deck JSON shape and routes, with a presenter view and HTML, PDF, and PPTX exports.
 
-The workflow is the same for both kinds:
+The workflow is the same for both kinds, copied from Swift Deck:
 
-- The user picks the kind and sends a request. The agent asks at most three material questions per turn, then writes a design brief.
-- The user approves the brief, edits it, or generates with assumptions. Only then does the agent write a design or a deck.
-- Agents build artifacts by writing JSON files that conform to the served schemas.
-- The user critiques the result in the browser. Each critique creates a brief revision and a focused edit run.
-- **Generation runs on the user's own accounts, never on Swift Design's.** Two paths: an external agent CLI the user already runs (Claude Code, pi), or the built-in provider loop (`model_client.rs`, `briefing.rs`, `generation.rs`, `deck_generation.rs`) that calls any LLM provider with the user's own keys. Swift Design supplies schemas, prompts, validation, the state machine, and the editors.
+- The user picks the kind and sends a request. A run starts at once.
+- Every run is one planner turn (`planner.rs`): the model reads the request, the answers so far, and the conversation, and replies with questions, a decision to write, a decision to edit the open candidate, or plain text. Questions are choices with 2 to 4 short options, never required, at most three per turn, none after five answers. The user can skip them all.
+- The app asks its own closed questions itself, on the same card: the canvas and the variations for a demo; the scenario, the length, the candidates, and the variety for a deck.
+- Agents build artifacts by writing JSON files that conform to the served schemas. There is no brief: `request.rs` renders the request, the app's choices, and the answers as the prompt input.
+- After candidates exist, a chat message is a turn: with a candidate open or chosen the planner edits it; otherwise it writes new candidates.
+- **Generation runs on the user's own accounts, never on Swift Design's.** Two paths: an external agent CLI the user already runs (Claude Code, pi), or the built-in provider loop (`model_client.rs`, `generation.rs`, `deck_generation.rs`) that calls any LLM provider with the user's own keys. Swift Design supplies schemas, prompts, validation, the state machine, and the editors.
 
 ## Languages & Stack
 
 - Rust everywhere. Edition 2024.
 - Server: axum on tokio. Serves the studio UI, design and deck files, sessions, and uploads.
 - Studio UI: Dioxus, compiled to WASM.
-- Design, deck, brief, and question definitions: JSON. serde structs are the source of truth. schemars generates the JSON Schemas that guide agents.
+- Design, deck, and question definitions: JSON. serde structs are the source of truth. schemars generates the JSON Schemas that guide agents.
 - Logging: tracing.
 
 ## Project Layout
@@ -29,36 +30,35 @@ Cargo workspace with three crates:
 
 ```
 crates/
-  design-model/ # serde + schemars types for designs, decks, briefs, questions, and the workflow. No IO.
+  design-model/ # serde + schemars types for designs, decks, questions, and the workflow. No IO.
   server/       # axum binary: API, sessions, engines, static assets, uploads, validation.
   ui/           # Dioxus studio (WASM).
 ```
 
 - `server` and `ui` depend on `design-model`. `design-model` depends on no workspace crate.
 - Declare shared dependency versions in `[workspace.dependencies]`.
-- Organize modules by feature (`sessions.rs`, `briefing.rs`, `render.rs`), not by layer.
+- Organize modules by feature (`sessions.rs`, `planner.rs`, `render.rs`), not by layer.
 
 ## Two Pipelines
 
 Designs and decks are separate pipelines that share one workflow.
 
 - Separate per kind: the model types (`design.rs`, `screen.rs` and `deck.rs`, `slide.rs`), the stores (`designs.rs`, `decks.rs`), the routes (`/designs/*`, `/decks/*`), the render entry points (`render.rs`, `deck_render.rs`), the patches (`patch.rs`, `deck_patch.rs`), the polish prompts (`polish.rs`, `deck_polish.rs`), the generation prompts (`generation.rs`, `deck_generation.rs`), and the editors (`editor.rs`, `deck_editor.rs`). Deck-only modules: `presenter.rs` and `pptx.rs`.
-- Shared only where the code is identical modulo names: `history.rs`, `provenance.rs`, `events.rs`, `api_error.rs`, `files.rs`, `screen_css.rs`, the Chrome runner in `screenshots.rs`, the font and upload inlining in `export.rs`, the page scripts in `render.rs`, the fix-round loop and attachments in `generation.rs`, `model_client.rs`, `sessions.rs`, `briefing.rs`.
-- A session has one `artifact_kind` (`demo` or `deck`), set at creation. The brief carries the same value. The engine, the chooser, the critique route, and the studio read that one value. Do not infer the kind from ids or file contents.
+- Shared only where the code is identical modulo names: `history.rs`, `provenance.rs`, `events.rs`, `api_error.rs`, `files.rs`, `screen_css.rs`, the Chrome runner in `screenshots.rs`, the font and upload inlining in `export.rs`, the page scripts in `render.rs`, the fix-round loop and attachments in `generation.rs`, `model_client.rs`, `sessions.rs`, `planner.rs`, `request.rs`.
+- A session has one `artifact_kind` (`demo` or `deck`), set at creation. The engine, the chooser, and the studio read that one value. Do not infer the kind from ids or file contents.
 - A deck page uses the same DOM vocabulary as a design page (`main.design`, `data-swift-design-*`), so the layout, navigation, editing, and audit scripts serve both. Only the audience-follow script and the PPTX measurement script are deck-only.
 - `PATCH_FORMAT` and the polish wording are duplicated on purpose: the model sees one vocabulary per kind (screens or slides).
 
 ## Workflow State
 
-- A session has one persisted `WorkflowState`: `intake`, `clarifying`, `brief_ready`, `awaiting_approval`, `generating`, `reviewing`, or `error`.
+- A session has one persisted `WorkflowState`: `intake`, `clarifying`, `generating`, `reviewing`, or `error`.
 - Every state change goes through `design_model::workflow::transition` and `SessionStore::apply`. Do not infer state from chat text, files, or UI flags.
-- The approved brief revision is the only content input to generation. Confirmed facts, assumptions, and open questions stay in separate fields.
-- Briefing mode never writes designs or decks. The server answers 409 to design and deck writes unless the session is `generating` (or `reviewing`, for user saves from the editor).
-- The artifact kind may change through a user brief edit before generation. After generation it is fixed: the server answers 409.
-- A question with a closed set of answers belongs to the app, not to the model: the artifact kind, the variation count (1 to `CANDIDATE_LIMIT`), the canvases for a demo (1 to `PLATFORM_LIMIT`), and the slide count for a deck. The studio asks with a control next to the questions; the prompts in `briefing.rs` and `instructions.rs` tell the agent never to ask about them.
-- The app's answers live on `Session.options`, not in the brief. `write_brief_revision` mirrors them into every revision, so an agent that rewrites the brief cannot drop them. A control that wrote a brief revision instead would move the session to `awaiting_approval` mid-clarification.
+- Events: `QuestionsAsked` (to clarifying), `GenerationStarted` (to generating, from intake, clarifying, or reviewing), `GenerationSucceeded` (to reviewing), `ContinueRequested`, `RunFailed`, `Recovered`.
+- A run may start in every state but `error`. A message, an answer set, and `POST /sessions/{id}/generate` each start one. A session already in `generating` at run start writes candidates without a planner turn (the user skipped the questions).
+- Design and deck writes answer 409 unless the session is `generating` (or `reviewing`, for user saves from the editor). An external agent posts `/sessions/{id}/generate` before it writes.
+- The app's answers live on `Session.options`, not in a question set: the artifact kind, the variation count (1 to `CANDIDATE_LIMIT`), the canvases for a demo (1 to `PLATFORM_LIMIT`), and for a deck the scenario (`DECK_SCENARIOS`), the slide count, and the variety. The prompts tell the agent never to ask about them.
 - A demo run writes one design per canvas per variation: `candidate_plans` in `generation.rs` names them, and the studio groups the cards under one tab per canvas.
-- The brief keeps the answered questions in `answered_questions`, as question text plus answer text. Never write an answer into `confirmed_facts` as `question: answer`: a fact is one short sentence.
+- Every question set is relaxed on write (`relax_question_set`): no question required, skip always allowed. An external agent's own flags are not trusted.
 
 ## Studio
 
@@ -66,8 +66,7 @@ Designs and decks are separate pipelines that share one workflow.
 - All studio CSS lives in `STYLESHEET` in `crates/ui/src/main.rs`. Verify a visual change with a screenshot before reporting it: a static mock built from the extracted stylesheet, or the live page on a spare port (`SWIFT_DESIGN_ADDRESS=127.0.0.1:3001`). Port 3000 belongs to the user's own server.
 - Candidate cards fix the height and let the width follow the canvas ratio: `frame_width_rem` in `canvas.rs` emits `--frame-width`, and the strip tiles do the same with `--tile-width`. A portrait canvas (`is_portrait_canvas`, the phone) gets a bezel; a narrow canvas (`is_narrow_canvas`, the tablet too) only changes the main preview height. Do not mix the two.
 - Cards page with the edge arrows and the arrow keys only. A swipe was tried and removed: a trackpad swipe reads as history navigation in Safari unless a real scroll container consumes it, and the sliding preview showed blank panes. Do not bring it back.
-- The brief panel shows no workflow state. The state and the run error live in the chat column (the status card and the error card), so a failed run does not read as a broken brief.
-- A brief restore (`POST /sessions/{id}/brief/revisions/{n}/restore`) writes the old revision back as a new `user_edit` revision. History is append-only: never rewrite or drop a revision.
+- The question set renders inside the chat thread (`thread-questions`), with the app's own cards in the same grid; the workbench holds the run settings before the first candidates and the candidates after. The run state and the run error live in the chat column.
 - `dx fmt` duplicates an `.await` that is split across lines. Bind every await on one line: `let sent = api::continue_artifact(&session_id, &id).await;`.
 
 ## Naming
@@ -98,7 +97,7 @@ Designs and decks are separate pipelines that share one workflow.
 - Library code returns `Result`. It does not panic on expected failures.
 - Every store writes through `files::write_atomically`: a temporary file, then a rename. `tokio::fs::write` truncates first, and the studio polls the stores while a run writes them, so a plain write lets a reader see an empty file.
 - A background save must stop once the final save has landed. `LiveSaver` and `DeckLiveSaver` set `is_finished` under the write lock, so a partial draft spawned earlier cannot overwrite the finished artifact.
-- Validate agent-written JSON (designs, decks, question sets, briefs) at the server boundary with serde and the model crate's validators. Report every validation error, not only the first — agents fix output from these messages.
+- Validate agent-written JSON (designs, decks, question sets) at the server boundary with serde and the model crate's validators. Report every validation error, not only the first — agents fix output from these messages.
 
 ## Error Handling
 
@@ -109,7 +108,7 @@ Designs and decks are separate pipelines that share one workflow.
 
 ## Logging
 
-- Use tracing with structured fields: `tracing::info!(session_id = %session_id, "brief drafted")`.
+- Use tracing with structured fields: `tracing::info!(session_id = %session_id, "questions asked")`.
 - Levels: `error` = broken, needs action. `warn` = degraded. `info` = state change. `debug` = development detail.
 - Never log upload contents, prompts, or full design or deck bodies. Log identifiers and sizes.
 
@@ -134,7 +133,7 @@ Designs and decks are separate pipelines that share one workflow.
 
 - All LLM access goes through the provider registry in `crates/server/src/model_client.rs`: OpenAI-compatible chat endpoints keyed by the user's own environment variables, pi-style. Do not add provider-specific SDK crates; a provider is a name, a URL, and key variables.
 - Swift Design never ships or requires its own API keys. Model calls happen only with the user's keys, and only when a run starts.
-- Agents receive everything from the running app, never from repo files: instructions at `GET /instructions`, the schemas at `GET /schemas/{design,deck,brief,question-set}`, the session at `GET /sessions/{id}`. Do not add agent-facing markdown or prompt files to the repo.
+- Agents receive everything from the running app, never from repo files: instructions at `GET /instructions`, the schemas at `GET /schemas/{design,deck,question-set}`, the session at `GET /sessions/{id}`. Do not add agent-facing markdown or prompt files to the repo.
 - The instructions payload lives in `crates/server/src/instructions.rs`. It carries one rule list per kind (`DEMO_RULES`, `DECK_RULES`) and one example per kind. Update it whenever agent-visible behavior changes.
 - The app serves the schemas from the Rust types at runtime, so they cannot go stale. `schemas/` holds generated copies for review diffs only: regenerate and commit them whenever `design-model` types change (`cargo run -p server --bin generate_schema`). CI fails on a stale copy.
 - Sample artifacts live in `fixtures/` (`sample-design.json`, `sample-deck.json`) for tests; the instructions payload embeds both examples for agents.
@@ -142,7 +141,7 @@ Designs and decks are separate pipelines that share one workflow.
 
 ## Server API
 
-- Routes: plural nouns, kebab-case: `/sessions`, `/sessions/{id}/brief`, `/designs`, `/decks`, `/uploads`.
+- Routes: plural nouns, kebab-case: `/sessions`, `/sessions/{id}/messages`, `/designs`, `/decks`, `/uploads`.
 - Deck-only routes: `/decks/{id}/present`, `/decks/{id}/render?audience=true`, `/decks/{id}/slides/{n}.png`, `/decks/{id}/export.pptx`.
 - JSON fields: `snake_case` (serde default). Do not rename to camelCase.
 - Success responses return the payload directly. Errors return `{ "error": { "message": "...", "details": [...] } }`.
