@@ -125,7 +125,9 @@ impl WorkflowEvent {
             WorkflowEvent::QuestionsAsked => &[Intake, Clarifying, Generating, Reviewing],
             WorkflowEvent::GenerationStarted => &[Intake, Clarifying, Reviewing],
             WorkflowEvent::GenerationSucceeded => &[Generating],
-            WorkflowEvent::ContinueRequested => &[Reviewing],
+            // A second continue may arrive while the first still
+            // runs: the user pressed Finish on more than one candidate.
+            WorkflowEvent::ContinueRequested => &[Reviewing, Generating],
             WorkflowEvent::RunFailed | WorkflowEvent::RunStopped => {
                 &[Intake, Clarifying, Generating, Reviewing]
             }
@@ -221,6 +223,8 @@ mod tests {
             (Reviewing, GenerationStarted, Generating),
             (Reviewing, QuestionsAsked, Clarifying),
             (Reviewing, ContinueRequested, Generating),
+            // A Finish pressed while a run works keeps it generating.
+            (Generating, ContinueRequested, Generating),
             (Generating, RunFailed, Error),
             (Generating, RunStopped, Stopped),
             (Clarifying, RunStopped, Stopped),
