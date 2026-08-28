@@ -52,7 +52,7 @@ Both kinds share the theme, the HTML and CSS rules, the brief, the workflow, the
 
 ## Design brief
 
-A brief records the artifact kind, audience, user need, target artifact/platform, primary action, required content/functionality, information architecture, visual direction, brand assets, accessibility and technical constraints, assumptions, open questions, the answered questions, and revision history.
+A brief records the artifact kind, audience, user need, target artifact/platform, primary action, required content/functionality, information architecture, visual direction, brand assets, accessibility and technical constraints, assumptions, open questions, the answered questions, and revision history. Every edit, critique, and automatic decision makes a new revision. The brief panel lists them under `Show the full brief`: click a row to read that revision, and `Restore this revision` writes it back as a new revision.
 
 The panel shows the answers, the assumptions, and the open questions first. The full field list is one click away.
 
