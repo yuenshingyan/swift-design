@@ -147,14 +147,16 @@ fn slide_markup(deck: &Deck, only_slide: Option<usize>) -> (String, String) {
     (sections, slide_styles)
 }
 
-/// The page script for `options`: layout and navigation always, editing,
-/// audit, measurement, and audience follow on request, and nothing at
-/// all for a print.
+/// The page script for `options`: the fit always, layout and navigation
+/// on screen, editing, audit, measurement, and audience follow on
+/// request. A print carries the fit alone, so the PDF holds the same
+/// content the studio shows.
 fn page_script(options: &RenderOptions) -> String {
     if options.is_print {
-        return String::new();
+        return crate::render::FIT_SCRIPT.to_owned();
     }
-    let mut script = LAYOUT_SCRIPT.to_owned();
+    let mut script = crate::render::FIT_SCRIPT.to_owned();
+    script.push_str(LAYOUT_SCRIPT);
     script.push_str(NAVIGATION_SCRIPT);
     if options.is_editable {
         script.push_str(EDITING_SCRIPT);
@@ -319,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn print_mode_emits_page_rules_and_no_scripts() {
+    fn print_mode_emits_page_rules_and_the_fit_script_only() {
         let mut deck = sample_deck();
         deck.transition = Some(Transition::default());
         let html = render_deck_with(
@@ -331,8 +333,8 @@ mod tests {
         );
         assert!(html.contains("@page { size: 1920px 1080px; margin: 0; }"));
         assert!(html.contains("break-after: page"));
-        assert!(html.contains("script-src 'none'"));
-        assert!(!html.contains("<script>"));
+        assert!(html.contains("swiftDesignFit"));
+        assert!(!html.contains("ResizeObserver"));
         assert!(!html.contains("data-swift-design-effect="));
         assert_eq!(
             html.matches("data-swift-design-root>").count(),
