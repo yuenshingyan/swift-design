@@ -15,7 +15,9 @@ use crate::designs::DesignStore;
 use crate::events::ChangeNotifier;
 use crate::instructions::DEMO_RULES;
 use crate::model_client::{LogSink, ModelClient, ModelConfiguration, TextSink, UsageSink};
-use crate::planner::{ANSWERED_QUESTION_LIMIT, parse_plan, planner_input, planner_prompt};
+use crate::planner::{
+    ANSWERED_QUESTION_LIMIT, app_question_set, parse_plan, planner_input, planner_prompt,
+};
 use crate::request::{SessionRequest, answered_questions_from_answers, request_input};
 use crate::sessions::session_id_of_artifact;
 use crate::sessions::{ChatMessage, RunMode, RunOptions, RunRecord, SessionStore};
@@ -175,6 +177,31 @@ pub(crate) const CONTINUE_CHUNK_SCREENS: usize = 3;
 /// polish rounds fill the rest.
 pub(crate) const CONTINUE_DRAFT_SHARE: f32 = 0.85;
 
+/// The artifact ids of the continue requests at the end of `messages`,
+/// newest last, without repeats.
+///
+/// The walk stops at the first user message that is not a continue: a
+/// request from an earlier turn is that turn's business. Pressing Finish
+/// on three candidates in a row therefore continues all three.
+pub(crate) fn trailing_continue_ids(messages: &[ChatMessage]) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for message in messages.iter().rev() {
+        if message.role != "user" {
+            continue;
+        }
+        if !message.is_continue {
+            break;
+        }
+        if let Some(id) = &message.design
+            && !ids.contains(id)
+        {
+            ids.push(id.clone());
+        }
+    }
+    ids.reverse();
+    ids
+}
+
 impl GenerationEngine {
     /// Creates an engine over the given stores. `settings` enables
     /// login-token refresh for Claude logins.
@@ -220,15 +247,18 @@ impl GenerationEngine {
         self
     }
 
-    /// The uploads to attach to a content request: every stored file
-    /// under the size caps. Empty without an upload store. A file that
-    /// cannot be read is logged and skipped.
-    pub(crate) async fn load_attachments(&self, log: &LogSink) -> Attachments {
+    /// The uploads to attach to a content request: the files of
+    /// `session_id` under the size caps. Empty without an upload store.
+    /// A file that cannot be read is logged and skipped.
+    ///
+    /// The session decides the list. A file attached to one project must
+    /// never reach another project's prompt.
+    pub(crate) async fn load_attachments(&self, session_id: &str, log: &LogSink) -> Attachments {
         let mut attachments = Attachments::default();
         let Some(uploads) = &self.uploads else {
             return attachments;
         };
-        let summaries = match uploads.list().await {
+        let summaries = match uploads.list(session_id).await {
             Ok(summaries) => summaries,
             Err(error) => {
                 log(&format!("listing uploads failed: {error}"));
@@ -428,8 +458,66 @@ impl GenerationEngine {
         }
         self.report_progress(0);
         let outcome = self.execute(&client, &context, task, &log).await;
+        let outcome = self
+            .run_late_continues(&client, &context, outcome, &log)
+            .await;
         self.report_progress(100);
         self.settle(session_id, &run_id, outcome, &log).await
+    }
+
+    /// Runs the continue requests that arrived while this run worked and
+    /// folds what they wrote into `outcome`.
+    ///
+    /// Pressing Finish on a second candidate appends a request the
+    /// running turn has already read past. Without this pass it would
+    /// wait for a turn that nothing starts.
+    ///
+    /// Each id is tried once. A continue that fails leaves a preview
+    /// behind, and trying it again would never end the run.
+    async fn run_late_continues(
+        &self,
+        client: &reqwest::Client,
+        context: &GenerationContext,
+        outcome: Result<GenerationOutcome, GenerationStop>,
+        log: &LogSink,
+    ) -> Result<GenerationOutcome, GenerationStop> {
+        let Ok(GenerationOutcome::Wrote { mut design_ids }) = outcome else {
+            return outcome;
+        };
+        let mut tried = design_ids.clone();
+        loop {
+            let pending = match self.pick_task(context).await {
+                Ok(Some(GenerationTask::Continue(ids))) => ids,
+                _ => return Ok(GenerationOutcome::Wrote { design_ids }),
+            };
+            let fresh: Vec<String> = pending
+                .into_iter()
+                .filter(|id| !tried.contains(id))
+                .collect();
+            if fresh.is_empty() {
+                return Ok(GenerationOutcome::Wrote { design_ids });
+            }
+            log(&format!(
+                "continuing {} more: {}",
+                fresh.len(),
+                fresh.join(", ")
+            ));
+            tried.extend(fresh.clone());
+            let task = GenerationTask::Continue(fresh);
+            match self.execute(client, context, task, log).await {
+                Ok(GenerationOutcome::Wrote { design_ids: more }) => design_ids.extend(more),
+                Ok(_) => {}
+                Err(stop) => {
+                    // The first task wrote, so the run is not a failure.
+                    let reason = match &stop {
+                        GenerationStop::Failed(message) => message.clone(),
+                        GenerationStop::NeedsClarification(_) => "it asked a question".to_owned(),
+                    };
+                    log(&format!("a later continue stopped: {reason}"));
+                    return Ok(GenerationOutcome::Wrote { design_ids });
+                }
+            }
+        }
     }
 
     /// A continue request names its artifacts; no planning is needed.
@@ -466,7 +554,7 @@ impl GenerationEngine {
         // The planner reads the user's source files, as the writing
         // turns do. Planning blind is what produced questions the files
         // already answered.
-        let attachments = self.load_attachments(log).await;
+        let attachments = self.load_attachments(&context.session_id, log).await;
         let input = planner_input(
             &context.request,
             &messages,
@@ -480,7 +568,16 @@ impl GenerationEngine {
         log("planning the turn");
         let reply = self.model.chat(client, &request, context.effort()).await?;
         let plan = parse_plan(&reply);
-        if let Some(set) = &plan.question_set
+        // The first turn always asks. The app owns a fixed list of
+        // questions and asks it before anything is written; the planner
+        // only adds to that card. Without this, a planner that asks
+        // nothing writes a session the user never set up.
+        let is_setup_turn = session.state == design_model::WorkflowState::Intake;
+        let asked = plan
+            .question_set
+            .clone()
+            .or_else(|| is_setup_turn.then(app_question_set));
+        if let Some(set) = &asked
             && context.request.answers.len() < ANSWERED_QUESTION_LIMIT
         {
             let number = self
@@ -488,10 +585,17 @@ impl GenerationEngine {
                 .write_question_set(session_id, set)
                 .await
                 .map_err(|error| error.to_string())?;
+            // The setup turn never writes, so a planner reply that
+            // promises a write would contradict the card it opens.
+            let is_promise_to_write = is_setup_turn && plan.should_generate;
+            let spoken = match plan.reply.trim() {
+                reply if !reply.is_empty() && !is_promise_to_write => reply.to_owned(),
+                _ => set.message.clone(),
+            };
             self.sessions
                 .append_message(
                     session_id,
-                    ChatMessage::assistant_questions(&set.message, number),
+                    ChatMessage::assistant_questions(&spoken, number),
                 )
                 .await
                 .map_err(|error| error.to_string())?;
@@ -552,27 +656,27 @@ impl GenerationEngine {
         }
     }
 
-    /// The preview designs the latest user turn asked to continue: the
-    /// design id of the newest user message, when that design exists and
-    /// is still a preview.
+    /// The preview designs the latest user turn asked to continue:
+    /// every design named by a trailing continue request that still is
+    /// a preview. Pressing Finish on several candidates continues them
+    /// all.
     async fn continue_requests(&self, session_id: &str) -> Result<Vec<String>, String> {
         let messages = self
             .sessions
             .messages(session_id)
             .await
             .map_err(|error| error.to_string())?;
-        let Some(design_id) = messages
-            .iter()
-            .rev()
-            .find(|message| message.role == "user" && message.is_continue)
-            .and_then(|message| message.design.clone())
-        else {
-            return Ok(Vec::new());
-        };
-        match self.designs.load(&design_id).await {
-            Ok(Some(design)) if design.is_preview() => Ok(vec![design_id]),
-            _ => Ok(Vec::new()),
+        let mut previews = Vec::new();
+        for design_id in trailing_continue_ids(&messages) {
+            // A design that is no longer a preview was finished
+            // already, by this run or an earlier one.
+            if let Ok(Some(design)) = self.designs.load(&design_id).await
+                && design.is_preview()
+            {
+                previews.push(design_id);
+            }
         }
+        Ok(previews)
     }
 
     /// Runs the chosen task and returns the outcome.
@@ -721,7 +825,7 @@ impl GenerationEngine {
         log: &LogSink,
     ) -> Result<GenerationOutcome, GenerationStop> {
         let count = context.options.variation_count();
-        let attachments = Arc::new(self.load_attachments(log).await);
+        let attachments = Arc::new(self.load_attachments(&context.session_id, log).await);
         let concepts = if count > 1 {
             self.plan_concepts(client, context, count, &attachments, log)
                 .await?
@@ -873,7 +977,7 @@ impl GenerationEngine {
             })?;
         let design_json = serde_json::to_string(&design)
             .map_err(|error| GenerationStop::Failed(error.to_string()))?;
-        let attachments = self.load_attachments(log).await;
+        let attachments = self.load_attachments(&context.session_id, log).await;
         let messages = vec![
             serde_json::json!({ "role": "system", "content": system_prompt() }),
             self.user_message(
@@ -923,7 +1027,7 @@ impl GenerationEngine {
     ) -> Vec<(String, Result<usize, String>)> {
         let ids: Vec<String> = design_ids.iter().map(|id| (*id).to_owned()).collect();
         let shares = self.shared_progress(&ids, 5, 95);
-        let attachments = Arc::new(self.load_attachments(log).await);
+        let attachments = Arc::new(self.load_attachments(&context.session_id, log).await);
         let mut tasks = tokio::task::JoinSet::new();
         for (index, design_id) in design_ids.iter().enumerate() {
             let engine = self.clone();
@@ -1134,6 +1238,16 @@ impl GenerationEngine {
         log: &LogSink,
     ) -> Result<Design, String> {
         let label = &context.label;
+        // Without Chrome nothing can be measured, and a round would
+        // ask the model to fix findings that were never taken.
+        if !crate::polish::can_audit() {
+            log(&format!(
+                "{label}: {}",
+                crate::polish::PolishStop::NotMeasured.describe(0, 0)
+            ));
+            context.report(1.0);
+            return Ok(design);
+        }
         let limit = crate::polish::polish_round_limit(&context.effort);
         // The version that measured best, and its finding count. A
         // round that makes the page worse is measured, reported, and
@@ -2315,7 +2429,9 @@ mod tests {
 
     use design_model::WorkflowState;
 
-    use super::{GenerationEngine, GenerationOutcome, candidate_plans, system_prompt};
+    use super::{
+        GenerationEngine, GenerationOutcome, candidate_plans, system_prompt, trailing_continue_ids,
+    };
     use crate::designs::DesignStore;
     use crate::events::ChangeNotifier;
     use crate::model_client::LogSink;
@@ -2348,6 +2464,16 @@ mod tests {
     async fn fresh_session(sessions: &SessionStore, request: &str) {
         sessions
             .create(NewSession::demo("talk", "Talk", request).with_options(low_effort_options()))
+            .await
+            .unwrap();
+    }
+
+    /// A session past its setup card: the app's own questions were
+    /// asked, so the next planner turn is free to write.
+    async fn set_up_session(sessions: &SessionStore, request: &str) {
+        fresh_session(sessions, request).await;
+        sessions
+            .apply("talk", design_model::WorkflowEvent::QuestionsAsked)
             .await
             .unwrap();
     }
@@ -2403,7 +2529,11 @@ mod tests {
         let sessions = SessionStore::new(directory.path().join("sessions"));
         let uploads = crate::uploads::UploadStore::new(directory.path().join("uploads"));
         uploads
-            .save("spec.md", b"The deck is for iOS developers new to Swift.")
+            .save(
+                "talk",
+                "spec.md",
+                b"The deck is for iOS developers new to Swift.",
+            )
             .await
             .unwrap();
         fresh_session(&sessions, "An intro deck.").await;
@@ -2416,6 +2546,88 @@ mod tests {
         let planner_call = server.requests()[0].to_string();
         assert!(planner_call.contains("The user's source files follow"));
         assert!(planner_call.contains("iOS developers new to Swift"));
+    }
+
+    #[test]
+    fn a_run_of_finish_presses_continues_every_candidate() {
+        let messages = vec![
+            ChatMessage::user("A landing page.", None),
+            ChatMessage::assistant("Two candidates."),
+            ChatMessage::continue_request("Finish it.", "talk-candidate-1"),
+            ChatMessage::continue_request("Finish it.", "talk-candidate-2"),
+            // The same card pressed twice is one request.
+            ChatMessage::continue_request("Finish it.", "talk-candidate-2"),
+        ];
+        assert_eq!(
+            trailing_continue_ids(&messages),
+            ["talk-candidate-1", "talk-candidate-2"]
+        );
+    }
+
+    #[test]
+    fn a_continue_from_an_earlier_turn_is_that_turns_business() {
+        let messages = vec![
+            ChatMessage::continue_request("Finish it.", "talk-candidate-1"),
+            ChatMessage::user("Make the title bigger.", None),
+            ChatMessage::continue_request("Finish it.", "talk-candidate-2"),
+        ];
+        assert_eq!(trailing_continue_ids(&messages), ["talk-candidate-2"]);
+        assert!(trailing_continue_ids(&[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_first_turn_asks_the_apps_own_questions_before_it_writes() {
+        let server = FakeModelServer::start().await;
+        // The planner wants to write at once and asks nothing.
+        server.push_text(WRITE_PLAN);
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        fresh_session(&sessions, "A landing page.").await;
+        let outcome = engine(&server, &designs, &sessions)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        // The app owns the fixed questions, so the first turn asks them
+        // whatever the planner decided.
+        assert!(matches!(
+            outcome,
+            GenerationOutcome::NeedsClarification { question_set: 1 }
+        ));
+        let session = sessions.read("talk").await.unwrap().unwrap();
+        assert_eq!(session.state, WorkflowState::Clarifying);
+        let set = sessions
+            .read_question_set("talk", 1)
+            .await
+            .unwrap()
+            .unwrap();
+        // No question of the agent's own: the studio draws the app's
+        // cards in this set's grid.
+        assert!(set.questions.is_empty());
+        assert!(set.can_proceed_with_assumptions);
+        // The planner promised a write it does not get to make, so the
+        // card speaks for itself instead of repeating that promise.
+        let messages = sessions.messages("talk").await.unwrap();
+        assert_eq!(messages[0].content, set.message);
+        assert!(!messages[0].content.contains("Writing it now"));
+        // Nothing was written: the model was called once, to plan.
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_second_turn_writes_without_asking_again() {
+        let server = FakeModelServer::start().await;
+        server.push_text(WRITE_PLAN);
+        server.push_text(SAMPLE_DESIGN);
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        set_up_session(&sessions, "A landing page.").await;
+        let outcome = engine(&server, &designs, &sessions)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
     }
 
     #[tokio::test]
@@ -2462,14 +2674,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let designs = DesignStore::new(directory.path().join("designs"));
         let sessions = SessionStore::new(directory.path().join("sessions"));
-        fresh_session(&sessions, "Hi.").await;
+        set_up_session(&sessions, "Hi.").await;
         let outcome = engine(&server, &designs, &sessions)
             .run("talk", silent_log())
             .await
             .unwrap();
         assert!(matches!(outcome, GenerationOutcome::Replied));
         let session = sessions.read("talk").await.unwrap().unwrap();
-        assert_eq!(session.state, WorkflowState::Intake);
+        assert_eq!(session.state, WorkflowState::Clarifying);
         let messages = sessions.messages("talk").await.unwrap();
         assert_eq!(messages[0].content, "Hello. Tell me what to build.");
         assert_eq!(
@@ -2486,7 +2698,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let designs = DesignStore::new(directory.path().join("designs"));
         let sessions = SessionStore::new(directory.path().join("sessions"));
-        fresh_session(&sessions, "A landing page for retail investors.").await;
+        set_up_session(&sessions, "A landing page for retail investors.").await;
         engine(&server, &designs, &sessions)
             .run("talk", silent_log())
             .await
@@ -2505,7 +2717,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let designs = DesignStore::new(directory.path().join("designs"));
         let sessions = SessionStore::new(directory.path().join("sessions"));
-        fresh_session(&sessions, "A landing page.").await;
+        set_up_session(&sessions, "A landing page.").await;
         let outcome = engine(&server, &designs, &sessions)
             .run("talk", silent_log())
             .await
@@ -2534,7 +2746,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let designs = DesignStore::new(directory.path().join("designs"));
         let sessions = SessionStore::new(directory.path().join("sessions"));
-        fresh_session(&sessions, "A landing page.").await;
+        set_up_session(&sessions, "A landing page.").await;
         let outcome = engine(&server, &designs, &sessions)
             .run("talk", silent_log())
             .await
@@ -2558,7 +2770,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let designs = DesignStore::new(directory.path().join("designs"));
         let sessions = SessionStore::new(directory.path().join("sessions"));
-        fresh_session(&sessions, "A landing page.").await;
+        set_up_session(&sessions, "A landing page.").await;
         let result = engine(&server, &designs, &sessions)
             .run("talk", silent_log())
             .await;
@@ -2579,7 +2791,7 @@ mod tests {
         design.outline = (1..=6).map(|number| format!("Screen {number}")).collect();
         assert!(design.is_preview());
         designs.save("talk-candidate-1", &design).await.unwrap();
-        fresh_session(&sessions, "A landing page.").await;
+        set_up_session(&sessions, "A landing page.").await;
         sessions
             .apply("talk", design_model::WorkflowEvent::GenerationStarted)
             .await
@@ -2617,7 +2829,7 @@ mod tests {
         let sessions = SessionStore::new(directory.path().join("sessions"));
         let design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
         designs.save("talk-candidate-1", &design).await.unwrap();
-        fresh_session(&sessions, "A landing page.").await;
+        set_up_session(&sessions, "A landing page.").await;
         sessions
             .apply("talk", design_model::WorkflowEvent::GenerationStarted)
             .await
