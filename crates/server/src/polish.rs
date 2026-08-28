@@ -24,8 +24,8 @@ pub(crate) struct Finding {
     /// The node, like `h2.title (0/1)`, or `root`.
     #[serde(default)]
     pub(crate) node: String,
-    /// `overflow`, `off_screen`, `tiny_text`, `overlap`, `empty`,
-    /// `contrast`, or `long_lines`.
+    /// `overflow`, `off_screen`, `overfull`, `tiny_text`, `overlap`,
+    /// `empty`, `contrast`, or `long_lines`.
     #[serde(default)]
     pub(crate) kind: String,
     /// What was measured.
@@ -51,6 +51,9 @@ pub fn polish_round_limit(effort: &str) -> usize {
 pub enum PolishStop {
     /// The browser measured nothing wrong.
     Clean,
+    /// No Chrome, so nothing was measured. The candidate is unchecked,
+    /// not clean.
+    NotMeasured,
     /// The last round did not reduce the findings, so another will not.
     NoImprovement,
     /// The effort's round limit ran out with findings left.
@@ -62,6 +65,9 @@ impl PolishStop {
     pub fn describe(&self, rounds: usize, findings: usize) -> String {
         match self {
             PolishStop::Clean => format!("measures clean after {rounds} polish round(s)"),
+            PolishStop::NotMeasured => {
+                "not polished: no Chrome, so the layout was never measured".to_owned()
+            }
             PolishStop::NoImprovement => format!(
                 "polish stopped after {rounds} round(s): {findings} finding(s) left and the last round fixed none"
             ),
@@ -70,6 +76,12 @@ impl PolishStop {
             }
         }
     }
+}
+
+/// True when a layout audit can run at all. Without Chrome nothing is
+/// measured, and an unmeasured candidate must not be reported as clean.
+pub fn can_audit() -> bool {
+    crate::screenshots::find_chrome().is_some()
 }
 
 /// Layout findings measured in a browser. Empty when no Chrome is
@@ -136,6 +148,7 @@ pub(crate) fn finding_advice(kind: &str) -> &'static str {
         "empty" => "add content or delete it",
         "contrast" => "use a darker or lighter text color, or change the background",
         "long_lines" => "narrow the box, split the text, or use a larger font size",
+        "overfull" => "cut a section, shorten the text, or reduce the sizes until it fits",
         _ => "fix it",
     }
 }
