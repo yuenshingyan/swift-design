@@ -33,12 +33,42 @@ pub(crate) struct Finding {
     pub(crate) detail: String,
 }
 
-/// Polish rounds per candidate, by effort level.
-pub fn polish_rounds(effort: &str) -> usize {
+/// The most polish rounds one candidate may take, by effort level.
+///
+/// This is a ceiling, not a target. A round runs only while the browser
+/// still measures something wrong and the last round improved it, so a
+/// page that comes out clean spends none of these.
+pub fn polish_round_limit(effort: &str) -> usize {
     match effort {
-        "low" => 0,
-        "high" => 2,
-        _ => 1,
+        "low" => 1,
+        "high" => 5,
+        _ => 3,
+    }
+}
+
+/// Why the polish loop stopped. Reported in the run log, so a run that
+/// ends with a flawed page says which of these happened.
+pub enum PolishStop {
+    /// The browser measured nothing wrong.
+    Clean,
+    /// The last round did not reduce the findings, so another will not.
+    NoImprovement,
+    /// The effort's round limit ran out with findings left.
+    OutOfRounds,
+}
+
+impl PolishStop {
+    /// One line for the run log, naming the state the candidate is in.
+    pub fn describe(&self, rounds: usize, findings: usize) -> String {
+        match self {
+            PolishStop::Clean => format!("measures clean after {rounds} polish round(s)"),
+            PolishStop::NoImprovement => format!(
+                "polish stopped after {rounds} round(s): {findings} finding(s) left and the last round fixed none"
+            ),
+            PolishStop::OutOfRounds => {
+                format!("polish used all {rounds} round(s) with {findings} finding(s) left")
+            }
+        }
     }
 }
 
@@ -237,6 +267,21 @@ mod tests {
     }
 
     #[test]
+    fn each_stop_reason_says_what_state_the_page_is_in() {
+        assert_eq!(
+            PolishStop::Clean.describe(2, 0),
+            "measures clean after 2 polish round(s)"
+        );
+        // A page left with findings must say so, not read as finished.
+        let stalled = PolishStop::NoImprovement.describe(3, 4);
+        assert!(stalled.contains("4 finding(s) left"));
+        assert!(stalled.contains("fixed none"));
+        let spent = PolishStop::OutOfRounds.describe(5, 2);
+        assert!(spent.contains("all 5 round(s)"));
+        assert!(spent.contains("2 finding(s) left"));
+    }
+
+    #[test]
     fn prompts_carry_findings_and_the_checklist() {
         let prompt = polish_prompt("{}", &["screens[0] x".to_owned()], 0);
         assert!(prompt.contains("- screens[0] x"));
@@ -246,7 +291,11 @@ mod tests {
         assert!(!prompt.contains("images show"));
         assert!(polish_prompt("{}", &[], 3).contains("no problems found"));
         assert!(polish_prompt("{}", &[], 3).contains("next 3 images"));
-        assert_eq!(polish_rounds("low"), 0);
-        assert_eq!(polish_rounds("high"), 2);
+        assert_eq!(polish_round_limit("low"), 1);
+        assert_eq!(polish_round_limit("medium"), 3);
+        assert_eq!(polish_round_limit("high"), 5);
+        // A ceiling, not a target: the loop exits as soon as the page
+        // measures clean, so these are rarely all spent.
+        assert!(polish_round_limit("low") < polish_round_limit("high"));
     }
 }
