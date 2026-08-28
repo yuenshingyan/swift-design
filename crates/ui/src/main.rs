@@ -470,10 +470,26 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .canvas-card:hover { border-color: #B4B0A7; }
 .canvas-card.chosen, .canvas-card.chosen:hover { border: 1.5px solid var(--teal);
   box-shadow: 0.5rem 0.5rem 0 0 rgba(14,110,99,.12), var(--sh-card); }
-.canvas-card.phone { width: 13rem; }
+/* A phone card is as wide as `Candidate 12` plus the Finish icon need; the bezel sits centred in it. */
+.canvas-card.phone { width: 8.75rem; }
 .canvas-card.placeholder { cursor: default; }
 .card-stage { position: relative; height: 13.5rem; overflow: hidden; background: var(--sunken);
   border-bottom: 1px solid var(--hairline); }
+.canvas-card:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+.card-arrow { position: absolute; top: 50%; z-index: 3; width: 1.75rem; height: 1.75rem;
+  margin-top: -0.875rem; padding: 0; border: 1px solid var(--hairline); border-radius: 999px;
+  background: rgba(255,255,255,.96); color: var(--ink-2); font-size: 1rem; line-height: 1;
+  display: flex; align-items: center; justify-content: center; box-shadow: var(--sh-control);
+  opacity: 0; transition: opacity 0.15s; }
+.card-arrow.left { left: 0.5rem; }
+.card-arrow.right { right: 0.5rem; }
+.card-arrow:disabled { display: none; }
+.card-arrow:hover:not(:disabled) { color: var(--teal); border-color: var(--hairline); background: #FFFFFF; }
+/* Fine pointers get the arrows on hover; touch screens see them all the time. */
+@media (hover: hover) and (pointer: fine) {
+  .canvas-card:hover .card-arrow, .canvas-card:focus-visible .card-arrow { opacity: 1; }
+}
+@media (hover: none) { .card-arrow { opacity: 1; } }
 .card-stage iframe, .card-blank { display: block; width: 100%; height: 100%; border: 0;
   pointer-events: none; background: #0B0F14; }
 .canvas-card.phone .card-stage { display: flex; align-items: center; justify-content: center;
@@ -484,7 +500,8 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .bezel iframe, .bezel .card-blank { width: 100%; height: 100%; border-radius: 0.875rem; }
 .card-pills { position: absolute; top: 0.5rem; left: 0.5rem; z-index: 2; display: flex;
   align-items: center; gap: 0.375rem; }
-.canvas-card.phone .card-pills { flex-direction: column; align-items: flex-start; }
+/* Below the count, which owns the top-right corner of a narrow card. */
+.canvas-card.phone .card-pills { top: 2.25rem; flex-direction: column; align-items: flex-start; }
 .card-pill { display: inline-flex;
   align-items: center; gap: 0.375rem; padding: 0.2rem 0.6rem; border-radius: 999px;
   border: 1px solid var(--hairline); background: rgba(255,255,255,.96); color: var(--teal);
@@ -499,24 +516,14 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
   font-weight: 500; box-shadow: none; }
 .card-finish:hover:not(:disabled) { background: var(--teal-hover); border-color: var(--teal-hover); }
 .card-finish span { display: flex; }
-.card-pager { flex: none; display: inline-flex; align-items: center; gap: 0.1rem;
-  padding: 0.1rem 0.2rem; white-space: nowrap; border: 1px solid var(--hairline);
-  border-radius: 999px; background: var(--raised); box-shadow: none; }
-.card-pager button { width: 1.25rem; height: 1.25rem; padding: 0; border: 0; border-radius: 999px;
-  background: transparent; box-shadow: none; color: var(--ink-2); font-size: 0.85rem;
-  line-height: 1; display: flex; align-items: center; justify-content: center; }
-.card-pager button:hover:not(:disabled) { background: var(--sunken); color: var(--teal);
-  border-color: transparent; }
 .card-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; z-index: 3;
   background: rgba(255,255,255,.18); }
 .card-progress-fill { height: 100%; background: var(--teal); transition: width 0.4s ease; }
-.card-footer { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 0.5rem;
+.card-footer { display: flex; align-items: center; gap: 0.5rem;
   min-height: 1.75rem; padding: 0.5rem 0.625rem; }
-.card-name { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
-.card-footer .card-finish { justify-self: end; }
-/* A phone card is narrow: one row, the name gives way, Finish is an icon. */
-.canvas-card.phone .card-footer { display: flex; gap: 0.375rem; }
-.canvas-card.phone .card-name { flex: 1 1 auto; }
+.card-name { flex: 1 1 auto; display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+/* A phone card is narrow: Finish is an icon. */
+.canvas-card.phone .card-footer { padding: 0.375rem 0.5rem; min-height: 0; gap: 0.375rem; }
 .canvas-card.phone .card-finish { padding: 0.3rem; }
 .canvas-card.phone .card-finish .finish-text { display: none; }
 .chosen-pill { flex: none; display: inline-flex; align-items: center; gap: 0.3rem;
