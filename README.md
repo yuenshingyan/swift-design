@@ -60,6 +60,12 @@ The app asks for the settings with a closed set of answers, so the agent does no
 
 Pick more than one canvas and the run writes one design per canvas per variation — desktop and phone with two variations is four candidates, grouped on the canvas under one tab per device.
 
+## Candidates
+
+Every candidate is a card with a live preview. Cards on one tab share a height, so a desktop card is wide and a phone card is a tall bezel. Click a card to open it in the editor. Arrows at the edges of the preview, or `←` and `→` on a focused card, step through the screens or slides; the pill in the corner shows `n/m`. A preview candidate (the first screens plus an outline) carries a `Finish` button that writes the rest. The chosen card is marked `Chosen`.
+
+In `reviewing`, the chat input sends a critique: type what should change and press **Request revision**.
+
 ## Architecture
 
 The harness may use a local CLI agent or a remote API, but workflow state, briefs, artifacts, and user decisions remain under application control.
@@ -98,6 +104,11 @@ External agents read `GET /instructions` and the schemas at
 `PUT /decks/{session}-candidate-N`. The run environment carries
 `SWIFT_DESIGN_SESSION_ID`, `SWIFT_DESIGN_RUN_MODE`, and
 `SWIFT_DESIGN_ARTIFACT_KIND`.
+
+Brief revisions: `GET /sessions/{id}/brief/revisions` lists them,
+`GET /sessions/{id}/brief?revision=N` returns one, and
+`POST /sessions/{id}/brief/revisions/N/restore` writes revision N back as
+a new user revision.
 
 Deck-only routes: `GET /decks/{id}/present`, `GET /decks/{id}/render?audience=true`,
 `GET /decks/{id}/slides/{n}.png`, `GET /decks/{id}/export.pptx`.
