@@ -23,11 +23,15 @@ fn template_button_label(chosen: usize) -> String {
     }
 }
 
-/// The composer placeholder for an artifact kind.
-fn composer_placeholder(kind: ArtifactKind) -> &'static str {
+/// The composer placeholder. It names both kinds, because the user
+/// picks the kind after they send the request, not before.
+const COMPOSER_PLACEHOLDER: &str = "A landing page for my finance app, or a ten-slide pitch deck…";
+
+/// What one kind is for, under its name in the picker.
+fn kind_detail(kind: ArtifactKind) -> &'static str {
     match kind {
-        ArtifactKind::Demo => "A landing page for my finance app, for retail investors…",
-        ArtifactKind::Deck => "A ten-slide pitch deck for my finance app, for seed investors…",
+        ArtifactKind::Demo => "A landing page, app screens, or a flow, on a device canvas.",
+        ArtifactKind::Deck => "Slides on a 1920 by 1080 px canvas, with a presenter view.",
     }
 }
 
@@ -37,6 +41,7 @@ fn state_class(state: design_model::WorkflowState) -> &'static str {
     match state {
         Generating => "generating",
         Reviewing => "reviewing",
+        Stopped => "stopped",
         Error => "error",
         _ => "",
     }
@@ -50,7 +55,7 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
     let mut is_configuring = use_signal(|| false);
     let mut is_loaded = use_signal(|| false);
     let mut request = use_signal(String::new);
-    let mut kind = use_signal(|| ArtifactKind::Demo);
+    let mut is_picking_kind = use_signal(|| false);
     let effort = use_signal(|| "medium".to_owned());
     let mut templates = use_signal(Vec::<api::TemplateSummary>::new);
     let chosen_templates = use_signal(Vec::<String>::new);
@@ -96,15 +101,25 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
         }
     });
 
+    // Sending asks for the kind. The request text is checked first, so
+    // the picker never opens over an empty composer.
     let create = use_callback(move |_: ()| {
+        if request().trim().is_empty() {
+            error.set(Some("Describe the design first.".to_owned()));
+            return;
+        }
+        error.set(None);
+        is_picking_kind.set(true);
+    });
+
+    let create_with_kind = use_callback(move |chosen_kind: ArtifactKind| {
         let text = request().trim().to_owned();
         if text.is_empty() {
-            error.set(Some("Describe the design first.".to_owned()));
             return;
         }
         let level = effort();
         let picked = chosen_templates();
-        let chosen_kind = kind();
+        is_picking_kind.set(false);
         spawn(async move {
             let body = api::CreateSessionRequest {
                 request: &text,
@@ -139,18 +154,8 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
             }
             section { class: "home-composer",
                 div { class: "brief-card",
-                    div { class: "effect-chips kind-chips",
-                        for choice in ArtifactKind::ALL {
-                            button {
-                                key: "{choice.as_str()}",
-                                class: if kind() == choice { "selected" } else { "" },
-                                onclick: move |_| kind.set(choice),
-                                "{choice.label()}"
-                            }
-                        }
-                    }
                     textarea {
-                        placeholder: composer_placeholder(kind()),
+                        placeholder: COMPOSER_PLACEHOLDER,
                         value: "{request()}",
                         oninput: move |event| request.set(event.value()),
                         onkeydown: move |event: Event<KeyboardData>| {
@@ -211,6 +216,12 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                     p { class: "error", "{message}" }
                 }
             }
+            if is_picking_kind() {
+                KindPicker {
+                    is_open: is_picking_kind,
+                    on_pick: move |chosen| create_with_kind.call(chosen),
+                }
+            }
             if is_picking_templates() {
                 TemplatePicker {
                     templates,
@@ -257,6 +268,53 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                             "×"
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/// The kind picker: the modal that opens when the user sends a request.
+///
+/// The kind is fixed for the life of a session, so it is asked once,
+/// here, and never guessed. Escape and the backdrop close the modal and
+/// leave the request in the composer, so a mis-press costs nothing.
+#[component]
+fn KindPicker(is_open: Signal<bool>, on_pick: EventHandler<ArtifactKind>) -> Element {
+    let mut is_open = is_open;
+    let close = move |_| is_open.set(false);
+    rsx! {
+        div { class: "modal-backdrop blurring", onclick: close }
+        div {
+            class: "modal kind-modal",
+            role: "dialog",
+            aria_modal: true,
+            aria_label: "Choose what to build",
+            autofocus: true,
+            tabindex: "-1",
+            onkeydown: move |event: Event<KeyboardData>| {
+                if event.key() == Key::Escape {
+                    is_open.set(false);
+                }
+            },
+            div { class: "modal-head",
+                span { class: "kicker", "What are we building?" }
+                button { class: "icon-button", title: "Close", onclick: close, "×" }
+            }
+            div { class: "modal-body",
+                div { class: "kind-choices",
+                    for choice in ArtifactKind::ALL {
+                        button {
+                            key: "{choice.as_str()}",
+                            class: "kind-choice",
+                            onclick: move |_| on_pick.call(choice),
+                            span { class: "kind-choice-name", "{choice.label()}" }
+                            span { class: "kind-choice-detail", "{kind_detail(choice)}" }
+                        }
+                    }
+                }
+                p { class: "kind-note",
+                    "This is fixed for the session. Start a new one to build the other kind."
                 }
             }
         }
@@ -360,7 +418,9 @@ fn TemplatePicker(
 
 #[cfg(test)]
 mod tests {
-    use crate::home::{composer_placeholder, template_button_label};
+    use design_model::ArtifactKind;
+
+    use crate::home::{COMPOSER_PLACEHOLDER, kind_detail, template_button_label};
 
     #[test]
     fn the_template_button_counts_what_is_chosen() {
@@ -370,8 +430,19 @@ mod tests {
     }
 
     #[test]
-    fn composer_placeholders_differ_per_kind() {
-        assert!(composer_placeholder(design_model::ArtifactKind::Demo).contains("landing page"));
-        assert!(composer_placeholder(design_model::ArtifactKind::Deck).contains("deck"));
+    fn the_placeholder_names_both_kinds() {
+        // The composer no longer knows the kind: the picker asks after
+        // the request is sent, so the hint must fit either answer.
+        assert!(COMPOSER_PLACEHOLDER.contains("landing page"));
+        assert!(COMPOSER_PLACEHOLDER.contains("deck"));
+    }
+
+    #[test]
+    fn every_kind_has_a_detail_line_in_the_picker() {
+        assert!(kind_detail(ArtifactKind::Demo).contains("device canvas"));
+        assert!(kind_detail(ArtifactKind::Deck).contains("1920 by 1080"));
+        for choice in ArtifactKind::ALL {
+            assert!(!kind_detail(choice).is_empty());
+        }
     }
 }
