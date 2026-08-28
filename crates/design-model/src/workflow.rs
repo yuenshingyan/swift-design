@@ -27,17 +27,21 @@ pub enum WorkflowState {
     Generating,
     /// An artifact exists. The user can ask for changes in the chat.
     Reviewing,
+    /// The user stopped a run, or the run was cut short. Nothing is
+    /// wrong: the session keeps its data and resumes where it left off.
+    Stopped,
     /// A run failed. The session keeps its data and can be retried.
     Error,
 }
 
 impl WorkflowState {
     /// Every state, in workflow order.
-    pub const ALL: [WorkflowState; 5] = [
+    pub const ALL: [WorkflowState; 6] = [
         WorkflowState::Intake,
         WorkflowState::Clarifying,
         WorkflowState::Generating,
         WorkflowState::Reviewing,
+        WorkflowState::Stopped,
         WorkflowState::Error,
     ];
 
@@ -48,17 +52,24 @@ impl WorkflowState {
             WorkflowState::Clarifying => "clarifying",
             WorkflowState::Generating => "generating",
             WorkflowState::Reviewing => "reviewing",
+            WorkflowState::Stopped => "stopped",
             WorkflowState::Error => "error",
         }
     }
 
     /// True when the user may send a message or answers and a run may
-    /// start: every state except a run in progress and an error.
+    /// start: every state except a run in progress and a halted one.
     pub fn can_take_turn(self) -> bool {
         matches!(
             self,
             WorkflowState::Intake | WorkflowState::Clarifying | WorkflowState::Reviewing
         )
+    }
+
+    /// True when the run ended before it finished and the session waits
+    /// to resume: `stopped` and `error`. Both leave through `Recovered`.
+    pub fn is_halted(self) -> bool {
+        matches!(self, WorkflowState::Stopped | WorkflowState::Error)
     }
 }
 
@@ -83,7 +94,10 @@ pub enum WorkflowEvent {
     ContinueRequested,
     /// A run failed.
     RunFailed,
-    /// The user retried after an error.
+    /// The user stopped a run, or the run was cut short before it
+    /// finished. This is not a failure.
+    RunStopped,
+    /// The user resumed after a stop or an error.
     Recovered {
         /// The state to return to.
         to: WorkflowState,
@@ -99,6 +113,7 @@ impl WorkflowEvent {
             WorkflowEvent::GenerationSucceeded => "generation_succeeded",
             WorkflowEvent::ContinueRequested => "continue_requested",
             WorkflowEvent::RunFailed => "run_failed",
+            WorkflowEvent::RunStopped => "run_stopped",
             WorkflowEvent::Recovered { .. } => "recovered",
         }
     }
@@ -111,8 +126,10 @@ impl WorkflowEvent {
             WorkflowEvent::GenerationStarted => &[Intake, Clarifying, Reviewing],
             WorkflowEvent::GenerationSucceeded => &[Generating],
             WorkflowEvent::ContinueRequested => &[Reviewing],
-            WorkflowEvent::RunFailed => &[Intake, Clarifying, Generating, Reviewing],
-            WorkflowEvent::Recovered { .. } => &[Error],
+            WorkflowEvent::RunFailed | WorkflowEvent::RunStopped => {
+                &[Intake, Clarifying, Generating, Reviewing]
+            }
+            WorkflowEvent::Recovered { .. } => &[Stopped, Error],
         }
     }
 
@@ -125,6 +142,7 @@ impl WorkflowEvent {
             }
             WorkflowEvent::GenerationSucceeded => WorkflowState::Reviewing,
             WorkflowEvent::RunFailed => WorkflowState::Error,
+            WorkflowEvent::RunStopped => WorkflowState::Stopped,
             WorkflowEvent::Recovered { to } => to,
         }
     }
@@ -149,9 +167,12 @@ pub enum WorkflowError {
         /// The states the event is allowed in, comma separated.
         allowed: String,
     },
-    /// A recovery named `error` as its target.
-    #[error("cannot recover into `error`: name the state to return to")]
-    InvalidRecovery,
+    /// A recovery named a halted state as its target.
+    #[error("cannot recover into `{target}`: name the state to return to")]
+    InvalidRecovery {
+        /// The halted state the recovery named.
+        target: WorkflowState,
+    },
 }
 
 /// The next state after `event` happens in `state`, or why it cannot.
@@ -159,10 +180,12 @@ pub fn transition(
     state: WorkflowState,
     event: WorkflowEvent,
 ) -> Result<WorkflowState, WorkflowError> {
+    // Recovering into a halted state would leave the session with
+    // nowhere to go: name the state the run was in before it halted.
     if let WorkflowEvent::Recovered { to } = event
-        && to == WorkflowState::Error
+        && to.is_halted()
     {
-        return Err(WorkflowError::InvalidRecovery);
+        return Err(WorkflowError::InvalidRecovery { target: to });
     }
     let allowed = event.allowed_in();
     if !allowed.contains(&state) {
@@ -199,7 +222,10 @@ mod tests {
             (Reviewing, QuestionsAsked, Clarifying),
             (Reviewing, ContinueRequested, Generating),
             (Generating, RunFailed, Error),
+            (Generating, RunStopped, Stopped),
+            (Clarifying, RunStopped, Stopped),
             (Error, Recovered { to: Reviewing }, Reviewing),
+            (Stopped, Recovered { to: Generating }, Generating),
         ];
         for (from, event, to) in cases {
             assert_eq!(transition(from, event), Ok(to), "{from} + {event}");
@@ -217,16 +243,49 @@ mod tests {
         assert!(transition(WorkflowState::Error, WorkflowEvent::GenerationStarted).is_err());
         assert!(transition(WorkflowState::Intake, WorkflowEvent::ContinueRequested).is_err());
         assert!(transition(WorkflowState::Error, WorkflowEvent::RunFailed).is_err());
+        // A halted session halts no further: it resumes first.
+        assert!(transition(WorkflowState::Stopped, WorkflowEvent::RunStopped).is_err());
+        assert!(transition(WorkflowState::Stopped, WorkflowEvent::RunFailed).is_err());
+        assert!(transition(WorkflowState::Error, WorkflowEvent::RunStopped).is_err());
+        assert!(transition(WorkflowState::Stopped, WorkflowEvent::GenerationStarted).is_err());
     }
 
     #[test]
-    fn error_recovers_to_any_state_except_error() {
-        for state in WorkflowState::ALL {
-            let result = transition(WorkflowState::Error, WorkflowEvent::Recovered { to: state });
-            if state == WorkflowState::Error {
-                assert_eq!(result, Err(WorkflowError::InvalidRecovery));
-            } else {
-                assert_eq!(result, Ok(state));
+    fn a_stop_is_not_a_failure() {
+        assert_eq!(
+            transition(WorkflowState::Generating, WorkflowEvent::RunStopped),
+            Ok(WorkflowState::Stopped)
+        );
+        assert_eq!(
+            transition(WorkflowState::Generating, WorkflowEvent::RunFailed),
+            Ok(WorkflowState::Error)
+        );
+        assert!(WorkflowState::Stopped.is_halted());
+        assert!(WorkflowState::Error.is_halted());
+        for state in [
+            WorkflowState::Intake,
+            WorkflowState::Clarifying,
+            WorkflowState::Generating,
+            WorkflowState::Reviewing,
+        ] {
+            assert!(!state.is_halted(), "{state}");
+        }
+    }
+
+    #[test]
+    fn a_halted_session_recovers_to_any_state_that_is_not_halted() {
+        for halted in [WorkflowState::Error, WorkflowState::Stopped] {
+            for state in WorkflowState::ALL {
+                let result = transition(halted, WorkflowEvent::Recovered { to: state });
+                if state.is_halted() {
+                    assert_eq!(
+                        result,
+                        Err(WorkflowError::InvalidRecovery { target: state }),
+                        "{halted} -> {state}"
+                    );
+                } else {
+                    assert_eq!(result, Ok(state), "{halted} -> {state}");
+                }
             }
         }
         assert!(
@@ -259,6 +318,12 @@ mod tests {
         })
         .unwrap();
         assert_eq!(event, r#"{"event":"recovered","to":"intake"}"#);
+    }
+
+    #[test]
+    fn a_halted_session_takes_no_turn_until_it_resumes() {
+        assert!(!WorkflowState::Stopped.can_take_turn());
+        assert!(!WorkflowState::Error.can_take_turn());
     }
 
     #[test]
