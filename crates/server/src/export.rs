@@ -782,7 +782,7 @@ mod tests {
     async fn inlines_uploaded_images_in_slides() {
         let directory = tempfile::tempdir().unwrap();
         let store = UploadStore::new(directory.path().to_path_buf());
-        store.save("chart.png", b"PNGDATA").await.unwrap();
+        store.save("talk", "chart.png", b"PNGDATA").await.unwrap();
         let mut deck = sample_deck();
         deck.slides[0].html = "<img src='/uploads/chart.png'>".to_owned();
         deck.slides[0].css = Some(".a { background: url('/uploads/chart.png'); }".to_owned());
@@ -823,7 +823,7 @@ mod tests {
     async fn inlines_uploaded_images_in_html_and_css() {
         let directory = tempfile::tempdir().unwrap();
         let store = UploadStore::new(directory.path().to_path_buf());
-        store.save("chart.png", b"PNGDATA").await.unwrap();
+        store.save("talk", "chart.png", b"PNGDATA").await.unwrap();
 
         let mut design = sample_design();
         design.screens[0].html = "<img src='/uploads/chart.png'><div style=\"background:url(/uploads/chart.png)\"></div>".to_owned();
