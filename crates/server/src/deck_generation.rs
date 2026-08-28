@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use design_model::{Critique, Deck, DesignBrief, Slide};
+use design_model::{Deck, Slide};
 
 use crate::concepts::{Concept, concept_note};
 use crate::decks::{DeckStore, PENDING_SLIDE_CLASS, is_pending_slide};
@@ -18,11 +18,12 @@ use crate::events::ChangeNotifier;
 use crate::generation::{
     ArtifactRequest, Attachments, CONTINUE_DRAFT_SHARE, ContinueChunk, DRAFT_SHARE,
     GenerationContext, GenerationEngine, GenerationOutcome, GenerationStop, GenerationTask,
-    ShareSink, brief_input, candidate_template, complete_array_items, continue_chunks,
-    failure_message, stop_to_string, template_note, user_content_with_images, writing_effort,
+    ShareSink, candidate_template, complete_array_items, continue_chunks, failure_message,
+    stop_to_string, template_note, user_content_with_images, writing_effort,
 };
 use crate::instructions::DECK_RULES;
 use crate::model_client::LogSink;
+use crate::request::{SessionRequest, request_input};
 
 /// The slides each continuation chunk has produced so far, shared
 /// between the chunks that run at once.
@@ -70,7 +71,7 @@ impl GenerationEngine {
         let Some(deck_id) = messages
             .iter()
             .rev()
-            .find(|message| message.role == "user")
+            .find(|message| message.role == "user" && message.is_continue)
             .and_then(|message| message.design.clone())
         else {
             return Ok(Vec::new());
@@ -91,8 +92,11 @@ impl GenerationEngine {
     ) -> Result<GenerationOutcome, GenerationStop> {
         match task {
             GenerationTask::Candidates => self.generate_deck_candidates(client, context, log).await,
-            GenerationTask::Edit { design, critique } => {
-                self.edit_deck(client, context, &design, &critique, log)
+            GenerationTask::Edit {
+                design,
+                instruction,
+            } => {
+                self.edit_deck(client, context, &design, &instruction, log)
                     .await?;
                 Ok(GenerationOutcome::Wrote {
                     design_ids: vec![design],
@@ -259,7 +263,7 @@ impl GenerationEngine {
         client: &reqwest::Client,
         context: &GenerationContext,
         deck_id: &str,
-        critique: &Critique,
+        instruction: &str,
         log: &LogSink,
     ) -> Result<(), GenerationStop> {
         let decks = self.deck_store()?;
@@ -274,7 +278,7 @@ impl GenerationEngine {
         let messages = vec![
             serde_json::json!({ "role": "system", "content": deck_system_prompt() }),
             self.user_message(
-                &deck_edit_prompt(&context.brief, critique, &deck_json),
+                &deck_edit_prompt(&context.request, instruction, &deck_json),
                 &attachments,
             ),
         ];
@@ -524,7 +528,7 @@ impl GenerationEngine {
         let messages = vec![
             serde_json::json!({ "role": "system", "content": deck_system_prompt() }),
             self.user_message(
-                &deck_continue_prompt(&context.brief, preview, &deck_json, chunk),
+                &deck_continue_prompt(&context.request, preview, &deck_json, chunk),
                 attachments,
             ),
         ];
@@ -878,8 +882,8 @@ fn deck_system_prompt() -> String {
          Follow these rules:\n{rules}\n\
          The deck must conform to this JSON Schema:\n{schema}\n\
          Example deck:\n{example}\n\
-         The brief is authoritative. Do not override a confirmed fact. Use an assumption only where the brief has no confirmed fact for the need.\n\
-         If the brief lacks a detail you cannot design without, do not guess. Reply with only this JSON instead:\n\
+         The request and the answers are authoritative. Do not override an answer. Decide the rest yourself.\n\
+         If they lack a detail you cannot design without, do not guess. Reply with only this JSON instead:\n\
          {{\"needs_clarification\":{{\"title\":\"...\",\"message\":\"...\",\"questions\":[{{\"id\":\"...\",\"label\":\"...\",\"kind\":\"single_select\",\"required\":true,\"options\":[{{\"value\":\"...\",\"label\":\"...\"}}]}}],\"can_proceed_with_assumptions\":true}}}}\n\
          Ask at most {limit} questions. Otherwise reply with only one deck JSON document. No prose, no code fences.",
         rules = DECK_RULES.join("\n"),
@@ -903,6 +907,17 @@ fn deck_preview_note(count: usize) -> String {
 /// The prompt line that holds the deck to the length the user asked
 /// for. Empty when the user set no length. A preview writes fewer
 /// slides than the length, so the count goes to the outline instead.
+/// The prompt line for the app's scenario choice. Empty when the
+/// agent decides.
+fn scenario_note(scenario: Option<&str>) -> String {
+    match scenario.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => format!(
+            "The deck is for this scenario: {name}. Use the vocabulary, the examples, and the tone that fit it.\n"
+        ),
+        None => String::new(),
+    }
+}
+
 fn slide_count_note(slide_count: Option<u32>, preview_slides: Option<usize>) -> String {
     let Some(count) = slide_count else {
         return String::new();
@@ -915,16 +930,16 @@ fn slide_count_note(slide_count: Option<u32>, preview_slides: Option<usize>) -> 
     }
 }
 
-/// The user prompt for one deck candidate: the approved brief is
-/// authoritative, plus the template, preview, concept, and effort notes.
+/// The user prompt for one deck candidate: the request and the answers
+/// are authoritative, plus the template, preview, concept, and effort
+/// notes.
 fn deck_candidate_prompt(request: &DeckCandidateRequest<'_>) -> String {
-    let brief = &request.context.brief;
     let options = &request.context.options;
     let candidate_number = request.candidate_number;
     let mut prompt = format!(
-        "Build a deck for this approved brief. The brief is authoritative; do not override a \
-         confirmed fact.\n{}\n",
-        brief_input(brief)
+        "Build a deck for this request. The request and the answers are authoritative; do not \
+         override an answer.\n{}\n",
+        request_input(&request.context.request)
     );
     if let Some(template) = request.template {
         prompt.push_str(&template_note(template));
@@ -935,7 +950,11 @@ fn deck_candidate_prompt(request: &DeckCandidateRequest<'_>) -> String {
     if let Some(count) = request.preview_slides {
         prompt.push_str(&deck_preview_note(count));
     }
-    prompt.push_str(&slide_count_note(brief.slide_count, request.preview_slides));
+    prompt.push_str(&slide_count_note(
+        options.slide_count,
+        request.preview_slides,
+    ));
+    prompt.push_str(&scenario_note(options.scenario.as_deref()));
     let count = options.variation_count();
     if count > 1 {
         prompt.push_str(&format!(
@@ -955,20 +974,20 @@ fn deck_candidate_prompt(request: &DeckCandidateRequest<'_>) -> String {
     prompt
 }
 
-/// The user prompt for a deck edit: the deck as it is, the approved
-/// brief, and the critique to apply.
-fn deck_edit_prompt(brief: &DesignBrief, critique: &Critique, deck_json: &str) -> String {
+/// The user prompt for a deck edit: the deck as it is, the request, and
+/// the change the user asked for.
+fn deck_edit_prompt(request: &SessionRequest, instruction: &str, deck_json: &str) -> String {
     format!(
         "Here is the deck to change:\n{deck_json}\n\
-         The deck is for this approved brief:\n{brief}\n\
-         Apply this critique: {critique}\n\
+         The deck is for this request:\n{request}\n\
+         Apply this change: {critique}\n\
          A reference like [slide 3, node 0/1 <h2.title>: What Swift Design does] names a slide \
          (1-based) and one element in that slide's html by its index path from the slide root \
          (zero-based child indexes, element children only), its tag and first class, and the \
          start of its text. Change only what the critique asks for. Keep every other slide and \
          value as it is. Return every changed slide complete: html, css, and notes.\n{format}",
-        brief = brief_input(brief),
-        critique = critique.as_instruction(),
+        request = request_input(request),
+        critique = instruction.trim(),
         format = crate::deck_patch::PATCH_FORMAT
     )
 }
@@ -976,7 +995,7 @@ fn deck_edit_prompt(brief: &DesignBrief, critique: &Critique, deck_json: &str) -
 /// The user prompt for one deck continuation chunk: the preview deck and
 /// the chunk's slides to add, as a patch of inserts.
 fn deck_continue_prompt(
-    brief: &DesignBrief,
+    request: &SessionRequest,
     deck: &Deck,
     deck_json: &str,
     chunk: ContinueChunk,
@@ -996,8 +1015,8 @@ fn deck_continue_prompt(
     let mut prompt = format!(
         "Here is a deck in progress: its theme, its first {written} slides, and `outline`, the \
          slide titles of the complete deck:\n{deck_json}\n\
-         The deck is for this approved brief:\n{}\n",
-        brief_input(brief)
+         The deck is for this request:\n{}\n",
+        request_input(request)
     );
     prompt.push_str(&format!(
         "Write {} slides: outline titles {} to {last} of {planned}, in order, one slide per \
@@ -1042,22 +1061,28 @@ fn parse_deck(content: &str) -> Result<Deck, String> {
 mod tests {
     use std::sync::Arc;
 
-    use design_model::{ArtifactKind, Critique, DesignBrief, RevisionSource, WorkflowState};
+    use design_model::{ArtifactKind, WorkflowState};
 
     use super::{
         apply_deck_continuation, continuation_slides, deck_system_prompt, parse_deck, partial_deck,
-        placeholder_slide, shown_deck, slide_count_note,
+        placeholder_slide, scenario_note, shown_deck, slide_count_note,
     };
     use crate::decks::DeckStore;
     use crate::designs::DesignStore;
     use crate::events::ChangeNotifier;
     use crate::generation::{ContinueChunk, GenerationEngine, GenerationOutcome};
     use crate::model_client::LogSink;
-    use crate::sessions::{NewSession, SessionStore};
+    use crate::sessions::{ChatMessage, NewSession, SessionStore};
     use crate::test_support::{FakeModelServer, SAMPLE_DECK, low_effort_options, sample_deck};
+
+    /// The planner reply that writes candidates.
+    const WRITE_PLAN: &str = r#"{"reply":"Writing it now.","generate":true}"#;
 
     #[test]
     fn the_slide_count_holds_the_deck_to_the_length_the_user_asked_for() {
+        assert_eq!(scenario_note(None), "");
+        assert_eq!(scenario_note(Some(" ")), "");
+        assert!(scenario_note(Some("Training")).contains("scenario: Training"));
         assert_eq!(slide_count_note(None, None), "");
         assert_eq!(slide_count_note(None, Some(3)), "");
         assert_eq!(
@@ -1101,32 +1126,14 @@ mod tests {
         .with_decks(stores.decks.clone())
     }
 
-    /// A deck session in the generating state with a one-candidate,
-    /// low-effort brief approved.
-    async fn generating_deck_session(sessions: &SessionStore) {
+    /// A fresh one-candidate, low-effort deck session, still in intake.
+    async fn deck_session(sessions: &SessionStore) {
         sessions
             .create(
                 NewSession::demo("talk", "Talk", "A talk.")
                     .with_kind(ArtifactKind::Deck)
                     .with_options(low_effort_options()),
             )
-            .await
-            .unwrap();
-        let revision = sessions
-            .write_brief_revision(
-                "talk",
-                DesignBrief::default(),
-                RevisionSource::Agent,
-                "Drafted",
-            )
-            .await
-            .unwrap();
-        sessions
-            .update("talk", |session| session.approved_revision = Some(revision))
-            .await
-            .unwrap();
-        sessions
-            .apply("talk", design_model::WorkflowEvent::GenerateWithAssumptions)
             .await
             .unwrap();
     }
@@ -1190,10 +1197,11 @@ mod tests {
     #[tokio::test]
     async fn a_valid_deck_reply_is_saved_as_a_candidate() {
         let server = FakeModelServer::start().await;
+        server.push_text(WRITE_PLAN);
         server.push_text(SAMPLE_DECK);
         let directory = tempfile::tempdir().unwrap();
         let stores = stores(&directory);
-        generating_deck_session(&stores.sessions).await;
+        deck_session(&stores.sessions).await;
         let outcome = engine(&server, &stores)
             .run("talk", silent_log())
             .await
@@ -1215,7 +1223,9 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let request = server.requests()[0].to_string();
+        let planner = server.requests()[0].to_string();
+        assert!(planner.contains("You plan slide decks"));
+        let request = server.requests()[1].to_string();
         assert!(request.contains("slide decks"));
         assert!(request.contains("Build a deck"));
         let runs = stores.sessions.runs("talk").await.unwrap();
@@ -1223,8 +1233,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_deck_critique_run_patches_the_chosen_deck() {
+    async fn a_chat_request_with_a_deck_open_patches_that_deck() {
         let server = FakeModelServer::start().await;
+        server.push_text(r#"{"reply":"Tightening the title.","edit":true}"#);
         server.push_text(
             r#"{"slides":[{"index":0,"slide":{"html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:96px;}"}}]}"#,
         );
@@ -1235,18 +1246,23 @@ mod tests {
             .save("talk-candidate-1", &sample_deck())
             .await
             .unwrap();
-        generating_deck_session(&stores.sessions).await;
+        deck_session(&stores.sessions).await;
         stores
             .sessions
-            .update("talk", |session| {
-                session.chosen_design = Some("talk-candidate-1".to_owned());
-                session.pending_critique = Some(crate::sessions::PendingCritique {
-                    design: "talk-candidate-1".to_owned(),
-                    critique: Critique {
-                        text: "Tighten the title.".to_owned(),
-                    },
-                });
-            })
+            .apply("talk", design_model::WorkflowEvent::GenerationStarted)
+            .await
+            .unwrap();
+        stores
+            .sessions
+            .apply("talk", design_model::WorkflowEvent::GenerationSucceeded)
+            .await
+            .unwrap();
+        stores
+            .sessions
+            .append_message(
+                "talk",
+                ChatMessage::user("Tighten the title.", Some("talk-candidate-1")),
+            )
             .await
             .unwrap();
         let outcome = engine(&server, &stores)
@@ -1270,10 +1286,11 @@ mod tests {
     #[tokio::test]
     async fn a_deck_session_without_a_deck_store_fails_plainly() {
         let server = FakeModelServer::start().await;
+        server.push_text(WRITE_PLAN);
         server.push_text(SAMPLE_DECK);
         let directory = tempfile::tempdir().unwrap();
         let stores = stores(&directory);
-        generating_deck_session(&stores.sessions).await;
+        deck_session(&stores.sessions).await;
         let engine = GenerationEngine::new(
             server.configuration(),
             stores.designs.clone(),
