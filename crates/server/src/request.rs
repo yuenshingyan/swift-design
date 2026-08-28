@@ -1,0 +1,205 @@
+//! What a run works from: the request, the answers so far, and the
+//! app's own choices. There is no brief: the model reads the request
+//! and the answers, as Swift Deck did.
+
+use design_model::{AnsweredQuestion, ArtifactKind, BriefQuestion, QuestionAnswer, Viewport};
+
+use crate::sessions::RunOptions;
+
+/// The input of one run.
+#[derive(Clone, Debug)]
+pub(crate) struct SessionRequest {
+    /// The user's request, in their words.
+    pub(crate) request: String,
+    /// `demo` or `deck`.
+    pub(crate) kind: ArtifactKind,
+    /// Every answered question so far, oldest first.
+    pub(crate) answers: Vec<AnsweredQuestion>,
+    /// The app's choices: canvases, variations, slides, scenario.
+    pub(crate) options: RunOptions,
+}
+
+impl SessionRequest {
+    /// Every platform a demo run builds for, never empty. An empty name
+    /// stands for the default desktop canvas.
+    pub(crate) fn platforms(&self) -> Vec<String> {
+        let listed: Vec<String> = self
+            .options
+            .platforms
+            .iter()
+            .filter(|platform| !platform.trim().is_empty())
+            .cloned()
+            .collect();
+        if listed.is_empty() {
+            return vec![String::new()];
+        }
+        listed
+    }
+
+    /// The canvas of every platform the run builds for, in order.
+    pub(crate) fn viewports(&self) -> Vec<Viewport> {
+        self.platforms()
+            .iter()
+            .map(|platform| Viewport::for_platform(platform))
+            .collect()
+    }
+}
+
+/// The request, the app's choices, and the answers, rendered as
+/// labelled lines for a generation prompt.
+pub(crate) fn request_input(request: &SessionRequest) -> String {
+    let mut input = format!("Request:\n{}\n", request.request.trim());
+    input.push_str(&format!("Kind: {}\n", request.kind.label()));
+    match request.kind {
+        ArtifactKind::Demo => {
+            let canvases: Vec<String> = request
+                .viewports()
+                .iter()
+                .map(|viewport| format!("{} by {} px", viewport.width, viewport.height))
+                .collect();
+            input.push_str(&format!("Canvases: {}\n", canvases.join(", ")));
+        }
+        ArtifactKind::Deck => {
+            if let Some(scenario) = &request.options.scenario {
+                input.push_str(&format!("Scenario: {scenario}\n"));
+            }
+            if let Some(count) = request.options.slide_count {
+                input.push_str(&format!("Slide count the user asked for: {count}\n"));
+            }
+        }
+    }
+    if !request.answers.is_empty() {
+        input.push_str("Answers from the user:\n");
+        for entry in &request.answers {
+            let answer = if entry.is_assumed {
+                "use your best judgment"
+            } else {
+                entry.answer.as_str()
+            };
+            input.push_str(&format!("- {} -> {answer}\n", entry.question));
+        }
+    }
+    input
+}
+
+/// The answered questions as text entries: the question wording and
+/// the answer wording, kept apart.
+pub(crate) fn answered_questions_from_answers(
+    answered: &[(BriefQuestion, QuestionAnswer)],
+) -> Vec<AnsweredQuestion> {
+    answered
+        .iter()
+        .map(|(question, answer)| AnsweredQuestion {
+            question: question.label.clone(),
+            answer: if answer.skipped {
+                String::new()
+            } else {
+                answer_text(question, answer)
+            },
+            is_assumed: answer.skipped,
+        })
+        .collect()
+}
+
+/// The readable text of one answer: option labels joined, plus any
+/// other text.
+fn answer_text(question: &BriefQuestion, answer: &QuestionAnswer) -> String {
+    let mut parts: Vec<String> = answer
+        .values
+        .iter()
+        .map(|value| {
+            question
+                .options
+                .iter()
+                .find(|option| &option.value == value)
+                .map(|option| option.label.clone())
+                .unwrap_or_else(|| value.clone())
+        })
+        .collect();
+    if let Some(other) = &answer.other_text
+        && !other.trim().is_empty()
+    {
+        parts.push(other.trim().to_owned());
+    }
+    parts.join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use design_model::{QuestionKind, QuestionOption};
+
+    use super::*;
+
+    fn request(kind: ArtifactKind) -> SessionRequest {
+        SessionRequest {
+            request: "Intro for Swift Design.".to_owned(),
+            kind,
+            answers: vec![AnsweredQuestion {
+                question: "Who is the audience?".to_owned(),
+                answer: "New users".to_owned(),
+                is_assumed: false,
+            }],
+            options: RunOptions::default(),
+        }
+    }
+
+    #[test]
+    fn a_demo_input_names_the_canvases_and_the_answers() {
+        let input = request_input(&request(ArtifactKind::Demo));
+        assert!(input.contains("Request:\nIntro for Swift Design."));
+        assert!(input.contains("Canvases: 1440 by 900 px"));
+        assert!(input.contains("- Who is the audience? -> New users"));
+    }
+
+    #[test]
+    fn a_deck_input_names_the_scenario_and_the_slide_count() {
+        let mut deck = request(ArtifactKind::Deck);
+        deck.options.scenario = Some("Training".to_owned());
+        deck.options.slide_count = Some(8);
+        let input = request_input(&deck);
+        assert!(input.contains("Scenario: Training"));
+        assert!(input.contains("Slide count the user asked for: 8"));
+        assert!(!input.contains("Canvases"));
+    }
+
+    #[test]
+    fn platforms_fall_back_to_the_default_canvas() {
+        let mut demo = request(ArtifactKind::Demo);
+        assert_eq!(demo.platforms(), vec![String::new()]);
+        demo.options.platforms = vec!["phone".to_owned(), " ".to_owned()];
+        assert_eq!(demo.platforms(), vec!["phone".to_owned()]);
+        assert_eq!(demo.viewports()[0], Viewport::for_platform("phone"));
+    }
+
+    #[test]
+    fn answers_read_as_option_labels_and_other_text() {
+        let question = BriefQuestion {
+            id: "audience".to_owned(),
+            label: "Who?".to_owned(),
+            rationale: None,
+            kind: QuestionKind::SingleSelect,
+            required: false,
+            options: vec![QuestionOption {
+                value: "new".to_owned(),
+                label: "New users".to_owned(),
+            }],
+            allow_other: true,
+        };
+        let answer = QuestionAnswer {
+            question_id: "audience".to_owned(),
+            values: vec!["new".to_owned()],
+            other_text: Some("and partners".to_owned()),
+            skipped: false,
+        };
+        let entries = answered_questions_from_answers(&[(question.clone(), answer)]);
+        assert_eq!(entries[0].answer, "New users, and partners");
+        let skipped = QuestionAnswer {
+            question_id: "audience".to_owned(),
+            skipped: true,
+            ..QuestionAnswer::default()
+        };
+        let entries = answered_questions_from_answers(&[(question, skipped)]);
+        assert!(entries[0].is_assumed);
+        assert_eq!(entries[0].answer, "");
+    }
+}
