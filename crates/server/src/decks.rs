@@ -280,24 +280,74 @@ impl DeckStore {
         let user_paths = self.user_paths(old_id).await?;
         self.save(new_id, &deck).await?;
         self.save_user_paths(new_id, &user_paths).await?;
-        self.delete(old_id).await?;
+        // The history moves before the delete, because a delete now
+        // drops the history of the id it deletes.
         if let Some(history) = &self.history
             && let Err(error) = history.rename(old_id, new_id).await
         {
             tracing::warn!(old_id, new_id, %error, "could not move the deck history");
         }
+        self.delete(old_id).await?;
         Ok(true)
     }
 
-    /// Deletes one deck and its authorship sidecar. Returns false when
-    /// no file with that id exists.
+    /// Deletes one deck, its authorship sidecar, and its history.
+    /// Returns false when no file with that id exists.
     pub async fn delete(&self, id: &str) -> anyhow::Result<bool> {
         self.clear_user_paths(id).await?;
+        // The history goes with the file. A later deck with the same
+        // id is a different deck and must start with no snapshots.
+        if let Some(history) = &self.history
+            && let Err(error) = history.delete(id).await
+        {
+            tracing::warn!(%id, %error, "could not delete the deck history");
+        }
         match tokio::fs::remove_file(self.path_of(id)).await {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Every stored deck id, malformed files included. A session
+    /// delete must remove those too, so this reads the directory
+    /// instead of the listing.
+    async fn stored_ids(&self) -> anyhow::Result<Vec<String>> {
+        let mut entries = match tokio::fs::read_dir(&self.directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut ids = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            if let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) {
+                ids.push(id.to_owned());
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    /// Deletes every deck of one session: the session's own deck and
+    /// its candidates, with their sidecars and history. Returns how many
+    /// files went. Session ids come from the request text, so the same
+    /// request makes the same id: without this sweep a new session would
+    /// show the deleted session's candidates.
+    pub async fn delete_session(&self, session_id: &str) -> anyhow::Result<usize> {
+        let mut deleted = 0;
+        for id in self.stored_ids().await? {
+            if crate::sessions::session_id_of_artifact(&id) != session_id {
+                continue;
+            }
+            if self.delete(&id).await? {
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
     }
 }
 
@@ -473,6 +523,7 @@ async fn restore_history(
 /// Deletes one stored deck.
 async fn delete_deck(
     State(store): State<DeckStore>,
+    State(sessions): State<crate::sessions::SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path(id): Path<String>,
 ) -> Response {
@@ -481,6 +532,7 @@ async fn delete_deck(
     }
     match store.delete(&id).await {
         Ok(true) => {
+            sessions.forget_artifact(&id).await;
             notifier.notify();
             tracing::info!(%id, "deck deleted");
             StatusCode::NO_CONTENT.into_response()
@@ -594,6 +646,44 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn a_deck_delete_takes_the_history_with_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_with_history(directory.path());
+        store.save("deck", &sample_deck()).await.unwrap();
+        store.save("deck", &sample_deck()).await.unwrap();
+        assert_eq!(store.history("deck").await.unwrap().len(), 1);
+        assert!(store.delete("deck").await.unwrap());
+        assert!(store.history("deck").await.unwrap().is_empty());
+        assert!(!directory.path().join("deck-history/deck").exists());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_session_takes_its_deck_candidates() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_with_history(directory.path());
+        for id in ["talk-candidate-1", "talk-candidate-2", "talking-shop"] {
+            store.save(id, &sample_deck()).await.unwrap();
+            store.save(id, &sample_deck()).await.unwrap();
+        }
+        assert_eq!(store.delete_session("talk").await.unwrap(), 2);
+        let left: Vec<String> = store
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.id)
+            .collect();
+        assert_eq!(left, ["talking-shop"]);
+        assert!(
+            !directory
+                .path()
+                .join("deck-history/talk-candidate-2")
+                .exists()
+        );
+        assert!(directory.path().join("deck-history/talking-shop").exists());
     }
 
     #[tokio::test]
