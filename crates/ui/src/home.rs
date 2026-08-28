@@ -8,9 +8,9 @@ use design_model::ArtifactKind;
 use dioxus::prelude::*;
 
 use crate::api;
-use crate::brief_panel::state_label;
 use crate::chat_controls::{ModelChip, SendButton};
 use crate::icons;
+use crate::run_settings::state_label;
 use crate::settings::{SettingsPanel, pause_briefly};
 use crate::uploads::{AttachButton, AttachmentChips};
 
@@ -96,7 +96,7 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
         }
     });
 
-    let create = move |_: ()| {
+    let create = use_callback(move |_: ()| {
         let text = request().trim().to_owned();
         if text.is_empty() {
             error.set(Some("Describe the design first.".to_owned()));
@@ -123,7 +123,7 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                 Err(message) => error.set(Some(message)),
             }
         });
-    };
+    });
 
     let is_model_chosen = settings().and_then(|view| view.current).is_some();
     let show_setup = is_loaded() && is_configuring();
@@ -134,7 +134,7 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
             section { class: "home-hero",
                 h1 { "What are we designing?" }
                 p { class: "lede",
-                    "Describe it once. We'll ask a few questions, agree a brief, then generate."
+                    "Describe it once. We'll ask a few questions in the chat, then write candidates."
                 }
             }
             section { class: "home-composer",
@@ -153,6 +153,14 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                         placeholder: composer_placeholder(kind()),
                         value: "{request()}",
                         oninput: move |event| request.set(event.value()),
+                        onkeydown: move |event: Event<KeyboardData>| {
+                            if event.key() == Key::Enter && !event.modifiers().shift() {
+                                event.prevent_default();
+                                if is_model_chosen {
+                                    create.call(());
+                                }
+                            }
+                        },
                     }
                     AttachmentChips {
                         uploads: uploads(),
