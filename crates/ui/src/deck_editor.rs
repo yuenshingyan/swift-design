@@ -236,7 +236,9 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
     let outline_count = deck().outline.len();
     // A deck is always 16:9, so every tile has the same width.
     let tile_width = frame_width_rem(DECK_VIEWPORT, STRIP_TILE_HEIGHT_REM);
-    let summary = strip_summary(slide_count, outline_count.saturating_sub(slide_count));
+    let deck_ratio = DECK_VIEWPORT.aspect_ratio_css();
+    let planned_count = outline_count.saturating_sub(slide_count);
+    let summary = strip_summary(slide_count, planned_count);
     let total_fields = field_count(&deck());
     let user_count = user_paths().len().min(total_fields);
     let agent_count = total_fields - user_count;
@@ -371,6 +373,10 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                         iframe {
                             title: "Deck preview",
                             "data-preview": "true",
+                            // Without the ratio the iframe falls back to
+                            // its default height and the slide sits in a
+                            // band of the deck's own background.
+                            style: "aspect-ratio: {deck_ratio}",
                             src: "/decks/{deck_id}/render?version={preview_version()}&editable=true&slide={selected() + 1}",
                         }
                     }
@@ -408,6 +414,30 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                     div { class: "strip-head",
                         "Slides"
                         span { class: "strip-counts", "{summary}" }
+                        // One control writes every planned slide. A
+                        // button on each planned tile did the same thing
+                        // and read as if it wrote that one alone.
+                        if planned_count > 0 {
+                            button {
+                                class: "strip-write",
+                                title: "Write the slides the outline still plans",
+                                onclick: {
+                                    let deck_id = deck_id.clone();
+                                    move |_| {
+                                        let deck_id = deck_id.clone();
+                                        spawn(async move {
+                                            let session_id = artifact_project(&deck_id);
+                                            let sent = api::continue_artifact(&session_id, &deck_id).await;
+                                            if let Err(message) = sent {
+                                                messages.write().push(message);
+                                            }
+                                        });
+                                    }
+                                },
+                                span { dangerous_inner_html: icons::PLAY }
+                                span { "Write the {planned_count} planned" }
+                            }
+                        }
                     }
                     div { class: "thumbnails",
                         for (index, label) in thumbnail_labels.into_iter().enumerate() {
@@ -471,37 +501,21 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                             span { class: "strip-divider" }
                         }
                         // A planned tile is an outline entry nobody has
-                        // written. A click asks the app to write every one
-                        // of them from the outline.
+                        // written. The strip head writes them.
                         for index in slide_count..outline_count {
                             {
                                 let (number, title) = outline_entry(&deck().outline, index, "Slide");
-                                let deck_id = deck_id.clone();
                                 rsx! {
-                                    button {
+                                    div {
                                         key: "outline-{index}",
                                         class: "thumbnail outline",
                                         style: "--tile-width: {tile_width}rem",
-                                        title: "{outline_title(&deck(), index)} · click to write the remaining slides",
-                                        onclick: move |_| {
-                                            let deck_id = deck_id.clone();
-                                            spawn(async move {
-                                                let session_id = artifact_project(&deck_id);
-                                                let sent = api::continue_artifact(&session_id, &deck_id).await;
-                                                if let Err(message) = sent {
-                                                    messages.write().push(message);
-                                                }
-                                            });
-                                        },
+                                        title: "{outline_title(&deck(), index)} · not written yet",
                                         span { class: "outline-kicker",
                                             "{number}"
                                             span { class: "planned-text", " planned" }
                                         }
                                         span { class: "outline-title", "{title}" }
-                                        span { class: "outline-write",
-                                            span { dangerous_inner_html: icons::PLAY }
-                                            span { class: "write-text", "write" }
-                                        }
                                     }
                                 }
                             }
