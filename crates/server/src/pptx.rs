@@ -59,11 +59,16 @@ pub(crate) const MEASURE_SCRIPT: &str = r##"(async () => {
   const slides = [];
   document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
     const rootRect = root.getBoundingClientRect();
-    const scale = rootRect.width / 1920 || 1;
+    // The page grows the root and scales it back when the content does
+    // not fit, so the root's own box is not always 1920 wide. Measure in
+    // the root's pixels, then map that box onto the 1920 canvas.
+    const rootWidth = root.offsetWidth || 1920;
+    const scale = rootRect.width / rootWidth || 1;
+    const fit = 1920 / rootWidth;
     const section = root.closest('[data-swift-design-screen]');
     const box = (element) => {
       const rect = element.getBoundingClientRect();
-      return { x: (rect.left - rootRect.left) / scale, y: (rect.top - rootRect.top) / scale, width: rect.width / scale, height: rect.height / scale };
+      return { x: (rect.left - rootRect.left) / scale * fit, y: (rect.top - rootRect.top) / scale * fit, width: rect.width / scale * fit, height: rect.height / scale * fit };
     };
     const texts = [], images = [];
     root.querySelectorAll('*').forEach((element) => {
@@ -74,8 +79,8 @@ pub(crate) const MEASURE_SCRIPT: &str = r##"(async () => {
       if (element.tagName.toLowerCase() === 'img') { images.push({ ...rect, src: element.getAttribute('src') || '' }); return; }
       const text = Array.from(element.childNodes).filter((node) => node.nodeType === 3).map((node) => node.textContent).join('').replace(/\s+/g, ' ').trim();
       if (!text) { return; }
-      const size = parseFloat(style.fontSize);
-      texts.push({ ...rect, font_family: style.fontFamily, font_size: size, font_weight: parseInt(style.fontWeight, 10) || 400, font_style: style.fontStyle, color: style.color, text_align: style.textAlign, line_height: parseFloat(style.lineHeight) || size * 1.2, text });
+      const size = parseFloat(style.fontSize) * fit;
+      texts.push({ ...rect, font_family: style.fontFamily, font_size: size, font_weight: parseInt(style.fontWeight, 10) || 400, font_style: style.fontStyle, color: style.color, text_align: style.textAlign, line_height: (parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.2) * fit, text });
     });
     slides.push({ background: getComputedStyle(section).backgroundColor, texts, images });
   });
