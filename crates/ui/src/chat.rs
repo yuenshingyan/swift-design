@@ -12,7 +12,7 @@ use crate::api;
 use crate::chat_controls::{ModelChip, SendButton};
 use crate::settings::{SettingsPanel, artifact_project, pause_briefly};
 use crate::status::RunStatusCard;
-use crate::uploads::{AttachButton, AttachmentChips};
+use crate::uploads::{AttachButton, AttachmentChips, PasteUploads};
 
 /// Scrolls the conversation to its newest message. Runs after the
 /// thread renders, when the message count changes.
@@ -46,12 +46,18 @@ pub fn DesignChat(
     let mut error = use_signal(|| Option::<String>::None);
     let mut was_running = use_signal(|| false);
     let mut uploads = use_signal(Vec::<api::UploadSummary>::new);
-    let refresh_uploads = use_callback(move |_: ()| {
-        spawn(async move {
-            if let Ok(listing) = api::fetch_uploads().await {
-                uploads.set(listing);
-            }
-        });
+    let refresh_uploads = use_callback({
+        // The chat belongs to one session, so it shows that session's
+        // source files and no other's.
+        let session_id = session_id.clone();
+        move |_: ()| {
+            let session_id = session_id.clone();
+            spawn(async move {
+                if let Ok(listing) = api::fetch_uploads(&session_id).await {
+                    uploads.set(listing);
+                }
+            });
+        }
     });
 
     // The live loop: refresh, then wait for the next change.
@@ -197,6 +203,14 @@ pub fn DesignChat(
                         }
                     },
                 }
+                PasteUploads {
+                    scope: session_id.clone(),
+                    on_uploaded: move |_| {
+                        error.set(None);
+                        refresh_uploads.call(());
+                    },
+                    on_error: move |message| error.set(Some(message)),
+                }
                 AttachmentChips {
                     uploads: uploads(),
                     on_changed: move |_| refresh_uploads.call(()),
@@ -205,6 +219,7 @@ pub fn DesignChat(
                 div { class: "chat-box-row",
                     div { class: "chat-box-left",
                         AttachButton {
+                            scope: session_id.clone(),
                             on_uploaded: move |_| {
                                 error.set(None);
                                 refresh_uploads.call(());
