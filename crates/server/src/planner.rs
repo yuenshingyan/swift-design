@@ -31,13 +31,17 @@ pub(crate) struct Plan {
     pub(crate) should_edit: bool,
 }
 
-/// One question as the model writes it: a label and short options.
+/// One question as the model writes it: a label, short options, and
+/// whether more than one option may be picked.
 #[derive(serde::Deserialize)]
 struct PlannedQuestion {
     #[serde(default)]
     question: String,
     #[serde(default)]
     options: Vec<String>,
+    /// True when the options are not exclusive. Absent means one pick.
+    #[serde(default)]
+    multi: bool,
 }
 
 /// Parses a planner reply. Prose that is not JSON becomes the reply
@@ -87,9 +91,12 @@ pub(crate) fn parse_plan(content: &str) -> Plan {
     }
 }
 
-/// One planned question as a studio question: a single choice among
-/// the options, with an `Other` field, never required. The app adds
-/// the `Use your best judgment` choice itself.
+/// One planned question as a studio question: a choice among the
+/// options, with an `Other` field, never required. The app adds the
+/// `Use your best judgment` choice itself.
+///
+/// A question the model marks `multi` takes any number of options; the
+/// rest take one.
 fn to_question(index: usize, question: PlannedQuestion) -> BriefQuestion {
     let options: Vec<QuestionOption> = question
         .options
@@ -101,10 +108,10 @@ fn to_question(index: usize, question: PlannedQuestion) -> BriefQuestion {
             label: option.to_owned(),
         })
         .collect();
-    let kind = if options.is_empty() {
-        QuestionKind::ShortText
-    } else {
-        QuestionKind::SingleSelect
+    let kind = match (options.is_empty(), question.multi) {
+        (true, _) => QuestionKind::ShortText,
+        (false, true) => QuestionKind::MultiSelect,
+        (false, false) => QuestionKind::SingleSelect,
     };
     BriefQuestion {
         id: format!("q{}", index + 1),
@@ -113,7 +120,7 @@ fn to_question(index: usize, question: PlannedQuestion) -> BriefQuestion {
         kind,
         required: false,
         options,
-        allow_other: kind == QuestionKind::SingleSelect,
+        allow_other: kind.is_select(),
     }
 }
 
@@ -132,19 +139,23 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
     let (subject, owned) = match kind {
         ArtifactKind::Demo => (
             "You plan software demos with the user: landing pages, app screens, and similar layouts on a device canvas.",
-            "the canvases to build for and the number of candidates",
+            "the audience, the tone, light or dark, how much of the demo to build, what kind of product it is, what state the screens show, the canvases to build for, and the number of candidates",
         ),
         ArtifactKind::Deck => (
             "You plan slide decks with the user.",
-            "the scenario, the deck length in slides, the number of candidates, and how different the candidates are",
+            "the audience, the tone, light or dark, the scenario, the deck length in slides, how much goes on a slide, how much the deck leans on data, the number of candidates, and how different the candidates are",
         ),
     };
     format!(
         "{subject}\n\
          Read the request, the answers, and the conversation. Reply with only this JSON:\n\
-         {{\"reply\":\"text for the user\",\"questions\":[{{\"question\":\"...\",\"options\":[\"...\"]}}],\"generate\":false,\"edit\":false}}\n\
-         Use questions when you need a choice from the user. Ask at most {per_turn}. Give 2 to 4 short options for each.\n\
-         The app asks the user for {owned} itself. Never ask these. The input shows their answers, or `not chosen yet`.\n\
+         {{\"reply\":\"text for the user\",\"questions\":[{{\"question\":\"...\",\"options\":[\"...\"],\"multi\":false}}],\"generate\":false,\"edit\":false}}\n\
+         Ask 0 to {per_turn} questions. Ask none when the request and the source files already say enough: no question is the usual answer. Give 2 to 4 short options for each question you do ask.\n\
+         Set multi to true when the user can pick more than one option at once, such as the topics to cover or the sections to include.\n\
+         Set multi to false when the options rule each other out, such as the audience or the tone.\n\
+         The app asks the user for {owned} itself. Never ask these, and never ask them in other words. The input shows their answers, or `not chosen yet`.\n\
+         Ask only what this request raises and the list above does not cover, such as the features to show, the steps of a flow, or the data on a screen.\n\
+         Read the user's source files before you ask. Never ask what a source file already answers.\n\
          After {answered} answered questions, do not ask more.\n\
          Set generate to true when you know enough to write. Then say in reply what you will write.\n\
          When the input names an artifact open in the editor and the user asks for a change, set edit to true and generate to false. Say in reply what you will change. The app applies the change to that artifact.\n\
@@ -237,6 +248,33 @@ mod tests {
     }
 
     #[test]
+    fn a_question_marked_multi_takes_several_options() {
+        let plan = parse_plan(
+            r#"{"questions":[{"question":"What should it cover?","options":["HIG","SwiftUI"],"multi":true}]}"#,
+        );
+        let question = &plan.question_set.unwrap().questions[0];
+        assert_eq!(question.kind, QuestionKind::MultiSelect);
+        // `Other` belongs to every select, not only the single-pick one.
+        assert!(question.allow_other);
+    }
+
+    #[test]
+    fn a_question_without_multi_still_takes_one_option() {
+        let plan = parse_plan(r#"{"questions":[{"question":"Who for?","options":["A","B"]}]}"#);
+        let question = &plan.question_set.unwrap().questions[0];
+        assert_eq!(question.kind, QuestionKind::SingleSelect);
+        assert!(question.allow_other);
+    }
+
+    #[test]
+    fn the_prompt_tells_the_model_when_to_allow_several_picks() {
+        let prompt = planner_prompt(ArtifactKind::Demo);
+        assert!(prompt.contains(r#""multi":false"#));
+        assert!(prompt.contains("Set multi to true when the user can pick more than one option"));
+        assert!(prompt.contains("Set multi to false when the options rule each other out"));
+    }
+
+    #[test]
     fn a_question_without_options_asks_for_text() {
         let plan = parse_plan(r#"{"questions":[{"question":"What is the product name?"}]}"#);
         let set = plan.question_set.unwrap();
@@ -281,11 +319,22 @@ mod tests {
     #[test]
     fn the_prompts_name_what_the_app_asks() {
         let demo = planner_prompt(ArtifactKind::Demo);
-        assert!(demo.contains("the canvases to build for and the number of candidates"));
-        assert!(demo.contains("After 5 answered questions, do not ask more."));
+        assert!(demo.contains("the canvases to build for, and the number of candidates"));
+        assert!(demo.contains("what kind of product it is"));
         let deck = planner_prompt(ArtifactKind::Deck);
+        assert!(deck.contains("how much goes on a slide"));
+        // The recurring axes are the app's, for both kinds, and asking
+        // nothing on top of them is a valid turn.
+        for prompt in [&demo, &deck] {
+            assert!(prompt.contains("the audience, the tone, light or dark"));
+            assert!(prompt.contains("never ask them in other words"));
+            assert!(prompt.contains("the list above does not cover"));
+            assert!(prompt.contains("Ask 0 to 3 questions"));
+            assert!(prompt.contains("no question is the usual answer"));
+            assert!(prompt.contains("Never ask what a source file already answers"));
+        }
+        assert!(demo.contains("After 5 answered questions, do not ask more."));
         assert!(deck.contains("the scenario, the deck length in slides"));
-        assert!(deck.contains("Ask at most 3."));
     }
 
     #[test]
