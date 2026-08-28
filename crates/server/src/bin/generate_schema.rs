@@ -24,10 +24,6 @@ fn main() -> anyhow::Result<()> {
             schemars::schema_for!(design_model::Deck),
         ),
         (
-            "brief.schema.json",
-            schemars::schema_for!(design_model::DesignBrief),
-        ),
-        (
             "question-set.schema.json",
             schemars::schema_for!(design_model::BriefQuestionSet),
         ),
