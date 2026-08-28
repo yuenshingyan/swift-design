@@ -24,11 +24,10 @@ use tokio::process::Command;
 use tokio::sync::oneshot;
 
 use crate::api_error;
-use crate::briefing::{BriefingEngine, BriefingOutcome};
 use crate::designs::DesignStore;
 use crate::events::ChangeNotifier;
 use crate::generation::{GenerationEngine, GenerationOutcome};
-use crate::model_client::{self, ModelClient, TokenUsage};
+use crate::model_client::{self, TokenUsage};
 use crate::sessions::{RunMode, RunRecord, SessionStore, run_mode_for};
 use crate::settings::SettingsStore;
 
@@ -43,8 +42,6 @@ const LOG_TAIL_BYTES: usize = 4 * 1024;
 enum ResolvedLaunch {
     /// The user's custom shell command.
     Shell(String),
-    /// The built-in briefing engine.
-    Briefing(Box<BriefingEngine>),
     /// The built-in generation engine.
     Generation(Box<GenerationEngine>),
 }
@@ -218,12 +215,6 @@ impl AgentRunner {
             )
         })?;
         match mode {
-            RunMode::Briefing => {
-                let client = ModelClient::new(configuration, Some(self.settings.clone()));
-                let engine =
-                    BriefingEngine::new(client, self.sessions.clone(), self.notifier.clone());
-                Ok((engine.label(), ResolvedLaunch::Briefing(Box::new(engine))))
-            }
             RunMode::Generation => {
                 let mut engine = GenerationEngine::new(
                     configuration,
@@ -304,9 +295,6 @@ impl AgentRunner {
                 return Err(StartError::AlreadyRunning);
             }
             mark_running(&mut state, &name, session_id, mode, stop_sender);
-            if let ResolvedLaunch::Briefing(engine) = &launch {
-                state.context_window = engine.context_window();
-            }
             if let ResolvedLaunch::Generation(engine) = &launch {
                 state.context_window = engine.context_window();
             }
@@ -316,9 +304,6 @@ impl AgentRunner {
                 if let Some(process) = shell_process.take() {
                     self.spawn_shell_tasks(session_id.to_owned(), mode, process, stop_receiver);
                 }
-            }
-            ResolvedLaunch::Briefing(engine) => {
-                self.spawn_briefing_task(*engine, session_id.to_owned(), stop_receiver);
             }
             ResolvedLaunch::Generation(engine) => {
                 self.spawn_generation_task(*engine, session_id.to_owned(), stop_receiver);
@@ -337,7 +322,6 @@ impl AgentRunner {
             runtime: runtime.to_owned(),
             provider: None,
             model: None,
-            brief_revision: None,
             started_at: crate::time::rfc3339_now(),
             finished_at: None,
             result: None,
@@ -401,33 +385,6 @@ impl AgentRunner {
             if let Ok(mut state) = state.lock() {
                 state.is_running = false;
                 state.exit_code = code;
-                state.stop_sender = None;
-            }
-            notifier.notify();
-        });
-    }
-
-    /// Runs the briefing engine and settles the session.
-    fn spawn_briefing_task(
-        &self,
-        engine: BriefingEngine,
-        session_id: String,
-        stop_receiver: oneshot::Receiver<()>,
-    ) {
-        let log = self.log_sink();
-        let state = Arc::clone(&self.state);
-        let notifier = self.notifier.clone();
-        let sessions = self.sessions.clone();
-        tokio::spawn(async move {
-            let result = tokio::select! {
-                result = engine.run(&session_id, Arc::clone(&log)) => result,
-                _ = stop_receiver => Err("stopped by the user".to_owned()),
-            };
-            let outcome: Result<(), String> = result.map(|_: BriefingOutcome| ());
-            let exit_code = settle_built_in(&sessions, &session_id, outcome, &log).await;
-            if let Ok(mut state) = state.lock() {
-                state.is_running = false;
-                state.exit_code = Some(exit_code);
                 state.stop_sender = None;
             }
             notifier.notify();
@@ -571,9 +528,9 @@ async fn settle_built_in(
 ) -> i32 {
     match outcome {
         Ok(()) => {
-            // The generation engine leaves the session generating on a
-            // written design; move it to reviewing. Briefing and
-            // needs-clarification already set the state.
+            // The engine leaves the session generating on a written
+            // artifact; move it to reviewing. Questions and replies
+            // already set the state.
             if let Ok(Some(session)) = sessions.read(session_id).await
                 && session.state == WorkflowState::Generating
             {
@@ -763,7 +720,7 @@ mod tests {
         let status = wait_until_finished(&runner).await;
         assert_eq!(status["exit_code"], 0);
         assert_eq!(status["active_agent"], "custom");
-        assert_eq!(status["mode"], "briefing");
+        assert_eq!(status["mode"], "generation");
         assert!(
             status["log_tail"]
                 .as_str()
@@ -788,7 +745,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_run_is_refused_when_the_session_is_reviewing() {
+    async fn a_run_is_refused_when_the_session_is_in_error() {
         let directory = TempDir::new().unwrap();
         let (runner, sessions) = command_runner(&directory, "echo hi");
         sessions
@@ -796,11 +753,7 @@ mod tests {
             .await
             .unwrap();
         sessions
-            .apply("talk", design_model::WorkflowEvent::GenerateWithAssumptions)
-            .await
-            .unwrap();
-        sessions
-            .apply("talk", design_model::WorkflowEvent::GenerationSucceeded)
+            .apply("talk", design_model::WorkflowEvent::RunFailed)
             .await
             .unwrap();
         assert!(runner.start("talk").await.is_err());
@@ -843,7 +796,7 @@ mod tests {
             .await
             .unwrap();
         sessions
-            .apply("talk", design_model::WorkflowEvent::GenerateWithAssumptions)
+            .apply("talk", design_model::WorkflowEvent::GenerationStarted)
             .await
             .unwrap();
         runner.start("talk").await.unwrap();
