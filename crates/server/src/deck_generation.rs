@@ -576,16 +576,38 @@ impl GenerationEngine {
         log: &LogSink,
     ) -> Result<Deck, String> {
         let label = &context.label;
-        let rounds = crate::polish::polish_rounds(&context.effort);
-        if rounds == 0 {
-            context.report(1.0);
-        }
-        for round in 1..=rounds {
+        let limit = crate::polish::polish_round_limit(&context.effort);
+        // `limit` is at least 1, so the loop always measures once and
+        // `best_count` is always set before it is read.
+        let mut best = deck.clone();
+        let mut best_count = usize::MAX;
+        let mut previous_count: Option<usize> = None;
+        let mut stop = crate::polish::PolishStop::OutOfRounds;
+        let mut rounds_taken = 0usize;
+        for round in 1..=limit {
             let findings =
                 crate::deck_polish::dom_findings(&deck, &self.base_url(), label, log).await;
+            if findings.len() < best_count {
+                best_count = findings.len();
+                best = deck.clone();
+            }
+            // Nothing measures wrong: another round would spend a model
+            // call to change a deck that is already good.
+            if findings.is_empty() {
+                stop = crate::polish::PolishStop::Clean;
+                break;
+            }
+            // The last round did not reduce the findings, so the next
+            // will not either.
+            if previous_count.is_some_and(|before| findings.len() >= before) {
+                stop = crate::polish::PolishStop::NoImprovement;
+                break;
+            }
+            previous_count = Some(findings.len());
+            rounds_taken = round;
             let images = self.slide_images(&deck, label, log).await;
             log(&format!(
-                "{label}: polish round {round} ({} layout findings, {} slide images)",
+                "{label}: polish round {round} of at most {limit} ({} layout findings, {} slide images)",
                 findings.len(),
                 images.len()
             ));
@@ -618,9 +640,14 @@ impl GenerationEngine {
                     "{label}: polish reply unusable ({parse_error}); keeping the previous version"
                 )),
             }
-            context.report(DRAFT_SHARE + (1.0 - DRAFT_SHARE) * round as f32 / rounds as f32);
+            context.report(DRAFT_SHARE + (1.0 - DRAFT_SHARE) * round as f32 / limit as f32);
         }
-        Ok(deck)
+        log(&format!(
+            "{label}: {}",
+            stop.describe(rounds_taken, best_count)
+        ));
+        context.report(1.0);
+        Ok(best)
     }
 
     /// PNG screenshots of the deck's slides for the polish pass, at most
