@@ -12,8 +12,7 @@
 use std::collections::HashMap;
 
 use design_model::{
-    ArtifactKind, BriefQuestionSet, BriefRevision, Critique, DECK_VIEWPORT, Deck, Design,
-    DesignBrief, QuestionAnswer, WorkflowState,
+    ArtifactKind, BriefQuestionSet, DECK_VIEWPORT, Deck, Design, QuestionAnswer, WorkflowState,
 };
 use gloo_net::http::{Request, RequestBuilder, Response};
 use serde::{Deserialize, Serialize};
@@ -141,9 +140,6 @@ pub struct Session {
     /// The design or deck the user chose.
     #[serde(default)]
     pub chosen_design: Option<String>,
-    /// The approved brief revision.
-    #[serde(default)]
-    pub approved_revision: Option<u32>,
     /// The run options the next run uses.
     #[serde(default)]
     pub options: SessionOptions,
@@ -174,6 +170,10 @@ pub struct SessionOptions {
     /// How many slides a deck run writes. `None` leaves it to the agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slide_count: Option<u32>,
+    /// The scenario a deck is for, one of the presets. `None` leaves
+    /// it to the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<String>,
 }
 
 impl Default for SessionOptions {
@@ -186,6 +186,7 @@ impl Default for SessionOptions {
             preview: true,
             platforms: Vec::new(),
             slide_count: None,
+            scenario: None,
         }
     }
 }
@@ -203,9 +204,6 @@ impl SessionOptions {
 pub struct SessionView {
     /// The session record.
     pub session: Session,
-    /// The latest brief, when one exists.
-    #[serde(default)]
-    pub brief: Option<DesignBrief>,
     /// Every question set asked, in order.
     #[serde(default)]
     pub question_sets: Vec<BriefQuestionSet>,
@@ -347,47 +345,6 @@ pub async fn send_session_answers(
         .map(|_| ())
 }
 
-/// Body of `PUT /sessions/{id}/brief`.
-#[derive(Serialize)]
-struct BriefRequest<'value> {
-    brief: &'value DesignBrief,
-    source: &'value str,
-}
-
-/// Saves a user edit of the brief.
-pub async fn save_session_brief(id: &str, brief: &DesignBrief) -> Result<(), String> {
-    let builder = Request::put(&format!("/sessions/{id}/brief"))
-        .json(&BriefRequest {
-            brief,
-            source: "user_edit",
-        })
-        .map_err(|error| error.to_string())?;
-    send_checked(builder, "PUT /sessions/brief")
-        .await
-        .map(|_| ())
-}
-
-/// Fetches the brief revision history.
-pub async fn fetch_brief_revisions(id: &str) -> Result<Vec<BriefRevision>, String> {
-    get_json(&format!("/sessions/{id}/brief/revisions")).await
-}
-
-/// Fetches one brief revision.
-pub async fn fetch_brief_revision(id: &str, revision: u32) -> Result<DesignBrief, String> {
-    get_json(&format!("/sessions/{id}/brief?revision={revision}")).await
-}
-
-/// Writes an old brief revision back as a new user revision.
-pub async fn restore_brief_revision(id: &str, revision: u32) -> Result<(), String> {
-    send_empty(
-        Request::post(&format!(
-            "/sessions/{id}/brief/revisions/{revision}/restore"
-        )),
-        "restore",
-    )
-    .await
-}
-
 /// Replaces the run options of one session. The server rejects a
 /// variation count outside 1 to `VARIATION_LIMIT`, and any change while
 /// the session generates.
@@ -400,41 +357,13 @@ pub async fn save_session_options(id: &str, options: &SessionOptions) -> Result<
         .map(|_| ())
 }
 
-/// Approves the brief and starts generation.
-pub async fn approve_brief(id: &str) -> Result<(), String> {
-    send_empty(Request::post(&format!("/sessions/{id}/approve")), "approve").await
-}
-
-/// Generates with the recorded assumptions.
-pub async fn generate_with_assumptions(id: &str) -> Result<(), String> {
+/// Writes candidates now, without more questions.
+pub async fn generate_now(id: &str) -> Result<(), String> {
     send_empty(
-        Request::post(&format!("/sessions/{id}/generate-with-assumptions")),
-        "generate-with-assumptions",
+        Request::post(&format!("/sessions/{id}/generate")),
+        "generate",
     )
     .await
-}
-
-/// Body of `POST /sessions/{id}/critiques`.
-#[derive(Serialize)]
-struct CritiqueRequest<'value> {
-    #[serde(flatten)]
-    critique: &'value Critique,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    design: Option<&'value str>,
-}
-
-/// Sends a critique and starts an edit run.
-pub async fn send_critique(
-    id: &str,
-    critique: &Critique,
-    design: Option<&str>,
-) -> Result<(), String> {
-    let builder = Request::post(&format!("/sessions/{id}/critiques"))
-        .json(&CritiqueRequest { critique, design })
-        .map_err(|error| error.to_string())?;
-    send_checked(builder, "POST /sessions/critiques")
-        .await
-        .map(|_| ())
 }
 
 /// Retries a failed session.
