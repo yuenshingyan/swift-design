@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use design_model::{
-    ArtifactKind, BriefQuestion, BriefQuestionSet, BriefRevision, Critique, DesignBrief,
-    QuestionAnswer, RevisionSource, WorkflowError, WorkflowEvent, WorkflowState, transition,
+    ArtifactKind, BriefQuestion, BriefQuestionSet, QuestionAnswer, WorkflowError, WorkflowEvent,
+    WorkflowState, transition,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -27,9 +27,10 @@ pub const CANDIDATE_MARKER: &str = "-candidate-";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunMode {
-    /// The briefing engine: asks questions and drafts the brief.
-    Briefing,
-    /// The generation engine: writes designs from the approved brief.
+    /// The generation engine: plans the turn, asks, writes, or edits.
+    /// Records from before the planner say `briefing`; they read as
+    /// this.
+    #[serde(alias = "briefing")]
     Generation,
 }
 
@@ -37,7 +38,6 @@ impl RunMode {
     /// The snake_case name used in JSON and env vars.
     pub fn as_str(self) -> &'static str {
         match self {
-            RunMode::Briefing => "briefing",
             RunMode::Generation => "generation",
         }
     }
@@ -70,6 +70,10 @@ pub struct RunOptions {
     /// agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slide_count: Option<u32>,
+    /// The scenario a deck is for, one of the presets. `None` leaves
+    /// it to the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<String>,
 }
 
 impl Default for RunOptions {
@@ -79,6 +83,7 @@ impl Default for RunOptions {
             variations: None,
             platforms: Vec::new(),
             slide_count: None,
+            scenario: None,
             variety: default_effort(),
             templates: Vec::new(),
             preview: true,
@@ -103,15 +108,6 @@ fn default_true() -> bool {
     true
 }
 
-/// A critique waiting for the next generation run to apply.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PendingCritique {
-    /// The design the critique is about.
-    pub design: String,
-    /// The critique itself.
-    pub critique: Critique,
-}
-
 /// One conversation turn kept with the session.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatMessage {
@@ -125,6 +121,10 @@ pub struct ChatMessage {
     /// The number of the question set this turn posed, when it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question_set: Option<u32>,
+    /// True when the user asked to finish the preview named in
+    /// `design`. A plain message with a design open is an edit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_continue: bool,
 }
 
 impl ChatMessage {
@@ -135,6 +135,15 @@ impl ChatMessage {
             content: content.to_owned(),
             design: design.map(str::to_owned),
             question_set: None,
+            is_continue: false,
+        }
+    }
+
+    /// A user turn that asks to finish the preview `design`.
+    pub fn continue_request(content: &str, design: &str) -> Self {
+        Self {
+            is_continue: true,
+            ..Self::user(content, Some(design))
         }
     }
 
@@ -145,6 +154,7 @@ impl ChatMessage {
             content: content.to_owned(),
             design: None,
             question_set: None,
+            is_continue: false,
         }
     }
 
@@ -155,6 +165,7 @@ impl ChatMessage {
             content: content.to_owned(),
             design: None,
             question_set: Some(number),
+            is_continue: false,
         }
     }
 }
@@ -185,9 +196,6 @@ pub struct RunRecord {
     /// Model id for a built-in run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// The brief revision the run read, for a generation run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub brief_revision: Option<u32>,
     /// When it started, as an RFC 3339 UTC string.
     pub started_at: String,
     /// When it finished, when it has.
@@ -233,18 +241,9 @@ pub struct Session {
     /// The design the user chose from the candidates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_design: Option<String>,
-    /// The brief revision the user approved for generation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approved_revision: Option<u32>,
-    /// The number of the newest brief revision.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latest_brief_revision: Option<u32>,
     /// The number of the newest question set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_question_set: Option<u32>,
-    /// A critique waiting for the next generation run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_critique: Option<PendingCritique>,
     /// The run options for this session.
     #[serde(default)]
     pub options: RunOptions,
@@ -313,9 +312,6 @@ impl<'a> NewSession<'a> {
 pub struct SessionView {
     /// The session record.
     pub session: Session,
-    /// The latest brief, when one exists.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub brief: Option<DesignBrief>,
     /// Every question set asked, in order.
     pub question_sets: Vec<BriefQuestionSet>,
     /// The number of the question set still open, when one is.
@@ -389,12 +385,6 @@ impl SessionStore {
         self.session_directory(id).join("session.json")
     }
 
-    fn brief_path(&self, id: &str, revision: u32) -> PathBuf {
-        self.session_directory(id)
-            .join("brief")
-            .join(format!("{revision}.json"))
-    }
-
     fn question_set_path(&self, id: &str, number: u32) -> PathBuf {
         self.session_directory(id)
             .join("question-sets")
@@ -432,10 +422,7 @@ impl SessionStore {
             created_at: now.clone(),
             updated_at: now,
             chosen_design: None,
-            approved_revision: None,
-            latest_brief_revision: None,
             latest_question_set: None,
-            pending_critique: None,
             options: new.options,
         };
         self.write_session(&session).await?;
@@ -569,110 +556,6 @@ impl SessionStore {
     pub async fn recovery_target(&self, id: &str) -> Result<WorkflowState, SessionError> {
         let session = self.require(id).await?;
         Ok(session.state_before_error.unwrap_or(WorkflowState::Intake))
-    }
-
-    /// Writes the next brief revision and records it in the history.
-    /// Returns the new revision number. The session and the brief share
-    /// one artifact kind: a user edit moves the session's kind, every
-    /// other source takes the session's kind.
-    pub async fn write_brief_revision(
-        &self,
-        id: &str,
-        mut brief: DesignBrief,
-        source: RevisionSource,
-        summary: &str,
-    ) -> Result<u32, SessionError> {
-        let _guard = self.write_lock.lock().await;
-        let mut session = self.require(id).await?;
-        let revision = session.latest_brief_revision.unwrap_or(0) + 1;
-        brief.request = session.request.clone();
-        brief.revision = revision;
-        if source == RevisionSource::UserEdit {
-            session.artifact_kind = brief.artifact_kind;
-        } else {
-            brief.artifact_kind = session.artifact_kind;
-        }
-        // The canvas and the slide count are the app's answers, not the
-        // agent's. Mirror them into every revision so a brief the agent
-        // rewrites cannot drop them.
-        if !session.options.platforms.is_empty() {
-            brief.target_platform = session.options.platforms[0].clone();
-            brief.target_platforms = session.options.platforms.clone();
-        }
-        if session.options.slide_count.is_some() {
-            brief.slide_count = session.options.slide_count;
-        }
-        // The history belongs to the store. A brief arrives with whatever
-        // history its writer invented, and a model writes an entry for
-        // the revision it thinks it is creating, which would double the
-        // row. Take the previous revision's history and nothing else.
-        brief.revision_history = match revision > 1 {
-            true => self
-                .read_brief_unlocked(id, revision - 1)
-                .await?
-                .map(|previous| previous.revision_history)
-                .unwrap_or_default(),
-            false => Vec::new(),
-        };
-        brief.revision_history.push(BriefRevision {
-            revision,
-            source,
-            summary: summary.to_owned(),
-            at: crate::time::rfc3339_now(),
-        });
-        let directory = self.session_directory(id).join("brief");
-        tokio::fs::create_dir_all(&directory)
-            .await
-            .map_err(SessionError::io)?;
-        let json = serde_json::to_string_pretty(&brief).map_err(SessionError::io)?;
-        tokio::fs::write(self.brief_path(id, revision), json)
-            .await
-            .map_err(SessionError::io)?;
-        session.latest_brief_revision = Some(revision);
-        session.updated_at = crate::time::rfc3339_now();
-        self.write_session(&session).await?;
-        Ok(revision)
-    }
-
-    async fn read_brief_unlocked(
-        &self,
-        id: &str,
-        revision: u32,
-    ) -> Result<Option<DesignBrief>, SessionError> {
-        match tokio::fs::read_to_string(self.brief_path(id, revision)).await {
-            Ok(raw) => serde_json::from_str(&raw)
-                .map(Some)
-                .map_err(SessionError::io),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(SessionError::io(error)),
-        }
-    }
-
-    /// Reads one brief revision.
-    pub async fn read_brief(
-        &self,
-        id: &str,
-        revision: u32,
-    ) -> Result<Option<DesignBrief>, SessionError> {
-        self.read_brief_unlocked(id, revision).await
-    }
-
-    /// Reads the latest brief revision, when one exists.
-    pub async fn latest_brief(&self, id: &str) -> Result<Option<DesignBrief>, SessionError> {
-        let session = self.require(id).await?;
-        match session.latest_brief_revision {
-            Some(revision) => self.read_brief_unlocked(id, revision).await,
-            None => Ok(None),
-        }
-    }
-
-    /// The revision history of the latest brief.
-    pub async fn brief_revisions(&self, id: &str) -> Result<Vec<BriefRevision>, SessionError> {
-        Ok(self
-            .latest_brief(id)
-            .await?
-            .map(|brief| brief.revision_history)
-            .unwrap_or_default())
     }
 
     /// Writes the next question set. Returns its number.
@@ -903,13 +786,12 @@ pub async fn write_access(
     }
 }
 
-/// The run mode for a workflow state: briefing while the session gathers
-/// the brief, generation while it writes designs, and nothing otherwise.
+/// The run mode for a workflow state: generation in every state that
+/// can take a turn or is writing, and nothing in error.
 pub fn run_mode_for(state: WorkflowState) -> Option<RunMode> {
     match state {
-        WorkflowState::Intake | WorkflowState::Clarifying => Some(RunMode::Briefing),
-        WorkflowState::Generating => Some(RunMode::Generation),
-        _ => None,
+        WorkflowState::Error => None,
+        _ => Some(RunMode::Generation),
     }
 }
 
@@ -1021,71 +903,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_history_the_writer_invented_is_thrown_away() {
-        let (_directory, store) = store();
-        store
-            .create(NewSession::demo("talk", "Talk", "A talk."))
-            .await
-            .unwrap();
-        // A model that writes its own entry for the revision it thinks
-        // it is creating used to double the row in the panel.
-        let invented = DesignBrief {
-            revision_history: vec![BriefRevision {
-                revision: 1,
-                source: RevisionSource::Agent,
-                summary: "Created initial design brief".to_owned(),
-                at: "2026-08-27T00:00:00Z".to_owned(),
-            }],
-            ..DesignBrief::default()
-        };
-        store
-            .write_brief_revision("talk", invented, RevisionSource::Agent, "Drafted")
-            .await
-            .unwrap();
-        let brief = store.latest_brief("talk").await.unwrap().unwrap();
-        assert_eq!(brief.revision_history.len(), 1);
-        assert_eq!(brief.revision_history[0].summary, "Drafted");
-    }
-
-    #[tokio::test]
-    async fn brief_revisions_number_from_one_and_keep_history() {
-        let (_directory, store) = store();
-        store
-            .create(NewSession::demo("talk", "Talk", "A talk."))
-            .await
-            .unwrap();
-        let first = store
-            .write_brief_revision(
-                "talk",
-                DesignBrief::default(),
-                RevisionSource::Agent,
-                "Drafted",
-            )
-            .await
-            .unwrap();
-        assert_eq!(first, 1);
-        let second = store
-            .write_brief_revision(
-                "talk",
-                DesignBrief {
-                    audience: "engineers".to_owned(),
-                    ..DesignBrief::default()
-                },
-                RevisionSource::UserEdit,
-                "Edited",
-            )
-            .await
-            .unwrap();
-        assert_eq!(second, 2);
-        let brief = store.latest_brief("talk").await.unwrap().unwrap();
-        assert_eq!(brief.revision, 2);
-        assert_eq!(brief.audience, "engineers");
-        assert_eq!(brief.revision_history.len(), 2);
-        assert_eq!(brief.revision_history[0].source, RevisionSource::Agent);
-        assert_eq!(store.brief_revisions("talk").await.unwrap().len(), 2);
-    }
-
-    #[tokio::test]
     async fn question_sets_number_in_order_and_answers_attach_to_the_latest() {
         let (_directory, store) = store();
         store
@@ -1132,11 +949,16 @@ mod tests {
             .create(NewSession::demo("talk", "Talk", "A talk."))
             .await
             .unwrap();
-        assert!(store.apply("talk", WorkflowEvent::Approved).await.is_err());
+        assert!(
+            store
+                .apply("talk", WorkflowEvent::GenerationSucceeded)
+                .await
+                .is_err()
+        );
         let session = store.read("talk").await.unwrap().unwrap();
         assert_eq!(session.state, WorkflowState::Intake);
         let after = store
-            .apply("talk", WorkflowEvent::GenerateWithAssumptions)
+            .apply("talk", WorkflowEvent::GenerationStarted)
             .await
             .unwrap();
         assert_eq!(after.state, WorkflowState::Generating);
@@ -1150,7 +972,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .apply("talk", WorkflowEvent::GenerateWithAssumptions)
+            .apply("talk", WorkflowEvent::GenerationStarted)
             .await
             .unwrap();
         store
@@ -1196,7 +1018,6 @@ mod tests {
                     runtime: "built-in".to_owned(),
                     provider: Some("openai".to_owned()),
                     model: Some("gpt-5".to_owned()),
-                    brief_revision: Some(1),
                     started_at: crate::time::rfc3339_now(),
                     finished_at: None,
                     result: None,
@@ -1221,6 +1042,12 @@ mod tests {
         assert_eq!(runs[0].mode, RunMode::Generation);
         assert_eq!(runs[0].result.as_deref(), Some("succeeded"));
         assert_eq!(runs[0].artifacts, vec!["talk-candidate-1"]);
+    }
+
+    #[test]
+    fn old_run_modes_read_as_generation() {
+        let mode: RunMode = serde_json::from_str("\"briefing\"").unwrap();
+        assert_eq!(mode, RunMode::Generation);
     }
 
     #[tokio::test]
@@ -1255,50 +1082,6 @@ mod tests {
         let without_kind = raw.replace("\"artifact_kind\": \"deck\",", "");
         let old: Session = serde_json::from_str(&without_kind).unwrap();
         assert_eq!(old.artifact_kind, ArtifactKind::Demo);
-    }
-
-    #[tokio::test]
-    async fn agent_briefs_take_the_session_kind() {
-        let (_directory, store) = store();
-        store
-            .create(NewSession::demo("talk", "Talk", "A talk.").with_kind(ArtifactKind::Deck))
-            .await
-            .unwrap();
-        let brief = DesignBrief {
-            artifact_kind: ArtifactKind::Demo,
-            ..DesignBrief::default()
-        };
-        store
-            .write_brief_revision("talk", brief, RevisionSource::Agent, "Drafted")
-            .await
-            .unwrap();
-        let stored = store.latest_brief("talk").await.unwrap().unwrap();
-        assert_eq!(stored.artifact_kind, ArtifactKind::Deck);
-        assert_eq!(
-            store.read("talk").await.unwrap().unwrap().artifact_kind,
-            ArtifactKind::Deck
-        );
-    }
-
-    #[tokio::test]
-    async fn user_edits_move_the_session_kind() {
-        let (_directory, store) = store();
-        store
-            .create(NewSession::demo("talk", "Talk", "A talk."))
-            .await
-            .unwrap();
-        let brief = DesignBrief {
-            artifact_kind: ArtifactKind::Deck,
-            ..DesignBrief::default()
-        };
-        store
-            .write_brief_revision("talk", brief, RevisionSource::UserEdit, "Edited")
-            .await
-            .unwrap();
-        assert_eq!(
-            store.read("talk").await.unwrap().unwrap().artifact_kind,
-            ArtifactKind::Deck
-        );
     }
 
     #[test]
