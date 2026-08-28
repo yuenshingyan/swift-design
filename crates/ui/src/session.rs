@@ -13,7 +13,7 @@ use crate::question_card::{
     DraftAnswer, QaRow, QuestionCardState, QuestionSetCard, answered_entries, question_card_state,
     set_key,
 };
-use crate::run_settings::{CanvasPicker, DeckQuestions, RunSettings};
+use crate::run_settings::{CanvasPicker, DeckQuestions, RunSettings, SharedQuestions};
 use crate::settings::{SettingsPanel, pause_briefly};
 use crate::status::{RunStatusCard, working_label};
 use design_model::{ArtifactKind, QuestionAnswer, WorkflowState};
@@ -31,6 +31,7 @@ pub(crate) fn progress_label(state: WorkflowState, run: Option<&api::AgentRun>) 
             .or_else(|| run.map(working_label))
             .unwrap_or_else(|| "Generating…".to_owned()),
         WorkflowState::Reviewing => "Ready for review".to_owned(),
+        WorkflowState::Stopped => "Stopped before it finished".to_owned(),
         WorkflowState::Error => "Stopped: the run failed".to_owned(),
     }
 }
@@ -192,6 +193,19 @@ pub(crate) fn SessionWorkspace(
     });
 
     let open_set = session_view.open_question_set;
+    // The set the workbench asks: the open one, with its number, when it
+    // is still unanswered. `None` leaves the workbench to the run
+    // settings and the candidates.
+    let open_set_card = open_set.and_then(|number| {
+        if answered_sets.contains(&number) {
+            return None;
+        }
+        session_view
+            .question_sets
+            .get((number as usize).saturating_sub(1))
+            .map(|set| (number, set.clone()))
+    });
+    let is_asking = open_set_card.is_some();
     let skip_questions = use_callback({
         let session_id = session_id.clone();
         move |_: ()| {
@@ -220,15 +234,17 @@ pub(crate) fn SessionWorkspace(
         }
     });
 
-    let retry = {
+    // Both the stopped card and the failed card resume through this, so
+    // it is a callback rather than a closure one of them would move.
+    let resume = use_callback({
         let session_id = session_id.clone();
-        move |_| {
+        move |_: ()| {
             let session_id = session_id.clone();
             spawn(async move {
                 let _ = api::retry_session(&session_id).await;
             });
         }
-    };
+    });
 
     let start = {
         let session_id = session_id.clone();
@@ -276,35 +292,11 @@ pub(crate) fn SessionWorkspace(
                                             session_view.open_question_set,
                                         );
                                         match card_state {
-                                            QuestionCardState::Active => rsx! {
-                                                div { class: "thread-questions",
-                                                    QuestionSetCard {
-                                                        set: set.clone(),
-                                                        drafts,
-                                                        is_busy: is_running,
-                                                        can_skip,
-                                                        on_submit: move |answers| submit_answers.call(answers),
-                                                        on_skip: move |_| skip_questions.call(()),
-                                                        // A deck asks the app's own questions in the
-                                                        // same card, as Swift Deck did.
-                                                        app_questions: if session.artifact_kind == ArtifactKind::Deck { Some(rsx! {
-                                                            DeckQuestions {
-                                                                session_id: session_id.clone(),
-                                                                options: session.options.clone(),
-                                                                on_error: move |message| error.set(Some(message)),
-                                                            }
-                                                        }) } else { None },
-                                                    }
-                                                    if session.artifact_kind == ArtifactKind::Demo {
-                                                        CanvasPicker {
-                                                            session_id: session_id.clone(),
-                                                            kind: session.artifact_kind,
-                                                            options: session.options.clone(),
-                                                            on_error: move |message| error.set(Some(message)),
-                                                        }
-                                                    }
-                                                }
-                                            },
+                                            // The open set is asked in the
+                                            // workbench, not here. The chat
+                                            // keeps the record of what was
+                                            // answered.
+                                            QuestionCardState::Active => rsx! {},
                                             QuestionCardState::Answered => rsx! {
                                                 div { class: "thread-answers",
                                                     for entry in set_answers(&set, &session_view.answers, number) {
@@ -325,13 +317,30 @@ pub(crate) fn SessionWorkspace(
                             }
                         }
                     }
+                    // A stop is not a failure: it gets a plain card and
+                    // a Resume button, with nothing to report.
+                    if state == WorkflowState::Stopped {
+                        div { class: "stopped-card",
+                            p { class: "stopped-title", "The run stopped" }
+                            p { "Nothing was lost. Resume to carry on from where it stopped." }
+                            button {
+                                class: "primary",
+                                onclick: move |_| resume.call(()),
+                                "Resume"
+                            }
+                        }
+                    }
                     if state == WorkflowState::Error {
                         div { class: "error-card",
-                            p { class: "error-title", "The run stopped" }
+                            p { class: "error-title", "The run failed" }
                             if let Some(message) = &session.error {
                                 p { "{message}" }
                             }
-                            button { class: "primary", onclick: retry, "Retry" }
+                            button {
+                                class: "primary",
+                                onclick: move |_| resume.call(()),
+                                "Retry"
+                            }
                         }
                     }
                     if let Some(run) = &run_value {
@@ -373,16 +382,60 @@ pub(crate) fn SessionWorkspace(
                 }
             }
             section { class: "workbench",
+                // The open question set owns the workbench while it is
+                // open: it is the one thing waiting on the user.
+                if let Some((number, set)) = open_set_card {
+                    div { class: "workbench-questions",
+                        QuestionSetCard {
+                            key: "{number}",
+                            set,
+                            drafts,
+                            is_busy: is_running,
+                            can_skip,
+                            on_submit: move |answers| submit_answers.call(answers),
+                            on_skip: move |_| skip_questions.call(()),
+                            // The app's own questions sit in the same
+                            // grid as the agent's, as Swift Deck did.
+                            // The recurring axes are shared; the rest
+                            // are per kind.
+                            app_questions: Some(rsx! {
+                                SharedQuestions {
+                                    session_id: session_id.clone(),
+                                    kind: session.artifact_kind,
+                                    options: session.options.clone(),
+                                    on_error: move |message| error.set(Some(message)),
+                                }
+                                if session.artifact_kind == ArtifactKind::Deck {
+                                    DeckQuestions {
+                                        session_id: session_id.clone(),
+                                        options: session.options.clone(),
+                                        on_error: move |message| error.set(Some(message)),
+                                    }
+                                }
+                            }),
+                        }
+                        if session.artifact_kind == ArtifactKind::Demo {
+                            CanvasPicker {
+                                session_id: session_id.clone(),
+                                kind: session.artifact_kind,
+                                options: session.options.clone(),
+                                on_error: move |message| error.set(Some(message)),
+                            }
+                        }
+                    }
+                }
                 // Before the first candidates, the demo's run settings sit
                 // where the candidates will be.
-                if session.artifact_kind == ArtifactKind::Demo && cards.is_empty() && can_chat {
+                if !is_asking && session.artifact_kind == ArtifactKind::Demo && cards.is_empty()
+                    && can_chat
+                {
                     RunSettings {
                         session_id: session_id.clone(),
                         options: session.options.clone(),
                         on_error: move |message| error.set(Some(message)),
                     }
                 }
-                if is_canvas_shown(state, !cards.is_empty()) {
+                if !is_asking && is_canvas_shown(state, !cards.is_empty()) {
                     CandidateCanvas {
                         session_id: session_id.clone(),
                         cards,
@@ -458,13 +511,17 @@ fn chat_placeholder(state: WorkflowState) -> &'static str {
         WorkflowState::Clarifying => "Answer the questions above, or reply here…",
         WorkflowState::Generating => "Generating… send after it finishes",
         WorkflowState::Reviewing => "Ask for a change, or for new candidates…",
-        WorkflowState::Error => "The run stopped. Send a message to try again…",
+        WorkflowState::Stopped => "The run stopped. Send a message to carry on…",
+        WorkflowState::Error => "The run failed. Send a message to try again…",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{generation_step, is_canvas_shown, is_chat_open, is_start_offered, progress_label};
+    use super::{
+        chat_placeholder, generation_step, is_canvas_shown, is_chat_open, is_start_offered,
+        progress_label,
+    };
     use design_model::WorkflowState;
 
     #[test]
@@ -472,6 +529,8 @@ mod tests {
         assert!(is_chat_open(WorkflowState::Intake, false));
         assert!(is_chat_open(WorkflowState::Reviewing, false));
         assert!(is_chat_open(WorkflowState::Error, false));
+        // A stopped session takes a message: it resumes on the way in.
+        assert!(is_chat_open(WorkflowState::Stopped, false));
         assert!(!is_chat_open(WorkflowState::Generating, false));
         assert!(!is_chat_open(WorkflowState::Reviewing, true));
     }
@@ -484,6 +543,7 @@ mod tests {
         assert!(!is_start_offered(WorkflowState::Clarifying, false, true));
         assert!(!is_start_offered(WorkflowState::Clarifying, true, false));
         assert!(!is_start_offered(WorkflowState::Error, false, false));
+        assert!(!is_start_offered(WorkflowState::Stopped, false, false));
         assert!(!is_start_offered(WorkflowState::Reviewing, false, false));
     }
 
@@ -521,6 +581,19 @@ mod tests {
             progress_label(WorkflowState::Reviewing, None),
             "Ready for review"
         );
+    }
+
+    #[test]
+    fn a_stop_and_a_failure_read_differently() {
+        // The whole point of the stopped state: it must not read as a
+        // fault anywhere the user looks.
+        let stopped = progress_label(WorkflowState::Stopped, None);
+        let failed = progress_label(WorkflowState::Error, None);
+        assert_ne!(stopped, failed);
+        assert!(!stopped.contains("fail"));
+        assert!(failed.contains("failed"));
+        assert!(chat_placeholder(WorkflowState::Stopped).contains("carry on"));
+        assert!(chat_placeholder(WorkflowState::Error).contains("failed"));
     }
 
     #[test]
