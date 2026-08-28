@@ -74,6 +74,62 @@ pub struct RunOptions {
     /// it to the agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scenario: Option<String>,
+    /// Who the artifact is for, one of `AUDIENCES`. `None` leaves it to
+    /// the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    /// The tone the artifact takes, one of `TONES`. `None` leaves it to
+    /// the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<String>,
+    /// How much of a demo to build, one of `DEMO_SCOPES`. A deck says
+    /// its size with `slide_count`. `None` leaves it to the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Light or dark, one of `COLOR_MODES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_mode: Option<String>,
+    /// What kind of product a demo shows, one of `PRODUCT_KINDS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_kind: Option<String>,
+    /// What state a demo's screens are in, one of `DATA_STATES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_state: Option<String>,
+    /// How much goes on one slide, one of `SLIDE_DENSITIES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slide_density: Option<String>,
+    /// How much a deck leans on data, one of `EVIDENCE_STYLES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_style: Option<String>,
+}
+
+impl RunOptions {
+    /// The app-owned axis values, as (prompt name, stored value) pairs,
+    /// for the axes that apply to `kind`. An axis the user has not
+    /// picked is absent, so the agent decides it.
+    pub fn axes(&self, kind: ArtifactKind) -> Vec<(&'static str, &str)> {
+        let per_kind: &[(&'static str, &Option<String>)] = match kind {
+            ArtifactKind::Demo => &[
+                ("Scope", &self.scope),
+                ("Product kind", &self.product_kind),
+                ("Screen state", &self.data_state),
+            ],
+            ArtifactKind::Deck => &[
+                ("Slide density", &self.slide_density),
+                ("Evidence", &self.evidence_style),
+            ],
+        };
+        let shared: [(&'static str, &Option<String>); 3] = [
+            ("Audience", &self.audience),
+            ("Tone", &self.tone),
+            ("Color mode", &self.color_mode),
+        ];
+        shared
+            .iter()
+            .chain(per_kind.iter())
+            .filter_map(|(name, value)| value.as_deref().map(|value| (*name, value)))
+            .collect()
+    }
 }
 
 impl Default for RunOptions {
@@ -84,6 +140,14 @@ impl Default for RunOptions {
             platforms: Vec::new(),
             slide_count: None,
             scenario: None,
+            audience: None,
+            tone: None,
+            scope: None,
+            color_mode: None,
+            product_kind: None,
+            data_state: None,
+            slide_density: None,
+            evidence_style: None,
             variety: default_effort(),
             templates: Vec::new(),
             preview: true,
@@ -228,9 +292,15 @@ pub struct Session {
     pub artifact_kind: ArtifactKind,
     /// Where the session is in the workflow.
     pub state: WorkflowState,
-    /// The state to return to after an error.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state_before_error: Option<WorkflowState>,
+    /// The state to return to when the session resumes from `stopped`
+    /// or `error`. Records written before the stop state existed name
+    /// this `state_before_error`.
+    #[serde(
+        default,
+        alias = "state_before_error",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub resume_state: Option<WorkflowState>,
     /// The failure message shown in the error state. Ids only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -417,7 +487,7 @@ impl SessionStore {
             request: new.request.to_owned(),
             artifact_kind: new.artifact_kind,
             state: WorkflowState::Intake,
-            state_before_error: None,
+            resume_state: None,
             error: None,
             created_at: now.clone(),
             updated_at: now,
@@ -524,11 +594,13 @@ impl SessionStore {
         let _guard = self.write_lock.lock().await;
         let mut session = self.require(id).await?;
         let next = transition(session.state, event)?;
-        if event == WorkflowEvent::RunFailed {
-            session.state_before_error = Some(session.state);
+        // A halt records where to come back to; a resume clears both
+        // the marker and any failure message.
+        if matches!(event, WorkflowEvent::RunFailed | WorkflowEvent::RunStopped) {
+            session.resume_state = Some(session.state);
         }
         if matches!(event, WorkflowEvent::Recovered { .. }) {
-            session.state_before_error = None;
+            session.resume_state = None;
             session.error = None;
         }
         session.state = next;
@@ -551,11 +623,11 @@ impl SessionStore {
         Ok(session)
     }
 
-    /// The state to recover into after an error: the state before it,
-    /// or intake.
+    /// The state to resume into after a stop or an error: the state the
+    /// run halted in, or intake.
     pub async fn recovery_target(&self, id: &str) -> Result<WorkflowState, SessionError> {
         let session = self.require(id).await?;
-        Ok(session.state_before_error.unwrap_or(WorkflowState::Intake))
+        Ok(session.resume_state.unwrap_or(WorkflowState::Intake))
     }
 
     /// Writes the next question set. Returns its number.
@@ -787,10 +859,11 @@ pub async fn write_access(
 }
 
 /// The run mode for a workflow state: generation in every state that
-/// can take a turn or is writing, and nothing in error.
+/// can take a turn or is writing, and nothing in a halted one. A
+/// stopped or failed session resumes before it runs again.
 pub fn run_mode_for(state: WorkflowState) -> Option<RunMode> {
     match state {
-        WorkflowState::Error => None,
+        state if state.is_halted() => None,
         _ => Some(RunMode::Generation),
     }
 }
@@ -983,7 +1056,7 @@ mod tests {
             .unwrap();
         let failed = store.apply("talk", WorkflowEvent::RunFailed).await.unwrap();
         assert_eq!(failed.state, WorkflowState::Error);
-        assert_eq!(failed.state_before_error, Some(WorkflowState::Generating));
+        assert_eq!(failed.resume_state, Some(WorkflowState::Generating));
         assert_eq!(
             store.recovery_target("talk").await.unwrap(),
             WorkflowState::Generating
@@ -999,7 +1072,74 @@ mod tests {
             .unwrap();
         assert_eq!(recovered.state, WorkflowState::Generating);
         assert_eq!(recovered.error, None);
-        assert_eq!(recovered.state_before_error, None);
+        assert_eq!(recovered.resume_state, None);
+    }
+
+    #[tokio::test]
+    async fn a_stop_halts_without_recording_a_failure() {
+        let (_directory, store) = store();
+        store
+            .create(NewSession::demo("talk", "Talk", "A talk."))
+            .await
+            .unwrap();
+        store
+            .apply("talk", WorkflowEvent::GenerationStarted)
+            .await
+            .unwrap();
+        let stopped = store
+            .apply("talk", WorkflowEvent::RunStopped)
+            .await
+            .unwrap();
+        assert_eq!(stopped.state, WorkflowState::Stopped);
+        // A stop has nothing to report, so no failure message is kept.
+        assert_eq!(stopped.error, None);
+        assert_eq!(stopped.resume_state, Some(WorkflowState::Generating));
+        assert_eq!(
+            store.recovery_target("talk").await.unwrap(),
+            WorkflowState::Generating
+        );
+        let resumed = store
+            .apply(
+                "talk",
+                WorkflowEvent::Recovered {
+                    to: WorkflowState::Generating,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(resumed.state, WorkflowState::Generating);
+        assert_eq!(resumed.resume_state, None);
+    }
+
+    #[tokio::test]
+    async fn a_record_written_before_the_stop_state_still_resumes() {
+        let (_directory, store) = store();
+        store
+            .create(NewSession::demo("talk", "Talk", "A talk."))
+            .await
+            .unwrap();
+        store
+            .apply("talk", WorkflowEvent::GenerationStarted)
+            .await
+            .unwrap();
+        store.apply("talk", WorkflowEvent::RunFailed).await.unwrap();
+        // Records written before the rename name the field
+        // `state_before_error`; the alias keeps them resumable.
+        let raw = std::fs::read_to_string(store.session_path("talk")).unwrap();
+        let old = raw.replace("\"resume_state\"", "\"state_before_error\"");
+        assert!(old.contains("state_before_error"));
+        let loaded: Session = serde_json::from_str(&old).unwrap();
+        assert_eq!(loaded.resume_state, Some(WorkflowState::Generating));
+    }
+
+    #[test]
+    fn a_halted_session_starts_no_run_until_it_resumes() {
+        assert_eq!(run_mode_for(WorkflowState::Stopped), None);
+        assert_eq!(run_mode_for(WorkflowState::Error), None);
+        assert_eq!(
+            run_mode_for(WorkflowState::Generating),
+            Some(RunMode::Generation)
+        );
     }
 
     #[tokio::test]
