@@ -470,6 +470,27 @@ impl AgentRunner {
         })
     }
 
+    /// True when a run of `session_id` is in flight right now.
+    ///
+    /// The session state alone does not answer this: a server that goes
+    /// away mid-run leaves `generating` on disk with no run behind it.
+    pub fn is_running_session(&self, session_id: &str) -> bool {
+        match self.state.lock() {
+            Ok(state) => state.is_running && state.session_id.as_deref() == Some(session_id),
+            Err(_) => false,
+        }
+    }
+
+    /// Waits until no run of `session_id` is in flight, or `limit`
+    /// passes. Used before a delete, so the run settles before its
+    /// session is removed.
+    pub async fn wait_until_idle(&self, session_id: &str, limit: std::time::Duration) {
+        let deadline = std::time::Instant::now() + limit;
+        while self.is_running_session(session_id) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     /// Stops the active run. Does nothing when no run is active.
     pub fn stop(&self) {
         if let Ok(mut state) = self.state.lock()
