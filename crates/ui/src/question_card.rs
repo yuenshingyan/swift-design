@@ -203,6 +203,10 @@ pub(crate) fn QuestionSetCard(
     can_skip: bool,
     on_submit: EventHandler<Vec<QuestionAnswer>>,
     on_skip: EventHandler<()>,
+    /// The app's own question cards, shown in the same grid after the
+    /// agent's questions. A deck session fills this slot.
+    #[props(default)]
+    app_questions: Option<Element>,
 ) -> Element {
     let questions: Vec<BriefQuestion> = set.questions.iter().take(3).cloned().collect();
     let ready = answers_are_complete(&set, &drafts.read());
@@ -219,8 +223,13 @@ pub(crate) fn QuestionSetCard(
             .collect();
         on_submit.call(answers);
     };
+    let set_class = if app_questions.is_some() {
+        "question-set with-app-questions"
+    } else {
+        "question-set"
+    };
     rsx! {
-        div { class: "question-set",
+        div { class: "{set_class}",
             p { class: "question-set-title", "{set.title}" }
             p { class: "question-set-message", "{set.message}" }
             div { class: "question-cards",
@@ -237,6 +246,7 @@ pub(crate) fn QuestionSetCard(
                         },
                     }
                 }
+                {app_questions}
             }
             div { class: "question-set-actions",
                 button {
