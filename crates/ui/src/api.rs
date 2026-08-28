@@ -377,6 +377,17 @@ pub async fn fetch_brief_revision(id: &str, revision: u32) -> Result<DesignBrief
     get_json(&format!("/sessions/{id}/brief?revision={revision}")).await
 }
 
+/// Writes an old brief revision back as a new user revision.
+pub async fn restore_brief_revision(id: &str, revision: u32) -> Result<(), String> {
+    send_empty(
+        Request::post(&format!(
+            "/sessions/{id}/brief/revisions/{revision}/restore"
+        )),
+        "restore",
+    )
+    .await
+}
+
 /// Replaces the run options of one session. The server rejects a
 /// variation count outside 1 to `VARIATION_LIMIT`, and any change while
 /// the session generates.
