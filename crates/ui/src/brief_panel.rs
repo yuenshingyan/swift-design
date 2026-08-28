@@ -247,13 +247,33 @@ pub(crate) fn state_label(state: WorkflowState) -> &'static str {
     }
 }
 
-/// The badge class suffix for a state.
-fn state_class(state: WorkflowState) -> &'static str {
-    match state {
-        WorkflowState::Generating => "generating",
-        WorkflowState::Reviewing => "reviewing",
-        WorkflowState::Error => "error",
-        _ => "",
+/// True when the server accepts a user brief write in `state`: while
+/// the brief is being settled, and while a result is under review.
+pub(crate) fn is_restore_allowed(state: WorkflowState) -> bool {
+    matches!(
+        state,
+        WorkflowState::Clarifying
+            | WorkflowState::BriefReady
+            | WorkflowState::AwaitingApproval
+            | WorkflowState::Reviewing
+    )
+}
+
+/// True when the viewed revision can be written back: it is not the
+/// current one, and the state accepts a user edit.
+pub(crate) fn is_restore_offered(state: WorkflowState, viewed: u32, current: u32) -> bool {
+    viewed != current && is_restore_allowed(state)
+}
+
+/// The class of one revision row: the current revision, the one on
+/// view, or a plain row.
+pub(crate) fn revision_row_class(entry: u32, current: u32, viewed: Option<u32>) -> &'static str {
+    if entry == current {
+        "history-row current"
+    } else if viewed == Some(entry) {
+        "history-row selected"
+    } else {
+        "history-row"
     }
 }
 
@@ -293,12 +313,38 @@ pub(crate) fn BriefPanel(
         collapse_choice.set(None);
     }
     let is_collapsed = collapse_choice().unwrap_or(is_brief_collapsed_by_default(state));
+    // An old revision on view, fetched on a click on its row. The
+    // current revision is always the panel's own `brief`.
+    let mut viewed = use_signal(|| None::<(u32, DesignBrief)>);
+    let view_revision = {
+        let id = session_id.clone();
+        use_callback(move |number: u32| {
+            let id = id.clone();
+            spawn(async move {
+                match api::fetch_brief_revision(&id, number).await {
+                    Ok(old) => viewed.set(Some((number, old))),
+                    Err(error) => on_error.call(error),
+                }
+            });
+        })
+    };
+    let restore_revision = {
+        let id = session_id.clone();
+        use_callback(move |number: u32| {
+            let id = id.clone();
+            spawn(async move {
+                match api::restore_brief_revision(&id, number).await {
+                    Ok(()) => viewed.set(None),
+                    Err(error) => on_error.call(error),
+                }
+            });
+        })
+    };
     let Some(brief) = brief else {
         return rsx! {
             section { class: "brief-panel",
                 div { class: "brief-head",
                     span { class: "kicker", "Brief" }
-                    span { class: "state-badge {state_class(state)}", "{state_label(state)}" }
                 }
                 AnswersView { entries: answers }
                 p { class: "lede", "The brief appears here once the questions are answered." }
@@ -309,6 +355,19 @@ pub(crate) fn BriefPanel(
     let is_full_brief_offered = has_full_brief(&brief, &answers) || !revisions.is_empty();
     let revision = brief.revision;
     let open_count = groups.open.len();
+    let viewed_value = viewed();
+    let viewed_number = viewed_value.as_ref().map(|(number, _)| *number);
+    let rows: Vec<(u32, &'static str, String, String)> = revisions
+        .iter()
+        .map(|entry| {
+            (
+                entry.revision,
+                revision_row_class(entry.revision, revision, viewed_number),
+                revision_label(entry),
+                entry.summary.clone(),
+            )
+        })
+        .collect();
     let approve = {
         let id = session_id.clone();
         move |_| {
@@ -346,7 +405,6 @@ pub(crate) fn BriefPanel(
                     }
                 }
                 span { class: "kicker", "Brief" }
-                span { class: "state-badge {state_class(state)}", "{state_label(state)}" }
                 span { class: "kind-badge", "{brief.artifact_kind.label()}" }
                 span { class: "rev", "rev {revision}" }
             }
@@ -365,15 +423,42 @@ pub(crate) fn BriefPanel(
                     }
                 }
                 if is_expanded() {
-                    BriefFields { brief: brief.clone(), answers: answers.clone() }
+                    if let Some((number, old)) = viewed_value.clone() {
+                        div { class: "revision-view",
+                            span { class: "kicker", "Revision {number}" }
+                            if is_restore_offered(state, number, revision) {
+                                button {
+                                    class: "secondary",
+                                    onclick: move |_| restore_revision(number),
+                                    "Restore this revision"
+                                }
+                            }
+                            button {
+                                class: "secondary",
+                                onclick: move |_| viewed.set(None),
+                                "Back to current"
+                            }
+                        }
+                        BriefFields { brief: old, answers: answers.clone() }
+                    } else {
+                        BriefFields { brief: brief.clone(), answers: answers.clone() }
+                    }
                     if !revisions.is_empty() {
                         div { class: "revision-list",
                             span { class: "kicker", "Revisions" }
-                            for entry in revisions.iter() {
-                                div {
-                                    key: "{entry.revision}",
-                                    class: if entry.revision == revision { "history-row current" } else { "history-row" },
-                                    "{revision_label(entry)}"
+                            for (number, row_class, label, summary) in rows.iter().cloned() {
+                                button {
+                                    key: "{number}",
+                                    class: "{row_class}",
+                                    onclick: move |_| {
+                                        if number == revision {
+                                            viewed.set(None);
+                                        } else {
+                                            view_revision(number);
+                                        }
+                                    },
+                                    span { class: "revision-name", "{label}" }
+                                    span { class: "revision-summary", "{summary}" }
                                 }
                             }
                         }
@@ -996,6 +1081,23 @@ mod tests {
             at: "2026-08-26T14:02:00Z".to_owned(),
         };
         assert_eq!(revision_label(&entry), "r3 · user edit · 14:02");
+    }
+
+    #[test]
+    fn restore_is_offered_only_for_an_older_revision_in_an_editable_state() {
+        assert!(is_restore_offered(WorkflowState::AwaitingApproval, 1, 3));
+        assert!(is_restore_offered(WorkflowState::Reviewing, 2, 3));
+        assert!(!is_restore_offered(WorkflowState::AwaitingApproval, 3, 3));
+        assert!(!is_restore_offered(WorkflowState::Generating, 1, 3));
+        assert!(!is_restore_offered(WorkflowState::Error, 1, 3));
+    }
+
+    #[test]
+    fn revision_rows_mark_the_current_and_the_viewed_one() {
+        assert_eq!(revision_row_class(3, 3, Some(1)), "history-row current");
+        assert_eq!(revision_row_class(1, 3, Some(1)), "history-row selected");
+        assert_eq!(revision_row_class(2, 3, Some(1)), "history-row");
+        assert_eq!(revision_row_class(2, 3, None), "history-row");
     }
 
     #[test]
