@@ -7,17 +7,20 @@
 //! routes, the slide vocabulary, and two deck-only actions: the presenter
 //! view and the PPTX export.
 
-use design_model::{ArtifactKind, Deck, Slide, Theme, Transition};
+use design_model::{ArtifactKind, DECK_VIEWPORT, Deck, Slide, Theme, Transition};
 use dioxus::document;
 use dioxus::prelude::*;
 
 use crate::api;
+use crate::canvas::frame_width_rem;
 use crate::chat::DesignChat;
 use crate::editor::{
     APPLY_TO_PREVIEW, HistorySection, NodeCommand, NodeInspector, PREVIEW_LISTENER, PreviewMessage,
-    SelectedNode, ThemeForm, TransitionForm, fragment_label, move_screen, node_reference, optional,
+    STRIP_TILE_HEIGHT_REM, SelectedNode, ThemeForm, ThumbnailState, TransitionForm, fragment_label,
+    move_screen, node_reference, optional, outline_entry, strip_summary, thumbnail_class,
 };
 use crate::icons;
+use crate::settings::artifact_project;
 
 /// Loads one deck, then hands it to the editor.
 #[component]
@@ -231,6 +234,9 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
 
     let slide_count = deck().slides.len();
     let outline_count = deck().outline.len();
+    // A deck is always 16:9, so every tile has the same width.
+    let tile_width = frame_width_rem(DECK_VIEWPORT, STRIP_TILE_HEIGHT_REM);
+    let summary = strip_summary(slide_count, outline_count.saturating_sub(slide_count));
     let total_fields = field_count(&deck());
     let user_count = user_paths().len().min(total_fields);
     let agent_count = total_fields - user_count;
@@ -361,10 +367,12 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                     for message in messages() {
                         p { class: "error", "{message}" }
                     }
-                    iframe {
-                        title: "Deck preview",
-                        "data-preview": "true",
-                        src: "/decks/{deck_id}/render?version={preview_version()}&editable=true&slide={selected() + 1}",
+                    div { class: "preview-stage",
+                        iframe {
+                            title: "Deck preview",
+                            "data-preview": "true",
+                            src: "/decks/{deck_id}/render?version={preview_version()}&editable=true&slide={selected() + 1}",
+                        }
                     }
                     p { class: "preview-hint",
                         span { "Click a node to reference it in the chat and edit its text" }
@@ -397,72 +405,106 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                             },
                         }
                     }
+                    div { class: "strip-head",
+                        "Slides"
+                        span { class: "strip-counts", "{summary}" }
+                    }
                     div { class: "thumbnails",
                         for (index, label) in thumbnail_labels.into_iter().enumerate() {
-                            div {
-                                key: "{index}",
-                                class: if dragged() == Some(index) { "thumbnail current dragging" } else if index == selected() { "thumbnail current" } else { "thumbnail" },
-                                title: "{label} · drag to reorder",
-                                "data-index": "{index}",
-                                onclick: move |_| {
-                                    selected.set(index);
-                                    selected_node.set(None);
-                                    pending_slide_delete.set(None);
-                                },
-                                iframe {
-                                    title: "Slide {index + 1}",
-                                    tabindex: "-1",
-                                    src: "/decks/{deck_id}/render?version={preview_version()}&slide={index + 1}",
-                                }
-                                span { class: "thumbnail-number", {format!("{:02}", index + 1)} }
-                                if slide_count > 1 {
-                                    button {
-                                        class: if pending_slide_delete() == Some(index) { "thumbnail-delete confirm" } else { "thumbnail-delete" },
-                                        title: "Delete this slide",
-                                        onclick: move |event: Event<MouseData>| {
-                                            event.stop_propagation();
-                                            if pending_slide_delete() == Some(index) {
-                                                pending_slide_delete.set(None);
-                                                deck.with_mut(|deck| {
-                                                    if deck.slides.len() > 1 && index < deck.slides.len() {
-                                                        deck.slides.remove(index);
-                                                    }
-                                                });
-                                                selected.set(selected().min(slide_count.saturating_sub(2)));
-                                                selected_node.set(None);
-                                                save.call(true);
-                                            } else {
-                                                pending_slide_delete.set(Some(index));
-                                            }
+                            {
+                                let is_deleting = pending_slide_delete() == Some(index);
+                                let class = thumbnail_class(ThumbnailState {
+                                    is_current: index == selected(),
+                                    is_dragging: dragged() == Some(index),
+                                    is_portrait: false,
+                                    is_deleting,
+                                });
+                                rsx! {
+                                    div {
+                                        key: "{index}",
+                                        class: "{class}",
+                                        title: "{label} · drag to reorder",
+                                        style: "--tile-width: {tile_width}rem",
+                                        "data-index": "{index}",
+                                        onclick: move |_| {
+                                            selected.set(index);
+                                            selected_node.set(None);
+                                            pending_slide_delete.set(None);
                                         },
-                                        if pending_slide_delete() == Some(index) {
-                                            "Delete?"
-                                        } else {
-                                            "×"
+                                        iframe {
+                                            title: "Slide {index + 1}",
+                                            tabindex: "-1",
+                                            src: "/decks/{deck_id}/render?version={preview_version()}&slide={index + 1}",
+                                        }
+                                        span { class: "thumbnail-number", {format!("{:02}", index + 1)} }
+                                        if slide_count > 1 {
+                                            button {
+                                                class: if is_deleting { "thumbnail-delete confirm" } else { "thumbnail-delete" },
+                                                title: "Delete this slide",
+                                                onclick: move |event: Event<MouseData>| {
+                                                    event.stop_propagation();
+                                                    if pending_slide_delete() == Some(index) {
+                                                        pending_slide_delete.set(None);
+                                                        deck.with_mut(|deck| {
+                                                            if deck.slides.len() > 1 && index < deck.slides.len() {
+                                                                deck.slides.remove(index);
+                                                            }
+                                                        });
+                                                        selected.set(selected().min(slide_count.saturating_sub(2)));
+                                                        selected_node.set(None);
+                                                        save.call(true);
+                                                    } else {
+                                                        pending_slide_delete.set(Some(index));
+                                                    }
+                                                },
+                                                "×"
+                                                if is_deleting {
+                                                    span { class: "delete-text", "delete?" }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                        for index in slide_count..outline_count {
-                            div {
-                                key: "outline-{index}",
-                                class: "thumbnail outline",
-                                title: "{outline_title(&deck(), index)} · not written yet",
-                                span { class: "thumbnail-number", {format!("{:02}", index + 1)} }
-                                span { class: "outline-label", "outline" }
-                            }
+                        if outline_count > slide_count {
+                            span { class: "strip-divider" }
                         }
-                        button {
-                            class: "thumbnail add",
-                            title: "Add a slide",
-                            onclick: move |_| {
-                                deck.with_mut(|deck| deck.slides.push(default_slide()));
-                                selected.set(slide_count);
-                                selected_node.set(None);
-                                save.call(true);
-                            },
-                            "+"
+                        // A planned tile is an outline entry nobody has
+                        // written. A click asks the app to write every one
+                        // of them from the outline.
+                        for index in slide_count..outline_count {
+                            {
+                                let (number, title) = outline_entry(&deck().outline, index, "Slide");
+                                let deck_id = deck_id.clone();
+                                rsx! {
+                                    button {
+                                        key: "outline-{index}",
+                                        class: "thumbnail outline",
+                                        style: "--tile-width: {tile_width}rem",
+                                        title: "{outline_title(&deck(), index)} · click to write the remaining slides",
+                                        onclick: move |_| {
+                                            let deck_id = deck_id.clone();
+                                            spawn(async move {
+                                                let session_id = artifact_project(&deck_id);
+                                                let sent = api::continue_artifact(&session_id, &deck_id).await;
+                                                if let Err(message) = sent {
+                                                    messages.write().push(message);
+                                                }
+                                            });
+                                        },
+                                        span { class: "outline-kicker",
+                                            "{number}"
+                                            span { class: "planned-text", " planned" }
+                                        }
+                                        span { class: "outline-title", "{title}" }
+                                        span { class: "outline-write",
+                                            span { dangerous_inner_html: icons::PLAY }
+                                            span { class: "write-text", "write" }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -606,7 +648,8 @@ fn outline_title(deck: &Deck, index: usize) -> String {
     }
 }
 
-/// The slide the + tile inserts: a heading and a paragraph.
+/// A sample slide for tests: a heading and a paragraph.
+#[cfg(test)]
 fn default_slide() -> Slide {
     Slide {
         html: "<div class='body'><h2>New slide</h2><p>Text</p></div>".to_owned(),
