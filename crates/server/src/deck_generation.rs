@@ -53,9 +53,10 @@ impl GenerationEngine {
         })
     }
 
-    /// The preview decks the latest user turn asked to continue: the
-    /// deck id of the newest user message, when that deck exists and is
-    /// still a preview.
+    /// The preview decks the latest user turn asked to continue: every
+    /// deck named by a trailing continue request that still is a
+    /// preview. Pressing Finish on several candidates continues them
+    /// all.
     pub(crate) async fn continue_deck_requests(
         &self,
         session_id: &str,
@@ -68,18 +69,17 @@ impl GenerationEngine {
             .messages(session_id)
             .await
             .map_err(|error| error.to_string())?;
-        let Some(deck_id) = messages
-            .iter()
-            .rev()
-            .find(|message| message.role == "user" && message.is_continue)
-            .and_then(|message| message.design.clone())
-        else {
-            return Ok(Vec::new());
-        };
-        match decks.load(&deck_id).await {
-            Ok(Some(deck)) if deck.is_preview() => Ok(vec![deck_id]),
-            _ => Ok(Vec::new()),
+        let mut previews = Vec::new();
+        for deck_id in crate::generation::trailing_continue_ids(&messages) {
+            // A deck that is no longer a preview was finished already,
+            // by this run or an earlier one.
+            if let Ok(Some(deck)) = decks.load(&deck_id).await
+                && deck.is_preview()
+            {
+                previews.push(deck_id);
+            }
         }
+        Ok(previews)
     }
 
     /// Runs the chosen task for a deck session and returns the outcome.
@@ -133,7 +133,7 @@ impl GenerationEngine {
     ) -> Result<GenerationOutcome, GenerationStop> {
         let decks = self.deck_store()?;
         let count = context.options.variation_count();
-        let attachments = Arc::new(self.load_attachments(log).await);
+        let attachments = Arc::new(self.load_attachments(&context.session_id, log).await);
         let concepts = if count > 1 {
             self.plan_concepts(client, context, count, &attachments, log)
                 .await?
@@ -274,7 +274,7 @@ impl GenerationEngine {
             .ok_or_else(|| GenerationStop::Failed(format!("deck `{deck_id}` does not exist")))?;
         let deck_json = serde_json::to_string(&deck)
             .map_err(|error| GenerationStop::Failed(error.to_string()))?;
-        let attachments = self.load_attachments(log).await;
+        let attachments = self.load_attachments(&context.session_id, log).await;
         let messages = vec![
             serde_json::json!({ "role": "system", "content": deck_system_prompt() }),
             self.user_message(
@@ -322,7 +322,7 @@ impl GenerationEngine {
     ) -> Vec<(String, Result<usize, String>)> {
         let ids: Vec<String> = deck_ids.iter().map(|id| (*id).to_owned()).collect();
         let shares = self.shared_progress(&ids, 5, 95);
-        let attachments = Arc::new(self.load_attachments(log).await);
+        let attachments = Arc::new(self.load_attachments(&context.session_id, log).await);
         let mut tasks = tokio::task::JoinSet::new();
         for (index, deck_id) in deck_ids.iter().enumerate() {
             let engine = self.clone();
@@ -576,6 +576,16 @@ impl GenerationEngine {
         log: &LogSink,
     ) -> Result<Deck, String> {
         let label = &context.label;
+        // Without Chrome nothing can be measured, and a round would
+        // ask the model to fix findings that were never taken.
+        if !crate::polish::can_audit() {
+            log(&format!(
+                "{label}: {}",
+                crate::polish::PolishStop::NotMeasured.describe(0, 0)
+            ));
+            context.report(1.0);
+            return Ok(deck);
+        }
         let limit = crate::polish::polish_round_limit(&context.effort);
         // `limit` is at least 1, so the loop always measures once and
         // `best_count` is always set before it is read.
@@ -1165,6 +1175,16 @@ mod tests {
             .unwrap();
     }
 
+    /// A deck session past its setup card: the app's own questions were
+    /// asked, so the next planner turn is free to write.
+    async fn set_up_deck_session(sessions: &SessionStore) {
+        deck_session(sessions).await;
+        sessions
+            .apply("talk", design_model::WorkflowEvent::QuestionsAsked)
+            .await
+            .unwrap();
+    }
+
     #[test]
     fn deck_system_prompt_carries_deck_rules_the_schema_and_the_example() {
         let prompt = deck_system_prompt();
@@ -1222,13 +1242,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_deck_run_asks_the_apps_own_questions_before_it_writes() {
+        let server = FakeModelServer::start().await;
+        // The planner wants to write at once and asks nothing.
+        server.push_text(WRITE_PLAN);
+        let directory = tempfile::tempdir().unwrap();
+        let stores = stores(&directory);
+        deck_session(&stores.sessions).await;
+        let outcome = engine(&server, &stores)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        // The deck's own questions live on this card: the scenario, the
+        // length, the density, the evidence, the candidates, and the
+        // variety. Without the card the deck flow asked nothing at all.
+        assert!(matches!(
+            outcome,
+            GenerationOutcome::NeedsClarification { question_set: 1 }
+        ));
+        let set = stores
+            .sessions
+            .read_question_set("talk", 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(set.questions.is_empty());
+        assert!(set.can_proceed_with_assumptions);
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[tokio::test]
     async fn a_valid_deck_reply_is_saved_as_a_candidate() {
         let server = FakeModelServer::start().await;
         server.push_text(WRITE_PLAN);
         server.push_text(SAMPLE_DECK);
         let directory = tempfile::tempdir().unwrap();
         let stores = stores(&directory);
-        deck_session(&stores.sessions).await;
+        set_up_deck_session(&stores.sessions).await;
         let outcome = engine(&server, &stores)
             .run("talk", silent_log())
             .await
@@ -1317,7 +1367,7 @@ mod tests {
         server.push_text(SAMPLE_DECK);
         let directory = tempfile::tempdir().unwrap();
         let stores = stores(&directory);
-        deck_session(&stores.sessions).await;
+        set_up_deck_session(&stores.sessions).await;
         let engine = GenerationEngine::new(
             server.configuration(),
             stores.designs.clone(),
