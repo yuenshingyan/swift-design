@@ -482,11 +482,17 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
   padding: 0.5rem; border-radius: 1.375rem; background: #15181C; overflow: hidden;
   box-shadow: 0 0 0 1px rgba(21,24,28,.15); }
 .bezel iframe, .bezel .card-blank { width: 100%; height: 100%; border-radius: 0.875rem; }
-.card-pill { position: absolute; top: 0.5rem; left: 0.5rem; z-index: 2; display: inline-flex;
+.card-pills { position: absolute; top: 0.5rem; left: 0.5rem; z-index: 2; display: flex;
+  align-items: center; gap: 0.375rem; }
+.canvas-card.phone .card-pills { flex-direction: column; align-items: flex-start; }
+.card-pill { display: inline-flex;
   align-items: center; gap: 0.375rem; padding: 0.2rem 0.6rem; border-radius: 999px;
   border: 1px solid var(--hairline); background: rgba(255,255,255,.96); color: var(--teal);
   font-family: var(--mono); font-size: 0.68rem; box-shadow: var(--sh-control); }
 .card-pill .dot { width: 6px; height: 6px; border-radius: 999px; background: var(--teal); }
+.card-count { position: absolute; top: 0.5rem; right: 0.5rem; z-index: 2; padding: 0.15rem 0.45rem;
+  border-radius: 999px; border: 1px solid var(--hairline); background: rgba(255,255,255,.96);
+  color: var(--ink-2); font-family: var(--mono); font-size: 0.66rem; box-shadow: var(--sh-control); }
 .card-finish { flex: none; display: inline-flex; align-items: center; gap: 0.3rem;
   padding: 0.15rem 0.6rem; white-space: nowrap; border: 1px solid var(--teal); border-radius: 999px;
   background: var(--teal); color: #FFFFFF; font-family: var(--mono); font-size: 0.68rem;
@@ -494,9 +500,8 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .card-finish:hover:not(:disabled) { background: var(--teal-hover); border-color: var(--teal-hover); }
 .card-finish span { display: flex; }
 .card-pager { flex: none; display: inline-flex; align-items: center; gap: 0.1rem;
-  padding: 0.1rem 0.3rem; white-space: nowrap; border: 1px solid var(--hairline);
-  border-radius: 999px; background: var(--raised); font-family: var(--mono); font-size: 0.72rem;
-  color: var(--ink); box-shadow: none; }
+  padding: 0.1rem 0.2rem; white-space: nowrap; border: 1px solid var(--hairline);
+  border-radius: 999px; background: var(--raised); box-shadow: none; }
 .card-pager button { width: 1.25rem; height: 1.25rem; padding: 0; border: 0; border-radius: 999px;
   background: transparent; box-shadow: none; color: var(--ink-2); font-size: 0.85rem;
   line-height: 1; display: flex; align-items: center; justify-content: center; }
@@ -509,14 +514,15 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
   min-height: 1.75rem; padding: 0.5rem 0.625rem; }
 .card-name { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
 .card-footer .card-finish { justify-self: end; }
-/* A phone card is narrow: the name takes one row, the pager and Finish the next. */
-.canvas-card.phone .card-footer { grid-template-columns: auto 1fr; }
-.canvas-card.phone .card-name { grid-column: 1 / -1; }
-.canvas-card.phone .card-pager { grid-column: 1; justify-self: start; }
-.canvas-card.phone .card-finish { grid-column: 2; }
+/* A phone card is narrow: one row, the name gives way, Finish is an icon. */
+.canvas-card.phone .card-footer { display: flex; gap: 0.375rem; }
+.canvas-card.phone .card-name { flex: 1 1 auto; }
+.canvas-card.phone .card-finish { padding: 0.3rem; }
+.canvas-card.phone .card-finish .finish-text { display: none; }
 .chosen-pill { flex: none; display: inline-flex; align-items: center; gap: 0.3rem;
-  padding: 0.15rem 0.6rem; border: 1px solid var(--teal-line); border-radius: 999px;
-  background: var(--teal-tint); color: var(--teal); font-family: var(--mono); font-size: 0.68rem; }
+  padding: 0.2rem 0.6rem; border: 1px solid var(--teal-line); border-radius: 999px;
+  background: var(--teal-tint); color: var(--teal); font-family: var(--mono); font-size: 0.68rem;
+  box-shadow: var(--sh-control); }
 .chosen-pill span { display: flex; }
 .card-label { font-family: var(--mono); font-size: 0.75rem; color: var(--ink);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -927,8 +933,17 @@ button.brief-toggle:hover { background: transparent; color: var(--ink); }
 .section-content { color: var(--ink-2); }
 .brief-actions { display: flex; flex-direction: row-reverse; flex-wrap: wrap; gap: 0.625rem; align-items: center; }
 .revision-list { display: flex; flex-direction: column; gap: 0.2rem; }
-.revision-list .history-row { font-family: var(--mono); font-size: 0.7rem; color: var(--muted); }
-.revision-list .history-row.current { color: var(--ink); font-weight: 500; }
+.revision-list button.history-row { justify-content: flex-start; padding: 0.25rem 0.4rem; border: 1px solid transparent;
+  border-radius: var(--r-control); background: transparent; box-shadow: none; text-align: left; }
+.revision-list button.history-row:hover:not(:disabled) { background: var(--subtle); border-color: transparent; }
+.revision-list .history-row.selected { background: var(--teal-tint); border-color: var(--teal-line); }
+.revision-list .revision-name { flex: none; font-family: var(--mono); font-size: 0.7rem; color: var(--muted); }
+.revision-list .history-row.current .revision-name { color: var(--ink); font-weight: 500; }
+.revision-list .revision-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 0.74rem; color: var(--ink-2); }
+.revision-view { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.revision-view .kicker { margin-right: auto; }
+.revision-view button { padding: 0.3rem 0.6rem; font-size: 0.72rem; }
 
 .progress-step { font-size: 0.8rem; font-weight: 500; margin-bottom: 0.4rem; }
 
