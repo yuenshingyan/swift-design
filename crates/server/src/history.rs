@@ -143,6 +143,16 @@ impl HistoryStore {
         }
     }
 
+    /// Deletes every snapshot of `id`. A design with no history has
+    /// nothing to delete, which is not an error.
+    pub async fn delete(&self, id: &str) -> anyhow::Result<()> {
+        match tokio::fs::remove_dir_all(self.design_directory(id)).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Moves the history of `old_id` to `new_id`. A design with no history
     /// has nothing to move, which is not an error.
     pub async fn rename(&self, old_id: &str, new_id: &str) -> anyhow::Result<()> {
@@ -184,6 +194,25 @@ pub fn saved_at_of(stamp: &str) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_delete_removes_every_snapshot_of_one_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HistoryStore::new(directory.path().join("history"));
+        store
+            .snapshot_at("talk", 1_000_000_000, b"{}")
+            .await
+            .unwrap();
+        store
+            .snapshot_at("talking", 1_000_000_000, b"{}")
+            .await
+            .unwrap();
+        store.delete("talk").await.unwrap();
+        assert!(store.list("talk").await.unwrap().is_empty());
+        assert_eq!(store.list("talking").await.unwrap().len(), 1);
+        // Deleting an id with no history is not an error.
+        store.delete("talk").await.unwrap();
+    }
 
     #[test]
     fn stamps_are_rfc3339_times_with_hyphens() {
