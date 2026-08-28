@@ -12,7 +12,7 @@ use crate::chat_controls::{ModelChip, SendButton};
 use crate::icons;
 use crate::run_settings::state_label;
 use crate::settings::{SettingsPanel, pause_briefly};
-use crate::uploads::{AttachButton, AttachmentChips};
+use crate::uploads::{AttachButton, AttachmentChips, PasteUploads};
 
 /// The label on the template button: how many templates are chosen.
 fn template_button_label(chosen: usize) -> String {
@@ -47,6 +47,19 @@ fn state_class(state: design_model::WorkflowState) -> &'static str {
     }
 }
 
+/// A stored RFC 3339 stamp as a row shows it: the date, the time to the
+/// minute, and the zone. A stamp of another shape is shown unchanged.
+fn short_time(stamp: &str) -> String {
+    let Some((date, time)) = stamp.split_once('T') else {
+        return stamp.to_owned();
+    };
+    let minutes: String = time.chars().take(5).collect();
+    if date.len() != 10 || minutes.len() != 5 {
+        return stamp.to_owned();
+    }
+    format!("{date} {minutes} UTC")
+}
+
 /// The landing page.
 #[component]
 pub fn Home(on_open_session: EventHandler<String>) -> Element {
@@ -64,8 +77,15 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
     let mut uploads = use_signal(Vec::<api::UploadSummary>::new);
     let refresh_uploads = use_callback(move |_: ()| {
         spawn(async move {
-            if let Ok(listing) = api::fetch_uploads().await {
+            if let Ok(listing) = api::fetch_uploads(api::DRAFT_SCOPE).await {
                 uploads.set(listing);
+            }
+        });
+    });
+    let refresh_sessions = use_callback(move |_: ()| {
+        spawn(async move {
+            if let Ok(listing) = api::fetch_sessions().await {
+                sessions.set(listing);
             }
         });
     });
@@ -167,6 +187,14 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                             }
                         },
                     }
+                    PasteUploads {
+                        scope: api::DRAFT_SCOPE.to_owned(),
+                        on_uploaded: move |_| {
+                            error.set(None);
+                            refresh_uploads.call(());
+                        },
+                        on_error: move |message| error.set(Some(message)),
+                    }
                     AttachmentChips {
                         uploads: uploads(),
                         on_changed: move |_| refresh_uploads.call(()),
@@ -175,6 +203,7 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                     div { class: "brief-footer",
                         div { class: "home-controls",
                             AttachButton {
+                                scope: api::DRAFT_SCOPE.to_owned(),
                                 on_uploaded: move |_| {
                                     error.set(None);
                                     refresh_uploads.call(());
@@ -249,6 +278,11 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                         },
                         span { class: "project-title", "{summary.title}" }
                         span { class: "project-kind", "{summary.artifact_kind.label()}" }
+                        span {
+                            class: "project-time",
+                            title: "Created {summary.created_at}\nUpdated {summary.updated_at}",
+                            "{short_time(&summary.updated_at)}"
+                        }
                         span { class: "state-badge {state_class(summary.state)}",
                             "{state_label(summary.state)}"
                         }
@@ -261,7 +295,16 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                                     event.stop_propagation();
                                     let id = id.clone();
                                     spawn(async move {
-                                        let _ = api::delete_session(&id).await;
+                                        // A refused delete used to be
+                                        // dropped here, so the button
+                                        // read as broken.
+                                        match api::delete_session(&id).await {
+                                            Ok(()) => {
+                                                error.set(None);
+                                                refresh_sessions.call(());
+                                            }
+                                            Err(message) => error.set(Some(message)),
+                                        }
                                     });
                                 }
                             },
@@ -420,7 +463,15 @@ fn TemplatePicker(
 mod tests {
     use design_model::ArtifactKind;
 
-    use crate::home::{COMPOSER_PLACEHOLDER, kind_detail, template_button_label};
+    use crate::home::{COMPOSER_PLACEHOLDER, kind_detail, short_time, template_button_label};
+
+    #[test]
+    fn a_row_time_keeps_the_date_the_minute_and_the_zone() {
+        assert_eq!(short_time("2026-08-28T15:27:55Z"), "2026-08-28 15:27 UTC");
+        // A session written before the app stored the times has none.
+        assert_eq!(short_time(""), "");
+        assert_eq!(short_time("odd"), "odd");
+    }
 
     #[test]
     fn the_template_button_counts_what_is_chosen() {
