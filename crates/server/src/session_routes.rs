@@ -25,8 +25,7 @@ use crate::designs::{DesignStore, is_valid_design_id};
 use crate::events::ChangeNotifier;
 use crate::sessions::{
     AnswerRecord, ChatMessage, NewSession, RunOptions, Session, SessionError, SessionStore,
-    SessionSummary, SessionView, is_valid_session_id, session_id_from_request,
-    session_id_of_artifact,
+    SessionSummary, SessionView, is_valid_session_id, new_session_id, session_id_of_artifact,
 };
 
 /// Most slides a deck run may be asked for. Past this the run costs
@@ -161,6 +160,7 @@ struct CreateRequest {
 async fn create_session(
     State(sessions): State<SessionStore>,
     State(runner): State<AgentRunner>,
+    State(uploads): State<crate::uploads::UploadStore>,
     State(notifier): State<ChangeNotifier>,
     Json(request): Json<CreateRequest>,
 ) -> Response {
@@ -174,7 +174,10 @@ async fn create_session(
     }
     let id = match request.id {
         Some(id) => id.trim().to_owned(),
-        None => session_id_from_request(prompt),
+        None => match new_session_id() {
+            Ok(id) => id,
+            Err(error) => return api_error::internal_error(&error),
+        },
     };
     if !is_valid_session_id(&id) {
         return api_error::error_response(
@@ -198,6 +201,15 @@ async fn create_session(
         .with_kind(request.artifact_kind.unwrap_or_default());
     match sessions.create(new).await {
         Ok(session) => {
+            // The landing page attaches files before the session exists,
+            // so the new session takes what the composer showed.
+            match uploads.adopt(&id).await {
+                Ok(count) if count > 0 => {
+                    tracing::info!(session_id = %id, count, "uploads adopted")
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(session_id = %id, %error, "adopting uploads failed"),
+            }
             notifier.notify();
             try_start(&runner, &id).await;
             tracing::info!(
@@ -242,22 +254,59 @@ async fn get_session(
 /// Deletes a session. The designs stay.
 async fn delete_session(
     State(sessions): State<SessionStore>,
+    State(designs): State<DesignStore>,
+    State(decks): State<DeckStore>,
+    State(runner): State<AgentRunner>,
+    State(uploads): State<crate::uploads::UploadStore>,
     State(notifier): State<ChangeNotifier>,
     Path(id): Path<String>,
 ) -> Response {
-    let session = match require_session(&sessions, &id).await {
-        Ok(session) => session,
-        Err(response) => return response,
-    };
-    if session.state == WorkflowState::Generating {
-        return conflict("cannot delete a session while it is generating");
+    if let Err(response) = require_session(&sessions, &id).await {
+        return response;
+    }
+    // Deleting a session ends its run. The user asked for the session to
+    // go, so there is nothing left for the run to write to.
+    if runner.is_running_session(&id) {
+        runner.stop();
+        runner
+            .wait_until_idle(&id, std::time::Duration::from_millis(1500))
+            .await;
+        tracing::info!(session_id = %id, "run stopped for a delete");
     }
     match sessions.delete(&id).await {
         Ok(_) => {
+            delete_session_artifacts(&designs, &decks, &id).await;
+            // The session's source files go with it: nothing else reads
+            // them.
+            if let Err(error) = uploads.delete_scope(&id).await {
+                tracing::warn!(session_id = %id, %error, "deleting the session uploads failed");
+            }
             notifier.notify();
             StatusCode::NO_CONTENT.into_response()
         }
         Err(error) => session_error_response(&error),
+    }
+}
+
+/// Deletes the artifacts of a deleted session: its designs and its
+/// decks, candidates included.
+///
+/// A session id comes from the request text, so the same request makes
+/// the same id. Without this the next session with that request would
+/// open on the deleted session's candidates. A failure is logged and
+/// does not fail the delete: the session record is already gone.
+async fn delete_session_artifacts(designs: &DesignStore, decks: &DeckStore, id: &str) {
+    match designs.delete_session(id).await {
+        Ok(count) if count > 0 => tracing::info!(session_id = %id, count, "designs deleted"),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(session_id = %id, %error, "deleting the session designs failed")
+        }
+    }
+    match decks.delete_session(id).await {
+        Ok(count) if count > 0 => tracing::info!(session_id = %id, count, "decks deleted"),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(session_id = %id, %error, "deleting the session decks failed"),
     }
 }
 
@@ -445,8 +494,13 @@ async fn post_message(
                 Vec::new(),
             );
         }
-        if session.state != WorkflowState::Reviewing {
-            return conflict("continue is only allowed while reviewing");
+        // Generating counts: a Finish pressed while a run works joins
+        // that run instead of being refused.
+        if !matches!(
+            session.state,
+            WorkflowState::Reviewing | WorkflowState::Generating
+        ) {
+            return conflict("continue is only allowed while reviewing or generating");
         }
     } else if session.state == WorkflowState::Generating {
         return conflict("cannot send a message while generating");
@@ -586,6 +640,17 @@ async fn generate_now(
     };
     if !session.state.can_take_turn() {
         return conflict("cannot generate while generating or in error");
+    }
+    // A skip closes the open card. Without a record the set stays open,
+    // and the workbench keeps asking over the candidates it wrote.
+    let answers = match sessions.answers(&id).await {
+        Ok(answers) => answers,
+        Err(error) => return session_error_response(&error),
+    };
+    if let Some(number) = open_question_set(&session, &answers)
+        && let Err(error) = sessions.record_answers(&id, number, Vec::new()).await
+    {
+        return session_error_response(&error);
     }
     if let Err(error) = sessions.apply(&id, WorkflowEvent::GenerationStarted).await {
         return session_error_response(&error);
@@ -856,6 +921,111 @@ mod tests {
         let session = view(&application, "talk").await;
         assert_eq!(session["session"]["state"], "generating");
         assert_eq!(session["messages"][0]["content"], "Try again, smaller.");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_session_takes_its_candidates_with_it() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "talk").await;
+        // The stores the test application serves from.
+        let designs = crate::designs::DesignStore::new(directory.path().join("designs"));
+        let decks = crate::decks::DeckStore::new(directory.path().join("decks"));
+        let design: design_model::Design =
+            serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap();
+        designs.save("talk-candidate-1", &design).await.unwrap();
+        designs.save("other-candidate-1", &design).await.unwrap();
+        decks
+            .save("talk-candidate-1", &crate::test_support::sample_deck())
+            .await
+            .unwrap();
+        let (status, body) = send(application.clone(), "DELETE", "/sessions/talk", None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        // A session id comes from the request text, so the next session
+        // with the same request reuses this id. Its candidates must not
+        // be waiting for it.
+        assert!(designs.load("talk-candidate-1").await.unwrap().is_none());
+        assert!(decks.load("talk-candidate-1").await.unwrap().is_none());
+        assert!(designs.load("other-candidate-1").await.unwrap().is_some());
+        create(&application, "talk").await;
+        assert_eq!(
+            view(&application, "talk").await["designs"],
+            serde_json::json!([])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_generating_session_deletes_without_a_fight() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "talk").await;
+        send(application.clone(), "POST", "/sessions/talk/generate", None).await;
+        assert_eq!(
+            view(&application, "talk").await["session"]["state"],
+            "generating"
+        );
+        // Generating is not a reason to keep a session the user asked
+        // to delete. A run in flight is stopped first; a stale state
+        // like this one has no run behind it at all.
+        let (status, body) = send(application.clone(), "DELETE", "/sessions/talk", None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        let (status, _) = send(application.clone(), "GET", "/sessions/talk", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn skipping_the_questions_closes_the_open_card() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "talk").await;
+        send(
+            application.clone(),
+            "PUT",
+            "/sessions/talk/question-set",
+            Some(r#"{"title":"T","message":"Two things.","questions":[{"id":"tone","label":"Which tone?","kind":"single_select","required":false,"options":[{"value":"warm","label":"Warm"}]}]}"#),
+        )
+        .await;
+        assert_eq!(
+            view(&application, "talk").await["open_question_set"],
+            serde_json::json!(1)
+        );
+        let (status, _) = send(application.clone(), "POST", "/sessions/talk/generate", None).await;
+        assert_eq!(status, StatusCode::OK);
+        // The card is answered by the skip, so the workbench shows the
+        // candidates instead of asking over them.
+        let session = view(&application, "talk").await;
+        assert_eq!(session["open_question_set"], serde_json::Value::Null);
+        assert_eq!(session["answers"][0]["question_set"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_second_finish_joins_the_running_turn() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "talk").await;
+        // The run that writes the candidates is in flight.
+        send(application.clone(), "POST", "/sessions/talk/generate", None).await;
+        assert_eq!(
+            view(&application, "talk").await["session"]["state"],
+            "generating"
+        );
+        for candidate in ["talk-candidate-1", "talk-candidate-2"] {
+            let body =
+                format!(r#"{{"content":"Finish it.","design":"{candidate}","action":"continue"}}"#);
+            let (status, body) = send(
+                application.clone(),
+                "POST",
+                "/sessions/talk/messages",
+                Some(&body),
+            )
+            .await;
+            // Pressing Finish on a second candidate is not a conflict.
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        }
+        let session = view(&application, "talk").await;
+        assert_eq!(session["session"]["state"], "generating");
+        assert_eq!(session["messages"][0]["design"], "talk-candidate-1");
+        assert_eq!(session["messages"][1]["design"], "talk-candidate-2");
     }
 
     #[tokio::test]
