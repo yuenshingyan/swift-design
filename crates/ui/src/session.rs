@@ -13,7 +13,7 @@ use crate::question_card::{
     DraftAnswer, QaRow, QuestionCardState, QuestionSetCard, answered_entries, question_card_state,
     set_key,
 };
-use crate::run_settings::{CanvasPicker, DeckQuestions, RunSettings, SharedQuestions};
+use crate::run_settings::{DeckQuestions, RunSettings, SharedQuestions};
 use crate::settings::{SettingsPanel, pause_briefly};
 use crate::status::{RunStatusCard, working_label};
 use design_model::{ArtifactKind, QuestionAnswer, WorkflowState};
@@ -162,8 +162,12 @@ pub(crate) fn SessionWorkspace(
             cards_from_decks(&decks(), &session_id, session.chosen_design.as_deref())
         }
     };
+    // Only a running turn reports progress. The finished run keeps its
+    // last percentages, and reading those left every card marked
+    // `writing` with its Finish button hidden.
     let run_designs = run_value
         .as_ref()
+        .filter(|run| run.is_running)
         .map(|run| run.designs.clone())
         .unwrap_or_default();
 
@@ -191,6 +195,12 @@ pub(crate) fn SessionWorkspace(
             });
         }
     });
+
+    // A message from the session left behind belongs to that session.
+    use_effect(use_reactive!(|session_id| {
+        let _ = session_id;
+        error.set(None);
+    }));
 
     let open_set = session_view.open_question_set;
     // The set the workbench asks: the open one, with its number, when it
@@ -414,10 +424,13 @@ pub(crate) fn SessionWorkspace(
                                 }
                             }),
                         }
+                        // A demo's run settings belong with the
+                        // questions: the card is now open on the first
+                        // turn, so this is the only place they appear
+                        // before the first candidates.
                         if session.artifact_kind == ArtifactKind::Demo {
-                            CanvasPicker {
+                            RunSettings {
                                 session_id: session_id.clone(),
-                                kind: session.artifact_kind,
                                 options: session.options.clone(),
                                 on_error: move |message| error.set(Some(message)),
                             }
@@ -440,6 +453,7 @@ pub(crate) fn SessionWorkspace(
                         session_id: session_id.clone(),
                         cards,
                         run_designs,
+                        on_error: move |message| error.set(Some(message)),
                         revision: revision(),
                         chosen: session.chosen_design.clone(),
                         on_open: move |(kind, id): (ArtifactKind, String)| match kind {
