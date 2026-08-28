@@ -98,7 +98,6 @@ pub fn routes() -> Router<crate::AppState> {
         .route("/instructions", get(get_instructions))
         .route("/schemas/design", get(get_design_schema))
         .route("/schemas/deck", get(get_deck_schema))
-        .route("/schemas/brief", get(get_brief_schema))
         .route("/schemas/question-set", get(get_question_set_schema))
 }
 
@@ -110,11 +109,6 @@ async fn get_design_schema() -> Json<schemars::Schema> {
 /// Returns the deck JSON Schema, generated from the deck types.
 async fn get_deck_schema() -> Json<schemars::Schema> {
     Json(schemars::schema_for!(Deck))
-}
-
-/// Returns the brief JSON Schema, generated from the brief types.
-async fn get_brief_schema() -> Json<schemars::Schema> {
-    Json(schemars::schema_for!(design_model::DesignBrief))
 }
 
 /// Returns the question set JSON Schema, generated from the question
@@ -131,16 +125,14 @@ async fn get_instructions() -> Json<serde_json::Value> {
 /// The build steps, in order. One instruction per sentence.
 fn steps() -> Vec<String> {
     vec![
-        "GET /schemas/design, GET /schemas/deck, GET /schemas/brief, and GET /schemas/question-set. Read the JSON Schemas.".to_owned(),
-        "GET /sessions/{id}. Read the request, the artifact_kind, the state, the messages, the question sets, and the answers. The artifact_kind is `demo` or `deck`. A demo session writes designs. A deck session writes decks.".to_owned(),
-        format!("Briefing mode: ask only questions that change the result. For a demo, ask in this order: artifact type and platform; audience and primary goal; primary action; required content and constraints; brand and visual direction and accessibility; technical constraints. For a deck, ask in this order: the scenario; the length in slides; the audience; required content and constraints; brand and visual direction and accessibility; technical constraints. Ask at most {limit} questions per turn. PUT /sessions/{{id}}/question-set with a BriefQuestionSet. Set required to false for a question the user may skip. The app adds a skip choice. Never invent a brand, an audience, or a conversion goal.", limit = QUESTIONS_PER_TURN_LIMIT),
-        "Briefing mode: wait with the /events loop, then GET /sessions/{id} and read the answers. When the brief is ready, PUT /sessions/{id}/brief with {\"brief\": <DesignBrief>, \"source\": \"agent\"}. Keep confirmed_facts for what the user stated, assumptions for what you decided, and open_questions for what is still unknown. Write a confirmed fact only when no answer and no brief field already states it: the brief carries every question and answer in answered_questions, and the app deletes a fact that repeats one. Write each fact and each assumption as one sentence of at most 12 words. Ask instead of assuming when the choice changes the layout, the content, or the visual direction. Do not write designs or decks in briefing mode. The server answers 409.".to_owned(),
-        "The app asks the user for these, not you: the artifact kind, the number of variations, the canvases for a demo, and the number of slides for a deck. Never ask about them. Read artifact_kind, target_platforms, and slide_count from the brief and follow them. A demo brief with several entries in target_platforms wants one design per canvas: write one file per canvas, each with that canvas in `viewport`.".to_owned(),
-        "Generation mode: GET /sessions/{id}/brief. The brief is authoritative. Do not override a confirmed fact. Use an assumption only where no confirmed fact covers the need.".to_owned(),
-        "Generation mode, demo session: write the design as JSON that conforms to GET /schemas/design. PUT it to /designs/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
-        "Generation mode, deck session: write the deck as JSON that conforms to GET /schemas/deck. The deck has `slides`, not `screens`, and no `viewport`. PUT it to /decks/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
+        "GET /schemas/design, GET /schemas/deck, and GET /schemas/question-set. Read the JSON Schemas.".to_owned(),
+        "GET /sessions/{id}. Read the request, the artifact_kind, the options, the state, the messages, the question sets, and the answers. The artifact_kind is `demo` or `deck`. A demo session writes designs. A deck session writes decks. There is no brief: the request and the answers are the input.".to_owned(),
+        format!("Plan the turn. When you need a choice from the user, PUT /sessions/{{id}}/question-set with a BriefQuestionSet: at most {limit} questions, each single_select with 2 to 4 short options and allow_other true, none required, can_proceed_with_assumptions true. The app adds a skip choice. The session moves to clarifying. Then stop. After {answered} answered questions, do not ask more.", limit = QUESTIONS_PER_TURN_LIMIT, answered = crate::planner::ANSWERED_QUESTION_LIMIT),
+        "The app asks the user for these, not you: the artifact kind, the number of variations, the canvases for a demo, and for a deck the scenario, the number of slides, and how different the candidates are. Never ask about them. Read them from the session options and follow them. A demo with several platforms wants one design per canvas: write one file per canvas, each with that canvas in `viewport`.".to_owned(),
+        "When you know enough, write. First POST /sessions/{id}/generate: the session moves to generating and accepts artifact writes; in any other state the server answers 409. Demo session: write the design as JSON that conforms to GET /schemas/design. PUT it to /designs/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
+        "Deck session: write the deck as JSON that conforms to GET /schemas/deck. The deck has `slides`, not `screens`, and no `viewport`. PUT it to /decks/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
         "A 422 response lists every problem in error.details. Fix each one. PUT again.".to_owned(),
-        "Generation mode: if the brief lacks a detail you cannot design without, do not guess. PUT /sessions/{id}/question-set with the blocking questions. The session returns to clarifying. Then stop.".to_owned(),
+        "When the user asks for a change in the chat while an artifact is open, edit that artifact and PUT it again. When no artifact is open, write new candidates.".to_owned(),
         "GET /uploads lists the user's source files. Each row has name, size_bytes, content_type, and is_image. GET /uploads/{name} returns the file. Use an image row as `<img src='/uploads/{name}'>`.".to_owned(),
         "After you save a design, look at it: GET /designs/{id}/screens/{n}.png returns a PNG of screen n, 1-based. It needs Chrome or Chromium and answers 503 without one. Review every screen for overlap, overflow, empty space, and weak contrast. Fix what you see and PUT the design again. GET /designs/{id}/export returns the design as one HTML file. GET /designs/{id}/export.pdf returns it as a PDF, one page per screen.".to_owned(),
         "After you save a deck, look at it: GET /decks/{id}/slides/{n}.png returns a PNG of slide n, 1-based. Review every slide the same way and PUT the deck again. GET /decks/{id}/export returns the deck as one HTML file. GET /decks/{id}/export.pdf returns it as a PDF, one page per slide. GET /decks/{id}/export.pptx returns it as a PowerPoint file. GET /decks/{id}/present is the presenter view with the notes.".to_owned(),
@@ -159,8 +151,8 @@ fn instructions() -> serde_json::Value {
         serde_json::from_str(include_str!("../../../fixtures/sample-deck.json"))
             .unwrap_or_default();
     serde_json::json!({
-        "purpose": "Turn a request into an approved design brief, then build HTML designs or decks from it. Swift Design keeps the workflow state, validates, renders, and lets the user edit. Swift Design makes no LLM API calls.",
-        "session": "The run works on one session. Its id is in the SWIFT_DESIGN_SESSION_ID environment variable. The mode is in SWIFT_DESIGN_RUN_MODE: briefing or generation. The artifact kind is in SWIFT_DESIGN_ARTIFACT_KIND: demo or deck. GET /sessions/{id} returns the state, the artifact_kind, the brief, the question sets, the answers, and the messages.",
+        "purpose": "Turn a request into HTML designs or decks: ask a few questions in the chat, write candidates, then edit them from the chat. Swift Design keeps the workflow state, validates, renders, and lets the user edit. Swift Design makes no LLM API calls.",
+        "session": "The run works on one session. Its id is in the SWIFT_DESIGN_SESSION_ID environment variable. The mode is in SWIFT_DESIGN_RUN_MODE: generation. The artifact kind is in SWIFT_DESIGN_ARTIFACT_KIND: demo or deck. GET /sessions/{id} returns the state, the artifact_kind, the options, the question sets, the answers, and the messages.",
         "kinds": {
             "demo": "A software demo: a landing page, app screens, or a similar layout on a device viewport. Written as a design with `screens` and a `viewport`. Saved under /designs.",
             "deck": "A slide presentation on a 1920 by 1080 px canvas. Written as a deck with `slides` and no `viewport`. Saved under /decks.",
@@ -181,7 +173,6 @@ fn instructions() -> serde_json::Value {
         },
         "payloads": {
             "PUT /sessions/{id}/question-set": "a BriefQuestionSet",
-            "PUT /sessions/{id}/brief": {"brief": "a DesignBrief", "source": "agent"},
             "PUT /designs/{id}": "the design JSON",
             "POST /designs/render": "the design JSON; returns the rendered HTML, or every validation error",
             "PUT /decks/{id}": "the deck JSON",
@@ -190,11 +181,8 @@ fn instructions() -> serde_json::Value {
         "routes": {
             "schema_design": "GET /schemas/design",
             "schema_deck": "GET /schemas/deck",
-            "schema_brief": "GET /schemas/brief",
             "schema_question_set": "GET /schemas/question-set",
             "session": "GET /sessions/{id}",
-            "brief": "GET /sessions/{id}/brief",
-            "save_brief": "PUT /sessions/{id}/brief",
             "question_set": "PUT /sessions/{id}/question-set",
             "answers": "GET /sessions/{id} (answers field)",
             "complete": "POST /sessions/{id}/complete",
@@ -245,18 +233,17 @@ mod tests {
     #[test]
     fn instructions_name_the_modes_and_the_gating() {
         let text = instructions().to_string();
-        assert!(text.contains("Briefing mode"));
-        assert!(text.contains("Generation mode"));
-        assert!(text.contains("Do not write designs or decks in briefing mode"));
+        assert!(text.contains("Plan the turn"));
+        assert!(text.contains("There is no brief"));
         assert!(text.contains("at most 3 questions"));
-        assert!(text.contains("The brief is authoritative"));
+        assert!(text.contains("When you know enough, write."));
+        assert!(!text.contains("briefing mode"));
     }
 
     #[test]
     fn instructions_serve_every_schema() {
         let payload = instructions();
         assert_eq!(payload["routes"]["schema_deck"], "GET /schemas/deck");
-        assert_eq!(payload["routes"]["schema_brief"], "GET /schemas/brief");
         assert_eq!(
             payload["routes"]["schema_question_set"],
             "GET /schemas/question-set"
