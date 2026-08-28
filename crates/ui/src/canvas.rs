@@ -347,10 +347,19 @@ fn CandidateCard(
                         tabindex: "-1",
                     }
                 }
-                if progress.is_some() {
-                    span { class: "card-pill",
-                        span { class: "dot" }
-                        "writing"
+                span { class: "card-count", "{current}/{count}" }
+                div { class: "card-pills",
+                    if is_chosen {
+                        span { class: "chosen-pill",
+                            span { dangerous_inner_html: icons::CHECK }
+                            "Chosen"
+                        }
+                    }
+                    if progress.is_some() {
+                        span { class: "card-pill",
+                            span { class: "dot" }
+                            "writing"
+                        }
                     }
                 }
                 if let Some(percent) = progress {
@@ -364,12 +373,6 @@ fn CandidateCard(
             }
             div { class: "card-footer",
                 div { class: "card-name",
-                    if is_chosen {
-                        span { class: "chosen-pill",
-                            span { dangerous_inner_html: icons::CHECK }
-                            "Chosen"
-                        }
-                    }
                     span { class: "card-label", "{candidate_label(&id)}" }
                 }
                 // The pager sits inside the card, and the card opens on
@@ -385,7 +388,6 @@ fn CandidateCard(
                         },
                         "‹"
                     }
-                    span { "{current}/{count}" }
                     button {
                         onclick: {
                             let id = id.clone();
@@ -409,7 +411,7 @@ fn CandidateCard(
                             }
                         },
                         span { dangerous_inner_html: icons::PLAY }
-                        "Finish {remaining}"
+                        span { class: "finish-text", "Finish {remaining}" }
                     }
                 }
             }
