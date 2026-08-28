@@ -1,7 +1,7 @@
 //! The session workflow: a persisted state machine.
 //!
-//! A session moves from `intake` through `clarifying` and the brief
-//! states into `generating` and `reviewing`. Every change goes through
+//! A session moves from `intake` through `clarifying` into
+//! `generating` and `reviewing`. Every change goes through
 //! `transition`, which is the only place that knows which event is
 //! allowed in which state. The server persists the result; nothing
 //! infers state from chat text or from files on disk.
@@ -11,22 +11,21 @@ use std::fmt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Where a session is in the brief-first workflow.
+/// Where a session is in the workflow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowState {
     /// The request arrived. No agent turn has run yet.
     Intake,
-    /// The agent asks material questions and waits for answers.
+    /// The agent asked questions and waits for answers. Sessions saved
+    /// before the brief was removed may say `brief_ready` or
+    /// `awaiting_approval`; they read as this, and the next message
+    /// continues them.
+    #[serde(alias = "brief_ready", alias = "awaiting_approval")]
     Clarifying,
-    /// The agent wrote the brief. The turn is still finishing.
-    BriefReady,
-    /// The user can approve the brief, edit it, or generate with
-    /// assumptions.
-    AwaitingApproval,
-    /// The agent writes or edits designs from the approved brief.
+    /// The agent writes or edits artifacts.
     Generating,
-    /// A design exists. The user can critique it or ask for changes.
+    /// An artifact exists. The user can ask for changes in the chat.
     Reviewing,
     /// A run failed. The session keeps its data and can be retried.
     Error,
@@ -34,11 +33,9 @@ pub enum WorkflowState {
 
 impl WorkflowState {
     /// Every state, in workflow order.
-    pub const ALL: [WorkflowState; 7] = [
+    pub const ALL: [WorkflowState; 5] = [
         WorkflowState::Intake,
         WorkflowState::Clarifying,
-        WorkflowState::BriefReady,
-        WorkflowState::AwaitingApproval,
         WorkflowState::Generating,
         WorkflowState::Reviewing,
         WorkflowState::Error,
@@ -49,26 +46,18 @@ impl WorkflowState {
         match self {
             WorkflowState::Intake => "intake",
             WorkflowState::Clarifying => "clarifying",
-            WorkflowState::BriefReady => "brief_ready",
-            WorkflowState::AwaitingApproval => "awaiting_approval",
             WorkflowState::Generating => "generating",
             WorkflowState::Reviewing => "reviewing",
             WorkflowState::Error => "error",
         }
     }
 
-    /// True while a briefing run may act: the agent may ask questions
-    /// or draft the brief.
-    pub fn is_briefing(self) -> bool {
-        matches!(self, WorkflowState::Intake | WorkflowState::Clarifying)
-    }
-
-    /// True when the user may approve the brief or edit it before
-    /// generation.
-    pub fn is_awaiting_user(self) -> bool {
+    /// True when the user may send a message or answers and a run may
+    /// start: every state except a run in progress and an error.
+    pub fn can_take_turn(self) -> bool {
         matches!(
             self,
-            WorkflowState::BriefReady | WorkflowState::AwaitingApproval
+            WorkflowState::Intake | WorkflowState::Clarifying | WorkflowState::Reviewing
         )
     }
 }
@@ -86,23 +75,13 @@ impl fmt::Display for WorkflowState {
 pub enum WorkflowEvent {
     /// The agent asked a question set.
     QuestionsAsked,
-    /// The agent wrote a brief revision.
-    BriefDrafted,
-    /// The briefing turn finished and the brief is in front of the user.
-    BriefPresented,
-    /// The user edited the brief, which made a new revision.
-    BriefEdited,
-    /// The user approved the brief.
-    Approved,
-    /// The user chose to generate with the recorded assumptions.
-    GenerateWithAssumptions,
-    /// A generation run wrote its designs.
+    /// The agent started to write or edit artifacts.
+    GenerationStarted,
+    /// The run wrote or edited its artifacts.
     GenerationSucceeded,
-    /// The user sent a critique, which made a new revision.
-    CritiqueSubmitted,
-    /// The user asked to continue a preview design.
+    /// The user asked the agent to finish a preview artifact.
     ContinueRequested,
-    /// A run failed or was stopped.
+    /// A run failed.
     RunFailed,
     /// The user retried after an error.
     Recovered {
@@ -112,17 +91,12 @@ pub enum WorkflowEvent {
 }
 
 impl WorkflowEvent {
-    /// The snake_case name used in messages.
+    /// The snake_case name used in JSON and in messages.
     pub fn as_str(self) -> &'static str {
         match self {
             WorkflowEvent::QuestionsAsked => "questions_asked",
-            WorkflowEvent::BriefDrafted => "brief_drafted",
-            WorkflowEvent::BriefPresented => "brief_presented",
-            WorkflowEvent::BriefEdited => "brief_edited",
-            WorkflowEvent::Approved => "approved",
-            WorkflowEvent::GenerateWithAssumptions => "generate_with_assumptions",
+            WorkflowEvent::GenerationStarted => "generation_started",
             WorkflowEvent::GenerationSucceeded => "generation_succeeded",
-            WorkflowEvent::CritiqueSubmitted => "critique_submitted",
             WorkflowEvent::ContinueRequested => "continue_requested",
             WorkflowEvent::RunFailed => "run_failed",
             WorkflowEvent::Recovered { .. } => "recovered",
@@ -133,24 +107,11 @@ impl WorkflowEvent {
     pub fn allowed_in(self) -> &'static [WorkflowState] {
         use WorkflowState::*;
         match self {
-            WorkflowEvent::QuestionsAsked => &[Intake, Clarifying, Generating],
-            WorkflowEvent::BriefDrafted => &[Intake, Clarifying],
-            WorkflowEvent::BriefPresented => &[BriefReady],
-            WorkflowEvent::BriefEdited => &[Clarifying, BriefReady, AwaitingApproval, Reviewing],
-            WorkflowEvent::Approved => &[AwaitingApproval],
-            WorkflowEvent::GenerateWithAssumptions => {
-                &[Intake, Clarifying, BriefReady, AwaitingApproval]
-            }
+            WorkflowEvent::QuestionsAsked => &[Intake, Clarifying, Generating, Reviewing],
+            WorkflowEvent::GenerationStarted => &[Intake, Clarifying, Reviewing],
             WorkflowEvent::GenerationSucceeded => &[Generating],
-            WorkflowEvent::CritiqueSubmitted | WorkflowEvent::ContinueRequested => &[Reviewing],
-            WorkflowEvent::RunFailed => &[
-                Intake,
-                Clarifying,
-                BriefReady,
-                AwaitingApproval,
-                Generating,
-                Reviewing,
-            ],
+            WorkflowEvent::ContinueRequested => &[Reviewing],
+            WorkflowEvent::RunFailed => &[Intake, Clarifying, Generating, Reviewing],
             WorkflowEvent::Recovered { .. } => &[Error],
         }
     }
@@ -159,14 +120,9 @@ impl WorkflowEvent {
     fn target(self) -> WorkflowState {
         match self {
             WorkflowEvent::QuestionsAsked => WorkflowState::Clarifying,
-            WorkflowEvent::BriefDrafted => WorkflowState::BriefReady,
-            WorkflowEvent::BriefPresented | WorkflowEvent::BriefEdited => {
-                WorkflowState::AwaitingApproval
+            WorkflowEvent::GenerationStarted | WorkflowEvent::ContinueRequested => {
+                WorkflowState::Generating
             }
-            WorkflowEvent::Approved
-            | WorkflowEvent::GenerateWithAssumptions
-            | WorkflowEvent::CritiqueSubmitted
-            | WorkflowEvent::ContinueRequested => WorkflowState::Generating,
             WorkflowEvent::GenerationSucceeded => WorkflowState::Reviewing,
             WorkflowEvent::RunFailed => WorkflowState::Error,
             WorkflowEvent::Recovered { to } => to,
@@ -232,43 +188,34 @@ mod tests {
     fn every_documented_transition_is_allowed() {
         use WorkflowEvent::*;
         use WorkflowState::*;
-        let table = [
+        let cases = [
             (Intake, QuestionsAsked, Clarifying),
+            (Intake, GenerationStarted, Generating),
             (Clarifying, QuestionsAsked, Clarifying),
+            (Clarifying, GenerationStarted, Generating),
             (Generating, QuestionsAsked, Clarifying),
-            (Intake, BriefDrafted, BriefReady),
-            (Clarifying, BriefDrafted, BriefReady),
-            (BriefReady, BriefPresented, AwaitingApproval),
-            (Clarifying, BriefEdited, AwaitingApproval),
-            (BriefReady, BriefEdited, AwaitingApproval),
-            (AwaitingApproval, BriefEdited, AwaitingApproval),
-            (Reviewing, BriefEdited, AwaitingApproval),
-            (AwaitingApproval, Approved, Generating),
-            (Intake, GenerateWithAssumptions, Generating),
-            (Clarifying, GenerateWithAssumptions, Generating),
-            (BriefReady, GenerateWithAssumptions, Generating),
-            (AwaitingApproval, GenerateWithAssumptions, Generating),
             (Generating, GenerationSucceeded, Reviewing),
-            (Reviewing, CritiqueSubmitted, Generating),
+            (Reviewing, GenerationStarted, Generating),
+            (Reviewing, QuestionsAsked, Clarifying),
             (Reviewing, ContinueRequested, Generating),
             (Generating, RunFailed, Error),
-            (Clarifying, RunFailed, Error),
-            (Error, Recovered { to: Clarifying }, Clarifying),
+            (Error, Recovered { to: Reviewing }, Reviewing),
         ];
-        for (from, event, to) in table {
+        for (from, event, to) in cases {
             assert_eq!(transition(from, event), Ok(to), "{from} + {event}");
         }
     }
 
     #[test]
     fn illegal_transitions_name_state_and_event() {
-        let error = transition(WorkflowState::Reviewing, WorkflowEvent::Approved).unwrap_err();
+        let error =
+            transition(WorkflowState::Intake, WorkflowEvent::GenerationSucceeded).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "event `approved` is not allowed in state `reviewing`: it is allowed in awaiting_approval"
+            "event `generation_succeeded` is not allowed in state `intake`: it is allowed in generating"
         );
-        assert!(transition(WorkflowState::Error, WorkflowEvent::Approved).is_err());
-        assert!(transition(WorkflowState::Intake, WorkflowEvent::GenerationSucceeded).is_err());
+        assert!(transition(WorkflowState::Error, WorkflowEvent::GenerationStarted).is_err());
+        assert!(transition(WorkflowState::Intake, WorkflowEvent::ContinueRequested).is_err());
         assert!(transition(WorkflowState::Error, WorkflowEvent::RunFailed).is_err());
     }
 
@@ -286,7 +233,7 @@ mod tests {
             transition(
                 WorkflowState::Intake,
                 WorkflowEvent::Recovered {
-                    to: WorkflowState::Clarifying
+                    to: WorkflowState::Reviewing
                 }
             )
             .is_err()
@@ -301,6 +248,12 @@ mod tests {
             assert_eq!(serde_json::from_str::<WorkflowState>(&json).unwrap(), state);
         }
         assert!(serde_json::from_str::<WorkflowState>("\"done\"").is_err());
+        for old in ["\"brief_ready\"", "\"awaiting_approval\""] {
+            assert_eq!(
+                serde_json::from_str::<WorkflowState>(old).unwrap(),
+                WorkflowState::Clarifying
+            );
+        }
         let event = serde_json::to_string(&WorkflowEvent::Recovered {
             to: WorkflowState::Intake,
         })
@@ -309,12 +262,11 @@ mod tests {
     }
 
     #[test]
-    fn briefing_and_awaiting_states_are_named() {
-        assert!(WorkflowState::Intake.is_briefing());
-        assert!(WorkflowState::Clarifying.is_briefing());
-        assert!(!WorkflowState::Generating.is_briefing());
-        assert!(WorkflowState::BriefReady.is_awaiting_user());
-        assert!(WorkflowState::AwaitingApproval.is_awaiting_user());
-        assert!(!WorkflowState::Reviewing.is_awaiting_user());
+    fn the_turn_states_are_named() {
+        assert!(WorkflowState::Intake.can_take_turn());
+        assert!(WorkflowState::Clarifying.can_take_turn());
+        assert!(WorkflowState::Reviewing.can_take_turn());
+        assert!(!WorkflowState::Generating.can_take_turn());
+        assert!(!WorkflowState::Error.can_take_turn());
     }
 }
