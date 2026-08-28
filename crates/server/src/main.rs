@@ -3,7 +3,6 @@
 
 mod agent_runs;
 mod api_error;
-mod briefing;
 mod candidates;
 mod concepts;
 mod deck_generation;
@@ -21,12 +20,14 @@ mod icon;
 mod instructions;
 mod model_client;
 mod patch;
+mod planner;
 mod polish;
 mod pptx;
 mod presenter;
 mod projects;
 mod provenance;
 mod render;
+mod request;
 mod screen_css;
 mod screenshots;
 mod session_routes;
@@ -271,7 +272,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let view: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(view["session"]["artifact_kind"], "deck");
-        assert_eq!(view["brief"]["artifact_kind"], "deck");
+        assert_eq!(view["session"]["artifact_kind"], "deck");
         let (status, _) = send(
             application.clone(),
             "PUT",
@@ -300,24 +301,6 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let (status, _) = send(application, "GET", "/designs/talk", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn the_artifact_kind_is_fixed_after_generation() {
-        let directory = TempDir::new().unwrap();
-        let application = test_application(&directory);
-        open_generating_deck_session(&application, "talk").await;
-        send(application.clone(), "PUT", "/decks/talk", Some(SAMPLE_DECK)).await;
-        send(application.clone(), "POST", "/sessions/talk/complete", None).await;
-        let (status, body) = send(
-            application,
-            "PUT",
-            "/sessions/talk/brief",
-            Some(r#"{"brief":{"artifact_kind":"demo","audience":"devs"}}"#),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert!(body.contains("cannot change after generation"));
     }
 
     #[tokio::test]
@@ -550,11 +533,11 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
-        // After generate-with-assumptions the session is generating: 204.
+        // After generate the session is generating: 204.
         send(
             application.clone(),
             "POST",
-            "/sessions/overview/generate-with-assumptions",
+            "/sessions/overview/generate",
             None,
         )
         .await;
@@ -967,7 +950,7 @@ mod tests {
             let run: serde_json::Value = serde_json::from_str(&body).unwrap();
             if run["is_running"] == false {
                 assert!(run["log_tail"].as_str().unwrap().contains("test-agent"));
-                assert_eq!(run["mode"], "briefing");
+                assert_eq!(run["mode"], "generation");
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -982,15 +965,10 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(payload["routes"]["session"], "GET /sessions/{id}");
-        assert!(
-            payload
-                .to_string()
-                .contains("Do not write designs or decks in briefing mode")
-        );
+        assert!(payload.to_string().contains("There is no brief"));
         for (path, key) in [
             ("/schemas/design", "screens"),
             ("/schemas/deck", "slides"),
-            ("/schemas/brief", "confirmed_facts"),
             ("/schemas/question-set", "can_proceed_with_assumptions"),
         ] {
             let (status, body) = send(test_application(&directory), "GET", path, None).await;
