@@ -293,6 +293,15 @@ pub(crate) fn CandidateCanvas(
     }
 }
 
+/// The screen step for an arrow key on a focused card.
+pub(crate) fn key_step(key: &Key) -> Option<i32> {
+    match key {
+        Key::ArrowLeft => Some(-1),
+        Key::ArrowRight => Some(1),
+        _ => None,
+    }
+}
+
 /// One candidate card: the live preview on a stage, the overlays, and
 /// the footer. A click on the card opens the artifact.
 #[component]
@@ -323,15 +332,43 @@ fn CandidateCard(
     // A preview waits for the rest of its outline. The button asks the
     // app for it, and the run then shows its progress on this card.
     let is_finish_offered = card.is_preview() && progress.is_none();
+    let has_pages = count > 1;
+    // The edge arrows and the arrow keys step through the screens. The
+    // arrows sit inside the card, and the card opens on click, so they
+    // keep their clicks to themselves.
+    let step = {
+        let id = id.clone();
+        use_callback(move |delta: i32| {
+            on_page.call((id.clone(), stepped_screen(current, delta, count)));
+        })
+    };
     let open = {
         let id = id.clone();
         move |_| on_open.call((kind, id.clone()))
+    };
+    let arrow = move |delta: i32| {
+        move |event: MouseEvent| {
+            event.stop_propagation();
+            step(delta);
+        }
     };
     rsx! {
         article {
             class: "{class}",
             style: "--frame-width: {frame_width}rem",
+            tabindex: "0",
             onclick: open,
+            onkeydown: {
+                let id = id.clone();
+                move |event: KeyboardEvent| {
+                    if let Some(delta) = key_step(&event.key()) {
+                        event.prevent_default();
+                        step(delta);
+                    } else if event.key() == Key::Enter {
+                        on_open.call((kind, id.clone()));
+                    }
+                }
+            },
             div { class: "card-stage",
                 // A phone sits in a bezel drawn by a wrapper, so the
                 // iframe itself carries no rounded corners or shadows.
@@ -345,6 +382,24 @@ fn CandidateCard(
                         style: "aspect-ratio: {ratio}",
                         title: "{id}",
                         tabindex: "-1",
+                    }
+                }
+                if has_pages {
+                    button {
+                        class: "card-arrow left",
+                        aria_label: "Previous screen",
+                        tabindex: "-1",
+                        disabled: current == 1,
+                        onclick: arrow(-1),
+                        "‹"
+                    }
+                    button {
+                        class: "card-arrow right",
+                        aria_label: "Next screen",
+                        tabindex: "-1",
+                        disabled: current == count,
+                        onclick: arrow(1),
+                        "›"
                     }
                 }
                 span { class: "card-count", "{current}/{count}" }
@@ -374,30 +429,6 @@ fn CandidateCard(
             div { class: "card-footer",
                 div { class: "card-name",
                     span { class: "card-label", "{candidate_label(&id)}" }
-                }
-                // The pager sits inside the card, and the card opens on
-                // click, so the pager must keep its clicks to itself.
-                div { class: "card-pager",
-                    button {
-                        onclick: {
-                            let id = id.clone();
-                            move |event: MouseEvent| {
-                                event.stop_propagation();
-                                on_page.call((id.clone(), stepped_screen(current, -1, count)));
-                            }
-                        },
-                        "‹"
-                    }
-                    button {
-                        onclick: {
-                            let id = id.clone();
-                            move |event: MouseEvent| {
-                                event.stop_propagation();
-                                on_page.call((id.clone(), stepped_screen(current, 1, count)));
-                            }
-                        },
-                        "›"
-                    }
                 }
                 if is_finish_offered {
                     button {
@@ -465,6 +496,14 @@ fn PlaceholderCard(id: String, viewport: Viewport, percent: Option<u8>) -> Eleme
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arrow_keys_step_and_other_keys_do_not() {
+        assert_eq!(key_step(&Key::ArrowLeft), Some(-1));
+        assert_eq!(key_step(&Key::ArrowRight), Some(1));
+        assert_eq!(key_step(&Key::Enter), None);
+        assert_eq!(key_step(&Key::ArrowUp), None);
+    }
     use crate::api::{DeckSummary, DesignSummary};
 
     fn phone() -> Viewport {
