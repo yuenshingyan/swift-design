@@ -387,6 +387,10 @@ button.primary.send-button { display: inline-flex; align-items: center; justify-
 
 /* Modal shell */
 .modal-backdrop { position: fixed; inset: 0; z-index: 20; background: rgba(21,24,28,.34); }
+/* The kind picker blurs the page behind it: the request is sent and
+   the one remaining choice is the modal. */
+.modal-backdrop.blurring { background: rgba(21,24,28,.22);
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
 .modal { position: fixed; z-index: 21; top: 50%; left: 50%; translate: -50% -50%;
   width: min(56rem, calc(100vw - 3rem)); max-height: calc(100vh - 4rem);
   display: flex; flex-direction: column; overflow: hidden;
@@ -647,7 +651,16 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .kind-badge { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.04em;
   color: var(--muted); border: 1px solid var(--hairline); border-radius: 4px;
   padding: 0.05rem 0.35rem; }
-.kind-chips { padding: 0.75rem 0.75rem 0; }
+/* The kind picker: two cards, asked once when the request is sent. */
+.kind-modal { width: min(30rem, calc(100vw - 2rem)); }
+.kind-choices { display: grid; gap: 0.625rem; }
+button.kind-choice { display: flex; flex-direction: column; align-items: flex-start; gap: 0.25rem;
+  width: 100%; padding: 0.9rem 1rem; text-align: left; border: 1px solid var(--line);
+  border-radius: var(--r-panel); background: var(--raised); box-shadow: none; }
+button.kind-choice:hover { border-color: var(--ink); background: var(--subtle); }
+.kind-choice-name { font-size: 0.95rem; font-weight: 500; color: var(--ink); }
+.kind-choice-detail { font-size: 0.78rem; color: var(--muted); line-height: 1.4; }
+.kind-note { margin-top: 0.75rem; font-size: 0.74rem; color: var(--muted); }
 /* The canvas picker: three device buttons, any number pressed. */
 .canvas-picker { display: flex; flex-direction: column; gap: 0.45rem; }
 .device-choices { display: flex; gap: 0.5rem; }
@@ -842,6 +855,12 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
 .option-chip.selected:hover:not(:disabled) { background: #23272C; border-color: #23272C; }
 .option-chip.skip { border-style: dashed; border-color: var(--line); color: var(--muted);
   align-self: flex-start; }
+/* Picked, the skip chip takes the dark fill from `.selected`. This rule
+   is needed because `.option-chip.skip` is declared after
+   `.option-chip.selected` at the same specificity, so its muted text
+   would otherwise stay grey on near-black. The dash stays: it still
+   marks an assumption rather than an answer. */
+.option-chip.skip.selected { color: var(--paper); border-color: var(--ink); }
 .option-chip.other { }
 
 /* The session workspace: the chat with the Q&A on the left, the candidates on the right. */
@@ -866,6 +885,8 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
 .state-badge.generating { background: var(--teal-tint); border-color: var(--teal-line); color: var(--teal); }
 .state-badge.reviewing { background: var(--teal-tint); border-color: var(--teal-line); color: var(--teal); }
 .state-badge.error { color: var(--danger, #b4231f); border-color: rgba(180,35,31,.35); }
+/* A stop is not a failure: neutral ink, not the danger red. */
+.state-badge.stopped { color: var(--ink-2); border-color: var(--line); background: var(--subtle); }
 
 .question-set { align-self: stretch; background: var(--raised); border: 1px solid var(--line-soft);
   border-radius: 12px; box-shadow: var(--sh-card, 0 1px 2px rgba(21,24,28,.06));
@@ -900,8 +921,11 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
 .question-rationale { font-size: 0.72rem; color: var(--muted); }
 .badge.required { font-size: 0.62rem; color: var(--muted); border: 1px solid var(--line);
   border-radius: 4px; padding: 0 0.3rem; }
-.answer-textarea, .other-input { width: 100%; font: inherit; font-size: 0.84rem;
-  border: 1px solid var(--line); border-radius: 6px; padding: 0.4rem 0.5rem; background: var(--raised); }
+/* border-box: `width: 100%` plus padding and a border would otherwise
+   overflow the card by the padding. */
+.answer-textarea, .other-input { width: 100%; box-sizing: border-box; font: inherit;
+  font-size: 0.84rem; border: 1px solid var(--line); border-radius: 6px;
+  padding: 0.4rem 0.5rem; background: var(--raised); }
 /* A question and its answer must never read alike. Each line carries a
    Q or A tag, so the role is legible before the words are. */
 .qa-row { display: flex; flex-direction: column; gap: 0.2rem; padding: 0.1rem 0; }
@@ -974,6 +998,11 @@ button.brief-toggle:hover { background: transparent; color: var(--ink); }
 .error-card { background: var(--raised); border: 1px solid rgba(180,35,31,.35); border-radius: 10px;
   padding: 0.75rem 0.875rem; display: flex; flex-direction: column; gap: 0.4rem; align-items: flex-start; }
 .error-card .error-title { color: var(--danger, #b4231f); font-weight: 600; }
+/* The stopped card mirrors the error card without the alarm. */
+.stopped-card { background: var(--raised); border: 1px solid var(--line); border-radius: 10px;
+  padding: 0.75rem 0.875rem; display: flex; flex-direction: column; gap: 0.4rem; align-items: flex-start; }
+.stopped-card .stopped-title { color: var(--ink); font-weight: 600; }
+.stopped-card p { color: var(--ink-2); font-size: 0.86rem; }
 
 .chat-controls { display: flex; align-items: center; gap: 0.5rem; justify-content: flex-end;
   padding: 0.5rem 1.25rem; }
