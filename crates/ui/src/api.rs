@@ -174,6 +174,30 @@ pub struct SessionOptions {
     /// it to the agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scenario: Option<String>,
+    /// Who the artifact is for, one of `AUDIENCES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    /// The tone the artifact takes, one of `TONES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<String>,
+    /// How much of a demo to build, one of `DEMO_SCOPES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Light or dark, one of `COLOR_MODES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_mode: Option<String>,
+    /// What kind of product a demo shows, one of `PRODUCT_KINDS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_kind: Option<String>,
+    /// What state a demo's screens are in, one of `DATA_STATES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_state: Option<String>,
+    /// How much goes on one slide, one of `SLIDE_DENSITIES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slide_density: Option<String>,
+    /// How much a deck leans on data, one of `EVIDENCE_STYLES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_style: Option<String>,
 }
 
 impl Default for SessionOptions {
@@ -187,6 +211,14 @@ impl Default for SessionOptions {
             platforms: Vec::new(),
             slide_count: None,
             scenario: None,
+            audience: None,
+            tone: None,
+            scope: None,
+            color_mode: None,
+            product_kind: None,
+            data_state: None,
+            slide_density: None,
+            evidence_style: None,
         }
     }
 }
