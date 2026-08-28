@@ -11,8 +11,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use design_model::{
-    ArtifactKind, BriefQuestionSet, DECK_SCENARIOS, QuestionAnswer, WorkflowEvent, WorkflowState,
-    is_deck_scenario, validate_answers, validate_question_set,
+    AUDIENCES, ArtifactKind, BriefQuestionSet, COLOR_MODES, DATA_STATES, DECK_SCENARIOS,
+    DEMO_SCOPES, EVIDENCE_STYLES, PRODUCT_KINDS, QuestionAnswer, SLIDE_DENSITIES, TONES,
+    WorkflowEvent, WorkflowState, is_deck_scenario, validate_answers, validate_question_set,
 };
 use serde::Deserialize;
 
@@ -322,8 +323,40 @@ fn option_problem(options: &RunOptions) -> Option<String> {
             DECK_SCENARIOS.join(", ")
         ));
     }
+    // The app owns every axis, so only its own values are accepted. A
+    // demo-only axis is still checked on a deck: a stored value that no
+    // list knows would reach no prompt and confuse the next reader.
+    let picked: [AxisCheck<'_>; 8] = [
+        ("audience", &options.audience, &AUDIENCES),
+        ("tone", &options.tone, &TONES),
+        ("color_mode", &options.color_mode, &COLOR_MODES),
+        ("scope", &options.scope, &DEMO_SCOPES),
+        ("product_kind", &options.product_kind, &PRODUCT_KINDS),
+        ("data_state", &options.data_state, &DATA_STATES),
+        ("slide_density", &options.slide_density, &SLIDE_DENSITIES),
+        ("evidence_style", &options.evidence_style, &EVIDENCE_STYLES),
+    ];
+    for (name, chosen, choices) in picked {
+        if let Some(value) = chosen
+            && !choices.iter().any(|(known, _)| known == value)
+        {
+            let known: Vec<&str> = choices.iter().map(|(value, _)| *value).collect();
+            return Some(format!(
+                "{name} `{value}` is unknown: use one of {}",
+                known.join(", ")
+            ));
+        }
+    }
     None
 }
+
+/// One app-owned axis to check: its option name, the stored value, and
+/// the fixed list the value must come from.
+type AxisCheck<'options> = (
+    &'static str,
+    &'options Option<String>,
+    &'static [(&'static str, &'static str)],
+);
 
 /// Replaces the run options.
 async fn put_options(
@@ -418,9 +451,9 @@ async fn post_message(
     } else if session.state == WorkflowState::Generating {
         return conflict("cannot send a message while generating");
     }
-    // A message after a failed or stopped run is the retry: the session
-    // returns to the state before the error, then takes the turn.
-    if session.state == WorkflowState::Error {
+    // A message after a halted run is the resume: the session returns to
+    // the state the run halted in, then takes the turn.
+    if session.state.is_halted() {
         let target = match sessions.recovery_target(&id).await {
             Ok(target) => target,
             Err(error) => return session_error_response(&error),
@@ -594,8 +627,8 @@ async fn retry(
         Ok(session) => session,
         Err(response) => return response,
     };
-    if session.state != WorkflowState::Error {
-        return conflict("retry is only allowed after an error");
+    if !session.state.is_halted() {
+        return conflict("resume is only allowed after a stop or an error");
     }
     let target = match sessions.recovery_target(&id).await {
         Ok(target) => target,
@@ -685,6 +718,46 @@ mod tests {
         let session = view(&application, "intro").await;
         assert_eq!(session["session"]["options"]["scenario"], "Startup pitch");
         assert!(session.get("brief").is_none());
+    }
+
+    #[tokio::test]
+    async fn the_apps_own_axes_take_only_their_own_values() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        send(
+            application.clone(),
+            "POST",
+            "/sessions",
+            Some(r#"{"id":"intro","request":"Intro for Swift Design."}"#),
+        )
+        .await;
+        let base =
+            r#"{"effort":"medium","variety":"medium","templates":[],"preview":true,"platforms":[]"#;
+        // A value outside the fixed list is refused, so the prompt can
+        // never carry an axis the app did not offer.
+        let (status, body) = send(
+            application.clone(),
+            "PUT",
+            "/sessions/intro/options",
+            Some(&format!(r#"{base},"audience":"astronauts"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("audience `astronauts` is unknown"));
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/sessions/intro/options",
+            Some(&format!(
+                r#"{base},"audience":"practitioners","tone":"executive","scope":"short_flow"}}"#
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let options = &view(&application, "intro").await["session"]["options"];
+        assert_eq!(options["audience"], "practitioners");
+        assert_eq!(options["tone"], "executive");
+        assert_eq!(options["scope"], "short_flow");
     }
 
     #[tokio::test]
