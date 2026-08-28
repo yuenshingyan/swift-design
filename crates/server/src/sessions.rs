@@ -330,7 +330,9 @@ pub struct SessionSummary {
     pub artifact_kind: ArtifactKind,
     /// The workflow state.
     pub state: WorkflowState,
-    /// When it last changed.
+    /// When it was created, RFC 3339.
+    pub created_at: String,
+    /// When it last changed, RFC 3339.
     pub updated_at: String,
     /// The chosen design or deck, when there is one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -552,6 +554,7 @@ impl SessionStore {
                     title: session.title,
                     artifact_kind: session.artifact_kind,
                     state: session.state,
+                    created_at: session.created_at,
                     updated_at: session.updated_at,
                     chosen_design: session.chosen_design,
                 });
@@ -610,6 +613,22 @@ impl SessionStore {
     }
 
     /// Edits the non-state fields of a session under the lock.
+    /// Clears `artifact_id` off the session that chose it.
+    ///
+    /// A deleted candidate must not stay the session's choice: the
+    /// planner reads that field to decide which artifact an edit turn
+    /// changes.
+    pub async fn forget_artifact(&self, artifact_id: &str) {
+        let session_id = session_id_of_artifact(artifact_id).to_owned();
+        let _ = self
+            .update(&session_id, |session| {
+                if session.chosen_design.as_deref() == Some(artifact_id) {
+                    session.chosen_design = None;
+                }
+            })
+            .await;
+    }
+
     pub async fn update(
         &self,
         id: &str,
@@ -883,28 +902,28 @@ pub fn session_id_of_artifact(artifact_id: &str) -> &str {
     }
 }
 
-/// A session id derived from the first words of a request. Falls back
-/// to `design` when the request has no usable words.
-pub fn session_id_from_request(request: &str) -> String {
-    let slug: String = request
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let words: Vec<&str> = slug.split('-').filter(|word| !word.is_empty()).collect();
-    let candidate = words.iter().take(4).cloned().collect::<Vec<_>>().join("-");
-    let candidate: String = candidate.chars().take(48).collect();
-    let trimmed = candidate.trim_matches('-');
-    if trimmed.is_empty() || !is_valid_session_id(trimmed) {
-        "design".to_owned()
-    } else {
-        trimmed.to_owned()
+/// A fresh session id: a random version 4 UUID.
+///
+/// The id is a key, not a name. The name a user reads is `title`, and
+/// the times are `created_at` and `updated_at`. An id built from the
+/// request text made the same request produce the same id, so two
+/// sessions with the same wording collided, and a deleted session left
+/// its files for the next one to adopt.
+pub fn new_session_id() -> anyhow::Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("no randomness source: {error}"))?;
+    // The version and variant bits of RFC 9562 version 4.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let mut id = String::with_capacity(36);
+    for (index, byte) in bytes.iter().enumerate() {
+        if matches!(index, 4 | 6 | 8 | 10) {
+            id.push('-');
+        }
+        id.push_str(&format!("{byte:02x}"));
     }
+    Ok(id)
 }
 
 #[cfg(test)]
@@ -1243,12 +1262,21 @@ mod tests {
     }
 
     #[test]
-    fn session_ids_come_from_the_first_words_of_the_request() {
+    fn a_new_session_id_is_a_random_version_4_uuid() {
+        let id = new_session_id().unwrap();
+        assert_eq!(id.len(), 36);
+        let groups: Vec<&str> = id.split('-').collect();
         assert_eq!(
-            session_id_from_request("Design a landing page for my finance app"),
-            "design-a-landing-page"
+            groups.iter().map(|group| group.len()).collect::<Vec<_>>(),
+            [8, 4, 4, 4, 12]
         );
-        assert_eq!(session_id_from_request("???"), "design");
-        assert_eq!(session_id_from_request(""), "design");
+        assert!(groups[2].starts_with('4'), "version nibble: {id}");
+        assert!(
+            matches!(&groups[3][..1], "8" | "9" | "a" | "b"),
+            "variant nibble: {id}"
+        );
+        // The id is a file stem and a URL segment everywhere it goes.
+        assert!(is_valid_session_id(&id));
+        assert_ne!(id, new_session_id().unwrap());
     }
 }
