@@ -344,8 +344,11 @@ impl GenerationEngine {
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("no session `{session_id}`"))?;
-        if session.state == design_model::WorkflowState::Error {
-            return Err("the session is in error: retry it first".to_owned());
+        if session.state.is_halted() {
+            return Err(format!(
+                "the session is `{}`: resume it first",
+                session.state
+            ));
         }
         let answered = self
             .sessions
@@ -460,12 +463,19 @@ impl GenerationEngine {
             .map_err(|error| error.to_string())?;
         let candidate_count = self.candidate_count(context).await;
         let open_artifact = open_artifact(&messages).or_else(|| session.chosen_design.clone());
+        // The planner reads the user's source files, as the writing
+        // turns do. Planning blind is what produced questions the files
+        // already answered.
+        let attachments = self.load_attachments(log).await;
+        let input = planner_input(
+            &context.request,
+            &messages,
+            candidate_count,
+            open_artifact.as_deref(),
+        );
         let request = vec![
             serde_json::json!({ "role": "system", "content": planner_prompt(context.request.kind) }),
-            serde_json::json!({
-                "role": "user",
-                "content": planner_input(&context.request, &messages, candidate_count, open_artifact.as_deref()),
-            }),
+            self.user_message(&input, &attachments),
         ];
         log("planning the turn");
         let reply = self.model.chat(client, &request, context.effort()).await?;
@@ -1124,15 +1134,41 @@ impl GenerationEngine {
         log: &LogSink,
     ) -> Result<Design, String> {
         let label = &context.label;
-        let rounds = crate::polish::polish_rounds(&context.effort);
-        if rounds == 0 {
-            context.report(1.0);
-        }
-        for round in 1..=rounds {
+        let limit = crate::polish::polish_round_limit(&context.effort);
+        // The version that measured best, and its finding count. A
+        // round that makes the page worse is measured, reported, and
+        // then thrown away in favour of this.
+        // `limit` is at least 1, so the loop always measures once and
+        // `best_count` is always set before it is read.
+        let mut best = design.clone();
+        let mut best_count = usize::MAX;
+        let mut previous_count: Option<usize> = None;
+        let mut stop = crate::polish::PolishStop::OutOfRounds;
+        let mut rounds_taken = 0usize;
+        for round in 1..=limit {
             let findings = crate::polish::dom_findings(&design, &self.base_url(), label, log).await;
+            if findings.len() < best_count {
+                best_count = findings.len();
+                best = design.clone();
+            }
+            // Nothing measures wrong: another round would spend a model
+            // call to change a page that is already good.
+            if findings.is_empty() {
+                stop = crate::polish::PolishStop::Clean;
+                break;
+            }
+            // The last round did not reduce the findings, so the next
+            // will not either. This also breaks a fix-one-break-one
+            // loop that would otherwise run to the limit.
+            if previous_count.is_some_and(|before| findings.len() >= before) {
+                stop = crate::polish::PolishStop::NoImprovement;
+                break;
+            }
+            previous_count = Some(findings.len());
+            rounds_taken = round;
             let images = self.screen_images(&design, label, log).await;
             log(&format!(
-                "{label}: polish round {round} ({} layout findings, {} screen images)",
+                "{label}: polish round {round} of at most {limit} ({} layout findings, {} screen images)",
                 findings.len(),
                 images.len()
             ));
@@ -1172,9 +1208,14 @@ impl GenerationEngine {
                     "{label}: polish reply unusable ({parse_error}); keeping the previous version"
                 )),
             }
-            context.report(DRAFT_SHARE + (1.0 - DRAFT_SHARE) * round as f32 / rounds as f32);
+            context.report(DRAFT_SHARE + (1.0 - DRAFT_SHARE) * round as f32 / limit as f32);
         }
-        Ok(design)
+        log(&format!(
+            "{label}: {}",
+            stop.describe(rounds_taken, best_count)
+        ));
+        context.report(1.0);
+        Ok(best)
     }
 
     /// PNG screenshots of the design's screens for the polish pass, at most
@@ -2351,6 +2392,30 @@ mod tests {
         assert!(prompt.contains("The request and the answers are authoritative"));
         assert!(prompt.contains("needs_clarification"));
         assert!(prompt.contains("\"viewport\""));
+    }
+
+    #[tokio::test]
+    async fn the_planner_reads_the_users_source_files() {
+        let server = FakeModelServer::start().await;
+        server.push_text(r#"{"reply":"Writing it now.","generate":true}"#);
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let uploads = crate::uploads::UploadStore::new(directory.path().join("uploads"));
+        uploads
+            .save("spec.md", b"The deck is for iOS developers new to Swift.")
+            .await
+            .unwrap();
+        fresh_session(&sessions, "An intro deck.").await;
+        let _ = engine(&server, &designs, &sessions)
+            .with_uploads(uploads)
+            .run("talk", silent_log())
+            .await;
+        // Planning blind is what produced questions the files already
+        // answered, so the first call must carry the file.
+        let planner_call = server.requests()[0].to_string();
+        assert!(planner_call.contains("The user's source files follow"));
+        assert!(planner_call.contains("iOS developers new to Swift"));
     }
 
     #[tokio::test]
