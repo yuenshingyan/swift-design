@@ -416,7 +416,8 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
     let stage_class = preview_stage_class(viewport);
     let is_portrait = is_portrait_canvas(viewport);
     let tile_width = frame_width_rem(viewport, STRIP_TILE_HEIGHT_REM);
-    let summary = strip_summary(screen_count, outline_count.saturating_sub(screen_count));
+    let planned_count = outline_count.saturating_sub(screen_count);
+    let summary = strip_summary(screen_count, planned_count);
     let total_fields = field_count(&design());
     let user_count = user_paths().len().min(total_fields);
     let agent_count = total_fields - user_count;
@@ -614,6 +615,30 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                     div { class: "strip-head",
                         "Screens"
                         span { class: "strip-counts", "{summary}" }
+                        // One control writes every planned screen. A
+                        // button on each planned tile did the same thing
+                        // and read as if it wrote that one alone.
+                        if planned_count > 0 {
+                            button {
+                                class: "strip-write",
+                                title: "Write the screens the outline still plans",
+                                onclick: {
+                                    let design_id = design_id.clone();
+                                    move |_| {
+                                        let design_id = design_id.clone();
+                                        spawn(async move {
+                                            let session_id = artifact_project(&design_id);
+                                            let sent = api::continue_artifact(&session_id, &design_id).await;
+                                            if let Err(message) = sent {
+                                                messages.write().push(message);
+                                            }
+                                        });
+                                    }
+                                },
+                                span { dangerous_inner_html: icons::PLAY }
+                                span { "Write the {planned_count} planned" }
+                            }
+                        }
                     }
                     div { class: "thumbnails",
                         for (index, label) in thumbnail_labels.into_iter().enumerate() {
@@ -678,37 +703,21 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                             span { class: "strip-divider" }
                         }
                         // A planned tile is an outline entry nobody has
-                        // written. A click asks the app to write every one
-                        // of them from the outline.
+                        // written. The strip head writes them.
                         for index in screen_count..outline_count {
                             {
                                 let (number, title) = outline_entry(&design().outline, index, "Screen");
-                                let design_id = design_id.clone();
                                 rsx! {
-                                    button {
+                                    div {
                                         key: "outline-{index}",
                                         class: if is_portrait { "thumbnail outline portrait" } else { "thumbnail outline" },
                                         style: "--tile-width: {tile_width}rem",
-                                        title: "{outline_title(&design(), index)} · click to write the remaining screens",
-                                        onclick: move |_| {
-                                            let design_id = design_id.clone();
-                                            spawn(async move {
-                                                let session_id = artifact_project(&design_id);
-                                                let sent = api::continue_artifact(&session_id, &design_id).await;
-                                                if let Err(message) = sent {
-                                                    messages.write().push(message);
-                                                }
-                                            });
-                                        },
+                                        title: "{outline_title(&design(), index)} · not written yet",
                                         span { class: "outline-kicker",
                                             "{number}"
                                             span { class: "planned-text", " planned" }
                                         }
                                         span { class: "outline-title", "{title}" }
-                                        span { class: "outline-write",
-                                            span { dangerous_inner_html: icons::PLAY }
-                                            span { class: "write-text", "write" }
-                                        }
                                     }
                                 }
                             }
