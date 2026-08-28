@@ -5,7 +5,10 @@
 
 use std::collections::HashSet;
 
-use design_model::{ArtifactKind, DECK_SCENARIOS, DECK_VARIETY_LEVELS, Viewport, WorkflowState};
+use design_model::{
+    AUDIENCES, ArtifactKind, COLOR_MODES, DATA_STATES, DECK_SCENARIOS, DECK_VARIETY_LEVELS,
+    DEMO_SCOPES, EVIDENCE_STYLES, PRODUCT_KINDS, SLIDE_DENSITIES, TONES, Viewport, WorkflowState,
+};
 use dioxus::prelude::*;
 
 use crate::api;
@@ -19,6 +22,7 @@ pub(crate) fn state_label(state: WorkflowState) -> &'static str {
         WorkflowState::Clarifying => "Questions",
         WorkflowState::Generating => "Generating",
         WorkflowState::Reviewing => "Reviewing",
+        WorkflowState::Stopped => "Stopped",
         WorkflowState::Error => "Error",
     }
 }
@@ -118,6 +122,168 @@ pub(crate) fn slide_count_options() -> Vec<(String, String)> {
         options.push((count.to_string(), format!("{count} slides")));
     }
     options
+}
+
+/// One app question's chips: the fixed choices, with a leading
+/// `the agent decides` that the card draws as the dashed chip.
+fn fixed_choices(choices: &[(&'static str, &'static str)]) -> Vec<(String, String)> {
+    let mut options = vec![(String::new(), "The agent decides".to_owned())];
+    options.extend(
+        choices
+            .iter()
+            .map(|(value, label)| ((*value).to_owned(), (*label).to_owned())),
+    );
+    options
+}
+
+/// One app-owned question: the field it writes, its wording, and its
+/// fixed choices.
+struct Axis {
+    /// Which `SessionOptions` field the pick lands in.
+    key: &'static str,
+    /// The question as the user reads it.
+    label: &'static str,
+    /// The fixed choices, before the judgment chip is added.
+    choices: &'static [(&'static str, &'static str)],
+}
+
+/// The app-owned questions for `kind`, in the order they are shown.
+///
+/// These recur in every session, so the app asks them from a fixed list
+/// and the agent never invents options for them. The agent may still
+/// add questions this list does not cover.
+fn axes_for(kind: ArtifactKind) -> Vec<Axis> {
+    let mut axes = vec![
+        Axis {
+            key: "audience",
+            label: "Who is it for?",
+            choices: &AUDIENCES,
+        },
+        Axis {
+            key: "tone",
+            label: "What tone should it have?",
+            choices: &TONES,
+        },
+        Axis {
+            key: "color_mode",
+            label: "Light or dark?",
+            choices: &COLOR_MODES,
+        },
+    ];
+    match kind {
+        ArtifactKind::Demo => axes.extend([
+            Axis {
+                key: "scope",
+                label: "How much should I build?",
+                choices: &DEMO_SCOPES,
+            },
+            Axis {
+                key: "product_kind",
+                label: "What kind of product is it?",
+                choices: &PRODUCT_KINDS,
+            },
+            Axis {
+                key: "data_state",
+                label: "What should the screens show?",
+                choices: &DATA_STATES,
+            },
+        ]),
+        ArtifactKind::Deck => axes.extend([
+            Axis {
+                key: "slide_density",
+                label: "How much goes on a slide?",
+                choices: &SLIDE_DENSITIES,
+            },
+            Axis {
+                key: "evidence_style",
+                label: "How much does it lean on data?",
+                choices: &EVIDENCE_STYLES,
+            },
+        ]),
+    }
+    axes
+}
+
+/// The value stored for `key`, if any.
+fn axis_value(options: &api::SessionOptions, key: &str) -> Option<String> {
+    match key {
+        "audience" => options.audience.clone(),
+        "tone" => options.tone.clone(),
+        "color_mode" => options.color_mode.clone(),
+        "scope" => options.scope.clone(),
+        "product_kind" => options.product_kind.clone(),
+        "data_state" => options.data_state.clone(),
+        "slide_density" => options.slide_density.clone(),
+        "evidence_style" => options.evidence_style.clone(),
+        _ => None,
+    }
+}
+
+/// The options with `key` set to `value`. An empty value clears it,
+/// which leaves that axis to the agent.
+fn with_axis(options: &api::SessionOptions, key: &str, value: String) -> api::SessionOptions {
+    let mut next = options.clone();
+    let picked = (!value.is_empty()).then_some(value);
+    match key {
+        "audience" => next.audience = picked,
+        "tone" => next.tone = picked,
+        "color_mode" => next.color_mode = picked,
+        "scope" => next.scope = picked,
+        "product_kind" => next.product_kind = picked,
+        "data_state" => next.data_state = picked,
+        "slide_density" => next.slide_density = picked,
+        "evidence_style" => next.evidence_style = picked,
+        _ => {}
+    }
+    next
+}
+
+/// The app's own questions for this kind, as cards of chips.
+#[component]
+pub(crate) fn SharedQuestions(
+    session_id: String,
+    kind: ArtifactKind,
+    options: api::SessionOptions,
+    on_error: EventHandler<String>,
+) -> Element {
+    // The cards the user has touched. A server default is not an answer.
+    let mut picked = use_signal(HashSet::<String>::new);
+    let saved = options.clone();
+    let save = use_callback(move |next: api::SessionOptions| {
+        if next == saved {
+            return;
+        }
+        let id = session_id.clone();
+        spawn(async move {
+            if let Err(message) = api::save_session_options(&id, &next).await {
+                on_error.call(message);
+            }
+        });
+    });
+    rsx! {
+        for axis in axes_for(kind) {
+            {
+                let options = options.clone();
+                let key = axis.key.to_owned();
+                let current = picked()
+                    .contains(axis.key)
+                    .then(|| axis_value(&options, axis.key).unwrap_or_default());
+                rsx! {
+                    ChoiceCard {
+                        key: "{axis.key}",
+                        label: axis.label,
+                        current,
+                        choices: fixed_choices(axis.choices),
+                        is_wide: true,
+                        on_pick: move |value: String| {
+                            picked.write().insert(key.clone());
+                            save.call(with_axis(&options, &key, value));
+                        },
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The settings for a demo before the first candidates exist: how many
@@ -433,6 +599,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_fixed_axis_offers_the_judgment_choice_first() {
+        let choices = fixed_choices(&AUDIENCES);
+        assert_eq!(choices.len(), AUDIENCES.len() + 1);
+        assert_eq!(choices[0], (String::new(), "The agent decides".to_owned()));
+        assert!(is_judgment_choice(&choices[0].0));
+        assert_eq!(choices[1].0, "newcomers".to_owned());
+        assert_eq!(choices[1].1, "Newcomers to the subject".to_owned());
+    }
+
+    #[test]
+    fn the_fixed_axes_never_change_between_runs() {
+        // The whole point of hardcoding them: two calls are identical.
+        for axis in [&AUDIENCES[..], &TONES[..], &DEMO_SCOPES[..]] {
+            assert_eq!(fixed_choices(axis), fixed_choices(axis));
+        }
+    }
+
+    #[test]
     fn every_pick_maps_to_one_canvas() {
         // Free text from the model still lands on a choice.
         assert_eq!(
@@ -504,5 +688,6 @@ mod tests {
     fn state_labels_are_readable() {
         assert_eq!(state_label(WorkflowState::Clarifying), "Questions");
         assert_eq!(state_label(WorkflowState::Error), "Error");
+        assert_eq!(state_label(WorkflowState::Stopped), "Stopped");
     }
 }
