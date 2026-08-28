@@ -14,6 +14,61 @@ use sha2::{Digest, Sha256};
 use crate::export::base64_encode;
 use crate::screen_css::{google_fonts_link, scope_css};
 
+/// Fits each screen's content inside the canvas.
+///
+/// The root is a fixed canvas box with `overflow: hidden`, so content
+/// that needs more room is cut off. Nothing in the pipeline guarantees
+/// the model writes content that fits. This grows the box until the
+/// content fits and scales the whole root back to the canvas, so the
+/// slide is smaller but whole.
+///
+/// The factor lands in `--swift-design-fit`, which the stylesheet
+/// multiplies into the root transform, and in `data-swift-design-fit`,
+/// which the audit reads and reports.
+pub(crate) const FIT_SCRIPT: &str = r##"(() => {
+  const main = document.querySelector('main.design');
+  const canvasWidth = Number(main && main.dataset.swiftDesignWidth) || 1440;
+  const canvasHeight = Number(main && main.dataset.swiftDesignHeight) || 900;
+  // Below this a screen is unreadable, so it stays cut off and the audit
+  // reports it instead.
+  const FIT_FLOOR = 0.4;
+  const PASSES = 6;
+  // The box keeps the canvas ratio at every factor, so a screen built
+  // around full-height boxes and centred flex rows still measures the
+  // way it will be shown.
+  const overflowsAt = (root, factor) => {
+    root.style.width = Math.round(canvasWidth / factor) + 'px';
+    root.style.height = Math.round(canvasHeight / factor) + 'px';
+    return root.scrollHeight > root.clientHeight + 2 || root.scrollWidth > root.clientWidth + 2;
+  };
+  const fitRoot = (root) => {
+    let factor = 1;
+    if (overflowsAt(root, 1)) {
+      // The largest factor that still fits, to 1/64th. A smaller factor
+      // always fits when a larger one does, so this is a plain search.
+      let low = FIT_FLOOR;
+      let high = 1;
+      for (let pass = 0; pass < PASSES; pass += 1) {
+        const middle = (low + high) / 2;
+        if (overflowsAt(root, middle)) { high = middle; } else { low = middle; }
+      }
+      factor = low;
+      overflowsAt(root, factor);
+    }
+    root.style.setProperty('--swift-design-fit', String(factor));
+    root.dataset.swiftDesignFit = factor.toFixed(4);
+  };
+  const fitAll = () => document.querySelectorAll('[data-swift-design-root]').forEach(fitRoot);
+  fitAll();
+  // A web font changes the metrics, so the fit is measured again once
+  // the fonts are in.
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(fitAll).catch(() => {});
+  }
+  window.swiftDesignFit = fitAll;
+})();
+"##;
+
 /// Fits each viewport-sized root to its frame by setting the scale
 /// variable from the measured frame width. The stylesheet carries a
 /// CSS-only fallback, but container units inside `atan2()` do not
@@ -176,6 +231,9 @@ function serialize(root) {
   return clone.innerHTML;
 }
 function postHtml(root, save) {
+  // An edit changes how much the screen holds, so the fit is measured
+  // again before the change leaves the page.
+  if (window.swiftDesignFit) { window.swiftDesignFit(); }
   post({ type: 'swift-design-html', screen: screenIndexOf(root), html: serialize(root), save: !!save });
 }
 function toHex(color) {
@@ -494,6 +552,12 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
     if (root.scrollHeight > root.clientHeight + 2 || root.scrollWidth > root.clientWidth + 2) {
       findings.push({ screen, node: 'root', kind: 'off_screen', detail: 'content runs past the ' + canvasWidth + ' by ' + canvasHeight + ' canvas (' + Math.round(root.scrollWidth) + ' by ' + Math.round(root.scrollHeight) + 'px)' });
     }
+    // The page shrinks a screen that holds too much, so it is whole
+    // rather than cut off. It is still too much content.
+    const fitFactor = Number(root.dataset.swiftDesignFit || 1);
+    if (fitFactor < 0.97) {
+      findings.push({ screen, node: 'root', kind: 'overfull', detail: 'the screen holds more than the ' + canvasWidth + ' by ' + canvasHeight + ' canvas fits, so it was scaled to ' + Math.round(fitFactor * 100) + '%: cut content or reduce the sizes' });
+    }
     const textBlocks = [];
     all.forEach((element) => {
       if (element.closest('svg') && element.tagName.toLowerCase() !== 'svg') { return; }
@@ -608,7 +672,8 @@ pub(crate) fn print_stylesheet(viewport: Viewport) -> String {
          main.design > [data-swift-design-frame] {{ width: {width}px; height: {height}px; display: block; overflow: hidden; }}\n\
          main.design > [data-swift-design-frame]:not(:last-child) {{ break-after: page; page-break-after: always; }}\n\
          [data-swift-design-screen] {{ width: {width}px; height: {height}px; container-type: normal; --swift-design-scale: 1; }}\n\
-         [data-swift-design-root] {{ transform: none; }}\n"
+         [data-swift-design-root] {{ transform-origin: 0 0;\n\
+           transform: scale(var(--swift-design-fit, 1)); }}\n"
     )
 }
 
@@ -677,13 +742,18 @@ pub fn render_design_with(design: &Design, options: RenderOptions) -> String {
     )
 }
 
-/// The page script for `options`: layout and navigation always, editing
-/// and audit on request, and nothing at all for a print.
+/// The page script for `options`: the fit always, layout and navigation
+/// on screen, editing and audit on request.
+///
+/// A print carries the fit and nothing else: the PDF must hold the same
+/// content the studio shows, and the rest of the scripts have no place
+/// in a print.
 fn page_script(options: &RenderOptions) -> String {
     if options.is_print {
-        return String::new();
+        return FIT_SCRIPT.to_owned();
     }
-    let mut script = LAYOUT_SCRIPT.to_owned();
+    let mut script = FIT_SCRIPT.to_owned();
+    script.push_str(LAYOUT_SCRIPT);
     script.push_str(NAVIGATION_SCRIPT);
     if options.is_editable {
         script.push_str(EDITING_SCRIPT);
@@ -823,7 +893,7 @@ pub(crate) fn stylesheet(theme: &Theme, viewport: Viewport) -> String {
            --mono-font: '{mono_font}', ui-monospace, monospace; }}\n\
          [data-swift-design-root] {{ position: relative; width: {width}px; height: {height}px; overflow: hidden;\n\
            box-sizing: border-box; transform-origin: 0 0;\n\
-           transform: scale(var(--swift-design-scale, 1));\n\
+           transform: scale(calc(var(--swift-design-scale, 1) * var(--swift-design-fit, 1)));\n\
            background: var(--background); color: var(--text);\n\
            font: 32px/1.3 var(--body-font); }}\n\
          [data-swift-design-root] * {{ box-sizing: border-box; }}\n\
@@ -916,7 +986,10 @@ mod tests {
         assert!(html.contains("--swift-design-scale: calc(tan(atan2(100cqw, 1440px)))"));
         assert!(html.contains("aspect-ratio: 1440 / 900;"));
         assert!(html.contains("data-swift-design-width=\"1440\" data-swift-design-height=\"900\""));
-        assert!(html.contains("transform: scale(var(--swift-design-scale, 1))"));
+        // The page scale and the content fit multiply into one transform.
+        assert!(html.contains(
+            "transform: scale(calc(var(--swift-design-scale, 1) * var(--swift-design-fit, 1)))"
+        ));
         assert!(html.contains("new ResizeObserver"));
     }
 
@@ -984,7 +1057,33 @@ mod tests {
     }
 
     #[test]
-    fn print_mode_emits_page_rules_and_no_scripts() {
+    fn every_page_carries_the_fit_script() {
+        // A screen that holds more than the canvas would be cut off, so
+        // the fit runs on the studio page, the audit page, and the print
+        // page alike.
+        let design = sample_design();
+        for options in [
+            RenderOptions::default(),
+            RenderOptions {
+                is_editable: true,
+                ..RenderOptions::default()
+            },
+            RenderOptions {
+                is_auditing: true,
+                ..RenderOptions::default()
+            },
+            RenderOptions {
+                is_print: true,
+                ..RenderOptions::default()
+            },
+        ] {
+            let html = render_design_with(&design, options);
+            assert!(html.contains("--swift-design-fit"), "{html}");
+        }
+    }
+
+    #[test]
+    fn print_mode_emits_page_rules_and_the_fit_script_only() {
         let mut design = sample_design();
         design.transition = Some(Transition::default());
         let html = render_design_with(
@@ -996,9 +1095,12 @@ mod tests {
         );
         assert!(html.contains("@page { size: 1440px 900px; margin: 0; }"));
         assert!(html.contains("break-after: page"));
-        assert!(html.contains("[data-swift-design-root] { transform: none; }"));
-        assert!(html.contains("script-src 'none'"));
-        assert!(!html.contains("<script>"));
+        assert!(html.contains("transform: scale(var(--swift-design-fit, 1)); }"));
+        // A print carries the fit and nothing else, so the PDF holds the
+        // same content the studio shows.
+        assert!(html.contains("swiftDesignFit"));
+        assert!(!html.contains("ResizeObserver"));
+        assert!(!html.contains("addEventListener('keydown'"));
         assert!(!html.contains("ResizeObserver"));
         assert!(!html.contains("ArrowRight"));
         assert!(!html.contains("data-swift-design-effect="));
