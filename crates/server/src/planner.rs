@@ -124,6 +124,21 @@ fn to_question(index: usize, question: PlannedQuestion) -> BriefQuestion {
     }
 }
 
+/// The set that carries the app's own fixed questions when the planner
+/// adds none of its own.
+///
+/// The app always asks its list first, so the first turn of a session
+/// always ends in the question card. The set holds no question of its
+/// own: the studio draws the app's cards in the same grid.
+pub(crate) fn app_question_set() -> BriefQuestionSet {
+    BriefQuestionSet {
+        title: QUESTION_SET_TITLE.to_owned(),
+        message: "Answer what matters here. Anything you leave is my best judgment.".to_owned(),
+        questions: Vec::new(),
+        can_proceed_with_assumptions: true,
+    }
+}
+
 /// Makes a question set skippable the Swift Deck way: no question is
 /// required, and the set allows generation without answers. An
 /// external agent's own flags are not trusted.
@@ -150,7 +165,8 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
         "{subject}\n\
          Read the request, the answers, and the conversation. Reply with only this JSON:\n\
          {{\"reply\":\"text for the user\",\"questions\":[{{\"question\":\"...\",\"options\":[\"...\"],\"multi\":false}}],\"generate\":false,\"edit\":false}}\n\
-         Ask 0 to {per_turn} questions. Ask none when the request and the source files already say enough: no question is the usual answer. Give 2 to 4 short options for each question you do ask.\n\
+         The app always asks the user its own fixed questions first. Your questions are added to that card.\n\
+         Ask 0 to {per_turn} extra questions. Ask none when the request and the source files already say enough. Give 2 to 4 short options for each question you do ask.\n\
          Set multi to true when the user can pick more than one option at once, such as the topics to cover or the sections to include.\n\
          Set multi to false when the options rule each other out, such as the audience or the tone.\n\
          The app asks the user for {owned} itself. Never ask these, and never ask them in other words. The input shows their answers, or `not chosen yet`.\n\
@@ -323,18 +339,28 @@ mod tests {
         assert!(demo.contains("what kind of product it is"));
         let deck = planner_prompt(ArtifactKind::Deck);
         assert!(deck.contains("how much goes on a slide"));
-        // The recurring axes are the app's, for both kinds, and asking
-        // nothing on top of them is a valid turn.
+        // The recurring axes are the app's, for both kinds. The app
+        // asks them itself, and asking nothing on top of them is a
+        // valid turn.
         for prompt in [&demo, &deck] {
             assert!(prompt.contains("the audience, the tone, light or dark"));
             assert!(prompt.contains("never ask them in other words"));
             assert!(prompt.contains("the list above does not cover"));
-            assert!(prompt.contains("Ask 0 to 3 questions"));
-            assert!(prompt.contains("no question is the usual answer"));
+            assert!(prompt.contains("Ask 0 to 3 extra questions"));
+            assert!(prompt.contains("asks the user its own fixed questions first"));
             assert!(prompt.contains("Never ask what a source file already answers"));
         }
         assert!(demo.contains("After 5 answered questions, do not ask more."));
         assert!(deck.contains("the scenario, the deck length in slides"));
+    }
+
+    #[test]
+    fn the_apps_own_set_holds_no_question_and_can_be_skipped() {
+        let set = app_question_set();
+        assert!(set.questions.is_empty());
+        assert!(set.can_proceed_with_assumptions);
+        assert_eq!(set.title, QUESTION_SET_TITLE);
+        assert!(set.message.contains("best judgment"));
     }
 
     #[test]
