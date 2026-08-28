@@ -58,9 +58,28 @@ failure reaches `error`. Both leave through the same `Recovered` event.
 
 Every turn is one run of the planner, copied from Swift Deck: it reads the request, the answers, and the conversation, and replies with questions, a decision to write, a decision to edit the open candidate, or plain text.
 
+The first turn is not the planner's to skip. The app owns a fixed list of
+questions per kind, and asks it before anything is written, so a session always
+opens with the setup card. The planner adds its own questions to that card, or
+adds none. **Skip the questions and generate** writes straight away.
+
+Source files reach a run three ways: the `+` button, a paste into the page, or
+a drop onto the page. A paste or a drop can carry a folder. The app walks the
+folder, keeps the path in each stored name, and skips hidden entries,
+`node_modules`, `target`, `dist`, files above 45 MB, and everything past 200
+files. It reports what it skipped.
+
+A file belongs to one session. Files attached on the landing page wait in a
+draft scope, and creating the session takes them. A run reads only its own
+session's files, so a file attached to one project never reaches another
+project's prompt. Deleting a session deletes its files. Two sessions may hold
+the same name: the second is stored as `name-2.ext`.
+
 ## Candidates
 
-Every candidate is a card with a live preview. Cards on one tab share a height, so a desktop card is wide and a phone card is a tall bezel. Click a card to open it in the editor. Arrows at the edges of the preview, or `←` and `→` on a focused card, step through the screens or slides; the pill in the corner shows `n/m`. A preview candidate (the first screens plus an outline) carries a `Finish` button that writes the rest. The chosen card is marked `Chosen`.
+Every candidate is a card with a live preview. Cards on one tab share a height, so a desktop card is wide and a phone card is a tall bezel. Click a card to open it in the editor. Arrows at the edges of the preview, or `←` and `→` on a focused card, step through the screens or slides; the pill in the corner shows `n/m`. A preview candidate (the first screens plus an outline) carries a `Finish` button that writes the rest; pressing it on a second card while the first is running joins that run. The chosen card is marked `Chosen`.
+
+The box at the top left of a card selects it. With cards selected, a bar over the canvas deletes them: one click arms the button, the second deletes. A deleted candidate that was the chosen one leaves the session with no choice.
 
 In `reviewing`, the chat is the edit input: type what should change and press **Send**. With a candidate chosen, the change is applied to it; otherwise new candidates are written.
 
@@ -69,6 +88,8 @@ In `reviewing`, the chat is the edit input: type what should change and press **
 The harness may use a local CLI agent or a remote API, but workflow state, answers, artifacts, and user decisions remain under application control.
 
 One run does one turn: plan, then ask, write, edit, or reply. The built-in engine runs the planner, the concept planner, the candidate writers, the fix-round loop, and the polish loop.
+
+Nothing lets a screen spill off the canvas. Every page measures the content and, when it needs more room than the canvas gives, grows the box and scales the whole screen back. The screen comes out smaller but whole, in the studio, the PDF, and the PPTX alike. The layout audit still reports it as `overfull` with the percentage, so the polish loop cuts the content instead of leaving it small.
 
 Two loops tighten a candidate. The **fix-round loop** feeds validation errors back until the JSON is valid. The **polish loop** renders the candidate in Chrome, measures it (contrast, line length, overflow, overlap), screenshots every screen, and sends the findings and the images back for a patch. It repeats until the page measures clean, or a round fixes nothing, or the effort's ceiling runs out: 1 round on `low`, 3 on `medium`, 5 on `high`. The version that measured best is the one kept, so a round that makes the page worse is discarded. The run log says which of the three ended it.
 
