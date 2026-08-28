@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "can_proceed_with_assumptions": {
-      "description": "True when the agent can draft a brief with assumptions instead\nof waiting for these answers.",
+      "description": "True when the user may skip the set and let the agent decide.",
       "type": "boolean",
       "default": false
     },
