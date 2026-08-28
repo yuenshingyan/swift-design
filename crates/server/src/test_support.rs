@@ -212,7 +212,7 @@ async fn open_generating_session_with(application: &Router, id: &str, body: &str
     let (status, _) = send(
         application.clone(),
         "POST",
-        &format!("/sessions/{id}/generate-with-assumptions"),
+        &format!("/sessions/{id}/generate"),
         None,
     )
     .await;
@@ -236,8 +236,6 @@ pub(crate) fn low_effort_options() -> RunOptions {
 pub(crate) enum FakeReply {
     /// A successful assistant message with this content.
     Text(String),
-    /// An error status with this body.
-    Status(u16, String),
 }
 
 /// Shared state of the fake provider: the queue of replies and the
@@ -283,15 +281,6 @@ impl FakeModelServer {
             .push_back(FakeReply::Text(content.to_owned()));
     }
 
-    /// Queues one error reply.
-    pub(crate) fn push_status(&self, status: u16, body: &str) {
-        self.state
-            .replies
-            .lock()
-            .unwrap()
-            .push_back(FakeReply::Status(status, body.to_owned()));
-    }
-
     /// The request bodies the server received, in order.
     pub(crate) fn requests(&self) -> Vec<serde_json::Value> {
         self.state.requests.lock().unwrap().clone()
@@ -326,11 +315,6 @@ async fn handle(
             "usage": { "prompt_tokens": 10, "completion_tokens": 5 },
         }))
         .into_response(),
-        Some(FakeReply::Status(status, body)) => (
-            StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            body,
-        )
-            .into_response(),
         None => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "no canned reply queued".to_owned(),
