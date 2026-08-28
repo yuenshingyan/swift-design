@@ -75,6 +75,9 @@ pub struct SessionSummary {
     pub artifact_kind: ArtifactKind,
     /// The workflow state.
     pub state: WorkflowState,
+    /// When it was created, RFC 3339.
+    #[serde(default)]
+    pub created_at: String,
     /// When it last changed, RFC 3339.
     pub updated_at: String,
     /// The chosen design or deck, when there is one.
@@ -735,10 +738,15 @@ pub struct UploadSummary {
     pub is_image: bool,
 }
 
-/// Fetches the upload listing.
-pub async fn fetch_uploads() -> Result<Vec<UploadSummary>, String> {
-    get_json("/uploads").await
+/// Fetches the uploads of one scope: a session id, or `DRAFT_SCOPE`
+/// for the landing page.
+pub async fn fetch_uploads(scope: &str) -> Result<Vec<UploadSummary>, String> {
+    get_json(&format!("/uploads?session={scope}")).await
 }
+
+/// The scope of files attached before a session exists. Creating a
+/// session takes them.
+pub const DRAFT_SCOPE: &str = "_draft";
 
 /// Deletes one upload.
 pub async fn delete_upload(name: &str) -> Result<(), String> {
