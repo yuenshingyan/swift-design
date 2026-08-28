@@ -71,6 +71,19 @@ pub struct BriefQuestion {
     pub allow_other: bool,
 }
 
+/// One question the user answered, kept as text. The agent reads the
+/// answers with the request; the studio shows them in the chat.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AnsweredQuestion {
+    /// The question, as the user saw it.
+    pub question: String,
+    /// The answer, as the user gave it. Empty when the user skipped.
+    pub answer: String,
+    /// True when the user skipped and asked the agent to decide.
+    #[serde(default)]
+    pub is_assumed: bool,
+}
+
 /// The questions of one turn.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BriefQuestionSet {
@@ -80,8 +93,7 @@ pub struct BriefQuestionSet {
     pub message: String,
     /// The questions, at most `QUESTIONS_PER_TURN_LIMIT`.
     pub questions: Vec<BriefQuestion>,
-    /// True when the agent can draft a brief with assumptions instead
-    /// of waiting for these answers.
+    /// True when the user may skip the set and let the agent decide.
     #[serde(default)]
     pub can_proceed_with_assumptions: bool,
 }
