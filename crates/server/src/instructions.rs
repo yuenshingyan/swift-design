@@ -21,7 +21,7 @@ const SHARED_RULES: [&str; 6] = [
     "Use the theme through CSS variables: `--background`, `--text`, `--accent`, `--muted`, `--heading-font`, `--body-font`, `--mono-font`. Write other colors as #rrggbb.",
     "The server loads the theme fonts from Google Fonts. Base styles: text is 32px in the body font and text color, headings use the heading font with margin 0, paragraphs and lists have margin 0, images are block and max-width 100%.",
     "Allowed HTML: headings, text, lists, tables, `<img>`, inline `<svg>`, `<pre><code>`, `<blockquote>`, `<a>`. Close every tag. Do not write `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, forms, media, comments, on* attributes, javascript: URLs, or data: URLs.",
-    "Images: `<img src='/uploads/{name}'>` for files in GET /uploads. Use no other image source. Draw charts, icons, and shapes as inline SVG or CSS.",
+    "Images: `<img src='/uploads/{name}'>` for files in GET /uploads?session={id}. Use no other image source. Draw charts, icons, and shapes as inline SVG or CSS.",
     "Keep html under 20,000 characters and css under 10,000 characters. Use single quotes for HTML attribute values inside the JSON string.",
 ];
 
@@ -133,7 +133,7 @@ fn steps() -> Vec<String> {
         "Deck session: write the deck as JSON that conforms to GET /schemas/deck. The deck has `slides`, not `screens`, and no `viewport`. PUT it to /decks/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
         "A 422 response lists every problem in error.details. Fix each one. PUT again.".to_owned(),
         "When the user asks for a change in the chat while an artifact is open, edit that artifact and PUT it again. When no artifact is open, write new candidates.".to_owned(),
-        "GET /uploads lists the user's source files. Each row has name, size_bytes, content_type, and is_image. GET /uploads/{name} returns the file. Use an image row as `<img src='/uploads/{name}'>`.".to_owned(),
+        "GET /uploads?session={id} lists the source files of that session. Each row has name, size_bytes, content_type, and is_image. GET /uploads/{name} returns the file. Use an image row as `<img src='/uploads/{name}'>`. A file belongs to one session: never read another session's files.".to_owned(),
         "After you save a design, look at it: GET /designs/{id}/screens/{n}.png returns a PNG of screen n, 1-based. It needs Chrome or Chromium and answers 503 without one. Review every screen for overlap, overflow, empty space, and weak contrast. Fix what you see and PUT the design again. GET /designs/{id}/export returns the design as one HTML file. GET /designs/{id}/export.pdf returns it as a PDF, one page per screen.".to_owned(),
         "After you save a deck, look at it: GET /decks/{id}/slides/{n}.png returns a PNG of slide n, 1-based. Review every slide the same way and PUT the deck again. GET /decks/{id}/export returns the deck as one HTML file. GET /decks/{id}/export.pdf returns it as a PDF, one page per slide. GET /decks/{id}/export.pptx returns it as a PowerPoint file. GET /decks/{id}/present is the presenter view with the notes.".to_owned(),
         "When the design or the deck is written, POST /sessions/{id}/complete, or exit with code 0. The session moves to reviewing.".to_owned(),
@@ -187,7 +187,7 @@ fn instructions() -> serde_json::Value {
             "answers": "GET /sessions/{id} (answers field)",
             "complete": "POST /sessions/{id}/complete",
             "events": "GET /events?after={revision}&wait={seconds}",
-            "uploads": "GET /uploads",
+            "uploads": "GET /uploads?session={id}",
             "upload": "GET /uploads/{name}",
             "save_design": "PUT /designs/{id}",
             "check_design": "POST /designs/render",
