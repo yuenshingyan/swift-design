@@ -407,12 +407,13 @@ impl AgentRunner {
         let notifier = self.notifier.clone();
         let sessions = self.sessions.clone();
         tokio::spawn(async move {
-            let result = tokio::select! {
-                result = engine.run(&session_id, Arc::clone(&log)) => result,
-                _ = stop_receiver => Err("stopped by the user".to_owned()),
+            let end = tokio::select! {
+                result = engine.run(&session_id, Arc::clone(&log)) => {
+                    RunEnd::Finished(result.map(|_: GenerationOutcome| ()))
+                }
+                _ = stop_receiver => RunEnd::Stopped,
             };
-            let outcome = result.map(|_: GenerationOutcome| ());
-            let exit_code = settle_built_in(&sessions, &session_id, outcome, &log).await;
+            let exit_code = settle_built_in(&sessions, &session_id, end, &log).await;
             if let Ok(mut state) = state.lock() {
                 state.is_running = false;
                 state.exit_code = Some(exit_code);
@@ -517,15 +518,60 @@ impl AgentRunner {
     }
 }
 
+/// How a run ended.
+///
+/// A stop is not a failure, so the two are kept apart all the way to
+/// the state machine: a stop leaves the session `stopped`, a failure
+/// leaves it `error`.
+enum RunEnd {
+    /// The run ran to its own end. `Err` carries the failure message.
+    Finished(Result<(), String>),
+    /// The user pressed stop, or the run was cut short before it
+    /// finished. A dropped stop channel reads as this too, so a server
+    /// that goes away mid-run leaves the session stopped, not failed.
+    Stopped,
+}
+
+/// Halts a session that is still running, recording why. A session that
+/// already halted keeps the first reason.
+async fn halt(sessions: &SessionStore, session_id: &str, message: Option<String>) {
+    let Ok(Some(session)) = sessions.read(session_id).await else {
+        return;
+    };
+    if session.state.is_halted() {
+        return;
+    }
+    let event = match message {
+        Some(_) => design_model::WorkflowEvent::RunFailed,
+        None => design_model::WorkflowEvent::RunStopped,
+    };
+    let _ = sessions.apply(session_id, event).await;
+    // A stop has nothing to report, so the failure message stays unset
+    // and the studio shows the plain stopped card.
+    if let Some(message) = message {
+        let _ = sessions
+            .update(session_id, |session| session.error = Some(message))
+            .await;
+    }
+}
+
 /// Settles the session after a built-in run. Returns the exit code:
 /// 0 on success, 1 on failure. A generation success is already recorded
 /// by the engine only for questions; the run moves to reviewing here.
 async fn settle_built_in(
     sessions: &SessionStore,
     session_id: &str,
-    outcome: Result<(), String>,
+    end: RunEnd,
     log: &crate::model_client::LogSink,
 ) -> i32 {
+    let outcome = match end {
+        RunEnd::Stopped => {
+            log("stopped by the user");
+            halt(sessions, session_id, None).await;
+            return 1;
+        }
+        RunEnd::Finished(outcome) => outcome,
+    };
     match outcome {
         Ok(()) => {
             // The engine leaves the session generating on a written
@@ -542,18 +588,7 @@ async fn settle_built_in(
         }
         Err(message) => {
             log(&format!("error: {message}"));
-            if let Ok(Some(session)) = sessions.read(session_id).await
-                && session.state != WorkflowState::Error
-            {
-                let _ = sessions
-                    .apply(session_id, design_model::WorkflowEvent::RunFailed)
-                    .await;
-                let _ = sessions
-                    .update(session_id, |session| {
-                        session.error = Some(format!("built-in: {message}"));
-                    })
-                    .await;
-            }
+            halt(sessions, session_id, Some(format!("built-in: {message}"))).await;
             1
         }
     }
@@ -570,17 +605,10 @@ async fn settle_shell(
     let Ok(Some(session)) = sessions.read(session_id).await else {
         return;
     };
+    // A killed command reports whatever code the signal left behind, so
+    // the stop flag decides, not the code.
     if stopped {
-        if session.state != WorkflowState::Error {
-            let _ = sessions
-                .apply(session_id, design_model::WorkflowEvent::RunFailed)
-                .await;
-            let _ = sessions
-                .update(session_id, |session| {
-                    session.error = Some("stopped by the user".to_owned());
-                })
-                .await;
-        }
+        halt(sessions, session_id, None).await;
         return;
     }
     match code {
@@ -592,19 +620,10 @@ async fn settle_shell(
             }
         }
         other => {
-            if session.state != WorkflowState::Error {
-                let code = other.unwrap_or(-1);
-                let _ = sessions
-                    .apply(session_id, design_model::WorkflowEvent::RunFailed)
-                    .await;
-                let _ = sessions
-                    .update(session_id, |session| {
-                        session.error = Some(format!(
-                            "the custom command exited with {code}: check SWIFT_DESIGN_AGENT_COMMAND"
-                        ));
-                    })
-                    .await;
-            }
+            let code = other.unwrap_or(-1);
+            let message =
+                format!("the custom command exited with {code}: check SWIFT_DESIGN_AGENT_COMMAND");
+            halt(sessions, session_id, Some(message)).await;
         }
     }
 }
@@ -765,6 +784,33 @@ mod tests {
         let (runner, _sessions) = command_runner(&directory, "echo hi");
         let error = runner.start("missing").await.unwrap_err();
         assert_eq!(error.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn stopping_a_command_leaves_the_session_stopped_not_failed() {
+        let directory = TempDir::new().unwrap();
+        // A command long enough to still be running when stop arrives.
+        let (runner, sessions) = command_runner(&directory, "sleep 30");
+        sessions
+            .create(NewSession::demo("talk", "Talk", "A talk."))
+            .await
+            .unwrap();
+        sessions
+            .apply("talk", design_model::WorkflowEvent::GenerationStarted)
+            .await
+            .unwrap();
+        runner.start("talk").await.unwrap();
+        runner.stop();
+        wait_until_finished(&runner).await;
+        let session = sessions.read("talk").await.unwrap().unwrap();
+        assert_eq!(session.state, design_model::WorkflowState::Stopped);
+        // A stop is not a failure, so nothing is reported and the run
+        // resumes where it left off.
+        assert_eq!(session.error, None);
+        assert_eq!(
+            session.resume_state,
+            Some(design_model::WorkflowState::Generating)
+        );
     }
 
     #[tokio::test]
