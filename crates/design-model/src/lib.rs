@@ -15,8 +15,8 @@
 //! protocol, and the `brief`.
 
 pub mod artifact_kind;
-pub mod brief;
 pub mod deck;
+pub mod deck_questions;
 pub mod design;
 pub mod markup;
 pub mod question;
@@ -30,14 +30,13 @@ pub mod viewport;
 pub mod workflow;
 
 pub use artifact_kind::ArtifactKind;
-pub use brief::{
-    AnsweredQuestion, BriefRevision, BriefSection, Critique, DesignBrief, RevisionSource,
-};
 pub use deck::{DECK_HEIGHT, DECK_VIEWPORT, DECK_WIDTH, Deck};
+pub use deck_questions::{DECK_SCENARIOS, DECK_VARIETY_LEVELS, is_deck_scenario};
 pub use design::Design;
 pub use question::{
-    AnswerError, BriefQuestion, BriefQuestionSet, QUESTIONS_PER_TURN_LIMIT, QuestionAnswer,
-    QuestionKind, QuestionOption, QuestionSetError, validate_answers, validate_question_set,
+    AnswerError, AnsweredQuestion, BriefQuestion, BriefQuestionSet, QUESTIONS_PER_TURN_LIMIT,
+    QuestionAnswer, QuestionKind, QuestionOption, QuestionSetError, validate_answers,
+    validate_question_set,
 };
 pub use screen::Screen;
 pub use slide::Slide;
