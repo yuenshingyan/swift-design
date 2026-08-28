@@ -5,7 +5,6 @@
 //! crate's directory.
 
 mod api;
-mod brief_panel;
 mod canvas;
 mod chat;
 mod chat_controls;
@@ -15,6 +14,7 @@ mod home;
 mod icons;
 mod question_card;
 mod route;
+mod run_settings;
 mod select;
 mod session;
 mod settings;
@@ -53,7 +53,7 @@ const STYLESHEET: &str = "
 }
 
 body { margin: 0; background: var(--paper); color: var(--ink);
-  font-family: Inter, system-ui, sans-serif; }
+  font-family: Inter, system-ui, sans-serif; overflow-x: hidden; }
 code, .mono { font-family: var(--mono); }
 .topbar { display: flex; align-items: center; justify-content: space-between;
   padding: 1rem 1.75rem; border-bottom: 1px solid #E3E1DB; background: var(--raised); }
@@ -462,7 +462,7 @@ button.canvas-tab:hover:not(:disabled) { color: var(--ink); background: transpar
 button.canvas-tab.open { background: var(--raised); color: var(--ink); border-color: var(--hairline);
   box-shadow: var(--sh-control); }
 .canvas-tab .tab-count { font-size: 0.68rem; color: var(--faint); }
-.canvas-grid { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 1rem; }
+.canvas-grid { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 1rem; min-width: 0; }
 .canvas-card { --frame-width: 21.6rem; position: relative; display: flex; flex-direction: column;
   box-sizing: content-box; width: var(--frame-width); border: 1px solid var(--line-soft);
   border-radius: var(--r-card); overflow: hidden; background: var(--raised); cursor: pointer;
@@ -668,6 +668,12 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
 .count-chips .effect-chips button { min-width: 1.8rem; padding: 0.3rem 0.55rem;
   justify-content: center; }
 .kind-field { margin-bottom: 0.75rem; }
+/* The app's deck questions: cards that look like the model's questions. */
+.deck-questions { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  align-items: start; }
+.app-question { display: flex; flex-direction: column; gap: 0.6rem; padding: 0.9rem 1rem; }
+/* A deck card mixes short and tall cards: fill the rows, keep each row one height. */
+.workbench-questions .with-app-questions .question-cards { grid-auto-flow: dense; align-items: stretch; }
 .project-kind { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.72rem;
   color: #6C7178; white-space: nowrap; }
 .effect-chips { display: flex; flex-wrap: wrap; gap: 0.375rem; }
@@ -838,8 +844,10 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
   align-self: flex-start; }
 .option-chip.other { }
 
-/* The brief-first session workspace. */
-.session { display: grid; grid-template-columns: 420px 1fr; height: calc(100vh - 3.6rem); }
+/* The session workspace: the chat with the Q&A on the left, the candidates on the right. */
+/* minmax(0, 1fr): the workbench must never widen to its content, or WebKit
+   sizes a wrapping card grid as one long row and the page scrolls sideways. */
+.session { display: grid; grid-template-columns: 420px minmax(0, 1fr); height: calc(100vh - 3.6rem); }
 .conversation { display: flex; flex-direction: column; min-height: 0;
   border-right: 1px solid var(--hairline); }
 .studio-head { display: flex; align-items: center; gap: 0.75rem; padding: 0.9rem 1.25rem;
@@ -848,7 +856,7 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
 .studio-title { font-size: 0.95rem; font-weight: 600; }
 .thread { flex: 1; overflow-y: auto; padding: 1.1rem 1.25rem; display: flex;
   flex-direction: column; gap: 0.75rem; }
-.workbench { background: var(--sunken); overflow-y: auto; padding: 1.25rem 1.5rem;
+.workbench { min-width: 0; background: var(--sunken); overflow-y: auto; overflow-x: hidden; padding: 1.25rem 1.5rem;
   display: flex; flex-direction: column; gap: 1rem; }
 .start-run { align-self: flex-start; }
 
@@ -876,6 +884,15 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
 .workbench-questions .question-label { font-size: 0.92rem; }
 .question-set-actions { display: flex; align-items: center; gap: 0.625rem; }
 .question-hint { font-size: 0.72rem; color: var(--muted); }
+/* The open question set sits in the chat thread, one column wide. */
+.thread-questions { display: flex; flex-direction: column; gap: 0.75rem; }
+.thread-questions .question-set-actions { flex-wrap: wrap; }
+.thread-questions .canvas-picker { padding: 0.75rem 0.875rem; background: var(--raised);
+  border: 1px solid var(--line-soft); border-radius: 12px; }
+.thread-answers { display: flex; flex-direction: column; gap: 0.4rem; padding: 0.5rem 0.75rem;
+  border: 1px solid var(--hairline); border-radius: 10px; background: var(--subtle); }
+.workbench .run-settings { border-top: 0; padding-top: 0; background: var(--raised);
+  border: 1px solid var(--line-soft); border-radius: 12px; padding: 1rem 1.1rem; }
 .question-card { background: var(--subtle); border-radius: 10px; padding: 0.75rem 0.875rem;
   display: flex; flex-direction: column; gap: 0.5rem; }
 .question-head { display: flex; align-items: center; gap: 0.5rem; }
