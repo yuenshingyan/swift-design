@@ -657,6 +657,8 @@ mod tests {
             design: design.map(str::to_owned),
             question_set: None,
             is_continue,
+            at: None,
+            artifacts: Vec::new(),
         }
     }
 
