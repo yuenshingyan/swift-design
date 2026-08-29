@@ -252,10 +252,14 @@ function nodeAt(root, path) {
 }
 function serialize(root) {
   const clone = root.cloneNode(true);
-  clone.querySelectorAll('[contenteditable], [spellcheck], [data-swift-design-selected]').forEach((node) => {
+  // The editing and fit scripts mark nodes with reserved attributes.
+  // None of them belong in the saved HTML.
+  clone.querySelectorAll('[contenteditable], [spellcheck], [data-swift-design-selected], [data-swift-design-inner-root], [data-swift-design-dragging]').forEach((node) => {
     node.removeAttribute('contenteditable');
     node.removeAttribute('spellcheck');
     node.removeAttribute('data-swift-design-selected');
+    node.removeAttribute('data-swift-design-inner-root');
+    node.removeAttribute('data-swift-design-dragging');
   });
   return clone.innerHTML;
 }
@@ -291,13 +295,32 @@ function describe(element) {
   };
 }
 let selected = null;
-function select(element) {
+// A plain click selects one node. A click with the command key (or
+// control) adds the node to the selection, or removes it again. The
+// last node clicked is the primary one: the inspector shows it, and
+// the chat names every node in the selection.
+let selection = [];
+function brief(element) {
+  return {
+    path: pathOf(element),
+    tag: element.tagName.toLowerCase(),
+    classes: element.getAttribute('class') || '',
+    text: (element.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+  };
+}
+function select(element, isAdditive) {
+  if (!element) { selection = []; }
+  else if (isAdditive) {
+    const index = selection.indexOf(element);
+    if (index >= 0) { selection.splice(index, 1); } else { selection.push(element); }
+  } else { selection = [element]; }
   document.querySelectorAll('[data-swift-design-selected]').forEach((node) => node.removeAttribute('data-swift-design-selected'));
-  selected = element;
+  selection.forEach((node) => node.setAttribute('data-swift-design-selected', ''));
+  selected = selection.length ? selection[selection.length - 1] : null;
   if (!element) { return; }
-  element.setAttribute('data-swift-design-selected', '');
   const root = rootOf(element);
-  post(Object.assign({ type: 'swift-design-select', screen: screenIndexOf(root) }, describe(element)));
+  if (!selected) { post({ type: 'swift-design-select', screen: screenIndexOf(root), path: null }); return; }
+  post(Object.assign({ type: 'swift-design-select', screen: screenIndexOf(root), selection: selection.map(brief) }, describe(selected)));
 }
 function editableTarget(element) {
   let node = element;
@@ -468,7 +491,7 @@ document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
     if (isClickSuppressed) { isClickSuppressed = false; event.stopPropagation(); return; }
     if (event.target === root) { select(null); post({ type: 'swift-design-select', screen, path: null }); return; }
     event.stopPropagation();
-    select(editableTarget(event.target));
+    select(editableTarget(event.target), event.metaKey || event.ctrlKey);
   });
   root.addEventListener('dblclick', (event) => {
     if (event.target === root) { return; }
@@ -1075,6 +1098,11 @@ mod tests {
         assert!(editable.contains("data-swift-design-dragging"));
         assert!(editable.contains("style.translate"));
         assert!(editable.contains("'dblclick'"));
+        // The HTML posted back carries none of the scripts' marks.
+        assert!(editable.contains("node.removeAttribute('data-swift-design-inner-root')"));
+        // A command-click adds a node to the selection.
+        assert!(editable.contains("event.metaKey || event.ctrlKey"));
+        assert!(editable.contains("selection: selection.map(brief)"));
         assert!(editable.contains("reset-position"));
         let auditing = render_design_with(
             &design,
