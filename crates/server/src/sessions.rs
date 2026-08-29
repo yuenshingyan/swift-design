@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use design_model::{
     ArtifactKind, BriefQuestion, BriefQuestionSet, QuestionAnswer, WorkflowError, WorkflowEvent,
-    WorkflowState, transition,
+    WorkflowState, app_axes, transition,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -101,34 +101,85 @@ pub struct RunOptions {
     /// How much a deck leans on data, one of `EVIDENCE_STYLES`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_style: Option<String>,
+    /// The axes whose value the planner suggested from the request, by
+    /// option key. The card shows them as picked and marks them as
+    /// suggested. A pick by the user removes the key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested: Vec<String>,
 }
 
 impl RunOptions {
+    /// The stored value of the axis whose option is `key`, or `None`
+    /// for a key that names no axis.
+    pub fn axis(&self, key: &str) -> Option<&Option<String>> {
+        Some(match key {
+            "audience" => &self.audience,
+            "tone" => &self.tone,
+            "color_mode" => &self.color_mode,
+            "scope" => &self.scope,
+            "product_kind" => &self.product_kind,
+            "data_state" => &self.data_state,
+            "slide_density" => &self.slide_density,
+            "evidence_style" => &self.evidence_style,
+            _ => return None,
+        })
+    }
+
+    /// The writable slot of the axis whose option is `key`.
+    fn axis_slot_mut(&mut self, key: &str) -> Option<&mut Option<String>> {
+        Some(match key {
+            "audience" => &mut self.audience,
+            "tone" => &mut self.tone,
+            "color_mode" => &mut self.color_mode,
+            "scope" => &mut self.scope,
+            "product_kind" => &mut self.product_kind,
+            "data_state" => &mut self.data_state,
+            "slide_density" => &mut self.slide_density,
+            "evidence_style" => &mut self.evidence_style,
+            _ => return None,
+        })
+    }
+
     /// The app-owned axis values, as (prompt name, stored value) pairs,
     /// for the axes that apply to `kind`. An axis the user has not
     /// picked is absent, so the agent decides it.
     pub fn axes(&self, kind: ArtifactKind) -> Vec<(&'static str, &str)> {
-        let per_kind: &[(&'static str, &Option<String>)] = match kind {
-            ArtifactKind::Demo => &[
-                ("Scope", &self.scope),
-                ("Product kind", &self.product_kind),
-                ("Screen state", &self.data_state),
-            ],
-            ArtifactKind::Deck => &[
-                ("Slide density", &self.slide_density),
-                ("Evidence", &self.evidence_style),
-            ],
-        };
-        let shared: [(&'static str, &Option<String>); 3] = [
-            ("Audience", &self.audience),
-            ("Tone", &self.tone),
-            ("Color mode", &self.color_mode),
-        ];
-        shared
-            .iter()
-            .chain(per_kind.iter())
-            .filter_map(|(name, value)| value.as_deref().map(|value| (*name, value)))
+        app_axes(kind)
+            .filter_map(|axis| {
+                self.axis(axis.key)
+                    .and_then(|value| value.as_deref())
+                    .map(|value| (axis.name, value))
+            })
             .collect()
+    }
+
+    /// Fills the blank axes of `kind` from `suggestions`, as (option
+    /// key, value) pairs, and records them as suggested. An axis the
+    /// user has already answered keeps its answer. A key or a value
+    /// the fixed lists do not carry is ignored. Returns the keys that
+    /// were filled.
+    pub fn suggest(&mut self, kind: ArtifactKind, suggestions: &[(String, String)]) -> Vec<String> {
+        let mut filled = Vec::new();
+        for (key, value) in suggestions {
+            let Some(axis) = app_axes(kind).find(|axis| axis.key == key) else {
+                continue;
+            };
+            if !axis.choices.iter().any(|(known, _)| known == value) {
+                continue;
+            }
+            let Some(slot) = self.axis_slot_mut(key) else {
+                continue;
+            };
+            if slot.is_some() {
+                continue;
+            }
+            *slot = Some(value.clone());
+            if !self.suggested.iter().any(|known| known == key) {
+                self.suggested.push(key.clone());
+            }
+            filled.push(key.clone());
+        }
+        filled
     }
 }
 
@@ -148,6 +199,7 @@ impl Default for RunOptions {
             data_state: None,
             slide_density: None,
             evidence_style: None,
+            suggested: Vec::new(),
             variety: default_effort(),
             templates: Vec::new(),
             preview: true,
@@ -996,6 +1048,68 @@ pub fn new_session_id() -> anyhow::Result<String> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_suggestion_fills_a_blank_axis_and_marks_it() {
+        let mut options = RunOptions::default();
+        let filled = options.suggest(
+            ArtifactKind::Demo,
+            &[
+                ("product_kind".to_owned(), "developer_tool".to_owned()),
+                ("color_mode".to_owned(), "dark".to_owned()),
+            ],
+        );
+        assert_eq!(filled, ["product_kind", "color_mode"]);
+        assert_eq!(options.product_kind.as_deref(), Some("developer_tool"));
+        assert_eq!(options.color_mode.as_deref(), Some("dark"));
+        assert_eq!(options.suggested, ["product_kind", "color_mode"]);
+    }
+
+    #[test]
+    fn a_suggestion_never_replaces_an_answer_or_names_an_unknown_value() {
+        let mut options = RunOptions {
+            product_kind: Some("dashboard".to_owned()),
+            ..RunOptions::default()
+        };
+        let filled = options.suggest(
+            ArtifactKind::Demo,
+            &[
+                ("product_kind".to_owned(), "developer_tool".to_owned()),
+                ("scope".to_owned(), "everything".to_owned()),
+                ("vibe".to_owned(), "loud".to_owned()),
+                // A deck axis is not a demo axis.
+                ("audience".to_owned(), "newcomers".to_owned()),
+            ],
+        );
+        assert!(filled.is_empty());
+        assert_eq!(options.product_kind.as_deref(), Some("dashboard"));
+        assert_eq!(options.scope, None);
+        assert_eq!(options.audience, None);
+        assert!(options.suggested.is_empty());
+    }
+
+    #[test]
+    fn the_axes_of_a_demo_leave_out_the_audience_and_the_tone() {
+        let options = RunOptions {
+            audience: Some("newcomers".to_owned()),
+            tone: Some("warm".to_owned()),
+            color_mode: Some("dark".to_owned()),
+            product_kind: Some("developer_tool".to_owned()),
+            ..RunOptions::default()
+        };
+        assert_eq!(
+            options.axes(ArtifactKind::Demo),
+            [("Color mode", "dark"), ("Product kind", "developer_tool")]
+        );
+        assert_eq!(
+            options.axes(ArtifactKind::Deck),
+            [
+                ("Color mode", "dark"),
+                ("Audience", "newcomers"),
+                ("Tone", "warm")
+            ]
+        );
+    }
     use design_model::{QuestionKind, QuestionOption};
 
     fn store() -> (tempfile::TempDir, SessionStore) {
