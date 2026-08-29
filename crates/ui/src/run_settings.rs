@@ -176,20 +176,8 @@ struct Axis {
 /// and the agent never invents options for them. The agent may still
 /// add questions this list does not cover.
 fn axes_for(kind: ArtifactKind) -> Vec<Axis> {
-    let mut axes = vec![
-        Axis {
-            key: "audience",
-            label: "Who is it for?",
-            choices: &AUDIENCES,
-        },
-        Axis {
-            key: "tone",
-            label: "What tone should it have?",
-            choices: &TONES,
-        },
-    ];
     match kind {
-        ArtifactKind::Demo => axes.extend([
+        ArtifactKind::Demo => vec![
             Axis {
                 key: "color_mode",
                 label: "How should the colors read?",
@@ -210,16 +198,36 @@ fn axes_for(kind: ArtifactKind) -> Vec<Axis> {
                 label: "What should the screens show?",
                 choices: &DATA_STATES,
             },
-        ]),
-        // A deck draws its colors card beside the scenario card, and
-        // its evidence card last, so `DeckQuestions` draws both.
-        ArtifactKind::Deck => axes.push(Axis {
-            key: "slide_density",
-            label: "How much goes on a slide?",
-            choices: &SLIDE_DENSITIES,
-        }),
+        ],
+        // The audience and the tone are a deck's questions: a deck
+        // speaks to a room. A demo's request already says what the
+        // product is. A deck draws its colors card beside the scenario
+        // card, and its evidence card last, so `DeckQuestions` draws
+        // both.
+        ArtifactKind::Deck => vec![
+            Axis {
+                key: "audience",
+                label: "Who is it for?",
+                choices: &AUDIENCES,
+            },
+            Axis {
+                key: "tone",
+                label: "What tone should it have?",
+                choices: &TONES,
+            },
+            Axis {
+                key: "slide_density",
+                label: "How much goes on a slide?",
+                choices: &SLIDE_DENSITIES,
+            },
+        ],
     }
-    axes
+}
+
+/// True when the planner filled `key` from the request and the user
+/// has not picked it since.
+fn is_suggested(options: &api::SessionOptions, key: &str) -> bool {
+    options.suggested.iter().any(|known| known == key)
 }
 
 /// The app's own questions with their answers, for the chat record
@@ -337,9 +345,11 @@ fn axis_value(options: &api::SessionOptions, key: &str) -> Option<String> {
 }
 
 /// The options with `key` set to `value`. An empty value clears it,
-/// which leaves that axis to the agent.
+/// which leaves that axis to the agent. A pick is the user's own, so
+/// the axis stops being a suggestion.
 fn with_axis(options: &api::SessionOptions, key: &str, value: String) -> api::SessionOptions {
     let mut next = options.clone();
+    next.suggested.retain(|known| known != key);
     let picked = (!value.is_empty()).then_some(value);
     match key {
         "audience" => next.audience = picked,
@@ -391,6 +401,7 @@ pub(crate) fn SharedQuestions(
                     .or_else(|| picked().contains(axis.key).then(String::new));
                 let choices = fixed_choices(axis.choices);
                 let is_wide = is_wide_card(&choices);
+                let is_suggested = is_suggested(&options, axis.key);
                 rsx! {
                     ChoiceCard {
                         key: "{axis.key}",
@@ -398,6 +409,7 @@ pub(crate) fn SharedQuestions(
                         current,
                         choices,
                         is_wide,
+                        is_suggested,
                         allows_custom: true,
                         on_pick: move |value: String| {
                             picked.write().insert(key.clone());
@@ -583,6 +595,10 @@ pub(crate) fn DeckQuestions(
         });
     });
     let shown = |key: &'static str, value: String| picked().contains(key).then_some(value);
+    // A suggestion shows on the card as picked, so the user sees what
+    // the planner read from the request.
+    let suggested =
+        |key: &str, value: Option<String>| value.filter(|_| is_suggested(&options, key));
     let scenario = shown("scenario", options.scenario.clone().unwrap_or_default());
     let slides = shown(
         "slides",
@@ -602,8 +618,12 @@ pub(crate) fn DeckQuestions(
     let evidence = shown(
         "evidence",
         options.evidence_style.clone().unwrap_or_default(),
-    );
-    let colors = shown("colors", options.color_mode.clone().unwrap_or_default());
+    )
+    .or_else(|| suggested("evidence_style", options.evidence_style.clone()));
+    let colors = shown("colors", options.color_mode.clone().unwrap_or_default())
+        .or_else(|| suggested("color_mode", options.color_mode.clone()));
+    let is_colors_suggested = is_suggested(&options, "color_mode");
+    let is_evidence_suggested = is_suggested(&options, "evidence_style");
     let pick_colors = {
         let options = options.clone();
         move |value: String| {
@@ -666,6 +686,7 @@ pub(crate) fn DeckQuestions(
                 label: "How should the colors read?",
                 current: colors,
                 choices: fixed_choices(&COLOR_MODES),
+                is_suggested: is_colors_suggested,
                 allows_custom: true,
                 on_pick: pick_colors,
             }
@@ -699,6 +720,7 @@ pub(crate) fn DeckQuestions(
             label: "How much does it lean on data?",
             current: evidence,
             choices: fixed_choices(&EVIDENCE_STYLES),
+            is_suggested: is_evidence_suggested,
             allows_custom: true,
             on_pick: pick_evidence,
         }
@@ -725,6 +747,10 @@ fn ChoiceCard(
     /// True when the user may type an answer the chips do not carry.
     #[props(default)]
     allows_custom: bool,
+    /// True when the planner picked `current` from the request. The
+    /// card says so, and the user can change it.
+    #[props(default)]
+    is_suggested: bool,
     on_pick: EventHandler<String>,
 ) -> Element {
     let is_judgment = current.as_deref() == Some("");
@@ -749,12 +775,19 @@ fn ChoiceCard(
         div { class: "{card_class}",
             div { class: "question-head",
                 span { class: "question-label", "{label}" }
+                if is_suggested {
+                    span {
+                        class: "suggested-tag",
+                        title: "Read from your request. Pick a chip to change it.",
+                        "suggested"
+                    }
+                }
             }
             div { class: "option-chips",
                 for (value, text) in choices.into_iter().filter(|(value, _)| !is_judgment_choice(value)) {
                     button {
                         key: "{value}",
-                        class: if current.as_deref() == Some(value.as_str()) { "option-chip selected" } else { "option-chip" },
+                        class: if current.as_deref() == Some(value.as_str()) { if is_suggested { "option-chip selected suggested" } else { "option-chip selected" } } else { "option-chip" },
                         "aria-pressed": if current.as_deref() == Some(value.as_str()) { "true" } else { "false" },
                         onclick: move |_| on_pick.call(value.clone()),
                         "{text}"
@@ -858,6 +891,46 @@ mod tests {
         let audience = row("Who is it for?").expect("audience row");
         assert!(audience.is_assumed);
         assert_eq!(audience.answer, "");
+    }
+
+    #[test]
+    fn a_demo_record_has_no_audience_and_no_tone() {
+        let options = api::SessionOptions {
+            audience: Some("newcomers".to_owned()),
+            product_kind: Some("developer_tool".to_owned()),
+            ..Default::default()
+        };
+        let entries = app_answers(ArtifactKind::Demo, &options);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.question != "Who is it for?")
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.question != "What tone should it have?")
+        );
+        let kind = entries
+            .iter()
+            .find(|entry| entry.question == "What kind of product is it?")
+            .expect("product row");
+        assert_eq!(kind.answer, "Developer tool");
+    }
+
+    #[test]
+    fn a_pick_by_the_user_ends_the_suggestion() {
+        let options = api::SessionOptions {
+            product_kind: Some("developer_tool".to_owned()),
+            color_mode: Some("dark".to_owned()),
+            suggested: vec!["product_kind".to_owned(), "color_mode".to_owned()],
+            ..Default::default()
+        };
+        assert!(is_suggested(&options, "product_kind"));
+        let next = with_axis(&options, "product_kind", "dashboard".to_owned());
+        assert_eq!(next.product_kind.as_deref(), Some("dashboard"));
+        assert!(!is_suggested(&next, "product_kind"));
+        assert!(is_suggested(&next, "color_mode"));
     }
 
     #[test]
