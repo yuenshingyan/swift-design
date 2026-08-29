@@ -42,6 +42,7 @@ mod uploads;
 
 use std::path::PathBuf;
 
+use anyhow::Context;
 use axum::extract::FromRef;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -168,6 +169,14 @@ async fn main() -> anyhow::Result<()> {
     let decks = DeckStore::new(PathBuf::from(decks_directory))
         .with_history(HistoryStore::new(PathBuf::from(deck_history_directory)));
     let sessions = SessionStore::new(PathBuf::from(sessions_directory));
+    // A run dies with the process. Its session would wait for it forever.
+    for session_id in sessions
+        .stop_orphaned_runs()
+        .await
+        .context("stopping the runs the last process left behind")?
+    {
+        tracing::info!(%session_id, "stopped an orphaned run");
+    }
     let settings = SettingsStore::new(PathBuf::from(settings_path), address.clone());
     let templates = TemplateStore::new(PathBuf::from(templates_directory));
     let uploads = UploadStore::new(PathBuf::from(uploads_directory));
