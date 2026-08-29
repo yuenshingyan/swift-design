@@ -11,10 +11,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use design_model::{
-    AUDIENCES, ArtifactKind, BriefQuestionSet, COLOR_MODES, CUSTOM_ANSWER_LIMIT, DATA_STATES,
-    DECK_SCENARIOS, DEMO_SCOPES, EVIDENCE_STYLES, PRODUCT_KINDS, QuestionAnswer, SLIDE_DENSITIES,
-    TONES, WorkflowEvent, WorkflowState, is_custom_answer, is_deck_scenario, validate_answers,
-    validate_question_set,
+    ArtifactKind, BriefQuestionSet, CUSTOM_ANSWER_LIMIT, DECK_SCENARIOS, QuestionAnswer,
+    WorkflowEvent, WorkflowState, app_axes, axis_by_key, is_custom_answer, is_deck_scenario,
+    validate_answers, validate_question_set,
 };
 use serde::Deserialize;
 
@@ -378,39 +377,27 @@ fn option_problem(options: &RunOptions) -> Option<String> {
     // The app owns every axis, but the lists cannot cover every answer,
     // so a typed answer is accepted beside them. Only the shape is
     // checked: the value goes into one prompt line.
-    let picked: [AxisCheck<'_>; 8] = [
-        ("audience", &options.audience, &AUDIENCES),
-        ("tone", &options.tone, &TONES),
-        ("color_mode", &options.color_mode, &COLOR_MODES),
-        ("scope", &options.scope, &DEMO_SCOPES),
-        ("product_kind", &options.product_kind, &PRODUCT_KINDS),
-        ("data_state", &options.data_state, &DATA_STATES),
-        ("slide_density", &options.slide_density, &SLIDE_DENSITIES),
-        ("evidence_style", &options.evidence_style, &EVIDENCE_STYLES),
-    ];
-    for (name, chosen, choices) in picked {
-        if let Some(value) = chosen
-            && !choices.iter().any(|(known, _)| known == value)
+    for axis in app_axes(ArtifactKind::Demo).chain(app_axes(ArtifactKind::Deck)) {
+        if let Some(Some(value)) = options.axis(axis.key)
+            && !axis.choices.iter().any(|(known, _)| known == value)
             && !is_custom_answer(value)
         {
-            let known: Vec<&str> = choices.iter().map(|(value, _)| *value).collect();
+            let known: Vec<&str> = axis.choices.iter().map(|(value, _)| *value).collect();
             return Some(format!(
-                "{name} `{value}` is not usable: type at most {CUSTOM_ANSWER_LIMIT} printable \
+                "{} `{value}` is not usable: type at most {CUSTOM_ANSWER_LIMIT} printable \
                  characters, or use one of {}",
+                axis.key,
                 known.join(", ")
             ));
         }
     }
+    for key in &options.suggested {
+        if axis_by_key(key).is_none() {
+            return Some(format!("suggested axis `{key}` is unknown"));
+        }
+    }
     None
 }
-
-/// One app-owned axis to check: its option name, the stored value, and
-/// the fixed list the value must come from.
-type AxisCheck<'options> = (
-    &'static str,
-    &'options Option<String>,
-    &'static [(&'static str, &'static str)],
-);
 
 /// Replaces the run options.
 async fn put_options(
