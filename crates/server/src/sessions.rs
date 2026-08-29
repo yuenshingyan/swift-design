@@ -189,6 +189,14 @@ pub struct ChatMessage {
     /// `design`. A plain message with a design open is an edit.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_continue: bool,
+    /// When the turn was recorded, RFC 3339. Set on append.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// The artifacts an assistant turn wrote, edited, or finished. The
+    /// studio reverts the turn by restoring each one's snapshot from
+    /// before it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<String>,
 }
 
 impl ChatMessage {
@@ -200,6 +208,8 @@ impl ChatMessage {
             design: design.map(str::to_owned),
             question_set: None,
             is_continue: false,
+            at: None,
+            artifacts: Vec::new(),
         }
     }
 
@@ -219,7 +229,15 @@ impl ChatMessage {
             design: None,
             question_set: None,
             is_continue: false,
+            at: None,
+            artifacts: Vec::new(),
         }
+    }
+
+    /// The same turn, naming the artifacts it wrote.
+    pub fn with_artifacts(mut self, artifacts: Vec<String>) -> Self {
+        self.artifacts = artifacts;
+        self
     }
 
     /// An assistant turn that posed question set `number`.
@@ -230,6 +248,8 @@ impl ChatMessage {
             design: None,
             question_set: Some(number),
             is_continue: false,
+            at: None,
+            artifacts: Vec::new(),
         }
     }
 }
@@ -757,9 +777,16 @@ impl SessionStore {
     }
 
     /// Appends one conversation turn.
-    pub async fn append_message(&self, id: &str, message: ChatMessage) -> Result<(), SessionError> {
+    pub async fn append_message(
+        &self,
+        id: &str,
+        mut message: ChatMessage,
+    ) -> Result<(), SessionError> {
         let _guard = self.write_lock.lock().await;
         let mut messages = self.messages(id).await?;
+        if message.at.is_none() {
+            message.at = Some(crate::time::rfc3339_now());
+        }
         messages.push(message);
         self.write_json(&self.messages_path(id), &messages).await
     }
@@ -1299,6 +1326,22 @@ mod tests {
         assert!(!is_valid_session_id("talk-candidate-1"));
         assert!(!is_valid_session_id("render"));
         assert!(!is_valid_session_id("Bad Id"));
+    }
+
+    #[tokio::test]
+    async fn an_appended_message_is_stamped_with_its_time() {
+        let (_directory, store) = store();
+        store
+            .create(NewSession::demo("talk", "Talk", "A talk."))
+            .await
+            .unwrap();
+        store
+            .append_message("talk", ChatMessage::user("Hello.", None))
+            .await
+            .unwrap();
+        let message = store.messages("talk").await.unwrap().pop().unwrap();
+        let at = message.at.expect("a time");
+        assert!(at.ends_with('Z') && at.len() == 20, "{at}");
     }
 
     #[tokio::test]
