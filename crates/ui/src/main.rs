@@ -13,6 +13,7 @@ mod editor;
 mod home;
 mod icons;
 mod question_card;
+mod revert;
 mod route;
 mod run_settings;
 mod select;
@@ -285,6 +286,11 @@ button.control-cell:focus-visible { outline-offset: -2px; }
 .chat-box .brief-attachments { padding: 0 0.6rem 0.5rem; }
 .chat-box .attach-button { width: 2rem; height: 2rem; }
 .chat-note { font-size: 0.7rem; color: var(--muted); }
+.revert-turn { align-self: flex-start; margin-top: -0.25rem; padding: 0.2rem 0.6rem;
+  font-family: var(--mono); font-size: 0.68rem; border: 1px solid var(--line); border-radius: 999px;
+  background: transparent; color: var(--ink-2); box-shadow: none; }
+.revert-turn:hover:not(:disabled) { border-color: var(--teal); color: var(--teal); }
+.revert-turn:disabled { opacity: 0.6; }
 .chat-box-left .chat-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   min-width: 0; }
 button.primary.send-button { display: inline-flex; align-items: center; justify-content: center;
@@ -523,6 +529,11 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .card-select.ticked, .card-select.ticked:hover:not(:disabled) { border-color: var(--teal);
   background: var(--teal); color: #FFFFFF; }
 .card-select span { display: flex; }
+/* The tick and the page count stay out of the way until the card is
+   hovered; a ticked box stays shown. */
+.card-select, .card-count { opacity: 0; transition: opacity 0.15s ease; }
+.canvas-card:hover .card-select, .canvas-card:hover .card-count, .card-select.ticked,
+.card-select:focus-visible { opacity: 1; }
 .canvas-card.selected, .canvas-card.selected:hover { border: 1.5px solid var(--teal); }
 /* The bulk actions for the ticked cards. */
 .selection-bar { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;
