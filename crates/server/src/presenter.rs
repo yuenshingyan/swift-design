@@ -145,10 +145,25 @@ pub fn routes() -> Router<crate::AppState> {
     Router::new().route("/decks/{id}/present", get(present_deck))
 }
 
-/// The BroadcastChannel and localStorage key the presenter of `deck_id`
-/// publishes on. One key per deck, so two decks never cross.
-pub(crate) fn channel_name(deck_id: &str) -> String {
-    format!("swift-design-presenter:{deck_id}")
+/// The BroadcastChannel and localStorage key a presenter publishes on:
+/// one per deck and per presenter page. The `token` is minted when the
+/// presenter page is served, so an older presenter tab of the same
+/// deck, left open on its last slide, cannot steer a new audience. An
+/// empty token gives the per-deck key.
+pub(crate) fn channel_name(deck_id: &str, token: &str) -> String {
+    if token.is_empty() {
+        return format!("swift-design-presenter:{deck_id}");
+    }
+    format!("swift-design-presenter:{deck_id}:{token}")
+}
+
+/// A token for one presenter page: the time it was served, in hex.
+fn presenter_token() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    format!("{nanos:x}")
 }
 
 /// Query of `GET /decks/{id}/present`.
@@ -190,7 +205,7 @@ async fn present_deck(
             );
         }
     };
-    Html(presenter_page(&id, &deck, start)).into_response()
+    Html(presenter_page(&id, &deck, start, &presenter_token())).into_response()
 }
 
 /// Turns the optional one-based `slide` query into a zero-based index.
@@ -211,6 +226,8 @@ struct PresenterContext<'a> {
     deck: &'a Deck,
     /// The zero-based slide the page starts on.
     start_slide: usize,
+    /// This presenter page's token, part of its channel name.
+    token: &'a str,
 }
 
 impl PresenterContext<'_> {
@@ -223,7 +240,10 @@ impl PresenterContext<'_> {
     }
 
     fn audience_url(&self) -> String {
-        format!("/decks/{}/render?audience=true", self.deck_id)
+        format!(
+            "/decks/{}/render?audience=true&channel={}",
+            self.deck_id, self.token
+        )
     }
 
     fn slide_url(&self) -> String {
@@ -232,12 +252,13 @@ impl PresenterContext<'_> {
 }
 
 /// Builds the presenter page for `deck`, starting on `start_slide`
-/// (zero-based).
-fn presenter_page(deck_id: &str, deck: &Deck, start_slide: usize) -> String {
+/// (zero-based), publishing on the channel named by `token`.
+fn presenter_page(deck_id: &str, deck: &Deck, start_slide: usize, token: &str) -> String {
     let context = PresenterContext {
         deck_id,
         deck,
         start_slide,
+        token,
     };
     format!(
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
@@ -255,7 +276,7 @@ fn presenter_page(deck_id: &str, deck: &Deck, start_slide: usize) -> String {
         style = PRESENTER_STYLE,
         id = escape_html(deck_id),
         slide_count = context.slide_count(),
-        channel = escape_html(&channel_name(deck_id)),
+        channel = escape_html(&channel_name(deck_id, token)),
         audience_url = escape_html(&context.audience_url()),
         slide_url = escape_html(&context.slide_url()),
         header = presenter_header(&context),
@@ -347,8 +368,12 @@ mod tests {
 
     #[test]
     fn channel_name_is_scoped_by_deck_id() {
-        assert_eq!(channel_name("talk"), "swift-design-presenter:talk");
-        assert_ne!(channel_name("talk"), channel_name("talk-2"));
+        assert_eq!(channel_name("talk", ""), "swift-design-presenter:talk");
+        assert_ne!(channel_name("talk", ""), channel_name("talk-2", ""));
+        // Each presenter page gets its own channel, so an older tab of
+        // the same deck cannot steer a new audience.
+        assert_eq!(channel_name("talk", "a1"), "swift-design-presenter:talk:a1");
+        assert_ne!(channel_name("talk", "a1"), channel_name("talk", "b2"));
     }
 
     #[test]
@@ -372,7 +397,7 @@ mod tests {
     fn presenter_page_escapes_the_notes() {
         let mut deck = sample_deck();
         deck.slides[0].notes = Some("<script>alert(1)</script> & more".to_owned());
-        let html = presenter_page("talk", &deck, 0);
+        let html = presenter_page("talk", &deck, 0, "a1");
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt; &amp; more"));
         assert!(!html.contains("<script>alert(1)</script>"));
     }
@@ -380,7 +405,7 @@ mod tests {
     #[test]
     fn presenter_page_shows_the_counter_and_the_slide_count() {
         let deck = sample_deck();
-        let html = presenter_page("talk", &deck, 1);
+        let html = presenter_page("talk", &deck, 1, "a1");
         assert!(html.contains(&format!("data-slide-count=\"{}\"", deck.slides.len())));
         assert!(html.contains("data-start-slide=\"1\""));
         assert!(html.contains("<span id=\"counter\">2</span>"));
@@ -388,12 +413,13 @@ mod tests {
             "<span class=\"of\"> / {}</span>",
             deck.slides.len()
         )));
-        assert!(html.contains("data-channel=\"swift-design-presenter:talk\""));
+        assert!(html.contains("data-channel=\"swift-design-presenter:talk:a1\""));
+        assert!(html.contains("render?audience=true&amp;channel=a1"));
     }
 
     #[test]
     fn presenter_page_groups_the_arrows_and_labels_the_panes() {
-        let html = presenter_page("talk", &sample_deck(), 0);
+        let html = presenter_page("talk", &sample_deck(), 0, "a1");
         assert!(html.contains("<div class=\"nav\">"));
         assert!(html.contains(
             "<button id=\"previous\" type=\"button\" title=\"Previous slide\">←</button>"
@@ -422,7 +448,7 @@ mod tests {
 
     #[test]
     fn the_presenter_csp_hash_matches_the_emitted_script() {
-        let html = presenter_page("talk", &sample_deck(), 0);
+        let html = presenter_page("talk", &sample_deck(), 0, "a1");
         let start = html.find("<script>").unwrap() + "<script>".len();
         let end = html.find("</script>").unwrap();
         let hash = base64_encode(&sha2::Sha256::digest(&html.as_bytes()[start..end]));
@@ -434,11 +460,11 @@ mod tests {
     #[test]
     fn presenter_page_links_the_audience_window_and_the_next_slide() {
         let deck = sample_deck();
-        let html = presenter_page("talk", &deck, 0);
-        assert!(html.contains("src=\"/decks/talk/render?audience=true\""));
+        let html = presenter_page("talk", &deck, 0, "a1");
+        assert!(html.contains("src=\"/decks/talk/render?audience=true&amp;channel=a1\""));
         assert!(html.contains("src=\"/decks/talk/render?slide=2\"></iframe>"));
         assert!(html.contains("<p id=\"end\" class=\"end\" hidden>"));
-        let last = presenter_page("talk", &deck, deck.slides.len() - 1);
+        let last = presenter_page("talk", &deck, deck.slides.len() - 1, "a1");
         assert!(last.contains("render?slide=3\" hidden></iframe>"));
         assert!(last.contains("<p id=\"end\" class=\"end\">End of deck</p>"));
     }
