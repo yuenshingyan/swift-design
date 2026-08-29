@@ -562,6 +562,12 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .card-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; z-index: 3;
   background: rgba(255,255,255,.18); }
 .card-progress-fill { height: 100%; background: var(--teal); transition: width 0.4s ease; }
+.card-progress.indeterminate .card-progress-fill { width: 35%; animation: finish-slide 1.4s ease-in-out infinite; }
+@keyframes finish-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }
+.card-finish.finishing { background: transparent; color: var(--teal); cursor: default; opacity: 1; }
+.finish-spinner { width: 0.7rem; height: 0.7rem; border-radius: 50%; border: 2px solid rgba(14, 110, 99, 0.25);
+  border-top-color: var(--teal); animation: finish-spin 0.9s linear infinite; }
+@keyframes finish-spin { to { transform: rotate(360deg); } }
 .card-footer { display: flex; align-items: center; gap: 0.5rem;
   min-height: 1.75rem; padding: 0.5rem 0.625rem; }
 .card-name { flex: 1 1 auto; display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
@@ -955,6 +961,7 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
 .workbench-questions .question-card { padding: 0.9rem 1rem; }
 .workbench-questions .question-label { font-size: 0.92rem; }
 .question-set-actions { display: flex; align-items: center; gap: 0.625rem; }
+.question-step { font-size: 0.75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 .question-hint { font-size: 0.72rem; color: var(--muted); }
 /* The open question set sits in the chat thread, one column wide. */
 .thread-questions { display: flex; flex-direction: column; gap: 0.75rem; }
