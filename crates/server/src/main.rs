@@ -11,6 +11,7 @@ mod deck_polish;
 mod deck_render;
 mod decks;
 mod designs;
+mod edit_focus;
 mod events;
 mod export;
 mod files;
