@@ -1,10 +1,13 @@
-//! The app's own questions that apply to both kinds: who the artifact
-//! is for, what tone it takes, and how much of a demo to build.
+//! The app's own questions: how the colors read for both kinds, how
+//! much of a demo to build and what it shows, and who a deck is for
+//! and what tone it takes.
 //!
 //! These recur in every session with the same answers, so the app asks
 //! them from a fixed list instead of letting the agent invent options
 //! that differ from run to run. The agent never asks them. The
 //! request-specific questions stay with the agent.
+
+use crate::ArtifactKind;
 
 /// Who the artifact is for, as (value, label). The value is the run
 /// option; the label is the chip.
@@ -49,12 +52,16 @@ pub const COLOR_MODES: [(&str, &str); 8] = [
 
 /// What kind of product a demo shows, as (value, label). It decides the
 /// layout vocabulary: a dashboard and a storefront share no furniture.
+///
+/// No label names a device. The canvas question owns the device, and
+/// `Consumer mobile app` beside a phone canvas read as the same
+/// question asked twice. The values predate the labels and stay.
 pub const PRODUCT_KINDS: [(&str, &str); 6] = [
-    ("consumer_app", "Consumer mobile app"),
-    ("business_app", "Business web app"),
+    ("consumer_app", "Consumer app"),
+    ("business_app", "Business tool"),
     ("developer_tool", "Developer tool"),
     ("marketplace", "Marketplace or storefront"),
-    ("content_site", "Content or media site"),
+    ("content_site", "Content or media"),
     ("dashboard", "Internal dashboard"),
 ];
 
@@ -130,34 +137,99 @@ pub fn demo_scope_label(value: &str) -> Option<&'static str> {
     label_of(&DEMO_SCOPES, value)
 }
 
-/// Every app-owned axis both kinds ask, as (prompt name, choices).
-pub const SHARED_AXES: [(&str, &[(&str, &str)]); 3] = [
-    ("Audience", &AUDIENCES),
-    ("Tone", &TONES),
-    ("Color mode", &COLOR_MODES),
-];
+/// One app-owned question: the option it writes, the name the prompt
+/// prints, and the fixed choices as (value, label).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppAxis {
+    /// The run option the pick lands in, such as `product_kind`.
+    pub key: &'static str,
+    /// The name the prompt prints, such as `Product kind`.
+    pub name: &'static str,
+    /// The fixed choices, as (value, label).
+    pub choices: &'static [(&'static str, &'static str)],
+}
+
+/// Every app-owned axis both kinds ask.
+pub const SHARED_AXES: [AppAxis; 1] = [AppAxis {
+    key: "color_mode",
+    name: "Color mode",
+    choices: &COLOR_MODES,
+}];
 
 /// Every app-owned axis only a demo asks.
-pub const DEMO_AXES: [(&str, &[(&str, &str)]); 3] = [
-    ("Scope", &DEMO_SCOPES),
-    ("Product kind", &PRODUCT_KINDS),
-    ("Screen state", &DATA_STATES),
+pub const DEMO_AXES: [AppAxis; 3] = [
+    AppAxis {
+        key: "scope",
+        name: "Scope",
+        choices: &DEMO_SCOPES,
+    },
+    AppAxis {
+        key: "product_kind",
+        name: "Product kind",
+        choices: &PRODUCT_KINDS,
+    },
+    AppAxis {
+        key: "data_state",
+        name: "Screen state",
+        choices: &DATA_STATES,
+    },
 ];
 
 /// Every app-owned axis only a deck asks.
-pub const DECK_AXES: [(&str, &[(&str, &str)]); 2] = [
-    ("Slide density", &SLIDE_DENSITIES),
-    ("Evidence", &EVIDENCE_STYLES),
+///
+/// The audience and the tone live here: a deck speaks to a room, and
+/// its copy changes with who sits in it. A demo's screens show a
+/// product, and the request already says what it is.
+pub const DECK_AXES: [AppAxis; 4] = [
+    AppAxis {
+        key: "audience",
+        name: "Audience",
+        choices: &AUDIENCES,
+    },
+    AppAxis {
+        key: "tone",
+        name: "Tone",
+        choices: &TONES,
+    },
+    AppAxis {
+        key: "slide_density",
+        name: "Slide density",
+        choices: &SLIDE_DENSITIES,
+    },
+    AppAxis {
+        key: "evidence_style",
+        name: "Evidence",
+        choices: &EVIDENCE_STYLES,
+    },
 ];
 
-/// The label for `value` on the axis named `name`, when both are known.
-pub fn axis_label(name: &str, value: &str) -> Option<&'static str> {
+/// Every app-owned axis of every kind.
+fn every_axis() -> impl Iterator<Item = &'static AppAxis> {
     SHARED_AXES
         .iter()
         .chain(DEMO_AXES.iter())
         .chain(DECK_AXES.iter())
-        .find(|(axis, _)| *axis == name)
-        .and_then(|(_, choices)| label_of(choices, value))
+}
+
+/// The app-owned axes `kind` asks, shared ones first.
+pub fn app_axes(kind: ArtifactKind) -> impl Iterator<Item = &'static AppAxis> {
+    let own: &'static [AppAxis] = match kind {
+        ArtifactKind::Demo => &DEMO_AXES,
+        ArtifactKind::Deck => &DECK_AXES,
+    };
+    SHARED_AXES.iter().chain(own.iter())
+}
+
+/// The axis whose option is `key`, when there is one.
+pub fn axis_by_key(key: &str) -> Option<&'static AppAxis> {
+    every_axis().find(|axis| axis.key == key)
+}
+
+/// The label for `value` on the axis named `name`, when both are known.
+pub fn axis_label(name: &str, value: &str) -> Option<&'static str> {
+    every_axis()
+        .find(|axis| axis.name == name)
+        .and_then(|axis| label_of(axis.choices, value))
 }
 
 #[cfg(test)]
@@ -198,37 +270,41 @@ mod tests {
 
     #[test]
     fn each_kind_asks_its_own_axes_and_the_shared_ones() {
-        let demo: Vec<&str> = SHARED_AXES
-            .iter()
-            .chain(DEMO_AXES.iter())
-            .map(|(name, _)| *name)
-            .collect();
+        let demo: Vec<&str> = app_axes(ArtifactKind::Demo).map(|axis| axis.name).collect();
         assert_eq!(
             demo,
-            [
-                "Audience",
-                "Tone",
-                "Color mode",
-                "Scope",
-                "Product kind",
-                "Screen state"
-            ]
+            ["Color mode", "Scope", "Product kind", "Screen state"]
         );
-        let deck: Vec<&str> = SHARED_AXES
-            .iter()
-            .chain(DECK_AXES.iter())
-            .map(|(name, _)| *name)
-            .collect();
+        let deck: Vec<&str> = app_axes(ArtifactKind::Deck).map(|axis| axis.name).collect();
         assert_eq!(
             deck,
             [
+                "Color mode",
                 "Audience",
                 "Tone",
-                "Color mode",
                 "Slide density",
                 "Evidence"
             ]
         );
+    }
+
+    #[test]
+    fn no_product_kind_names_a_device() {
+        for (_, label) in PRODUCT_KINDS {
+            let lower = label.to_lowercase();
+            for device in ["mobile", "web", "phone", "desktop", "site"] {
+                assert!(!lower.contains(device), "{label} names a device");
+            }
+        }
+    }
+
+    #[test]
+    fn an_axis_is_found_by_its_option_key() {
+        assert_eq!(
+            axis_by_key("product_kind").map(|axis| axis.name),
+            Some("Product kind")
+        );
+        assert_eq!(axis_by_key("vibe"), None);
     }
 
     #[test]
@@ -248,12 +324,7 @@ mod tests {
 
     #[test]
     fn no_axis_name_is_used_twice() {
-        let names: Vec<&str> = SHARED_AXES
-            .iter()
-            .chain(DEMO_AXES.iter())
-            .chain(DECK_AXES.iter())
-            .map(|(name, _)| *name)
-            .collect();
+        let names: Vec<&str> = every_axis().map(|axis| axis.name).collect();
         for name in &names {
             assert_eq!(
                 names.iter().filter(|other| *other == name).count(),
