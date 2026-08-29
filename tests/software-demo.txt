@@ -1,13 +1,1 @@
 A TODO app with Zed IDE's aesthetics and styling.
-Q
-What platform should the TODO app be designed for?
-A
-Desktop web app
-Q
-What should the demo include?
-A
-Small app flow: list, task detail, add/edit task
-Q
-Who is this TODO app for, and what is their main goal?
-A
-Developers
