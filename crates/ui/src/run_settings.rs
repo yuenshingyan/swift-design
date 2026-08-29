@@ -6,9 +6,9 @@
 use std::collections::HashSet;
 
 use design_model::{
-    AUDIENCES, ArtifactKind, COLOR_MODES, CUSTOM_ANSWER_LIMIT, DATA_STATES, DECK_SCENARIOS,
-    DECK_VARIETY_LEVELS, DEMO_SCOPES, EVIDENCE_STYLES, PRODUCT_KINDS, SLIDE_DENSITIES, TONES,
-    Viewport, WorkflowState,
+    AUDIENCES, AnsweredQuestion, ArtifactKind, COLOR_MODES, CUSTOM_ANSWER_LIMIT, DATA_STATES,
+    DECK_SCENARIOS, DECK_VARIETY_LEVELS, DEMO_SCOPES, EVIDENCE_STYLES, PRODUCT_KINDS,
+    SLIDE_DENSITIES, TONES, Viewport, WorkflowState,
 };
 use dioxus::prelude::*;
 
@@ -220,6 +220,105 @@ fn axes_for(kind: ArtifactKind) -> Vec<Axis> {
         }),
     }
     axes
+}
+
+/// The app's own questions with their answers, for the chat record
+/// of the setup card. A blank field, or a judgment pick, reads as
+/// assumed: the agent decided it.
+pub(crate) fn app_answers(
+    kind: ArtifactKind,
+    options: &api::SessionOptions,
+) -> Vec<AnsweredQuestion> {
+    let mut entries: Vec<AnsweredQuestion> = axes_for(kind)
+        .iter()
+        .map(|axis| {
+            recorded(
+                axis.label,
+                axis_value(options, axis.key).as_deref(),
+                &fixed_choices(axis.choices),
+            )
+        })
+        .collect();
+    match kind {
+        ArtifactKind::Demo => {
+            entries.push(recorded(
+                "Variations",
+                options.variations.map(|count| count.to_string()).as_deref(),
+                &candidate_choices(),
+            ));
+            entries.push(canvas_record(&options.platforms));
+        }
+        ArtifactKind::Deck => {
+            entries.push(recorded(
+                "How should the colors read?",
+                options.color_mode.as_deref(),
+                &fixed_choices(&COLOR_MODES),
+            ));
+            entries.push(recorded(
+                "What scenario is the deck for?",
+                options.scenario.as_deref(),
+                &scenario_choices(),
+            ));
+            entries.push(recorded(
+                "How different should the candidates be?",
+                Some(&options.variety),
+                &variety_choices(),
+            ));
+            entries.push(recorded(
+                "How long should the deck be?",
+                options
+                    .slide_count
+                    .map(|count| count.to_string())
+                    .as_deref(),
+                &slide_count_options(),
+            ));
+            entries.push(recorded(
+                "How many candidates should I write?",
+                options.variations.map(|count| count.to_string()).as_deref(),
+                &candidate_choices(),
+            ));
+            entries.push(recorded(
+                "How much does it lean on data?",
+                options.evidence_style.as_deref(),
+                &fixed_choices(&EVIDENCE_STYLES),
+            ));
+        }
+    }
+    entries
+}
+
+/// One recorded answer: the label of a preset, a typed answer as typed,
+/// or an assumed row when nothing was picked.
+fn recorded(question: &str, value: Option<&str>, choices: &[(String, String)]) -> AnsweredQuestion {
+    let answer = value
+        .filter(|value| !is_judgment_choice(value))
+        .map(|value| {
+            choices
+                .iter()
+                .find(|(known, _)| known == value)
+                .map(|(_, label)| label.clone())
+                .unwrap_or_else(|| value.to_owned())
+        });
+    AnsweredQuestion {
+        question: question.to_owned(),
+        is_assumed: answer.is_none(),
+        answer: answer.unwrap_or_default(),
+    }
+}
+
+/// The canvas row: the picked canvases by name, or assumed when none.
+fn canvas_record(platforms: &[String]) -> AnsweredQuestion {
+    let picked = picked_platforms(platforms);
+    let names: Vec<&str> = platform_choices()
+        .into_iter()
+        .filter(|choice| picked.iter().any(|value| value == choice.value))
+        .map(|choice| choice.label)
+        .collect();
+    AnsweredQuestion {
+        question: "Canvas".to_owned(),
+        is_assumed: names.is_empty(),
+        answer: names.join(", "),
+    }
 }
 
 /// The value stored for `key`, if any.
@@ -733,6 +832,45 @@ fn typed_answer(current: Option<&str>, choices: &[(String, String)]) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_record_reads_a_preset_a_typed_answer_and_a_blank() {
+        let options = api::SessionOptions {
+            tone: Some("technical".to_owned()),
+            scenario: Some("Board offsite".to_owned()),
+            slide_count: Some(10),
+            ..Default::default()
+        };
+        let entries = app_answers(ArtifactKind::Deck, &options);
+        let row = |question: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.question == question)
+                .cloned()
+        };
+        let tone = row("What tone should it have?").expect("tone row");
+        assert_eq!(tone.answer, "Technical and precise");
+        assert!(!tone.is_assumed);
+        let scenario = row("What scenario is the deck for?").expect("scenario row");
+        assert_eq!(scenario.answer, "Board offsite");
+        let length = row("How long should the deck be?").expect("length row");
+        assert_eq!(length.answer, "10 slides");
+        let audience = row("Who is it for?").expect("audience row");
+        assert!(audience.is_assumed);
+        assert_eq!(audience.answer, "");
+    }
+
+    #[test]
+    fn a_demo_record_names_its_canvases() {
+        let options = api::SessionOptions {
+            platforms: vec!["desktop web".to_owned()],
+            ..Default::default()
+        };
+        let entries = app_answers(ArtifactKind::Demo, &options);
+        let canvas = entries.last().expect("canvas row");
+        assert_eq!(canvas.question, "Canvas");
+        assert_eq!(canvas.answer, "Desktop");
+    }
 
     #[test]
     fn a_fixed_axis_offers_the_judgment_choice_first() {
