@@ -114,9 +114,76 @@ pub async fn dom_findings(
 }
 
 /// Reads the audit report out of a dumped DOM: the JSON in the
-/// `data-swift-design-findings` attribute on `<html>`.
+/// `data-swift-design-findings` attribute on `<html>`. The findings
+/// come ordered by severity and capped per kind, see `prioritized`.
 pub fn parse_findings(dom: &str) -> Vec<String> {
-    raw_findings(dom).iter().map(format_finding).collect()
+    prioritized(raw_findings(dom))
+        .iter()
+        .map(format_finding)
+        .collect()
+}
+
+/// The most findings of one kind on one screen that reach the model.
+/// The rest fold into one summary line.
+pub(crate) const FINDINGS_PER_KIND_LIMIT: usize = 6;
+
+/// The rank of a finding kind: lower comes first. Layout breakage
+/// first, then legibility. A candidate with hundreds of small labels
+/// once buried eight overflowing lines under the small-text findings,
+/// and the model fixed none of them.
+fn kind_rank(kind: &str) -> usize {
+    match kind {
+        "overfull" => 0,
+        "off_screen" => 1,
+        "overflow" => 2,
+        "overlap" => 3,
+        "empty" => 4,
+        "contrast" => 5,
+        "long_lines" => 6,
+        "tiny_text" => 7,
+        _ => 8,
+    }
+}
+
+/// The findings ordered by kind severity, then by screen, with at
+/// most `FINDINGS_PER_KIND_LIMIT` of one kind per screen. The rest of
+/// that kind on that screen become one finding that says how many
+/// more there are, so the model still knows the scale of it.
+pub(crate) fn prioritized(findings: Vec<Finding>) -> Vec<Finding> {
+    let mut findings = findings;
+    findings.sort_by_key(|finding| (kind_rank(&finding.kind), finding.screen));
+    let mut kept: Vec<Finding> = Vec::new();
+    let mut counts: std::collections::HashMap<(usize, String), usize> =
+        std::collections::HashMap::new();
+    for finding in findings {
+        let count = counts
+            .entry((finding.screen, finding.kind.clone()))
+            .or_insert(0);
+        *count += 1;
+        if *count <= FINDINGS_PER_KIND_LIMIT {
+            kept.push(finding);
+        } else if *count == FINDINGS_PER_KIND_LIMIT + 1 {
+            kept.push(Finding {
+                node: "and more".to_owned(),
+                detail: String::new(),
+                ..finding
+            });
+        }
+    }
+    for finding in &mut kept {
+        if finding.node == "and more" {
+            let extra = counts
+                .get(&(finding.screen, finding.kind.clone()))
+                .copied()
+                .unwrap_or(0)
+                .saturating_sub(FINDINGS_PER_KIND_LIMIT);
+            finding.detail = format!(
+                "{extra} more {} finding(s) on this screen, not listed",
+                finding.kind
+            );
+        }
+    }
+    kept
 }
 
 /// The audit findings in a dumped DOM, as records. Empty when the page
@@ -215,6 +282,56 @@ mod tests {
         );
         assert!(parse_findings("<html><head></head></html>").is_empty());
         assert!(parse_findings("<html data-swift-design-findings=\"not json\">").is_empty());
+    }
+
+    #[test]
+    fn findings_come_layout_first_and_capped_per_kind() {
+        let mut raw: Vec<Finding> = (0..10)
+            .map(|index| Finding {
+                screen: 0,
+                node: format!("p ({index})"),
+                kind: "tiny_text".to_owned(),
+                detail: "font-size 11px is too small".to_owned(),
+            })
+            .collect();
+        raw.push(Finding {
+            screen: 1,
+            node: "h2 (0/1)".to_owned(),
+            kind: "overflow".to_owned(),
+            detail: "content needs 59px but the box is 30px tall".to_owned(),
+        });
+        raw.push(Finding {
+            screen: 0,
+            node: "p (0/2)".to_owned(),
+            kind: "contrast".to_owned(),
+            detail: "contrast 2.1:1".to_owned(),
+        });
+        let ordered = prioritized(raw);
+        let kinds: Vec<&str> = ordered
+            .iter()
+            .map(|finding| finding.kind.as_str())
+            .collect();
+        // The overflow leads, then the contrast, then six small-text
+        // findings and one line for the other four.
+        assert_eq!(kinds[0], "overflow");
+        assert_eq!(kinds[1], "contrast");
+        assert_eq!(kinds.iter().filter(|kind| **kind == "tiny_text").count(), 7);
+        let summary = ordered.last().expect("a summary line");
+        assert_eq!(summary.node, "and more");
+        assert_eq!(
+            summary.detail,
+            "4 more tiny_text finding(s) on this screen, not listed"
+        );
+        assert_eq!(ordered.len(), 9);
+    }
+
+    #[test]
+    fn the_audit_script_sets_the_text_floor_by_canvas() {
+        let script = crate::render::AUDIT_SCRIPT;
+        assert!(script.contains("canvasWidth >= 1920 ? { flag: 20, ask: 24 }"));
+        assert!(script.contains("canvasWidth >= 1000 ? { flag: 12, ask: 14 }"));
+        assert!(script.contains("{ flag: 11, ask: 12 }"));
+        assert!(script.contains("if (size < textFloor.flag)"));
     }
 
     #[test]
