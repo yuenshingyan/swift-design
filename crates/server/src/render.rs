@@ -610,6 +610,12 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
     if (fitFactor < 0.97) {
       findings.push({ screen, node: 'root', kind: 'overfull', detail: 'the screen holds more than the ' + canvasWidth + ' by ' + canvasHeight + ' canvas fits, so it was scaled to ' + Math.round(fitFactor * 100) + '%: cut content or reduce the sizes' });
     }
+    // The smallest readable text depends on the canvas. A slide is
+    // read from across a room; a desktop app screen uses 12 to 14px
+    // labels, and a phone screen 11 to 12px. The deck floor applied
+    // to a demo flagged every label, and the real layout findings
+    // were lost in hundreds of these.
+    const textFloor = canvasWidth >= 1920 ? { flag: 20, ask: 24 } : canvasWidth >= 1000 ? { flag: 12, ask: 14 } : { flag: 11, ask: 12 };
     const textBlocks = [];
     all.forEach((element) => {
       if (element.closest('svg') && element.tagName.toLowerCase() !== 'svg') { return; }
@@ -623,8 +629,8 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
       }
       if (isText) {
         const size = parseFloat(getComputedStyle(element).fontSize);
-        if (size < 20) {
-          findings.push({ screen, node: name(element), kind: 'tiny_text', detail: 'font-size ' + Math.round(size) + 'px is too small: use at least 24px' });
+        if (size < textFloor.flag) {
+          findings.push({ screen, node: name(element), kind: 'tiny_text', detail: 'font-size ' + Math.round(size) + 'px is too small: use at least ' + textFloor.ask + 'px' });
         }
         textBlocks.push({ element, rect });
       }
