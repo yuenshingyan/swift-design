@@ -643,10 +643,17 @@ impl SessionStore {
     }
 
     /// The state to resume into after a stop or an error: the state the
-    /// run halted in, or intake.
+    /// run halted in, or intake. A halt in `generating` resumes in
+    /// `reviewing`: a run that starts in `generating` writes candidates
+    /// without a planner turn, and that overwrote finished candidates
+    /// when the user's next message was an edit.
     pub async fn recovery_target(&self, id: &str) -> Result<WorkflowState, SessionError> {
         let session = self.require(id).await?;
-        Ok(session.resume_state.unwrap_or(WorkflowState::Intake))
+        Ok(match session.resume_state {
+            Some(WorkflowState::Generating) => WorkflowState::Reviewing,
+            Some(state) => state,
+            None => WorkflowState::Intake,
+        })
     }
 
     /// Writes the next question set. Returns its number.
@@ -800,6 +807,38 @@ impl SessionStore {
         tokio::fs::write(&path, json)
             .await
             .map_err(SessionError::io)
+    }
+
+    /// Stops every run the last process left unfinished. A session in
+    /// `generating` whose latest run has no end was killed with the
+    /// server: nothing will finish it, and the session refuses messages
+    /// until it halts. Returns the ids stopped.
+    pub async fn stop_orphaned_runs(&self) -> Result<Vec<String>, SessionError> {
+        let mut stopped = Vec::new();
+        for summary in self.list().await? {
+            if summary.state != WorkflowState::Generating {
+                continue;
+            }
+            let orphans: Vec<RunRecord> = self
+                .runs(&summary.id)
+                .await?
+                .into_iter()
+                .filter(|record| record.finished_at.is_none())
+                .collect();
+            for record in &orphans {
+                self.finish_run(
+                    &summary.id,
+                    &record.run_id,
+                    "stopped",
+                    Some("the server stopped while the run worked".to_owned()),
+                    Vec::new(),
+                )
+                .await?;
+            }
+            self.apply(&summary.id, WorkflowEvent::RunStopped).await?;
+            stopped.push(summary.id);
+        }
+        Ok(stopped)
     }
 
     /// Every run record, oldest first.
@@ -1076,9 +1115,10 @@ mod tests {
         let failed = store.apply("talk", WorkflowEvent::RunFailed).await.unwrap();
         assert_eq!(failed.state, WorkflowState::Error);
         assert_eq!(failed.resume_state, Some(WorkflowState::Generating));
+        // The run halted in generating; the user resumes on the canvas.
         assert_eq!(
             store.recovery_target("talk").await.unwrap(),
-            WorkflowState::Generating
+            WorkflowState::Reviewing
         );
         let recovered = store
             .apply(
@@ -1115,7 +1155,7 @@ mod tests {
         assert_eq!(stopped.resume_state, Some(WorkflowState::Generating));
         assert_eq!(
             store.recovery_target("talk").await.unwrap(),
-            WorkflowState::Generating
+            WorkflowState::Reviewing
         );
         let resumed = store
             .apply(
@@ -1259,6 +1299,41 @@ mod tests {
         assert!(!is_valid_session_id("talk-candidate-1"));
         assert!(!is_valid_session_id("render"));
         assert!(!is_valid_session_id("Bad Id"));
+    }
+
+    #[tokio::test]
+    async fn a_run_the_last_process_left_behind_is_stopped_at_boot() {
+        let (_directory, store) = store();
+        store
+            .create(NewSession::demo("talk", "Talk", "A landing page."))
+            .await
+            .unwrap();
+        store
+            .apply("talk", WorkflowEvent::GenerationStarted)
+            .await
+            .unwrap();
+        let record = RunRecord {
+            run_id: String::new(),
+            mode: RunMode::Generation,
+            runtime: "built-in".to_owned(),
+            provider: None,
+            model: None,
+            started_at: crate::time::rfc3339_now(),
+            finished_at: None,
+            result: None,
+            error: None,
+            artifacts: Vec::new(),
+        };
+        let run_id = store.start_run("talk", record).await.unwrap();
+        assert_eq!(store.stop_orphaned_runs().await.unwrap(), vec!["talk"]);
+        let session = store.read("talk").await.unwrap().unwrap();
+        assert_eq!(session.state, WorkflowState::Stopped);
+        let runs = store.runs("talk").await.unwrap();
+        let record = runs.iter().find(|record| record.run_id == run_id).unwrap();
+        assert_eq!(record.result.as_deref(), Some("stopped"));
+        assert!(record.finished_at.is_some());
+        // A second boot finds nothing to do.
+        assert!(store.stop_orphaned_runs().await.unwrap().is_empty());
     }
 
     #[test]
