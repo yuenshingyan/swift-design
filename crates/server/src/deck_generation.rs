@@ -103,8 +103,9 @@ impl GenerationEngine {
                 })
             }
             GenerationTask::Continue(deck_ids) => {
-                let refs: Vec<&str> = deck_ids.iter().map(String::as_str).collect();
-                let outcomes = self.continue_decks(client, context, &refs, log).await;
+                let outcomes = self
+                    .continue_artifacts(client, context, deck_ids, log)
+                    .await;
                 if outcomes.iter().all(|(_, outcome)| outcome.is_err()) {
                     let failures: Vec<String> = outcomes
                         .iter()
@@ -117,8 +118,9 @@ impl GenerationEngine {
                         "no deck was continued",
                     )));
                 }
+                // The late finishes count too.
                 Ok(GenerationOutcome::Wrote {
-                    design_ids: deck_ids,
+                    design_ids: outcomes.into_iter().map(|(id, _)| id).collect(),
                 })
             }
         }
@@ -310,51 +312,11 @@ impl GenerationEngine {
         Ok(())
     }
 
-    /// Continues every requested preview deck at the same time. Returns
-    /// one outcome per deck, in request order: the slides added, or the
-    /// error.
-    async fn continue_decks(
-        &self,
-        client: &reqwest::Client,
-        context: &GenerationContext,
-        deck_ids: &[&str],
-        log: &LogSink,
-    ) -> Vec<(String, Result<usize, String>)> {
-        let ids: Vec<String> = deck_ids.iter().map(|id| (*id).to_owned()).collect();
-        let shares = self.shared_progress(&ids, 5, 95);
-        let attachments = Arc::new(self.load_attachments(&context.session_id, log).await);
-        let mut tasks = tokio::task::JoinSet::new();
-        for (index, deck_id) in deck_ids.iter().enumerate() {
-            let engine = self.clone();
-            let client = client.clone();
-            let context = context.clone();
-            let deck_id = (*deck_id).to_owned();
-            let attachments = Arc::clone(&attachments);
-            let share = Arc::clone(&shares[index]);
-            let log = Arc::clone(log);
-            tasks.spawn(async move {
-                let outcome = engine
-                    .continue_deck(&client, &context, &deck_id, &attachments, &share, &log)
-                    .await;
-                (index, deck_id, outcome)
-            });
-        }
-        let mut outcomes: Vec<Option<(String, Result<usize, String>)>> =
-            (0..deck_ids.len()).map(|_| None).collect();
-        while let Some(joined) = tasks.join_next().await {
-            match joined {
-                Ok((index, deck_id, outcome)) => outcomes[index] = Some((deck_id, outcome)),
-                Err(error) => log(&format!("continue task failed: {error}")),
-            }
-        }
-        outcomes.into_iter().flatten().collect()
-    }
-
     /// Writes the remaining slides of the preview deck `deck_id` in
     /// chunks. The deck is saved after every chunk, so the canvas shows
     /// it grow, then polished once it is complete. Returns how many
     /// slides were added; 0 when the deck is complete already.
-    async fn continue_deck(
+    pub(crate) async fn continue_deck(
         &self,
         client: &reqwest::Client,
         context: &GenerationContext,
@@ -384,6 +346,9 @@ impl GenerationEngine {
             planned - start,
             chunks.len()
         ));
+        // The card shows `writing` from the first moment, not from the
+        // first chunk: a chunk takes a minute or more.
+        progress(0.0);
         let saver = DeckLiveSaver::new(decks, &self.notifier, deck_id);
         let board = self
             .write_deck_chunks(
