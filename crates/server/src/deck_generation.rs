@@ -1113,7 +1113,9 @@ fn deck_edit_prompt(request: &SessionRequest, input: &EditInput<'_>) -> String {
          A reference like [slide 3, node 0/1 <h2.title>: What Swift Design does] names a slide \
          (1-based) and one element in that slide's html by its index path from the slide root \
          (zero-based child indexes, element children only), its tag and first class, and the \
-         start of its text. Change only what the critique asks for. Keep every other slide and \
+         start of its text. A reference like [slide 3, nodes 0/1 <h2>; 0/2 <p>] names several \
+         elements of one slide the same way, without their text. A reference like [slide 3] \
+         names the slide alone: the change is about that slide. Change only what the critique asks for. Keep every other slide and \
          value as it is. Return every changed slide complete: html, css, and notes.\n{format}",
         deck_json = input.artifact_json,
         note = input.note,
