@@ -176,7 +176,7 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
          Name the real thing the option builds: a named feature, a named screen, a named section, a named step.\n\
          Two options must differ in what you build, not in wording.\n\
          Read the user's source files before you ask. Never ask what a source file already answers.\n\
-         After {answered} answered questions, do not ask more.\n\
+         After {answered} answered questions about one request, do not ask more about it. A later request for a change starts fresh: when the change is unclear, ask first and set edit and generate to false. When it is clear, edit.\n\
          Set generate to true when you know enough to write. Then say in reply what you will write.\n\
          When the input names an artifact open in the editor and the user asks for a change, set edit to true and generate to false. Say in reply what you will change. The app applies the change to that artifact.\n\
          When no artifact is open and candidates exist and the user asks for changes, set generate to true to write new candidates.\n\
@@ -360,7 +360,12 @@ mod tests {
             assert!(prompt.contains("would fit any other project is wrong"));
             assert!(prompt.contains("Two options must differ in what you build"));
         }
-        assert!(demo.contains("After 5 answered questions, do not ask more."));
+        assert!(
+            demo.contains(
+                "After 5 answered questions about one request, do not ask more about it."
+            )
+        );
+        assert!(demo.contains("A later request for a change starts fresh"));
         assert!(deck.contains("the scenario, the deck length in slides"));
     }
 
