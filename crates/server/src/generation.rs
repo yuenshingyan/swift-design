@@ -632,6 +632,40 @@ impl GenerationEngine {
         Ok((!continues.is_empty()).then_some(GenerationTask::Continue(continues)))
     }
 
+    /// Fills the blank app questions from what the planner read in the
+    /// request, before the card opens. The card then shows them as
+    /// picked and marked as suggested. Only the setup turn does this:
+    /// a later turn has no card, so a suggestion would land unseen.
+    async fn suggest_options(
+        &self,
+        context: &GenerationContext,
+        suggestions: &[(String, String)],
+        log: &LogSink,
+    ) -> Result<(), String> {
+        if suggestions.is_empty() {
+            return Ok(());
+        }
+        let kind = context.request.kind;
+        let mut filled = Vec::new();
+        self.sessions
+            .update(&context.session_id, |session| {
+                filled = session.options.suggest(kind, suggestions);
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        if filled.is_empty() {
+            return Ok(());
+        }
+        tracing::info!(
+            session_id = %context.session_id,
+            axes = ?filled,
+            "app questions suggested from the request"
+        );
+        log(&format!("suggested {}", filled.join(", ")));
+        self.notifier.notify();
+        Ok(())
+    }
+
     /// Asks the planner what this turn does: questions, a write, an
     /// edit of the open artifact, or a reply.
     async fn plan_turn(
@@ -671,6 +705,10 @@ impl GenerationEngine {
         // only adds to that card. Without this, a planner that asks
         // nothing writes a session the user never set up.
         let is_setup_turn = session.state == design_model::WorkflowState::Intake;
+        if is_setup_turn {
+            self.suggest_options(context, &plan.suggestions, log)
+                .await?;
+        }
         let asked = plan
             .question_set
             .clone()
@@ -2982,6 +3020,34 @@ mod tests {
         assert!(!messages[0].content.contains("Writing it now"));
         // Nothing was written: the model was called once, to plan.
         assert_eq!(server.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_setup_turn_fills_the_app_questions_the_request_answers() {
+        let server = FakeModelServer::start().await;
+        server.push_text(
+            r#"{"reply":"A todo app in Zed's style.","questions":[],"suggestions":{"product_kind":"developer_tool","color_mode":"dark","audience":"newcomers","scope":"whole_app"},"generate":false,"edit":false}"#,
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        fresh_session(&sessions, "A TODO app with Zed IDE's aesthetics.").await;
+        let outcome = engine(&server, &designs, &sessions)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            GenerationOutcome::NeedsClarification { question_set: 1 }
+        ));
+        // The card opens with the answers the request gave, marked as
+        // suggested. A deck axis and an unknown value are dropped.
+        let options = sessions.read("talk").await.unwrap().unwrap().options;
+        assert_eq!(options.product_kind.as_deref(), Some("developer_tool"));
+        assert_eq!(options.color_mode.as_deref(), Some("dark"));
+        assert_eq!(options.audience, None);
+        assert_eq!(options.scope, None);
+        assert_eq!(options.suggested, ["color_mode", "product_kind"]);
     }
 
     #[tokio::test]
