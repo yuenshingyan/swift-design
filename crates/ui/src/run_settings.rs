@@ -6,8 +6,9 @@
 use std::collections::HashSet;
 
 use design_model::{
-    AUDIENCES, ArtifactKind, COLOR_MODES, DATA_STATES, DECK_SCENARIOS, DECK_VARIETY_LEVELS,
-    DEMO_SCOPES, EVIDENCE_STYLES, PRODUCT_KINDS, SLIDE_DENSITIES, TONES, Viewport, WorkflowState,
+    AUDIENCES, ArtifactKind, COLOR_MODES, CUSTOM_ANSWER_LIMIT, DATA_STATES, DECK_SCENARIOS,
+    DECK_VARIETY_LEVELS, DEMO_SCOPES, EVIDENCE_STYLES, PRODUCT_KINDS, SLIDE_DENSITIES, TONES,
+    Viewport, WorkflowState,
 };
 use dioxus::prelude::*;
 
@@ -166,7 +167,7 @@ fn axes_for(kind: ArtifactKind) -> Vec<Axis> {
         },
         Axis {
             key: "color_mode",
-            label: "Light or dark?",
+            label: "How should the colors read?",
             choices: &COLOR_MODES,
         },
     ];
@@ -265,9 +266,13 @@ pub(crate) fn SharedQuestions(
             {
                 let options = options.clone();
                 let key = axis.key.to_owned();
-                let current = picked()
-                    .contains(axis.key)
-                    .then(|| axis_value(&options, axis.key).unwrap_or_default());
+                // A stored answer shows on every visit, so a reload
+                // never hides what the run will use. These fields have
+                // no server default: absent means unanswered. The
+                // judgment choice stores nothing, so it is remembered
+                // for this page only.
+                let current = axis_value(&options, axis.key)
+                    .or_else(|| picked().contains(axis.key).then(String::new));
                 rsx! {
                     ChoiceCard {
                         key: "{axis.key}",
@@ -275,6 +280,7 @@ pub(crate) fn SharedQuestions(
                         current,
                         choices: fixed_choices(axis.choices),
                         is_wide: true,
+                        allows_custom: true,
                         on_pick: move |value: String| {
                             picked.write().insert(key.clone());
                             save.call(with_axis(&options, &key, value));
@@ -521,6 +527,7 @@ pub(crate) fn DeckQuestions(
             current: scenario,
             choices: scenario_choices(),
             is_wide: true,
+            allows_custom: true,
             on_pick: pick_scenario,
         }
         ChoiceCard {
@@ -561,6 +568,9 @@ fn ChoiceCard(
     /// True for a card with many chips: it takes the full row.
     #[props(default)]
     is_wide: bool,
+    /// True when the user may type an answer the chips do not carry.
+    #[props(default)]
+    allows_custom: bool,
     on_pick: EventHandler<String>,
 ) -> Element {
     let is_judgment = current.as_deref() == Some("");
@@ -568,6 +578,18 @@ fn ChoiceCard(
         "question-card app-question wide"
     } else {
         "question-card app-question"
+    };
+    let typed_answer = typed_answer(current.as_deref(), &choices);
+    let mut is_typing = use_signal(|| false);
+    let mut draft = use_signal(String::new);
+    let mut commit = move |()| {
+        let answer = draft().trim().to_owned();
+        if answer.is_empty() {
+            return;
+        }
+        is_typing.set(false);
+        draft.set(String::new());
+        on_pick.call(answer);
     };
     rsx! {
         div { class: "{card_class}",
@@ -584,6 +606,55 @@ fn ChoiceCard(
                         "{text}"
                     }
                 }
+                // An answer the user typed reads as a chip of its own,
+                // so the card still shows what the run will use.
+                if let Some(answer) = typed_answer.clone() {
+                    button {
+                        class: "option-chip selected",
+                        "aria-pressed": "true",
+                        onclick: move |_| {
+                            draft.set(answer.clone());
+                            is_typing.set(true);
+                        },
+                        "{answer}"
+                    }
+                }
+                if allows_custom && !is_typing() {
+                    button {
+                        class: "option-chip write-in",
+                        onclick: move |_| is_typing.set(true),
+                        "Something else…"
+                    }
+                }
+            }
+            if allows_custom && is_typing() {
+                div { class: "write-in-row",
+                    input {
+                        class: "write-in-field",
+                        r#type: "text",
+                        autofocus: true,
+                        maxlength: CUSTOM_ANSWER_LIMIT as i64,
+                        placeholder: "Type your own answer",
+                        value: "{draft()}",
+                        oninput: move |event| draft.set(event.value()),
+                        onkeydown: move |event: Event<KeyboardData>| {
+                            if event.key() == Key::Enter {
+                                event.prevent_default();
+                                commit(());
+                            }
+                            if event.key() == Key::Escape {
+                                is_typing.set(false);
+                                draft.set(String::new());
+                            }
+                        },
+                    }
+                    button {
+                        class: "option-chip write-in-save",
+                        disabled: draft().trim().is_empty(),
+                        onclick: move |_| commit(()),
+                        "Use this"
+                    }
+                }
             }
             button {
                 class: if is_judgment { "option-chip skip selected" } else { "option-chip skip" },
@@ -592,6 +663,16 @@ fn ChoiceCard(
             }
         }
     }
+}
+
+/// The answer the user typed, when the current value is not one of the
+/// chips. An empty value is the judgment choice, not a typed answer.
+fn typed_answer(current: Option<&str>, choices: &[(String, String)]) -> Option<String> {
+    let value = current?;
+    if value.is_empty() || choices.iter().any(|(known, _)| known == value) {
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 #[cfg(test)]
@@ -606,6 +687,21 @@ mod tests {
         assert!(is_judgment_choice(&choices[0].0));
         assert_eq!(choices[1].0, "newcomers".to_owned());
         assert_eq!(choices[1].1, "Newcomers to the subject".to_owned());
+    }
+
+    #[test]
+    fn a_value_outside_the_chips_reads_as_a_typed_answer() {
+        let choices = fixed_choices(&TONES);
+        assert_eq!(
+            typed_answer(Some("wry, like a changelog"), &choices),
+            Some("wry, like a changelog".to_owned())
+        );
+        // A chip value is a chip, not a typed answer.
+        assert_eq!(typed_answer(Some("playful"), &choices), None);
+        // An empty value is the judgment choice.
+        assert_eq!(typed_answer(Some(""), &choices), None);
+        // Nothing picked yet.
+        assert_eq!(typed_answer(None, &choices), None);
     }
 
     #[test]
