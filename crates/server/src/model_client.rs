@@ -13,7 +13,13 @@ use std::sync::Arc;
 use crate::settings::SettingsStore;
 
 /// Longest time to wait for one model response.
-pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+/// How long a connection to the provider may take to open.
+pub(crate) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a reply may go silent before the run gives up. The cap is
+/// on silence, not on the whole reply: a model that reasons for minutes
+/// sends nothing meanwhile, and a long deck streams for longer than any
+/// fixed total. A total cap surfaced as `error decoding response body`.
+pub(crate) const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// One LLM provider: a chat endpoint plus its key environment variables.
 struct Provider {
@@ -298,10 +304,11 @@ impl ModelClient {
         context_window(&self.configuration.model)
     }
 
-    /// An HTTP client with the request timeout every run shares.
+    /// An HTTP client with the connect timeout every run shares. The
+    /// reply itself is capped by silence, in `chat_with`.
     pub fn build_http_client() -> Result<reqwest::Client, String> {
         reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .map_err(|error| error.to_string())
     }
@@ -453,10 +460,18 @@ impl ModelClient {
         let mut raw = String::new();
         let mut pending: Vec<u8> = Vec::new();
         loop {
-            let chunk = match response.chunk().await {
-                Ok(Some(chunk)) => chunk,
-                Ok(None) => break,
-                Err(error) => return Err(format!("reading the {provider} reply failed: {error}")),
+            let chunk = match tokio::time::timeout(IDLE_TIMEOUT, response.chunk()).await {
+                Ok(Ok(Some(chunk))) => chunk,
+                Ok(Ok(None)) => break,
+                Ok(Err(error)) => {
+                    return Err(format!("reading the {provider} reply failed: {error}"));
+                }
+                Err(_) => {
+                    return Err(format!(
+                        "the {provider} reply went silent for {} s",
+                        IDLE_TIMEOUT.as_secs()
+                    ));
+                }
             };
             pending.extend_from_slice(&chunk);
             while let Some(position) = pending.iter().position(|byte| *byte == b'\n') {
