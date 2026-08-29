@@ -141,6 +141,11 @@ mod tests {
             "[slide 4, node 0/4/3 <span>: x] [slide 2, node 1 <h2>] [slide 4, node 1 <p>] fix";
         assert_eq!(referenced_indexes(instruction, "slide"), vec![1, 3]);
         assert!(referenced_indexes(instruction, "screen").is_empty());
+        // The page alone, without a node.
+        assert_eq!(
+            referenced_indexes("[slide 4] More margin at the bottom.", "slide"),
+            vec![3]
+        );
         assert!(referenced_indexes("make every title bigger", "slide").is_empty());
     }
 
