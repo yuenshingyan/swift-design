@@ -98,6 +98,9 @@ pub struct ChatMessage {
     /// The number of the question set this turn posed, when it did.
     #[serde(default)]
     pub question_set: Option<u32>,
+    /// True when the user pressed Finish on the design in `design`.
+    #[serde(default)]
+    pub is_continue: bool,
 }
 
 /// One recorded set of answers.
