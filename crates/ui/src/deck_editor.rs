@@ -17,8 +17,9 @@ use crate::chat::DesignChat;
 use crate::editor::{
     APPLY_TO_PREVIEW, HistorySection, NodeCommand, NodeInspector, PREVIEW_LISTENER, PreviewMessage,
     STRIP_TILE_HEIGHT_REM, SelectedNode, SelectionEntry, ThemeForm, ThumbnailState, TransitionForm,
-    fragment_label, move_screen, node_reference, optional, outline_entry, selection_of,
-    selection_paths, selection_reference, strip_summary, thumbnail_class,
+    fragment_label, move_screen, node_reference, optional, outline_entry, page_reference,
+    schedule_save, selection_of, selection_paths, selection_reference, strip_summary,
+    thumbnail_class, toggle_pin,
 };
 use crate::icons;
 use crate::settings::artifact_project;
@@ -53,10 +54,14 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
     let mut selected = use_signal(|| 0usize);
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
     let mut selection = use_signal(Vec::<SelectionEntry>::new);
+    // The slides pinned for the chat with a command-click on a tile.
+    let mut pinned = use_signal(Vec::<usize>::new);
     let mut messages = use_signal(Vec::<String>::new);
     let mut preview_version = use_signal(|| 0u32);
     let mut user_paths = use_signal(Vec::<String>::new);
     let mut is_dirty = use_signal(|| false);
+    // Autosave: the newest change wins the delay.
+    let save_generation = use_signal(|| 0u64);
     let mut show_properties = use_signal(|| false);
     let mut is_menu_open = use_signal(|| false);
     let mut template_name = use_signal(|| Option::<String>::None);
@@ -262,6 +267,7 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
         .enumerate()
         .map(|(index, slide)| slide_label(index, slide))
         .collect();
+    let page_labels = thumbnail_labels.clone();
     let current_notes = deck()
         .slides
         .get(selected())
@@ -272,6 +278,16 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
             DesignChat {
                 design_id: deck_id.clone(),
                 context: chat_context,
+                page: page_reference("slide", &pinned()),
+                is_pinned: !pinned().is_empty(),
+                on_pin_page: move |index: usize| {
+                    if !pinned().contains(&index) {
+                        pinned.write().push(index);
+                    }
+                },
+                pages: page_labels.clone(),
+                page_unit: Some("slide".to_owned()),
+                on_drop_page: move |_| pinned.write().clear(),
                 on_before_send: move |_| {
                     if is_dirty() {
                         save.call(false);
@@ -289,17 +305,10 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                     span { class: "preview-heading", "{selected() + 1} / {slide_count}" }
                     span { class: "badge", "agent {agent_count}" }
                     span { class: "badge you", "you {user_count}" }
+                    // Every change saves by itself, shortly after it. The
+                    // cue shows only while a save is due.
                     if is_dirty() {
-                        button {
-                            class: "primary",
-                            onclick: move |_| save.call(true),
-                            "Save"
-                        }
-                    } else {
-                        span { class: "save-state",
-                            span { dangerous_inner_html: icons::CHECK }
-                            "saved"
-                        }
+                        span { class: "save-state pending", "saving…" }
                     }
                     div { class: "actions",
                         button { onclick: move |_| show_properties.set(!show_properties()),
@@ -396,7 +405,7 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                     }
                     p { class: "preview-hint",
                         span {
-                            "Click a node to reference it in the chat and edit its text · ⌘-click adds more"
+                            "Click a node to reference it in the chat and edit its text · ⌘-click adds more · ⌘-click a tile to pin pages"
                         }
                         span { class: "dot", "·" }
                         span { "right-click for quick edits" }
@@ -424,6 +433,7 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                                     }
                                 });
                                 is_dirty.set(true);
+                                schedule_save(save_generation, save, false);
                             },
                         }
                     }
@@ -464,15 +474,22 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                                     is_dragging: dragged() == Some(index),
                                     is_portrait: false,
                                     is_deleting,
+                                    is_pinned: pinned().contains(&index),
                                 });
                                 rsx! {
                                     div {
                                         key: "{index}",
                                         class: "{class}",
-                                        title: "{label} · drag to reorder",
+                                        title: "{label} · drag to reorder · ⌘-click to pin for the chat",
                                         style: "--tile-width: {tile_width}rem",
                                         "data-index": "{index}",
-                                        onclick: move |_| {
+                                        onclick: move |event: MouseEvent| {
+                                            // A command-click pins the slide for
+                                            // the chat; a plain click opens it.
+                                            if event.modifiers().meta() || event.modifiers().ctrl() {
+                                                toggle_pin(&mut pinned.write(), index);
+                                                return;
+                                            }
                                             selected.set(index);
                                             selected_node.set(None);
                                             pending_slide_delete.set(None);
@@ -544,10 +561,9 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                     div { class: "sheet-head",
                         span { class: "kicker", "Properties" }
                         span { class: "spacer" }
-                        button {
-                            class: "primary",
-                            onclick: move |_| save.call(true),
-                            "Save"
+                        // The same cue as the toolbar.
+                        if is_dirty() {
+                            span { class: "save-state pending", "saving…" }
                         }
                         button { onclick: move |_| show_properties.set(false), "Close" }
                     }
@@ -566,6 +582,7 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                                     oninput: move |event| {
                                         deck.with_mut(|deck| deck.title = event.value());
                                         is_dirty.set(true);
+                                        schedule_save(save_generation, save, false);
                                     },
                                 }
                             }
@@ -575,6 +592,7 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                             on_change: move |theme: Theme| {
                                 deck.with_mut(|deck| deck.theme = theme);
                                 is_dirty.set(true);
+                                schedule_save(save_generation, save, true);
                             },
                         }
                         TransitionForm {
