@@ -120,6 +120,29 @@ fn open_artifact(messages: &[ChatMessage]) -> Option<String> {
         .and_then(|message| message.design.clone())
 }
 
+/// How many questions the user answered since the last turn that
+/// wrote artifacts: the answers that belong to the current request.
+/// Every answer counts while nothing was written yet.
+pub(crate) fn answers_since_last_write(
+    messages: &[ChatMessage],
+    records: &[crate::sessions::AnswerRecord],
+) -> usize {
+    let last_write = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant" && !message.artifacts.is_empty())
+        .and_then(|message| message.at.clone());
+    records
+        .iter()
+        .filter(|record| {
+            last_write
+                .as_deref()
+                .is_none_or(|written| record.at.as_str() > written)
+        })
+        .map(|record| record.answers.len())
+        .sum()
+}
+
 /// The text of the latest user turn.
 fn latest_user_text(messages: &[ChatMessage]) -> Option<String> {
     messages
@@ -652,8 +675,16 @@ impl GenerationEngine {
             .question_set
             .clone()
             .or_else(|| is_setup_turn.then(app_question_set));
+        // The limit is per request: answers given before the last write
+        // belong to an earlier request, and a new change may need its own
+        // questions.
+        let records = self
+            .sessions
+            .answers(session_id)
+            .await
+            .map_err(|error| error.to_string())?;
         if let Some(set) = &asked
-            && context.request.answers.len() < ANSWERED_QUESTION_LIMIT
+            && answers_since_last_write(&messages, &records) < ANSWERED_QUESTION_LIMIT
         {
             let number = self
                 .sessions
@@ -2417,7 +2448,9 @@ fn edit_prompt(request: &SessionRequest, input: &EditInput<'_>) -> String {
          A reference like [screen 3, node 0/1 <h2.title>: What Swift Design does] names a screen \
          (1-based) and one element in that screen's html by its index path from the screen root \
          (zero-based child indexes, element children only), its tag and first class, and the \
-         start of its text. Change only what the critique asks for. Keep every other screen and \
+         start of its text. A reference like [screen 3, nodes 0/1 <h2>; 0/2 <p>] names several \
+         elements of one screen the same way, without their text. A reference like [screen 3] \
+         names the screen alone: the change is about that screen. Change only what the critique asks for. Keep every other screen and \
          value as it is. Return every changed screen complete: html, css, and notes.\n{format}",
         design_json = input.artifact_json,
         note = input.note,
@@ -2764,7 +2797,8 @@ mod tests {
 
     use super::{
         GenerationContext, GenerationEngine, GenerationOutcome, ProgressGroup, ProgressSink,
-        candidate_plans, edit_prompt, focused_design_json, system_prompt, trailing_continue_ids,
+        answers_since_last_write, candidate_plans, edit_prompt, focused_design_json, system_prompt,
+        trailing_continue_ids,
     };
     use crate::designs::DesignStore;
     use crate::edit_focus::EditInput;
@@ -3113,6 +3147,32 @@ mod tests {
         assert!(result.unwrap_err().contains("fix rounds"));
         let runs = sessions.runs("talk").await.unwrap();
         assert_eq!(runs[0].result.as_deref(), Some("failed"));
+    }
+
+    #[test]
+    fn answers_count_per_request_from_the_last_write() {
+        let record = |at: &str, count: usize| crate::sessions::AnswerRecord {
+            question_set: 1,
+            answers: (0..count)
+                .map(|index| design_model::QuestionAnswer {
+                    question_id: format!("q{index}"),
+                    values: Vec::new(),
+                    other_text: None,
+                    skipped: true,
+                })
+                .collect(),
+            at: at.to_owned(),
+        };
+        let records = vec![
+            record("2026-08-29T07:00:00Z", 3),
+            record("2026-08-29T07:30:00Z", 2),
+        ];
+        let mut wrote = ChatMessage::assistant("I wrote 2 candidates.")
+            .with_artifacts(vec!["talk-candidate-1".to_owned()]);
+        wrote.at = Some("2026-08-29T07:10:00Z".to_owned());
+        let messages = vec![ChatMessage::user("A talk.", None), wrote];
+        assert_eq!(answers_since_last_write(&messages, &records), 2);
+        assert_eq!(answers_since_last_write(&messages[..1], &records), 5);
     }
 
     #[test]
