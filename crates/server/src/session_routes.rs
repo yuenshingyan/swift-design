@@ -11,9 +11,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use design_model::{
-    AUDIENCES, ArtifactKind, BriefQuestionSet, COLOR_MODES, DATA_STATES, DECK_SCENARIOS,
-    DEMO_SCOPES, EVIDENCE_STYLES, PRODUCT_KINDS, QuestionAnswer, SLIDE_DENSITIES, TONES,
-    WorkflowEvent, WorkflowState, is_deck_scenario, validate_answers, validate_question_set,
+    AUDIENCES, ArtifactKind, BriefQuestionSet, COLOR_MODES, CUSTOM_ANSWER_LIMIT, DATA_STATES,
+    DECK_SCENARIOS, DEMO_SCOPES, EVIDENCE_STYLES, PRODUCT_KINDS, QuestionAnswer, SLIDE_DENSITIES,
+    TONES, WorkflowEvent, WorkflowState, is_custom_answer, is_deck_scenario, validate_answers,
+    validate_question_set,
 };
 use serde::Deserialize;
 
@@ -366,15 +367,17 @@ fn option_problem(options: &RunOptions) -> Option<String> {
     }
     if let Some(scenario) = &options.scenario
         && !is_deck_scenario(scenario)
+        && !is_custom_answer(scenario)
     {
         return Some(format!(
-            "scenario `{scenario}` is unknown: use one of {}",
+            "scenario `{scenario}` is not usable: type at most {CUSTOM_ANSWER_LIMIT} printable \
+             characters, or use one of {}",
             DECK_SCENARIOS.join(", ")
         ));
     }
-    // The app owns every axis, so only its own values are accepted. A
-    // demo-only axis is still checked on a deck: a stored value that no
-    // list knows would reach no prompt and confuse the next reader.
+    // The app owns every axis, but the lists cannot cover every answer,
+    // so a typed answer is accepted beside them. Only the shape is
+    // checked: the value goes into one prompt line.
     let picked: [AxisCheck<'_>; 8] = [
         ("audience", &options.audience, &AUDIENCES),
         ("tone", &options.tone, &TONES),
@@ -388,10 +391,12 @@ fn option_problem(options: &RunOptions) -> Option<String> {
     for (name, chosen, choices) in picked {
         if let Some(value) = chosen
             && !choices.iter().any(|(known, _)| known == value)
+            && !is_custom_answer(value)
         {
             let known: Vec<&str> = choices.iter().map(|(value, _)| *value).collect();
             return Some(format!(
-                "{name} `{value}` is unknown: use one of {}",
+                "{name} `{value}` is not usable: type at most {CUSTOM_ANSWER_LIMIT} printable \
+                 characters, or use one of {}",
                 known.join(", ")
             ));
         }
@@ -764,6 +769,8 @@ mod tests {
             Some(r#"{"id":"intro","request":"Intro for Swift Design.","artifact_kind":"deck"}"#),
         )
         .await;
+        // A scenario outside the presets is the user's own words, so it
+        // is kept. Only an unusable shape is refused.
         let (status, _) = send(
             application.clone(),
             "PUT",
@@ -771,7 +778,21 @@ mod tests {
             Some(r#"{"effort":"medium","variety":"high","templates":[],"preview":true,"platforms":[],"scenario":"Cooking"}"#),
         )
         .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            view(&application, "intro").await["session"]["options"]["scenario"],
+            "Cooking"
+        );
+        let long = "x".repeat(design_model::CUSTOM_ANSWER_LIMIT + 1);
+        let (status, body) = send(
+            application.clone(),
+            "PUT",
+            "/sessions/intro/options",
+            Some(&format!(r#"{{"effort":"medium","variety":"high","templates":[],"preview":true,"platforms":[],"scenario":"{long}"}}"#)),
+        )
+        .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("is not usable"), "{body}");
         let (status, _) = send(
             application.clone(),
             "PUT",
@@ -786,7 +807,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_apps_own_axes_take_only_their_own_values() {
+    async fn the_apps_own_axes_take_a_preset_or_the_users_own_words() {
         let directory = TempDir::new().unwrap();
         let application = test_application(&directory);
         send(
@@ -798,30 +819,45 @@ mod tests {
         .await;
         let base =
             r#"{"effort":"medium","variety":"medium","templates":[],"preview":true,"platforms":[]"#;
-        // A value outside the fixed list is refused, so the prompt can
-        // never carry an axis the app did not offer.
-        let (status, body) = send(
+        // The fixed lists cannot cover every answer, so an answer the
+        // user typed is kept beside them.
+        let (status, _) = send(
             application.clone(),
             "PUT",
             "/sessions/intro/options",
             Some(&format!(r#"{base},"audience":"astronauts"}}"#)),
         )
         .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            view(&application, "intro").await["session"]["options"]["audience"],
+            "astronauts"
+        );
+        // An answer that would break the prompt line is refused.
+        let long = "x".repeat(design_model::CUSTOM_ANSWER_LIMIT + 1);
+        let (status, body) = send(
+            application.clone(),
+            "PUT",
+            "/sessions/intro/options",
+            Some(&format!(r#"{base},"tone":"{long}"}}"#)),
+        )
+        .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(body.contains("audience `astronauts` is unknown"));
+        assert!(body.contains("tone `"), "{body}");
+        assert!(body.contains("is not usable"), "{body}");
         let (status, _) = send(
             application.clone(),
             "PUT",
             "/sessions/intro/options",
             Some(&format!(
-                r#"{base},"audience":"practitioners","tone":"executive","scope":"short_flow"}}"#
+                r#"{base},"audience":"practitioners","tone":"technical","scope":"short_flow"}}"#
             )),
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
         let options = &view(&application, "intro").await["session"]["options"];
         assert_eq!(options["audience"], "practitioners");
-        assert_eq!(options["tone"], "executive");
+        assert_eq!(options["tone"], "technical");
         assert_eq!(options["scope"], "short_flow");
     }
 
