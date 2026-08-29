@@ -71,12 +71,13 @@ pub(crate) fn request_input(request: &SessionRequest) -> String {
         }
     }
     // The app's own answers, which recur in every session. An axis
-    // the user has not picked is absent, so the agent decides it.
-    // The value is stored as a slug; the prompt reads the label.
+    // the user has not picked is absent, so the agent decides it. A
+    // picked value is a slug that the prompt reads as its label; an
+    // answer the user typed has no label and is printed as it was
+    // typed.
     for (name, value) in request.options.axes(request.kind) {
-        if let Some(label) = axis_label(name, value) {
-            input.push_str(&format!("{name}: {label}\n"));
-        }
+        let text = axis_label(name, value).unwrap_or(value);
+        input.push_str(&format!("{name}: {text}\n"));
     }
     if !request.answers.is_empty() {
         input.push_str("Answers from the user:\n");
@@ -176,7 +177,7 @@ mod tests {
     fn the_apps_own_answers_reach_the_prompt() {
         let mut demo = request(ArtifactKind::Demo);
         demo.options.audience = Some("practitioners".to_owned());
-        demo.options.tone = Some("executive".to_owned());
+        demo.options.tone = Some("technical".to_owned());
         demo.options.scope = Some("short_flow".to_owned());
         demo.options.color_mode = Some("dark".to_owned());
         demo.options.product_kind = Some("developer_tool".to_owned());
@@ -184,8 +185,8 @@ mod tests {
         let input = request_input(&demo);
         // The stored value is a slug; the prompt reads the label.
         assert!(input.contains("Audience: Practitioners in the field"));
-        assert!(input.contains("Tone: Executive overview"));
-        assert!(input.contains("Color mode: Dark"));
+        assert!(input.contains("Tone: Technical and precise"));
+        assert!(input.contains("Color mode: Dark and sleek"));
         assert!(input.contains("Scope: A short flow of screens"));
         assert!(input.contains("Product kind: Developer tool"));
         assert!(input.contains("Screen state: A full, realistic working state"));
@@ -231,10 +232,12 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_axis_value_is_left_out_rather_than_passed_through() {
+    fn an_answer_the_user_typed_reaches_the_prompt_as_typed() {
         let mut demo = request(ArtifactKind::Demo);
+        // No list carries this, so there is no label to read: the
+        // user's own words are the answer.
         demo.options.audience = Some("astronauts".to_owned());
-        assert!(!request_input(&demo).contains("Audience:"));
+        assert!(request_input(&demo).contains("Audience: astronauts"));
     }
 
     #[test]
