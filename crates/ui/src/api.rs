@@ -101,6 +101,12 @@ pub struct ChatMessage {
     /// True when the user pressed Finish on the design in `design`.
     #[serde(default)]
     pub is_continue: bool,
+    /// When the turn was recorded, RFC 3339.
+    #[serde(default)]
+    pub at: Option<String>,
+    /// The artifacts an assistant turn wrote, edited, or finished.
+    #[serde(default)]
+    pub artifacts: Vec<String>,
 }
 
 /// One recorded set of answers.
