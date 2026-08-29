@@ -176,20 +176,34 @@ mod tests {
     #[test]
     fn the_apps_own_answers_reach_the_prompt() {
         let mut demo = request(ArtifactKind::Demo);
-        demo.options.audience = Some("practitioners".to_owned());
-        demo.options.tone = Some("technical".to_owned());
         demo.options.scope = Some("short_flow".to_owned());
         demo.options.color_mode = Some("dark".to_owned());
         demo.options.product_kind = Some("developer_tool".to_owned());
         demo.options.data_state = Some("populated".to_owned());
         let input = request_input(&demo);
         // The stored value is a slug; the prompt reads the label.
-        assert!(input.contains("Audience: Practitioners in the field"));
-        assert!(input.contains("Tone: Technical and precise"));
         assert!(input.contains("Color mode: Dark and sleek"));
         assert!(input.contains("Scope: A short flow of screens"));
         assert!(input.contains("Product kind: Developer tool"));
         assert!(input.contains("Screen state: A full, realistic working state"));
+        let mut deck = request(ArtifactKind::Deck);
+        deck.options.audience = Some("practitioners".to_owned());
+        deck.options.tone = Some("technical".to_owned());
+        let input = request_input(&deck);
+        assert!(input.contains("Audience: Practitioners in the field"));
+        assert!(input.contains("Tone: Technical and precise"));
+    }
+
+    #[test]
+    fn a_demo_prints_no_audience_and_no_tone() {
+        // A demo does not ask them, so an old record's value stays out
+        // of the prompt.
+        let mut demo = request(ArtifactKind::Demo);
+        demo.options.audience = Some("practitioners".to_owned());
+        demo.options.tone = Some("technical".to_owned());
+        let input = request_input(&demo);
+        assert!(!input.contains("Audience:"));
+        assert!(!input.contains("Tone:"));
     }
 
     #[test]
@@ -233,11 +247,11 @@ mod tests {
 
     #[test]
     fn an_answer_the_user_typed_reaches_the_prompt_as_typed() {
-        let mut demo = request(ArtifactKind::Demo);
+        let mut deck = request(ArtifactKind::Deck);
         // No list carries this, so there is no label to read: the
         // user's own words are the answer.
-        demo.options.audience = Some("astronauts".to_owned());
-        assert!(request_input(&demo).contains("Audience: astronauts"));
+        deck.options.audience = Some("astronauts".to_owned());
+        assert!(request_input(&deck).contains("Audience: astronauts"));
     }
 
     #[test]
