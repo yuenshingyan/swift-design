@@ -153,6 +153,67 @@ pub(crate) struct PreviewMessage {
     /// Screens to move by, on navigate messages: 1 or -1.
     #[serde(default)]
     pub(crate) step: i32,
+    /// Every node selected, on select messages, the primary one last.
+    /// A command-click adds to it.
+    #[serde(default)]
+    pub(crate) selection: Vec<SelectionEntry>,
+}
+
+/// One node of a multi-node selection, as the preview names it.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub(crate) struct SelectionEntry {
+    #[serde(default)]
+    pub(crate) path: String,
+    #[serde(default)]
+    pub(crate) tag: String,
+    #[serde(default)]
+    pub(crate) classes: String,
+    #[serde(default)]
+    pub(crate) text: String,
+}
+
+impl SelectionEntry {
+    /// The entry as a selected node, without computed styles.
+    fn to_node(&self) -> SelectedNode {
+        SelectedNode {
+            path: self.path.clone(),
+            tag: self.tag.clone(),
+            classes: self.classes.clone(),
+            text: self.text.clone(),
+            styles: NodeStyles::default(),
+        }
+    }
+}
+
+/// The nodes a select message carries: its selection list, or the one
+/// node it describes when the list is absent.
+pub(crate) fn selection_of(message: &PreviewMessage) -> Vec<SelectionEntry> {
+    if !message.selection.is_empty() {
+        return message.selection.clone();
+    }
+    SelectedNode::from_message(message)
+        .map(|node| SelectionEntry {
+            path: node.path,
+            tag: node.tag,
+            classes: node.classes,
+            text: node.text,
+        })
+        .into_iter()
+        .collect()
+}
+
+/// The chat reference for a selection: one node reference per node,
+/// space separated.
+pub(crate) fn selection_reference(
+    unit: &str,
+    screen_index: usize,
+    entries: &[SelectionEntry],
+) -> String {
+    entries
+        .iter()
+        .map(|entry| node_reference(unit, screen_index, &entry.to_node()))
+        .collect::<Vec<String>>()
+        .join(" ")
 }
 
 /// The node the user selected in the preview.
@@ -217,6 +278,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
     let mut design = use_signal(|| initial.clone());
     let mut selected = use_signal(|| 0usize);
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
+    let mut selection = use_signal(Vec::<SelectionEntry>::new);
     let mut messages = use_signal(Vec::<String>::new);
     let mut preview_version = use_signal(|| 0u32);
     let mut user_paths = use_signal(Vec::<String>::new);
@@ -315,9 +377,15 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                 "swift-design-select" if message.screen < design.peek().screens.len() => {
                     selected.set(message.screen);
                     let node = SelectedNode::from_message(&message);
-                    if let Some(node) = &node {
-                        chat_context.set(Some(node_reference("screen", message.screen, node)));
+                    let entries = selection_of(&message);
+                    if node.is_some() {
+                        chat_context.set(Some(selection_reference(
+                            "screen",
+                            message.screen,
+                            &entries,
+                        )));
                     }
+                    selection.set(entries);
                     selected_node.set(node);
                 }
                 "swift-design-html" => {
@@ -400,10 +468,17 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
         }
     });
 
-    // Sends an inspector command into the preview iframe.
+    // Sends an inspector command into the preview iframe, once per
+    // selected node: a change made on the primary node lands on every
+    // node in the selection.
     let apply = use_callback(move |command: NodeCommand| {
-        let channel = document::eval(APPLY_TO_PREVIEW);
-        let _ = channel.send(command);
+        for path in selection_paths(&selection.peek(), &command.path) {
+            let channel = document::eval(APPLY_TO_PREVIEW);
+            let _ = channel.send(NodeCommand {
+                path,
+                ..command.clone()
+            });
+        }
     });
 
     let screen_count = design().screens.len();
@@ -581,7 +656,9 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                         }
                     }
                     p { class: "preview-hint",
-                        span { "Click a node to reference it in the chat and edit its text" }
+                        span {
+                            "Click a node to reference it in the chat and edit its text · ⌘-click adds more"
+                        }
                         span { class: "dot", "·" }
                         span { "right-click for quick edits" }
                         span { class: "dot", "·" }
@@ -988,6 +1065,19 @@ fn effect_from_value(value: &str) -> Option<TransitionEffect> {
         "zoom" => Some(TransitionEffect::Zoom),
         _ => None,
     }
+}
+
+/// The paths an inspector command goes to: the command's own path
+/// first, then every other node in the selection.
+pub(crate) fn selection_paths(selection: &[SelectionEntry], primary: &str) -> Vec<String> {
+    let mut paths = vec![primary.to_owned()];
+    paths.extend(
+        selection
+            .iter()
+            .map(|entry| entry.path.clone())
+            .filter(|path| path != primary),
+    );
+    paths
 }
 
 /// The chat reference for one node: `[screen 3, node 0/1 <h2.title>: text]`.
@@ -1520,10 +1610,11 @@ mod tests {
     use design_model::TransitionEffect;
 
     use crate::editor::{
-        MONO_FONTS, NodeStyles, SelectedNode, TEXT_FONTS, ThumbnailState, default_screen,
-        effect_uses_motion, field_count, first_heading, font_options, history_label, move_screen,
-        node_reference, optional, outline_entry, outline_title, preview_stage_class, screen_label,
-        strip_summary, strip_tags, thumbnail_class,
+        MONO_FONTS, NodeStyles, SelectedNode, SelectionEntry, TEXT_FONTS, ThumbnailState,
+        default_screen, effect_uses_motion, field_count, first_heading, font_options,
+        history_label, move_screen, node_reference, optional, outline_entry, outline_title,
+        preview_stage_class, screen_label, selection_paths, selection_reference, strip_summary,
+        strip_tags, thumbnail_class,
     };
 
     #[test]
@@ -1659,6 +1750,32 @@ mod tests {
             first_heading("<p>x</p><h3>Third</h3><h2>Second</h2>"),
             Some("Third".to_owned())
         );
+    }
+
+    #[test]
+    fn a_selection_reference_names_every_node() {
+        let entries = vec![
+            SelectionEntry {
+                path: "0/1".to_owned(),
+                tag: "h2".to_owned(),
+                classes: "title".to_owned(),
+                text: "Hello".to_owned(),
+            },
+            SelectionEntry {
+                path: "0/2".to_owned(),
+                tag: "p".to_owned(),
+                ..SelectionEntry::default()
+            },
+        ];
+        assert_eq!(
+            selection_reference("slide", 3, &entries),
+            "[slide 4, node 0/1 <h2.title>: Hello] [slide 4, node 0/2 <p>]"
+        );
+        assert_eq!(
+            selection_paths(&entries, "0/2"),
+            vec!["0/2".to_owned(), "0/1".to_owned()]
+        );
+        assert_eq!(selection_paths(&[], "0/2"), vec!["0/2".to_owned()]);
     }
 
     #[test]
