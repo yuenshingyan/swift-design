@@ -894,8 +894,7 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
   color: var(--ink-2); box-shadow: none; }
 .option-chip.selected { background: var(--ink); border-color: var(--ink); color: var(--paper); }
 .option-chip.selected:hover:not(:disabled) { background: #23272C; border-color: #23272C; }
-.option-chip.skip { border-style: dashed; border-color: var(--line); color: var(--muted);
-  align-self: flex-start; }
+.option-chip.skip { border-style: dashed; border-color: var(--line); color: var(--muted); }
 /* Picked, the skip chip takes the dark fill from `.selected`. This rule
    is needed because `.option-chip.skip` is declared after
    `.option-chip.selected` at the same specificity, so its muted text
