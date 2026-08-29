@@ -2,18 +2,18 @@
 //! the candidate canvas on the right. A long-poll on `GET /events`
 //! keeps both live.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dioxus::prelude::*;
 
 use crate::api;
-use crate::canvas::{CandidateCanvas, cards_from_decks, cards_from_designs};
+use crate::canvas::{CandidateCanvas, cards_from_decks, cards_from_designs, queued_finishes};
 use crate::chat_controls::{ModelChip, SendButton};
 use crate::question_card::{
     DraftAnswer, QaRow, QuestionCardState, QuestionSetCard, answered_entries, question_card_state,
     set_key,
 };
-use crate::run_settings::{DeckQuestions, RunSettings, SharedQuestions};
+use crate::run_settings::{DeckQuestions, RunSettings, SharedQuestions, app_answers};
 use crate::settings::{SettingsPanel, pause_briefly};
 use crate::status::{RunStatusCard, working_label};
 use design_model::{ArtifactKind, QuestionAnswer, WorkflowState};
@@ -170,6 +170,11 @@ pub(crate) fn SessionWorkspace(
         .filter(|run| run.is_running)
         .map(|run| run.designs.clone())
         .unwrap_or_default();
+    // A pressed Finish shows as queued at once, before the poll brings
+    // the message back, and stays queued while the run holds it.
+    let mut pressed = use_signal(HashSet::<String>::new);
+    let mut queued = queued_finishes(&session_view.messages, is_running);
+    queued.extend(pressed().into_iter());
 
     let answered_sets: Vec<u32> = session_view
         .answers
@@ -309,6 +314,19 @@ pub(crate) fn SessionWorkspace(
                                             QuestionCardState::Active => rsx! {},
                                             QuestionCardState::Answered => rsx! {
                                                 div { class: "thread-answers",
+                                                    // The setup card asked the app's
+                                                    // questions too. Their answers live
+                                                    // on the options, so the first
+                                                    // record reads them from there.
+                                                    if number == 1 {
+                                                        for entry in app_answers(session.artifact_kind, &session.options) {
+                                                            QaRow {
+                                                                question: entry.question.clone(),
+                                                                answer: entry.answer.clone(),
+                                                                is_assumed: entry.is_assumed,
+                                                            }
+                                                        }
+                                                    }
                                                     for entry in set_answers(&set, &session_view.answers, number) {
                                                         QaRow {
                                                             question: entry.question.clone(),
@@ -423,17 +441,17 @@ pub(crate) fn SessionWorkspace(
                                     }
                                 }
                             }),
-                        }
-                        // A demo's run settings belong with the
-                        // questions: the card is now open on the first
-                        // turn, so this is the only place they appear
-                        // before the first candidates.
-                        if session.artifact_kind == ArtifactKind::Demo {
-                            RunSettings {
-                                session_id: session_id.clone(),
-                                options: session.options.clone(),
-                                on_error: move |message| error.set(Some(message)),
-                            }
+                            // A demo's run settings belong with the
+                            // app's cards: the card is open on the
+                            // first turn, so this is the only place
+                            // they appear before the first candidates.
+                            app_settings: if session.artifact_kind == ArtifactKind::Demo { Some(rsx! {
+                                RunSettings {
+                                    session_id: session_id.clone(),
+                                    options: session.options.clone(),
+                                    on_error: move |message| error.set(Some(message)),
+                                }
+                            }) } else { None },
                         }
                     }
                 }
@@ -453,6 +471,7 @@ pub(crate) fn SessionWorkspace(
                         session_id: session_id.clone(),
                         cards,
                         run_designs,
+                        queued,
                         on_error: move |message| error.set(Some(message)),
                         revision: revision(),
                         chosen: session.chosen_design.clone(),
@@ -464,9 +483,11 @@ pub(crate) fn SessionWorkspace(
                             let session_id = session_id.clone();
                             move |artifact_id: String| {
                                 let session_id = session_id.clone();
+                                pressed.write().insert(artifact_id.clone());
                                 spawn(async move {
                                     let sent = api::continue_artifact(&session_id, &artifact_id).await;
                                     if let Err(message) = sent {
+                                        pressed.write().remove(&artifact_id);
                                         error.set(Some(message));
                                     }
                                 });
