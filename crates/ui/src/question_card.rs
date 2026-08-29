@@ -192,6 +192,34 @@ pub(crate) fn set_key(set: &BriefQuestionSet) -> String {
     format!("{}|{}", set.title, ids.join(","))
 }
 
+/// One page of the open question set. The app's fixed-option cards
+/// come first, the agent's own questions second, so the agent's
+/// questions, which vary in size, never break the app's grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QuestionPage {
+    /// The app's own cards: the axes and the run settings.
+    App,
+    /// The questions the agent added for this request.
+    Agent,
+}
+
+/// Lists the pages of a question set, in the order they are shown.
+/// A set with nothing on a page drops that page. A set with nothing on
+/// either page keeps the agent's page, so the card still has a submit.
+pub(crate) fn question_pages(
+    has_app_questions: bool,
+    has_agent_questions: bool,
+) -> Vec<QuestionPage> {
+    let mut pages = Vec::new();
+    if has_app_questions {
+        pages.push(QuestionPage::App);
+    }
+    if has_agent_questions || pages.is_empty() {
+        pages.push(QuestionPage::Agent);
+    }
+    pages
+}
+
 /// The card for the open question set: up to three questions, a
 /// `Send answers` button enabled once every question is complete, and,
 /// when the set allows it, a skip that starts generation at once.
@@ -203,14 +231,24 @@ pub(crate) fn QuestionSetCard(
     can_skip: bool,
     on_submit: EventHandler<Vec<QuestionAnswer>>,
     on_skip: EventHandler<()>,
-    /// The app's own question cards, shown in the same grid after the
-    /// agent's questions. A deck session fills this slot.
+    /// The app's own question cards, shown on their own page before
+    /// the agent's questions.
     #[props(default)]
     app_questions: Option<Element>,
+    /// The run settings, shown under the app's cards on the same page.
+    /// A demo session fills this slot.
+    #[props(default)]
+    app_settings: Option<Element>,
 ) -> Element {
     let questions: Vec<BriefQuestion> = set.questions.iter().take(3).cloned().collect();
     // The grid consumes the list, so the hint reads this instead.
     let has_questions = !questions.is_empty();
+    let pages = question_pages(app_questions.is_some(), has_questions);
+    let page_count = pages.len();
+    let mut page_index = use_signal(|| 0usize);
+    let index = page_index().min(page_count - 1);
+    let page = pages[index];
+    let is_last_page = index + 1 == page_count;
     let ready = answers_are_complete(&set, &drafts.read());
     let submit_set = set.clone();
     let submit = move |_| {
@@ -235,28 +273,52 @@ pub(crate) fn QuestionSetCard(
         // already the assistant's chat bubble, and the title said
         // nothing the cards do not.
         div { class: "{set_class}",
-            div { class: "question-cards",
-                for question in questions {
-                    QuestionCard {
-                        key: "{question.id}",
-                        question: question.clone(),
-                        draft: drafts.read().get(&question.id).cloned().unwrap_or_default(),
-                        on_change: {
-                            let id = question.id.clone();
-                            move |next: DraftAnswer| {
-                                drafts.write().insert(id.clone(), next);
-                            }
-                        },
+            if page == QuestionPage::App {
+                div { class: "question-cards", {app_questions} }
+                {app_settings}
+            } else {
+                div { class: "question-cards",
+                    for question in questions {
+                        QuestionCard {
+                            key: "{question.id}",
+                            question: question.clone(),
+                            draft: drafts.read().get(&question.id).cloned().unwrap_or_default(),
+                            on_change: {
+                                let id = question.id.clone();
+                                move |next: DraftAnswer| {
+                                    drafts.write().insert(id.clone(), next);
+                                }
+                            },
+                        }
                     }
                 }
-                {app_questions}
             }
             div { class: "question-set-actions",
-                button {
-                    class: "primary",
-                    disabled: !ready || is_busy,
-                    onclick: submit,
-                    "Send answers"
+                if page_count > 1 {
+                    span { class: "question-step", "Step {index + 1} of {page_count}" }
+                }
+                if index > 0 {
+                    button {
+                        class: "secondary",
+                        disabled: is_busy,
+                        onclick: move |_| page_index.set(index - 1),
+                        "Back"
+                    }
+                }
+                if is_last_page {
+                    button {
+                        class: "primary",
+                        disabled: !ready || is_busy,
+                        onclick: submit,
+                        "Send answers"
+                    }
+                } else {
+                    button {
+                        class: "primary",
+                        disabled: is_busy,
+                        onclick: move |_| page_index.set(index + 1),
+                        "Next"
+                    }
                 }
                 if can_skip {
                     button {
@@ -266,10 +328,9 @@ pub(crate) fn QuestionSetCard(
                         "Skip the questions and generate"
                     }
                 }
-                // With no question of the agent's own, the card holds
-                // only the app's cards, and the hint has nothing to
-                // point at.
-                if has_questions {
+                // The hint points at the agent's questions, so it
+                // shows only on their page.
+                if page == QuestionPage::Agent && has_questions {
                     span { class: "question-hint",
                         "Required questions need an answer or Use your best judgment."
                     }
@@ -459,6 +520,25 @@ pub(crate) fn answered_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_apps_page_comes_before_the_agents() {
+        assert_eq!(
+            question_pages(true, true),
+            vec![QuestionPage::App, QuestionPage::Agent]
+        );
+    }
+
+    #[test]
+    fn a_set_with_no_agent_questions_has_only_the_apps_page() {
+        assert_eq!(question_pages(true, false), vec![QuestionPage::App]);
+    }
+
+    #[test]
+    fn a_later_turn_has_only_the_agents_page() {
+        assert_eq!(question_pages(false, true), vec![QuestionPage::Agent]);
+        assert_eq!(question_pages(false, false), vec![QuestionPage::Agent]);
+    }
     use design_model::QuestionOption;
 
     #[test]
