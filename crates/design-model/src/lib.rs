@@ -40,9 +40,9 @@ pub use question::{
     validate_question_set,
 };
 pub use run_questions::{
-    AUDIENCES, COLOR_MODES, CUSTOM_ANSWER_LIMIT, DATA_STATES, DECK_AXES, DEMO_AXES, DEMO_SCOPES,
-    EVIDENCE_STYLES, PRODUCT_KINDS, SHARED_AXES, SLIDE_DENSITIES, TONES, audience_label,
-    axis_label, demo_scope_label, is_custom_answer, tone_label,
+    AUDIENCES, AppAxis, COLOR_MODES, CUSTOM_ANSWER_LIMIT, DATA_STATES, DECK_AXES, DEMO_AXES,
+    DEMO_SCOPES, EVIDENCE_STYLES, PRODUCT_KINDS, SHARED_AXES, SLIDE_DENSITIES, TONES, app_axes,
+    audience_label, axis_by_key, axis_label, demo_scope_label, is_custom_answer, tone_label,
 };
 pub use screen::Screen;
 pub use slide::Slide;
