@@ -30,7 +30,7 @@ const SHARED_RULES: [&str; 6] = [
 pub const DEMO_RULES: &[&str] = &[
     "A screen is one HTML fragment in `html` and one CSS block in `css`.",
     "Design each screen for the px canvas in the design's `viewport`. The default is 1440 by 900 px (desktop web). Use 390 by 844 for a phone and 1024 by 768 for a tablet. Use px units. Do not use vw, vh, vmin, vmax, or container units.",
-    "Lay out with flex, grid, or absolute positioning. The screen root is position: relative, the viewport size, overflow: hidden.",
+    "Lay out with flex, grid, or absolute positioning. The screen root is position: relative, the viewport size, overflow: hidden. Do not add an outer box of your own with a fixed height and overflow: hidden. Such a box hides overflow from the fit.",
     SHARED_RULES[0],
     SHARED_RULES[1],
     SHARED_RULES[2],
@@ -48,7 +48,7 @@ pub const DEMO_RULES: &[&str] = &[
 pub const DECK_RULES: &[&str] = &[
     "A slide is one HTML fragment in `html` and one CSS block in `css`.",
     "Design each slide for a canvas of 1920 by 1080 px. A deck has no `viewport` field. Use px units. Do not use vw, vh, vmin, vmax, or container units.",
-    "Lay out with flex, grid, or absolute positioning. The slide root is position: relative, 1920 by 1080 px, overflow: hidden.",
+    "Lay out with flex, grid, or absolute positioning. The slide root is position: relative, 1920 by 1080 px, overflow: hidden. Do not add an outer box of your own with a fixed height and overflow: hidden. Such a box hides overflow from the fit.",
     SHARED_RULES[0],
     SHARED_RULES[1],
     SHARED_RULES[2],
