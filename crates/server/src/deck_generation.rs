@@ -14,6 +14,10 @@ use design_model::{Deck, Slide};
 
 use crate::concepts::{Concept, concept_note};
 use crate::decks::{DeckStore, PENDING_SLIDE_CLASS, is_pending_slide};
+use crate::edit_focus::{
+    EditFix, EditInput, findings_for, findings_note, fix_instruction, focus_note,
+    referenced_indexes, touched_indexes,
+};
 use crate::events::ChangeNotifier;
 use crate::generation::{
     ArtifactRequest, Attachments, CONTINUE_DRAFT_SHARE, ContinueChunk, DRAFT_SHARE,
@@ -274,21 +278,40 @@ impl GenerationEngine {
             .await
             .map_err(|error| GenerationStop::Failed(error.to_string()))?
             .ok_or_else(|| GenerationStop::Failed(format!("deck `{deck_id}` does not exist")))?;
-        let deck_json = serde_json::to_string(&deck)
-            .map_err(|error| GenerationStop::Failed(error.to_string()))?;
+        let label = format!("edit {deck_id}");
+        // A change that names slides is about those slides: the model
+        // sees only them. A change that names none is systemic.
+        let indexes: Vec<usize> = referenced_indexes(instruction, "slide")
+            .into_iter()
+            .filter(|index| *index < deck.slides.len())
+            .collect();
+        let measured = crate::deck_polish::dom_findings(&deck, &self.base_url(), &label, log).await;
+        let findings = findings_for(&measured, "slides", &indexes);
+        let (deck_json, note) = if indexes.is_empty() {
+            (serde_json::to_string(&deck), String::new())
+        } else {
+            (
+                focused_deck_json(&deck, &indexes),
+                focus_note("slide", "slides", &indexes, deck.slides.len()),
+            )
+        };
+        let deck_json = deck_json.map_err(|error| GenerationStop::Failed(error.to_string()))?;
         let attachments = self.load_attachments(&context.session_id, log).await;
+        let input = EditInput {
+            instruction,
+            artifact_json: &deck_json,
+            note: &note,
+            findings: &findings,
+        };
         let messages = vec![
             serde_json::json!({ "role": "system", "content": deck_system_prompt() }),
-            self.user_message(
-                &deck_edit_prompt(&context.request, instruction, &deck_json),
-                &attachments,
-            ),
+            self.user_message(&deck_edit_prompt(&context.request, &input), &attachments),
         ];
         let original = deck.clone();
         let effort = context.effort().to_owned();
         let request = ArtifactRequest {
-            effort: effort.clone(),
-            label: format!("edit {deck_id}"),
+            effort,
+            label,
             parse: Box::new(move |content| {
                 crate::deck_patch::apply_patch(&original, crate::deck_patch::parse_patch(content)?)
             }),
@@ -296,13 +319,19 @@ impl GenerationEngine {
             live: None,
         };
         let edited = self.request_valid(client, messages, &request, log).await?;
-        let final_deck = if effort == "high" {
-            self.polish_deck(client, edited, &request, log)
-                .await
-                .map_err(GenerationStop::Failed)?
-        } else {
-            edited
+        // A fix can make a new problem. The touched slides are measured
+        // again, and the model tweaks them until they measure clean or
+        // the effort's rounds run out.
+        let touched = touched_indexes(&deck.slides, &edited.slides, &indexes);
+        let fix = EditFix {
+            request: &context.request,
+            context: &request,
+            indexes: touched,
         };
+        let final_deck = self
+            .fix_edited_deck(client, edited, &fix, log)
+            .await
+            .map_err(GenerationStop::Failed)?;
         decks
             .save(deck_id, &final_deck)
             .await
@@ -622,6 +651,104 @@ impl GenerationEngine {
             stop.describe(rounds_taken, best_count)
         ));
         context.report(1.0);
+        Ok(best)
+    }
+
+    /// Measures the touched slides of an edited deck and asks the model
+    /// to fix what Chrome finds, round after round: until the slides
+    /// measure clean, a round does not help, or the effort's round limit
+    /// runs out. Returns the best version measured.
+    async fn fix_edited_deck(
+        &self,
+        client: &reqwest::Client,
+        mut deck: Deck,
+        fix: &EditFix<'_, Deck>,
+        log: &LogSink,
+    ) -> Result<Deck, String> {
+        let label = &fix.context.label;
+        if fix.indexes.is_empty() || !crate::polish::can_audit() {
+            fix.context.report(1.0);
+            return Ok(deck);
+        }
+        let limit = crate::polish::polish_round_limit(&fix.context.effort);
+        let mut best = deck.clone();
+        let mut best_count = usize::MAX;
+        let mut previous_count: Option<usize> = None;
+        let mut stop = crate::polish::PolishStop::OutOfRounds;
+        let mut rounds_taken = 0usize;
+        for round in 1..=limit {
+            let measured =
+                crate::deck_polish::dom_findings(&deck, &self.base_url(), label, log).await;
+            let findings = findings_for(&measured, "slides", &fix.indexes);
+            if findings.len() < best_count {
+                best_count = findings.len();
+                best = deck.clone();
+            }
+            if findings.is_empty() {
+                stop = crate::polish::PolishStop::Clean;
+                break;
+            }
+            if previous_count.is_some_and(|before| findings.len() >= before) {
+                stop = crate::polish::PolishStop::NoImprovement;
+                break;
+            }
+            previous_count = Some(findings.len());
+            rounds_taken = round;
+            log(&format!(
+                "{label}: fix round {round} of at most {limit} ({} findings on the touched slides)",
+                findings.len()
+            ));
+            let deck_json =
+                focused_deck_json(&deck, &fix.indexes).map_err(|error| error.to_string())?;
+            let note = focus_note("slide", "slides", &fix.indexes, deck.slides.len());
+            let instruction = fix_instruction("slides");
+            let input = EditInput {
+                instruction: &instruction,
+                artifact_json: &deck_json,
+                note: &note,
+                findings: &findings,
+            };
+            let messages = vec![
+                serde_json::json!({ "role": "system", "content": deck_system_prompt() }),
+                serde_json::json!({ "role": "user", "content": deck_edit_prompt(fix.request, &input) }),
+            ];
+            let reply = self
+                .model
+                .chat_with(
+                    client,
+                    self.model
+                        .request_body(&messages, writing_effort(&fix.context.effort)),
+                    None,
+                )
+                .await;
+            // The edit itself is done. A fix round that cannot reach the
+            // model leaves the best version as it is.
+            let content = match reply {
+                Ok(content) => content,
+                Err(error) => {
+                    log(&format!("{label}: fix round {round} failed: {error}"));
+                    break;
+                }
+            };
+            let improved = crate::deck_patch::parse_patch(&content)
+                .and_then(|patch| crate::deck_patch::apply_patch(&deck, patch));
+            match improved {
+                Ok(improved) if improved.validate().is_empty() => deck = improved,
+                Ok(_) => log(&format!(
+                    "{label}: the fix failed validation; keeping the previous version"
+                )),
+                Err(parse_error) => log(&format!(
+                    "{label}: fix reply unusable ({parse_error}); keeping the previous version"
+                )),
+            }
+            fix.context
+                .report(DRAFT_SHARE + (1.0 - DRAFT_SHARE) * round as f32 / limit as f32);
+        }
+        log(&format!(
+            "{label}: {}",
+            stop.describe(rounds_taken, best_count)
+        ));
+        fix.context.report(1.0);
         Ok(best)
     }
 
@@ -978,20 +1105,42 @@ fn deck_candidate_prompt(request: &DeckCandidateRequest<'_>) -> String {
 
 /// The user prompt for a deck edit: the deck as it is, the request, and
 /// the change the user asked for.
-fn deck_edit_prompt(request: &SessionRequest, instruction: &str, deck_json: &str) -> String {
+fn deck_edit_prompt(request: &SessionRequest, input: &EditInput<'_>) -> String {
     format!(
-        "Here is the deck to change:\n{deck_json}\n\
+        "Here is the deck to change:\n{deck_json}\n{note}\
          The deck is for this request:\n{request}\n\
-         Apply this change: {critique}\n\
+         Apply this change: {critique}\n{findings}\
          A reference like [slide 3, node 0/1 <h2.title>: What Swift Design does] names a slide \
          (1-based) and one element in that slide's html by its index path from the slide root \
          (zero-based child indexes, element children only), its tag and first class, and the \
          start of its text. Change only what the critique asks for. Keep every other slide and \
          value as it is. Return every changed slide complete: html, css, and notes.\n{format}",
+        deck_json = input.artifact_json,
+        note = input.note,
         request = request_input(request),
-        critique = instruction.trim(),
+        critique = input.instruction.trim(),
+        findings = findings_note(input.findings),
         format = crate::deck_patch::PATCH_FORMAT
     )
+}
+
+/// The deck as a focused edit sees it: the title, the theme, the slide
+/// count, and only the slides at `indexes`, each with its index.
+fn focused_deck_json(deck: &Deck, indexes: &[usize]) -> Result<String, serde_json::Error> {
+    let slides: Vec<serde_json::Value> = indexes
+        .iter()
+        .filter_map(|index| {
+            deck.slides
+                .get(*index)
+                .map(|slide| serde_json::json!({ "index": index, "slide": slide }))
+        })
+        .collect();
+    serde_json::to_string(&serde_json::json!({
+        "title": deck.title,
+        "theme": deck.theme,
+        "slide_count": deck.slides.len(),
+        "slides": slides,
+    }))
 }
 
 /// The user prompt for one deck continuation chunk: the preview deck and
@@ -1066,19 +1215,50 @@ mod tests {
     use design_model::{ArtifactKind, WorkflowState};
 
     use super::{
-        apply_deck_continuation, continuation_slides, deck_system_prompt, parse_deck, partial_deck,
-        placeholder_slide, scenario_note, shown_deck, slide_count_note,
+        apply_deck_continuation, continuation_slides, deck_edit_prompt, deck_system_prompt,
+        focused_deck_json, parse_deck, partial_deck, placeholder_slide, scenario_note, shown_deck,
+        slide_count_note,
     };
     use crate::decks::DeckStore;
     use crate::designs::DesignStore;
+    use crate::edit_focus::EditInput;
     use crate::events::ChangeNotifier;
     use crate::generation::{ContinueChunk, GenerationEngine, GenerationOutcome};
     use crate::model_client::LogSink;
+    use crate::request::SessionRequest;
     use crate::sessions::{ChatMessage, NewSession, SessionStore};
     use crate::test_support::{FakeModelServer, SAMPLE_DECK, low_effort_options, sample_deck};
 
     /// The planner reply that writes candidates.
     const WRITE_PLAN: &str = r#"{"reply":"Writing it now.","generate":true}"#;
+
+    #[test]
+    fn a_focused_deck_edit_shows_only_the_named_slides_and_their_findings() {
+        let deck = crate::test_support::sample_deck();
+        let focused = focused_deck_json(&deck, &[1]).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&focused).unwrap();
+        assert_eq!(value["slide_count"], deck.slides.len());
+        assert_eq!(value["slides"].as_array().unwrap().len(), 1);
+        assert_eq!(value["slides"][0]["index"], 1);
+        let request = SessionRequest {
+            request: "A talk.".to_owned(),
+            kind: ArtifactKind::Deck,
+            answers: Vec::new(),
+            options: crate::test_support::low_effort_options(),
+        };
+        let findings = vec!["slides[1] p (0/2): overflow: shorten".to_owned()];
+        let input = EditInput {
+            instruction: "[slide 2, node 0/2 <p>: x] Fix the overflow.",
+            artifact_json: &focused,
+            note: "Only slide 2 is shown.\n",
+            findings: &findings,
+        };
+        let prompt = deck_edit_prompt(&request, &input);
+        assert!(prompt.contains("Only slide 2 is shown."));
+        assert!(prompt.contains("Chrome measured these layout problems"));
+        assert!(prompt.contains("- slides[1] p (0/2): overflow: shorten"));
+        assert!(prompt.contains("Apply this change: [slide 2, node 0/2 <p>: x] Fix the overflow."));
+    }
 
     #[test]
     fn the_slide_count_holds_the_deck_to_the_length_the_user_asked_for() {
