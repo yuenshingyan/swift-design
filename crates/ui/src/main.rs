@@ -999,6 +999,11 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
   display: flex; flex-direction: column; gap: 0.5rem; }
 .question-head { display: flex; align-items: center; gap: 0.5rem; }
 .question-label { font-size: 0.85rem; font-weight: 500; }
+/* A pick the planner read from the request: the chip is picked, and the
+   tag says why, until the user picks for themselves. */
+.suggested-tag { font-size: 0.66rem; font-weight: 500; letter-spacing: 0.02em; color: var(--teal);
+  background: var(--teal-tint); border-radius: 999px; padding: 0.1rem 0.45rem; }
+.option-chip.selected.suggested { border-style: dashed; }
 .question-rationale { font-size: 0.72rem; color: var(--muted); }
 .badge.required { font-size: 0.62rem; color: var(--muted); border: 1px solid var(--line);
   border-radius: 4px; padding: 0 0.3rem; }
