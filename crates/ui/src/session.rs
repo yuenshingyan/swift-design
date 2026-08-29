@@ -8,7 +8,9 @@ use dioxus::prelude::*;
 
 use crate::api;
 use crate::canvas::{CandidateCanvas, cards_from_decks, cards_from_designs, queued_finishes};
+use crate::chat::recall_prompt;
 use crate::chat_controls::{ModelChip, SendButton};
+use crate::prompt_history::{PromptHistory, prompt_entries};
 use crate::question_card::{
     DraftAnswer, QaRow, QuestionCardState, QuestionSetCard, answered_entries, question_card_state,
     set_key,
@@ -80,6 +82,8 @@ pub(crate) fn SessionWorkspace(
     let mut settings = use_signal(|| Option::<api::SettingsView>::None);
     let is_configuring = use_signal(|| false);
     let mut draft = use_signal(String::new);
+    // ↑ and ↓ walk the prompts sent before, as a shell does.
+    let mut history = use_signal(PromptHistory::default);
     let drafts = use_signal(HashMap::<String, DraftAnswer>::new);
     let mut drafts_key = use_signal(String::new);
     let mut revision = use_signal(|| 0u64);
@@ -145,6 +149,7 @@ pub(crate) fn SessionWorkspace(
         };
     };
     let session = session_view.session.clone();
+    let prompts = prompt_entries(&session_view.messages);
     let state = session.state;
     let can_skip = session_view
         .question_sets
@@ -194,6 +199,7 @@ pub(crate) fn SessionWorkspace(
                 return;
             }
             draft.set(String::new());
+            history.write().reset();
             let session_id = session_id.clone();
             // Every message is a turn: the planner answers, asks,
             // writes, or edits the chosen artifact.
@@ -432,11 +438,20 @@ pub(crate) fn SessionWorkspace(
                         placeholder: chat_placeholder(state),
                         disabled: !can_chat,
                         value: "{draft}",
-                        oninput: move |event: FormEvent| draft.set(event.value()),
-                        onkeydown: move |event: KeyboardEvent| {
-                            if event.key() == Key::Enter && !event.modifiers().shift() {
-                                event.prevent_default();
-                                send_message.call(());
+                        oninput: move |event: FormEvent| {
+                            draft.set(event.value());
+                            history.write().reset();
+                        },
+                        onkeydown: {
+                            let prompts = prompts.clone();
+                            move |event: KeyboardEvent| {
+                                if recall_prompt(&event, &prompts, &mut history.write(), &mut draft) {
+                                    return;
+                                }
+                                if event.key() == Key::Enter && !event.modifiers().shift() {
+                                    event.prevent_default();
+                                    send_message.call(());
+                                }
                             }
                         },
                     }
