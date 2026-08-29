@@ -12,6 +12,10 @@ use design_model::{BriefQuestionSet, Design, QuestionSetError, validate_question
 
 use crate::concepts::{Concept, concept_input, concept_note, concept_prompt, parse_concepts};
 use crate::designs::DesignStore;
+use crate::edit_focus::{
+    EditFix, EditInput, findings_for, findings_note, fix_instruction, focus_note,
+    referenced_indexes, touched_indexes,
+};
 use crate::events::ChangeNotifier;
 use crate::instructions::DEMO_RULES;
 use crate::model_client::{LogSink, ModelClient, ModelConfiguration, TextSink, UsageSink};
@@ -820,7 +824,16 @@ impl GenerationEngine {
             }
             Ok(GenerationOutcome::Wrote { design_ids }) => {
                 let summary = wrote_summary(&design_ids);
-                self.say(session_id, &summary).await?;
+                // The reply names what it wrote, so the studio can
+                // revert the turn.
+                self.sessions
+                    .append_message(
+                        session_id,
+                        ChatMessage::assistant(&summary).with_artifacts(design_ids.clone()),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                self.notifier.notify();
                 self.finish_run(session_id, run_id, "succeeded", None, design_ids.clone())
                     .await;
                 Ok(GenerationOutcome::Wrote { design_ids })
@@ -1050,21 +1063,40 @@ impl GenerationEngine {
             .ok_or_else(|| {
                 GenerationStop::Failed(format!("design `{design_id}` does not exist"))
             })?;
-        let design_json = serde_json::to_string(&design)
-            .map_err(|error| GenerationStop::Failed(error.to_string()))?;
+        let label = format!("edit {design_id}");
+        // A change that names screens is about those screens: the model
+        // sees only them. A change that names none is systemic.
+        let indexes: Vec<usize> = referenced_indexes(instruction, "screen")
+            .into_iter()
+            .filter(|index| *index < design.screens.len())
+            .collect();
+        let measured = crate::polish::dom_findings(&design, &self.base_url(), &label, log).await;
+        let findings = findings_for(&measured, "screens", &indexes);
+        let (design_json, note) = if indexes.is_empty() {
+            (serde_json::to_string(&design), String::new())
+        } else {
+            (
+                focused_design_json(&design, &indexes),
+                focus_note("screen", "screens", &indexes, design.screens.len()),
+            )
+        };
+        let design_json = design_json.map_err(|error| GenerationStop::Failed(error.to_string()))?;
         let attachments = self.load_attachments(&context.session_id, log).await;
+        let input = EditInput {
+            instruction,
+            artifact_json: &design_json,
+            note: &note,
+            findings: &findings,
+        };
         let messages = vec![
             serde_json::json!({ "role": "system", "content": system_prompt() }),
-            self.user_message(
-                &edit_prompt(&context.request, instruction, &design_json),
-                &attachments,
-            ),
+            self.user_message(&edit_prompt(&context.request, &input), &attachments),
         ];
         let original = design.clone();
         let effort = context.effort().to_owned();
         let request = ArtifactRequest {
-            effort: effort.clone(),
-            label: format!("edit {design_id}"),
+            effort,
+            label,
             parse: Box::new(move |content| {
                 crate::patch::apply_patch(&original, crate::patch::parse_patch(content)?)
             }),
@@ -1072,15 +1104,19 @@ impl GenerationEngine {
             live: None,
         };
         let edited = self.request_valid(client, messages, &request, log).await?;
-        // A polish round costs a full-design rewrite; edits get one only
-        // at high effort.
-        let final_design = if effort == "high" {
-            self.polish_design(client, edited, &request, log)
-                .await
-                .map_err(GenerationStop::Failed)?
-        } else {
-            edited
+        // A fix can make a new problem. The touched screens are measured
+        // again, and the model tweaks them until they measure clean or
+        // the effort's rounds run out.
+        let touched = touched_indexes(&design.screens, &edited.screens, &indexes);
+        let fix = EditFix {
+            request: &context.request,
+            context: &request,
+            indexes: touched,
         };
+        let final_design = self
+            .fix_edited_design(client, edited, &fix, log)
+            .await
+            .map_err(GenerationStop::Failed)?;
         self.designs
             .save(design_id, &final_design)
             .await
@@ -1492,6 +1528,103 @@ impl GenerationEngine {
             stop.describe(rounds_taken, best_count)
         ));
         context.report(1.0);
+        Ok(best)
+    }
+
+    /// Measures the touched screens of an edited design and asks the
+    /// model to fix what Chrome finds, round after round: until the
+    /// screens measure clean, a round does not help, or the effort's
+    /// round limit runs out. Returns the best version measured.
+    async fn fix_edited_design(
+        &self,
+        client: &reqwest::Client,
+        mut design: Design,
+        fix: &EditFix<'_, Design>,
+        log: &LogSink,
+    ) -> Result<Design, String> {
+        let label = &fix.context.label;
+        if fix.indexes.is_empty() || !crate::polish::can_audit() {
+            fix.context.report(1.0);
+            return Ok(design);
+        }
+        let limit = crate::polish::polish_round_limit(&fix.context.effort);
+        let mut best = design.clone();
+        let mut best_count = usize::MAX;
+        let mut previous_count: Option<usize> = None;
+        let mut stop = crate::polish::PolishStop::OutOfRounds;
+        let mut rounds_taken = 0usize;
+        for round in 1..=limit {
+            let measured = crate::polish::dom_findings(&design, &self.base_url(), label, log).await;
+            let findings = findings_for(&measured, "screens", &fix.indexes);
+            if findings.len() < best_count {
+                best_count = findings.len();
+                best = design.clone();
+            }
+            if findings.is_empty() {
+                stop = crate::polish::PolishStop::Clean;
+                break;
+            }
+            if previous_count.is_some_and(|before| findings.len() >= before) {
+                stop = crate::polish::PolishStop::NoImprovement;
+                break;
+            }
+            previous_count = Some(findings.len());
+            rounds_taken = round;
+            log(&format!(
+                "{label}: fix round {round} of at most {limit} ({} findings on the touched screens)",
+                findings.len()
+            ));
+            let design_json =
+                focused_design_json(&design, &fix.indexes).map_err(|error| error.to_string())?;
+            let note = focus_note("screen", "screens", &fix.indexes, design.screens.len());
+            let instruction = fix_instruction("screens");
+            let input = EditInput {
+                instruction: &instruction,
+                artifact_json: &design_json,
+                note: &note,
+                findings: &findings,
+            };
+            let messages = vec![
+                serde_json::json!({ "role": "system", "content": system_prompt() }),
+                serde_json::json!({ "role": "user", "content": edit_prompt(fix.request, &input) }),
+            ];
+            let reply = self
+                .model
+                .chat_with(
+                    client,
+                    self.model
+                        .request_body(&messages, writing_effort(&fix.context.effort)),
+                    None,
+                )
+                .await;
+            // The edit itself is done. A fix round that cannot reach the
+            // model leaves the best version as it is.
+            let content = match reply {
+                Ok(content) => content,
+                Err(error) => {
+                    log(&format!("{label}: fix round {round} failed: {error}"));
+                    break;
+                }
+            };
+            let improved = crate::patch::parse_patch(&content)
+                .and_then(|patch| crate::patch::apply_patch(&design, patch));
+            match improved {
+                Ok(improved) if improved.validate().is_empty() => design = improved,
+                Ok(_) => log(&format!(
+                    "{label}: the fix failed validation; keeping the previous version"
+                )),
+                Err(parse_error) => log(&format!(
+                    "{label}: fix reply unusable ({parse_error}); keeping the previous version"
+                )),
+            }
+            fix.context
+                .report(DRAFT_SHARE + (1.0 - DRAFT_SHARE) * round as f32 / limit as f32);
+        }
+        log(&format!(
+            "{label}: {}",
+            stop.describe(rounds_taken, best_count)
+        ));
+        fix.context.report(1.0);
         Ok(best)
     }
 
@@ -2276,20 +2409,45 @@ impl<T> ArtifactRequest<'_, T> {
 
 /// The user prompt for an edit: the design as it is, the request, and
 /// the change the user asked for.
-fn edit_prompt(request: &SessionRequest, instruction: &str, design_json: &str) -> String {
+fn edit_prompt(request: &SessionRequest, input: &EditInput<'_>) -> String {
     format!(
-        "Here is the design to change:\n{design_json}\n\
+        "Here is the design to change:\n{design_json}\n{note}\
          The design is for this request:\n{request}\n\
-         Apply this change: {critique}\n\
+         Apply this change: {critique}\n{findings}\
          A reference like [screen 3, node 0/1 <h2.title>: What Swift Design does] names a screen \
          (1-based) and one element in that screen's html by its index path from the screen root \
          (zero-based child indexes, element children only), its tag and first class, and the \
          start of its text. Change only what the critique asks for. Keep every other screen and \
          value as it is. Return every changed screen complete: html, css, and notes.\n{format}",
+        design_json = input.artifact_json,
+        note = input.note,
         request = request_input(request),
-        critique = instruction.trim(),
+        critique = input.instruction.trim(),
+        findings = findings_note(input.findings),
         format = crate::patch::PATCH_FORMAT
     )
+}
+
+/// The design as a focused edit sees it: the title, the theme, the
+/// viewport, the screen count, and only the screens at `indexes`, each
+/// with its index.
+fn focused_design_json(design: &Design, indexes: &[usize]) -> Result<String, serde_json::Error> {
+    let screens: Vec<serde_json::Value> = indexes
+        .iter()
+        .filter_map(|index| {
+            design
+                .screens
+                .get(*index)
+                .map(|screen| serde_json::json!({ "index": index, "screen": screen }))
+        })
+        .collect();
+    serde_json::to_string(&serde_json::json!({
+        "title": design.title,
+        "theme": design.theme,
+        "viewport": design.viewport,
+        "screen_count": design.screens.len(),
+        "screens": screens,
+    }))
 }
 
 /// What one candidate call needs: the run context, the candidate number,
@@ -2606,9 +2764,10 @@ mod tests {
 
     use super::{
         GenerationContext, GenerationEngine, GenerationOutcome, ProgressGroup, ProgressSink,
-        candidate_plans, system_prompt, trailing_continue_ids,
+        candidate_plans, edit_prompt, focused_design_json, system_prompt, trailing_continue_ids,
     };
     use crate::designs::DesignStore;
+    use crate::edit_focus::EditInput;
     use crate::events::ChangeNotifier;
     use crate::model_client::LogSink;
     use crate::request::SessionRequest;
@@ -2954,6 +3113,33 @@ mod tests {
         assert!(result.unwrap_err().contains("fix rounds"));
         let runs = sessions.runs("talk").await.unwrap();
         assert_eq!(runs[0].result.as_deref(), Some("failed"));
+    }
+
+    #[test]
+    fn a_focused_design_edit_shows_only_the_named_screens_and_their_findings() {
+        let mut design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+        design.screens.push(design.screens[0].clone());
+        let focused = focused_design_json(&design, &[1]).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&focused).unwrap();
+        assert_eq!(value["screen_count"], design.screens.len());
+        assert_eq!(value["screens"].as_array().unwrap().len(), 1);
+        assert_eq!(value["screens"][0]["index"], 1);
+        let request = SessionRequest {
+            request: "A landing page.".to_owned(),
+            kind: design_model::ArtifactKind::Demo,
+            answers: Vec::new(),
+            options: low_effort_options(),
+        };
+        let findings = vec!["screens[1] h1 (0/1): overflow: shorten".to_owned()];
+        let input = EditInput {
+            instruction: "[screen 2, node 0/1 <h1>: x] Fix it.",
+            artifact_json: &focused,
+            note: "Only screen 2 is shown.\n",
+            findings: &findings,
+        };
+        let prompt = edit_prompt(&request, &input);
+        assert!(prompt.contains("Only screen 2 is shown."));
+        assert!(prompt.contains("- screens[1] h1 (0/1): overflow: shorten"));
     }
 
     #[tokio::test]
