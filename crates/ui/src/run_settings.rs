@@ -626,6 +626,11 @@ fn ChoiceCard(
                         "Something else…"
                     }
                 }
+                button {
+                    class: if is_judgment { "option-chip skip selected" } else { "option-chip skip" },
+                    onclick: move |_| on_pick.call(String::new()),
+                    "Use your best judgment"
+                }
             }
             if allows_custom && is_typing() {
                 div { class: "write-in-row",
@@ -655,11 +660,6 @@ fn ChoiceCard(
                         "Use this"
                     }
                 }
-            }
-            button {
-                class: if is_judgment { "option-chip skip selected" } else { "option-chip skip" },
-                onclick: move |_| on_pick.call(String::new()),
-                "Use your best judgment"
             }
         }
     }
