@@ -50,6 +50,7 @@ Designs and decks are separate pipelines that share one workflow.
 - `render::FIT_SCRIPT` runs on every rendered page, print included. A root whose content needs more than the canvas grows to the largest box that fits and scales back through `--swift-design-fit`, so nothing is ever cut off. The audit reports the shrink as `overfull`; the PPTX measurement divides it out.
 - A deck page uses the same DOM vocabulary as a design page (`main.design`, `data-swift-design-*`), so the layout, navigation, editing, and audit scripts serve both. Only the audience-follow script and the PPTX measurement script are deck-only.
 - `PATCH_FORMAT` and the polish wording are duplicated on purpose: the model sees one vocabulary per kind (screens or slides).
+- An edit turn is focused or systemic (`edit_focus.rs`). A change whose references name screens or slides sends only those units, each with its index, and the Chrome findings for them; a change that names none sends the whole artifact and every finding. The audit runs before every edit, at every effort. After the edit, `fix_edited_deck` and `fix_edited_design` measure the touched units again and ask the model to fix what Chrome finds, for up to `polish_round_limit(effort)` rounds; the best version measured is saved.
 
 ## Workflow State
 
