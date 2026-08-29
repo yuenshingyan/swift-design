@@ -10,6 +10,7 @@ use dioxus::prelude::*;
 
 use crate::api;
 use crate::chat_controls::{ModelChip, SendButton};
+use crate::prompt_history::{PromptHistory, prompt_entries};
 use crate::settings::{SettingsPanel, artifact_project, pause_briefly};
 use crate::status::RunStatusCard;
 use crate::uploads::{AttachButton, AttachmentChips, PasteUploads};
@@ -31,6 +32,30 @@ pub fn DesignChat(
     design_id: String,
     /// The element reference to prepend to the next message.
     context: Signal<Option<String>>,
+    /// The pinned pages' reference, like `[slide 2] [slide 4]`, when
+    /// the user pinned any. With none, a change is about the whole
+    /// artifact.
+    #[props(default)]
+    page: Option<String>,
+    /// True when `page` lists pinned pages. The chip's × then clears
+    /// the pins first; a second × drops the open page.
+    #[props(default)]
+    is_pinned: bool,
+    /// Called when the user drops the page chip while pages are pinned,
+    /// so the editor clears its pins.
+    #[props(default)]
+    on_drop_page: Option<EventHandler<()>>,
+    /// The pages the user can mention with `@`, in order: one label
+    /// each. Empty outside the editor.
+    #[props(default)]
+    pages: Vec<String>,
+    /// The unit a mention names: `slide` or `screen`.
+    #[props(default)]
+    page_unit: Option<String>,
+    /// Called with the page index the user picked from the `@` menu.
+    /// The editor pins that page.
+    #[props(default)]
+    on_pin_page: Option<EventHandler<usize>>,
     /// Called before a message is sent, so the editor can save local
     /// edits first.
     on_before_send: EventHandler<()>,
@@ -44,6 +69,45 @@ pub fn DesignChat(
     let mut is_configuring = use_signal(|| false);
     let mut draft = use_signal(String::new);
     let mut error = use_signal(|| Option::<String>::None);
+    // The page the user dropped with the chip's ×. A new page brings
+    // the chip back.
+    let mut dropped_page = use_signal(|| Option::<String>::None);
+    let page_for_send = page.clone();
+    // ↑ and ↓ walk the prompts sent before, as a shell does, when the
+    // caret is on the first or the last line.
+    let mut history = use_signal(PromptHistory::default);
+    let prompts = prompt_entries(&messages());
+    // The `@` menu: the highlighted row, and the draft the user closed
+    // it on, so Escape keeps it closed until the text changes.
+    let mut mention_row = use_signal(|| 0usize);
+    let mut mention_closed_on = use_signal(|| Option::<String>::None);
+    // The caret, read from the page after every edit and move, so a
+    // mention typed in the middle of the text is found too.
+    let caret = use_signal(|| 0usize);
+    let mention = page_unit
+        .as_deref()
+        .filter(|_| !pages.is_empty() && mention_closed_on() != Some(draft()))
+        .and_then(|_| mention_at(&draft(), caret()));
+    let mention_rows: Vec<(usize, String)> = mention
+        .as_ref()
+        .map(|(_, query)| mention_matches(&pages, query))
+        .unwrap_or_default();
+    let unit_for_send = page_unit.clone().unwrap_or_default();
+    // Picks row `row` of the menu: the page is pinned, and the `@` and
+    // its query leave the draft.
+    let pick_mention = {
+        let rows = mention_rows.clone();
+        let start = mention.as_ref().map(|(start, _)| *start);
+        move |row: usize| {
+            if let (Some(start), Some((index, _))) = (start, rows.get(row)) {
+                draft.set(remove_mention(&draft(), start, caret()));
+                mention_row.set(0);
+                if let Some(on_pin_page) = &on_pin_page {
+                    on_pin_page.call(*index);
+                }
+            }
+        }
+    };
     let mut was_running = use_signal(|| false);
     let mut uploads = use_signal(Vec::<api::UploadSummary>::new);
     let refresh_uploads = use_callback({
@@ -122,14 +186,23 @@ pub fn DesignChat(
             if text.is_empty() {
                 return;
             }
-            let content = match context() {
+            // A page the text names itself needs no chip in front of it.
+            let page = page_for_send
+                .as_deref()
+                .filter(|_| !has_page_reference(&text, &unit_for_send));
+            let content = match reference_for(&context(), page, &dropped_page()) {
                 Some(reference) => format!("{reference} {text}"),
                 None => text,
             };
             let design_id = design_id.clone();
             let session_id = session_id.clone();
             draft.set(String::new());
+            history.write().reset();
             context.set(None);
+            // The pins were for this message. The next one starts clean.
+            if is_pinned && let Some(on_drop_page) = &on_drop_page {
+                on_drop_page.call(());
+            }
             on_before_send.call(());
             spawn(async move {
                 match api::send_session_message(&session_id, &content, Some(&design_id)).await {
@@ -182,24 +255,105 @@ pub fn DesignChat(
                         SettingsPanel { settings, is_configuring }
                     }
                 }
-                if let Some(reference) = context() {
+                if let Some(reference) = reference_for(
+                    &context(),
+                    page
+                        .as_deref()
+                        .filter(|_| {
+                            !has_page_reference(&draft(), page_unit.as_deref().unwrap_or_default())
+                        }),
+                    &dropped_page(),
+                )
+                {
                     div { class: "context-chip mono",
                         span { "{reference}" }
                         button {
                             title: "Drop this reference",
-                            onclick: move |_| context.set(None),
+                            onclick: {
+                                let page = page.clone();
+                                move |_| {
+                                    context.set(None);
+                                    if is_pinned {
+                                        if let Some(on_drop_page) = &on_drop_page {
+                                            on_drop_page.call(());
+                                        }
+                                    } else {
+                                        dropped_page.set(page.clone());
+                                    }
+                                }
+                            },
                             "×"
                         }
                     }
                 }
+                // The `@` menu: the pages that match what follows the `@`.
+                if !mention_rows.is_empty() {
+                    div { class: "mention-menu", role: "listbox",
+                        for (row, (index, label)) in mention_rows.iter().enumerate() {
+                            button {
+                                key: "{index}",
+                                class: if row == mention_row() { "mention-item active" } else { "mention-item" },
+                                role: "option",
+                                onmousedown: move |event: Event<MouseData>| event.prevent_default(),
+                                onclick: {
+                                    let mut pick_mention = pick_mention.clone();
+                                    move |_| pick_mention(row)
+                                },
+                                span { class: "mono", {format!("{:02}", index + 1)} }
+                                span { "{page_title(label)}" }
+                            }
+                        }
+                    }
+                }
                 textarea {
-                    placeholder: if is_running { "Working… your next request queues up." } else { "Ask for a change: “make this title bigger”, “swap screens 2 and 4”…" },
+                    placeholder: if is_running { "Working… your next request queues up." } else if page_unit.is_some() { "Ask for a change: “make this title bigger”, “@3 more margin”…" } else { "Ask for a change: “make this title bigger”, “swap screens 2 and 4”…" },
                     value: "{draft()}",
-                    oninput: move |event| draft.set(event.value()),
-                    onkeydown: move |event: Event<KeyboardData>| {
-                        if event.key() == Key::Enter && !event.modifiers().shift() {
-                            event.prevent_default();
-                            send.call(());
+                    oninput: move |event| {
+                        draft.set(event.value());
+                        mention_row.set(0);
+                        history.write().reset();
+                        watch_caret(caret);
+                    },
+                    onkeyup: move |_| watch_caret(caret),
+                    onmouseup: move |_| watch_caret(caret),
+                    onkeydown: {
+                        let mut pick_mention = pick_mention.clone();
+                        let row_count = mention_rows.len();
+                        let prompts = prompts.clone();
+                        move |event: Event<KeyboardData>| {
+                            if row_count == 0
+                                && recall_prompt(&event, &prompts, &mut history.write(), &mut draft)
+                            {
+                                return;
+                            }
+                            if row_count > 0 {
+                                match event.key() {
+                                    Key::ArrowDown => {
+                                        event.prevent_default();
+                                        mention_row.set((mention_row() + 1) % row_count);
+                                        return;
+                                    }
+                                    Key::ArrowUp => {
+                                        event.prevent_default();
+                                        mention_row.set((mention_row() + row_count - 1) % row_count);
+                                        return;
+                                    }
+                                    Key::Enter | Key::Tab => {
+                                        event.prevent_default();
+                                        pick_mention(mention_row());
+                                        return;
+                                    }
+                                    Key::Escape => {
+                                        mention_closed_on.set(Some(draft()));
+                                        return;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if event.key() == Key::Enter && !event.modifiers().shift() {
+                                event.prevent_default();
+                                send.call(());
+                            }
                         }
                     },
                 }
@@ -238,5 +392,215 @@ pub fn DesignChat(
                 }
             }
         }
+    }
+}
+
+/// The reference the next message carries: the picked element, else
+/// the open page unless the user dropped that page.
+pub(crate) fn reference_for(
+    context: &Option<String>,
+    page: Option<&str>,
+    dropped_page: &Option<String>,
+) -> Option<String> {
+    if let Some(reference) = context {
+        return Some(reference.clone());
+    }
+    page.filter(|page| dropped_page.as_deref() != Some(*page))
+        .map(str::to_owned)
+}
+
+/// Handles ↑ and ↓ in a composer: ↑ recalls an earlier prompt, ↓ walks
+/// forward again. `ARROW_GUARD` lets only an arrow on the first or the
+/// last line through, so elsewhere the arrows move the caret. Returns
+/// true when the key was taken.
+pub(crate) fn recall_prompt(
+    event: &Event<KeyboardData>,
+    prompts: &[String],
+    history: &mut PromptHistory,
+    draft: &mut Signal<String>,
+) -> bool {
+    let text = draft.peek().clone();
+    let recalled = match event.key() {
+        Key::ArrowUp => history.older(prompts, &text),
+        Key::ArrowDown if history.is_walking() => history.newer(prompts),
+        _ => None,
+    };
+    let Some(text) = recalled else {
+        return false;
+    };
+    event.prevent_default();
+    draft.set(text);
+    true
+}
+
+/// Reads the caret of the focused textarea, in UTF-16 units.
+const CARET_SCRIPT: &str = "const box = document.activeElement; \
+dioxus.send(box && box.tagName === 'TEXTAREA' ? box.selectionStart : null);";
+
+/// Reads the focused textarea's caret into `caret`, as a byte offset
+/// into its text.
+pub(crate) fn watch_caret(mut caret: Signal<usize>) {
+    spawn(async move {
+        let mut channel = document::eval(CARET_SCRIPT);
+        if let Ok(Some(units)) = channel.recv::<Option<usize>>().await {
+            caret.set(units);
+        }
+    });
+}
+
+/// The byte offset that `units` UTF-16 units into `text` reach.
+fn byte_offset(text: &str, units: usize) -> usize {
+    let mut seen = 0usize;
+    for (offset, character) in text.char_indices() {
+        if seen >= units {
+            return offset;
+        }
+        seen += character.len_utf16();
+    }
+    text.len()
+}
+
+/// The `@` the user is typing: the byte offset of an `@` before the
+/// caret, at the start of the text or after whitespace, with the text
+/// between it and the caret as the query. `None` when no such `@`
+/// precedes the caret or the query spans a line. `caret` counts UTF-16
+/// units, as the browser does.
+pub(crate) fn mention_at(text: &str, caret: usize) -> Option<(usize, String)> {
+    let caret = byte_offset(text, caret);
+    let before = &text[..caret];
+    let start = before.rfind('@')?;
+    let is_word_start = start == 0
+        || before[..start]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace);
+    let query = &before[start + 1..];
+    if !is_word_start || query.contains('\n') {
+        return None;
+    }
+    Some((start, query.to_owned()))
+}
+
+/// The pages a query matches: by number, or by a word of the label.
+/// Every page for an empty query. At most eight.
+pub(crate) fn mention_matches(pages: &[String], query: &str) -> Vec<(usize, String)> {
+    let query = query.trim().to_lowercase();
+    pages
+        .iter()
+        .enumerate()
+        .filter(|(index, label)| {
+            query.is_empty()
+                || (index + 1).to_string().starts_with(&query)
+                || label.to_lowercase().contains(&query)
+        })
+        .map(|(index, label)| (index, label.clone()))
+        .take(8)
+        .collect()
+}
+
+/// The draft without the `@` query between `start` and the caret.
+pub(crate) fn remove_mention(text: &str, start: usize, caret: usize) -> String {
+    let caret = byte_offset(text, caret).max(start);
+    format!("{}{}", &text[..start], &text[caret..])
+}
+
+/// A page label without its leading number: `3. Roadmap` reads
+/// `Roadmap`. The menu shows the number itself.
+pub(crate) fn page_title(label: &str) -> &str {
+    match label.split_once(". ") {
+        Some((number, title))
+            if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            title
+        }
+        _ => label,
+    }
+}
+
+/// True when the text names a page itself, like `[slide 3]`.
+pub(crate) fn has_page_reference(text: &str, unit: &str) -> bool {
+    !unit.is_empty() && text.contains(&format!("[{unit} "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        has_page_reference, mention_at, mention_matches, page_title, reference_for, remove_mention,
+    };
+
+    #[test]
+    fn an_at_sign_opens_a_page_mention() {
+        assert_eq!(mention_at("@", 1), Some((0, String::new())));
+        assert_eq!(mention_at("fix @3", 6), Some((4, "3".to_owned())));
+        // The caret decides: the `@` behind it counts, the text after
+        // it does not.
+        assert_eq!(
+            mention_at("fix @3 on the left", 6),
+            Some((4, "3".to_owned()))
+        );
+        // Past the text, the query runs on and matches no page.
+        assert_eq!(
+            mention_at("fix @3 on the left", 18),
+            Some((4, "3 on the left".to_owned()))
+        );
+        assert_eq!(mention_at("fix @3\nmore", 11), None);
+        assert_eq!(mention_at("mail@example.com", 16), None);
+        assert_eq!(mention_at("no mention", 10), None);
+        // Units, not bytes: an emoji is two.
+        assert_eq!(mention_at("😀 @2", 5), Some((5, "2".to_owned())));
+    }
+
+    #[test]
+    fn a_mention_matches_pages_by_number_or_word_and_inserts_a_reference() {
+        let pages = vec![
+            "Why It Exists".to_owned(),
+            "Architecture".to_owned(),
+            "Roadmap".to_owned(),
+        ];
+        assert_eq!(mention_matches(&pages, "").len(), 3);
+        assert_eq!(
+            mention_matches(&pages, "2"),
+            vec![(1, "Architecture".to_owned())]
+        );
+        assert_eq!(
+            mention_matches(&pages, "road"),
+            vec![(2, "Roadmap".to_owned())]
+        );
+        assert_eq!(remove_mention("fix @roa", 4, 8), "fix ");
+        assert_eq!(
+            remove_mention("fix @roa on the left", 4, 8),
+            "fix  on the left"
+        );
+        assert!(has_page_reference("[slide 3] more margin", "slide"));
+        assert_eq!(page_title("3. Roadmap"), "Roadmap");
+        assert_eq!(page_title("Roadmap"), "Roadmap");
+        assert!(!has_page_reference("more margin", "slide"));
+    }
+
+    #[test]
+    fn the_open_page_is_the_reference_until_the_user_drops_it() {
+        let none: Option<String> = None;
+        assert_eq!(
+            reference_for(&none, Some("[slide 4]"), &None),
+            Some("[slide 4]".to_owned())
+        );
+        assert_eq!(
+            reference_for(&none, Some("[slide 4]"), &Some("[slide 4]".to_owned())),
+            None
+        );
+        // A new page brings the chip back.
+        assert_eq!(
+            reference_for(&none, Some("[slide 5]"), &Some("[slide 4]".to_owned())),
+            Some("[slide 5]".to_owned())
+        );
+        // A picked element wins over the page.
+        assert_eq!(
+            reference_for(
+                &Some("[slide 4, node 1 <p>]".to_owned()),
+                Some("[slide 4]"),
+                &None
+            ),
+            Some("[slide 4, node 1 <p>]".to_owned())
+        );
     }
 }
