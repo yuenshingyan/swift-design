@@ -13,6 +13,7 @@ use crate::question_card::{
     DraftAnswer, QaRow, QuestionCardState, QuestionSetCard, answered_entries, question_card_state,
     set_key,
 };
+use crate::revert::{revert_artifact, turn_start};
 use crate::run_settings::{DeckQuestions, RunSettings, SharedQuestions, app_answers};
 use crate::settings::{SettingsPanel, pause_briefly};
 use crate::status::{RunStatusCard, working_label};
@@ -173,6 +174,9 @@ pub(crate) fn SessionWorkspace(
     // A pressed Finish shows as queued at once, before the poll brings
     // the message back, and stays queued while the run holds it.
     let mut pressed = use_signal(HashSet::<String>::new);
+    // The turns reverted in this view, so the button does not offer
+    // the same revert twice.
+    let mut reverted = use_signal(HashSet::<usize>::new);
     let mut queued = queued_finishes(&session_view.messages, is_running);
     queued.extend(pressed().into_iter());
 
@@ -282,7 +286,7 @@ pub(crate) fn SessionWorkspace(
                 }
                 div { class: "thread",
                     div { class: "bubble user", "{session.request}" }
-                    for message in session_view.messages.iter() {
+                    for (index, message) in session_view.messages.iter().enumerate() {
                         {
                             let bubble_class = if message.role == "user" {
                                 "bubble user"
@@ -297,8 +301,45 @@ pub(crate) fn SessionWorkspace(
                                         .get((number as usize).saturating_sub(1))
                                         .map(|set| (number, set.clone()))
                                 });
+                            // A turn that wrote artifacts can be reverted
+                            // while nothing runs: each artifact goes back to
+                            // its snapshot from before the turn.
+                            let revert_since = (!message.artifacts.is_empty() && can_chat)
+                                .then(|| turn_start(&session_view.messages, index))
+                                .flatten();
+                            let is_reverted = reverted().contains(&index);
                             rsx! {
                                 div { class: "{bubble_class}", "{message.content}" }
+                                if let Some(since) = revert_since {
+                                    button {
+                                        class: "revert-turn",
+                                        disabled: is_reverted,
+                                        title: "Put every artifact of this turn back to how it was before it",
+                                        onclick: {
+                                            let artifacts = message.artifacts.clone();
+                                            let kind = session.artifact_kind;
+                                            move |_| {
+                                                let artifacts = artifacts.clone();
+                                                let since = since.clone();
+                                                spawn(async move {
+                                                    for id in &artifacts {
+                                                        let done = revert_artifact(kind, id, &since).await;
+                                                        if let Err(message) = done {
+                                                            error.set(Some(message));
+                                                            return;
+                                                        }
+                                                    }
+                                                    reverted.write().insert(index);
+                                                });
+                                            }
+                                        },
+                                        if is_reverted {
+                                            "Reverted"
+                                        } else {
+                                            "Revert this turn"
+                                        }
+                                    }
+                                }
                                 if let Some((number, set)) = question_set {
                                     {
                                         let card_state = question_card_state(
