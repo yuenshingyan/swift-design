@@ -231,9 +231,10 @@ pub(crate) fn QuestionSetCard(
         "question-set"
     };
     rsx! {
+        // The set's title and message are not drawn: the message is
+        // already the assistant's chat bubble, and the title said
+        // nothing the cards do not.
         div { class: "{set_class}",
-            p { class: "question-set-title", "{set.title}" }
-            p { class: "question-set-message", "{set.message}" }
             div { class: "question-cards",
                 for question in questions {
                     QuestionCard {
