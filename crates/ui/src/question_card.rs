@@ -286,6 +286,22 @@ pub(crate) fn QuestionCard(
     on_change: EventHandler<DraftAnswer>,
 ) -> Element {
     let kind = question.kind;
+    // The judgment chip sits in the same row as the options: it is one
+    // more answer, not a footnote under them.
+    let judgment = {
+        let draft_for_skip = draft.clone();
+        rsx! {
+            button {
+                class: if draft.is_skipped { "option-chip skip selected" } else { "option-chip skip" },
+                onclick: move |_| {
+                    let mut next = draft_for_skip.clone();
+                    skip_answer(&mut next);
+                    on_change.call(next);
+                },
+                "Use your best judgment"
+            }
+        }
+    };
     rsx! {
         div { class: "question-card",
             div { class: "question-head",
@@ -314,6 +330,7 @@ pub(crate) fn QuestionCard(
                             }
                         },
                     }
+                    div { class: "option-chips", {judgment.clone()} }
                 },
                 _ => rsx! {
                     div { class: "option-chips",
@@ -347,6 +364,7 @@ pub(crate) fn QuestionCard(
                                 "Other…"
                             }
                         }
+                        {judgment.clone()}
                     }
                 },
             }
@@ -364,18 +382,6 @@ pub(crate) fn QuestionCard(
                         }
                     },
                 }
-            }
-            button {
-                class: if draft.is_skipped { "option-chip skip selected" } else { "option-chip skip" },
-                onclick: {
-                    let draft = draft.clone();
-                    move |_| {
-                        let mut next = draft.clone();
-                        skip_answer(&mut next);
-                        on_change.call(next);
-                    }
-                },
-                "Use your best judgment"
             }
         }
     }
