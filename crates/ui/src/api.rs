@@ -210,6 +210,10 @@ pub struct SessionOptions {
     /// How much a deck leans on data, one of `EVIDENCE_STYLES`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_style: Option<String>,
+    /// The axes the planner filled from the request, by option key.
+    /// The card marks them as suggested until the user picks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested: Vec<String>,
 }
 
 impl Default for SessionOptions {
@@ -231,6 +235,7 @@ impl Default for SessionOptions {
             data_state: None,
             slide_density: None,
             evidence_style: None,
+            suggested: Vec::new(),
         }
     }
 }
