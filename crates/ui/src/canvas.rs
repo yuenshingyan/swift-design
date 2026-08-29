@@ -216,12 +216,38 @@ pub(crate) fn card_class(flags: CardFlags) -> String {
     class
 }
 
+/// The ids whose Finish the running turn still has to serve: the
+/// trailing continue requests, as the server reads them. The walk stops
+/// at the first user message that is not a continue. With no run in
+/// flight the list is empty, so a failed run gives the button back.
+pub(crate) fn queued_finishes(messages: &[api::ChatMessage], is_running: bool) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    if !is_running {
+        return ids;
+    }
+    for message in messages.iter().rev() {
+        if message.role != "user" {
+            continue;
+        }
+        if !message.is_continue {
+            break;
+        }
+        if let Some(id) = &message.design {
+            ids.insert(id.clone());
+        }
+    }
+    ids
+}
+
 /// The candidate canvas for a session.
 #[component]
 pub(crate) fn CandidateCanvas(
     session_id: String,
     cards: Vec<CanvasCard>,
     run_designs: HashMap<String, u8>,
+    /// The ids whose Finish was pressed and not yet served.
+    #[props(default)]
+    queued: HashSet<String>,
     revision: u64,
     chosen: Option<String>,
     on_open: EventHandler<(ArtifactKind, String)>,
@@ -333,6 +359,7 @@ pub(crate) fn CandidateCanvas(
                     let id = card.id.clone();
                     let current = shown.read().get(&id).copied().unwrap_or(1);
                     let progress = run_designs.get(&id).copied();
+                    let is_queued = queued.contains(&id);
                     let is_chosen = chosen.as_deref() == Some(id.as_str());
                     let is_selected = selected().contains(&id);
                     rsx! {
@@ -341,6 +368,7 @@ pub(crate) fn CandidateCanvas(
                             card,
                             current,
                             progress,
+                            is_queued,
                             is_chosen,
                             is_selected,
                             revision,
@@ -388,6 +416,10 @@ fn CandidateCard(
     card: CanvasCard,
     current: usize,
     progress: Option<u8>,
+    /// True while the run has this card's Finish in its queue but has
+    /// not reported progress on it yet.
+    #[props(default)]
+    is_queued: bool,
     is_chosen: bool,
     is_selected: bool,
     revision: u64,
@@ -414,6 +446,7 @@ fn CandidateCard(
     // A preview waits for the rest of its outline. The button asks the
     // app for it, and the run then shows its progress on this card.
     let is_finish_offered = card.is_preview() && progress.is_none();
+    let is_finishing = is_finish_offered && is_queued;
     let has_pages = count > 1;
     // The edge arrows and the arrow keys step through the screens. The
     // arrows sit inside the card, and the card opens on click, so they
@@ -514,6 +547,12 @@ fn CandidateCard(
                             "writing"
                         }
                     }
+                    if is_finishing {
+                        span { class: "card-pill",
+                            span { class: "dot" }
+                            "queued"
+                        }
+                    }
                 }
                 if let Some(percent) = progress {
                     div { class: "card-progress",
@@ -523,12 +562,27 @@ fn CandidateCard(
                         }
                     }
                 }
+                // A queued Finish has no percentage yet: the bar slides
+                // until the run reports one.
+                if is_finishing {
+                    div { class: "card-progress indeterminate",
+                        div { class: "card-progress-fill" }
+                    }
+                }
             }
             div { class: "card-footer",
                 div { class: "card-name",
                     span { class: "card-label", "{candidate_label(&id)}" }
                 }
-                if is_finish_offered {
+                if is_finishing {
+                    button {
+                        class: "card-finish finishing",
+                        disabled: true,
+                        title: "The run will write the remaining screens",
+                        span { class: "finish-spinner" }
+                        span { class: "finish-text", "Finishing…" }
+                    }
+                } else if is_finish_offered {
                     button {
                         class: "card-finish",
                         title: "Write the remaining screens from the outline",
@@ -595,6 +649,31 @@ fn PlaceholderCard(id: String, viewport: Viewport, percent: Option<u8>) -> Eleme
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn message(role: &str, design: Option<&str>, is_continue: bool) -> api::ChatMessage {
+        api::ChatMessage {
+            role: role.to_owned(),
+            content: String::new(),
+            design: design.map(str::to_owned),
+            question_set: None,
+            is_continue,
+        }
+    }
+
+    #[test]
+    fn queued_finishes_are_the_trailing_continues_of_a_running_turn() {
+        let messages = vec![
+            message("user", Some("a"), true),
+            message("assistant", None, false),
+            message("user", None, false),
+            message("user", Some("b"), true),
+            message("user", Some("c"), true),
+        ];
+        let queued = queued_finishes(&messages, true);
+        assert!(queued.contains("b") && queued.contains("c"));
+        assert!(!queued.contains("a"));
+        assert!(queued_finishes(&messages, false).is_empty());
+    }
 
     #[test]
     fn arrow_keys_step_and_other_keys_do_not() {
