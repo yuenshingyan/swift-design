@@ -36,7 +36,7 @@ Both kinds share the theme, the HTML and CSS rules, the workflow, the templates,
 - Ask only choices that change the result, with 2 to 4 short options each.
 - Ask at most three questions per turn, and no more once five are answered.
 - Never require an answer: every question has `Use your best judgment`, and the whole set can be skipped.
-- The app asks its own closed questions itself, from fixed lists: the audience, the tone, and light or dark for both kinds; the canvas, how much to build, the product kind, the screen state, and the number of variations for a demo; the scenario, the length, the slide density, how much it leans on data, the candidates, and the variety for a deck. Their wording and options are the same in every session.
+- The app asks its own closed questions itself, from fixed lists: how the colors read for both kinds; the canvas, how much to build, the product kind, the screen state, and the number of variations for a demo; the audience, the tone, the scenario, the length, the slide density, how much it leans on data, the candidates, and the variety for a deck. Their wording and options are the same in every session. The questions the request already answers come pre-selected, marked `suggested`, and one press accepts them.
 - The agent asks 0 to 3 more, only what the request raises and the fixed list does not cover, such as which features a demo must show. Asking nothing is a normal turn.
 - After the candidates exist, the chat edits: a message with a candidate open changes that candidate, a message without one writes new candidates.
 
