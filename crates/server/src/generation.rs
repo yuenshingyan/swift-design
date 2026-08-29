@@ -160,6 +160,77 @@ pub type DesignProgressSink = Arc<dyn Fn(&str, u8) + Send + Sync>;
 /// goes to the `ProgressSink`.
 pub(crate) type ShareSink = Arc<dyn Fn(f32) + Send + Sync>;
 
+/// What every continue of one turn shares.
+struct ContinueShared<'a> {
+    /// The HTTP client.
+    client: &'a reqwest::Client,
+    /// The run's context.
+    context: &'a GenerationContext,
+    /// The user's source files, loaded once.
+    attachments: Arc<Attachments>,
+    /// The progress group the continues report into.
+    group: ProgressGroup,
+    /// The run log.
+    log: &'a LogSink,
+}
+
+/// The continues in flight and the ids started so far.
+#[derive(Default)]
+struct ContinueBatch {
+    /// The running continues.
+    tasks: tokio::task::JoinSet<(String, Result<usize, String>)>,
+    /// Every id started, in order.
+    started: Vec<String>,
+}
+
+/// The progress of a set of artifacts that grows while the run works.
+pub(crate) struct ProgressGroup {
+    /// One fraction per share, in start order.
+    shares: Arc<std::sync::Mutex<Vec<f32>>>,
+    /// The run's progress sink.
+    sink: Option<ProgressSink>,
+    /// The per-artifact progress sink.
+    design_sink: Option<DesignProgressSink>,
+    /// The percentage the group starts from.
+    base: u8,
+    /// The percentage span the group fills.
+    span: u8,
+}
+
+impl ProgressGroup {
+    /// Adds an artifact and returns its share.
+    pub(crate) fn share(&self, design_id: &str) -> ShareSink {
+        let index = match self.shares.lock() {
+            Ok(mut shares) => {
+                shares.push(0.0);
+                shares.len() - 1
+            }
+            Err(_) => 0,
+        };
+        let shares = Arc::clone(&self.shares);
+        let sink = self.sink.clone();
+        let design_sink = self.design_sink.clone();
+        let design_id = design_id.to_owned();
+        let (base, span) = (self.base, self.span);
+        Arc::new(move |fraction: f32| {
+            let fraction = fraction.clamp(0.0, 1.0);
+            if let Some(design_sink) = &design_sink {
+                design_sink(&design_id, (fraction * 100.0) as u8);
+            }
+            let Ok(mut shares) = shares.lock() else {
+                return;
+            };
+            if let Some(slot) = shares.get_mut(index) {
+                *slot = fraction;
+            }
+            let mean = shares.iter().sum::<f32>() / shares.len().max(1) as f32;
+            if let Some(sink) = &sink {
+                sink(base.saturating_add((f32::from(span) * mean) as u8));
+            }
+        })
+    }
+}
+
 /// The screens each continuation chunk has produced so far, shared
 /// between the chunks that run at once.
 type ChunkBoard = Arc<std::sync::Mutex<Vec<Vec<design_model::Screen>>>>;
@@ -703,8 +774,9 @@ impl GenerationEngine {
                 })
             }
             GenerationTask::Continue(design_ids) => {
-                let refs: Vec<&str> = design_ids.iter().map(String::as_str).collect();
-                let outcomes = self.continue_designs(client, context, &refs, log).await;
+                let outcomes = self
+                    .continue_artifacts(client, context, design_ids, log)
+                    .await;
                 if outcomes.iter().all(|(_, outcome)| outcome.is_err()) {
                     let failures: Vec<String> = outcomes
                         .iter()
@@ -717,7 +789,10 @@ impl GenerationEngine {
                         "no design was continued",
                     )));
                 }
-                Ok(GenerationOutcome::Wrote { design_ids })
+                // The late finishes count too.
+                Ok(GenerationOutcome::Wrote {
+                    design_ids: outcomes.into_iter().map(|(id, _)| id).collect(),
+                })
             }
         }
     }
@@ -1015,44 +1090,129 @@ impl GenerationEngine {
         Ok(())
     }
 
-    /// Continues every requested preview design at the same time. Returns
-    /// one outcome per design, in request order: the screens added, or
-    /// the error.
-    async fn continue_designs(
+    /// Continues every requested preview at the same time, and every
+    /// preview whose Finish is pressed while they run. Returns one
+    /// outcome per artifact, in start order: the screens added, or the
+    /// error.
+    ///
+    /// A late Finish would otherwise wait for the first continue to end.
+    /// The loop wakes on every store change and on a timer, reads the
+    /// trailing continue requests again, and starts the new ones.
+    pub(crate) async fn continue_artifacts(
         &self,
         client: &reqwest::Client,
         context: &GenerationContext,
-        design_ids: &[&str],
+        ids: Vec<String>,
         log: &LogSink,
     ) -> Vec<(String, Result<usize, String>)> {
-        let ids: Vec<String> = design_ids.iter().map(|id| (*id).to_owned()).collect();
-        let shares = self.shared_progress(&ids, 5, 95);
-        let attachments = Arc::new(self.load_attachments(&context.session_id, log).await);
-        let mut tasks = tokio::task::JoinSet::new();
-        for (index, design_id) in design_ids.iter().enumerate() {
-            let engine = self.clone();
-            let client = client.clone();
-            let context = context.clone();
-            let design_id = (*design_id).to_owned();
-            let attachments = Arc::clone(&attachments);
-            let share = Arc::clone(&shares[index]);
-            let log = Arc::clone(log);
-            tasks.spawn(async move {
-                let outcome = engine
-                    .continue_design(&client, &context, &design_id, &attachments, &share, &log)
-                    .await;
-                (index, design_id, outcome)
-            });
-        }
-        let mut outcomes: Vec<Option<(String, Result<usize, String>)>> =
-            (0..design_ids.len()).map(|_| None).collect();
-        while let Some(joined) = tasks.join_next().await {
-            match joined {
-                Ok((index, design_id, outcome)) => outcomes[index] = Some((design_id, outcome)),
-                Err(error) => log(&format!("continue task failed: {error}")),
+        let shared = ContinueShared {
+            client,
+            context,
+            attachments: Arc::new(self.load_attachments(&context.session_id, log).await),
+            group: self.progress_group(5, 95),
+            log,
+        };
+        let mut batch = ContinueBatch::default();
+        let mut outcomes: Vec<(String, Result<usize, String>)> = Vec::new();
+        let mut changes = self.notifier.subscribe();
+        self.start_continues(&mut batch, ids, &shared);
+        loop {
+            if batch.tasks.is_empty() {
+                let late = self.late_continue_ids(context, &batch.started).await;
+                if late.is_empty() {
+                    break;
+                }
+                self.start_continues(&mut batch, late, &shared);
+                continue;
             }
+            tokio::select! {
+                joined = batch.tasks.join_next() => match joined {
+                    Some(Ok((id, outcome))) => outcomes.push((id, outcome)),
+                    Some(Err(error)) => log(&format!("continue task failed: {error}")),
+                    None => {}
+                },
+                changed = changes.changed() => {
+                    if changed.is_err() {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                }
+                () = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+            }
+            let late = self.late_continue_ids(context, &batch.started).await;
+            self.start_continues(&mut batch, late, &shared);
         }
-        outcomes.into_iter().flatten().collect()
+        outcomes.sort_by_key(|(id, _)| batch.started.iter().position(|known| known == id));
+        outcomes
+    }
+
+    /// Starts a continue for each id and records it as started.
+    fn start_continues(
+        &self,
+        batch: &mut ContinueBatch,
+        ids: Vec<String>,
+        shared: &ContinueShared<'_>,
+    ) {
+        if ids.is_empty() {
+            return;
+        }
+        if !batch.started.is_empty() {
+            (shared.log)(&format!(
+                "continuing {} more: {}",
+                ids.len(),
+                ids.join(", ")
+            ));
+        }
+        for id in ids {
+            let share = shared.group.share(&id);
+            self.spawn_continue(&mut batch.tasks, &id, share, shared);
+            batch.started.push(id);
+        }
+    }
+
+    /// The trailing continue requests that are not running yet: a
+    /// Finish pressed after this turn read its task.
+    async fn late_continue_ids(
+        &self,
+        context: &GenerationContext,
+        started: &[String],
+    ) -> Vec<String> {
+        match self.pick_task(context).await {
+            Ok(Some(GenerationTask::Continue(ids))) => {
+                ids.into_iter().filter(|id| !started.contains(id)).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Starts one continue on the session's kind of artifact.
+    fn spawn_continue(
+        &self,
+        tasks: &mut tokio::task::JoinSet<(String, Result<usize, String>)>,
+        id: &str,
+        share: ShareSink,
+        shared: &ContinueShared<'_>,
+    ) {
+        let engine = self.clone();
+        let client = shared.client.clone();
+        let context = shared.context.clone();
+        let id = id.to_owned();
+        let attachments = Arc::clone(&shared.attachments);
+        let log = Arc::clone(shared.log);
+        tasks.spawn(async move {
+            let outcome = match context.request.kind {
+                design_model::ArtifactKind::Demo => {
+                    engine
+                        .continue_design(&client, &context, &id, &attachments, &share, &log)
+                        .await
+                }
+                design_model::ArtifactKind::Deck => {
+                    engine
+                        .continue_deck(&client, &context, &id, &attachments, &share, &log)
+                        .await
+                }
+            };
+            (id, outcome)
+        });
     }
 
     /// Writes the remaining screens of the preview design `design_id` in
@@ -1095,6 +1255,9 @@ impl GenerationEngine {
             planned - start,
             chunks.len()
         ));
+        // The card shows `writing` from the first moment, not from the
+        // first chunk: a chunk takes a minute or more.
+        progress(0.0);
         // Every chunk runs at the same time from the same preview. The
         // board keeps what each chunk has written so far; `shown_design`
         // turns the board into the design the canvas shows.
@@ -1542,6 +1705,18 @@ impl GenerationEngine {
     /// same time. Each design reports its own 0.0 to 1.0: the design sink
     /// gets it as a percent under its id, and the turn progress becomes
     /// `base` plus `span` times the mean of all shares.
+    /// A progress group that takes artifacts as they start: each share
+    /// reports its own percentage, and the run's bar shows the mean.
+    pub(crate) fn progress_group(&self, base: u8, span: u8) -> ProgressGroup {
+        ProgressGroup {
+            shares: Arc::new(std::sync::Mutex::new(Vec::new())),
+            sink: self.progress_sink.clone(),
+            design_sink: self.design_progress_sink.clone(),
+            base,
+            span,
+        }
+    }
+
     pub(crate) fn shared_progress(
         &self,
         design_ids: &[String],
@@ -2430,11 +2605,13 @@ mod tests {
     use design_model::WorkflowState;
 
     use super::{
-        GenerationEngine, GenerationOutcome, candidate_plans, system_prompt, trailing_continue_ids,
+        GenerationContext, GenerationEngine, GenerationOutcome, ProgressGroup, ProgressSink,
+        candidate_plans, system_prompt, trailing_continue_ids,
     };
     use crate::designs::DesignStore;
     use crate::events::ChangeNotifier;
     use crate::model_client::LogSink;
+    use crate::request::SessionRequest;
     use crate::sessions::{ChatMessage, NewSession, SessionStore};
     use crate::test_support::{FakeModelServer, SAMPLE_DESIGN, low_effort_options};
 
@@ -2777,6 +2954,77 @@ mod tests {
         assert!(result.unwrap_err().contains("fix rounds"));
         let runs = sessions.runs("talk").await.unwrap();
         assert_eq!(runs[0].result.as_deref(), Some("failed"));
+    }
+
+    #[tokio::test]
+    async fn a_finish_pressed_mid_run_is_a_late_continue() {
+        let server = FakeModelServer::start().await;
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let mut design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+        design.outline = (1..=6).map(|number| format!("Screen {number}")).collect();
+        designs.save("talk-candidate-1", &design).await.unwrap();
+        designs.save("talk-candidate-2", &design).await.unwrap();
+        set_up_session(&sessions, "A landing page.").await;
+        let session = sessions.read("talk").await.unwrap().unwrap();
+        let context = GenerationContext {
+            request: SessionRequest {
+                request: session.request.clone(),
+                kind: session.artifact_kind,
+                answers: Vec::new(),
+                options: session.options.clone(),
+            },
+            options: session.options.clone(),
+            session_id: "talk".to_owned(),
+        };
+        let engine = engine(&server, &designs, &sessions);
+        let press = |id: &str| ChatMessage::continue_request("Finish it.", id);
+        sessions
+            .append_message("talk", press("talk-candidate-1"))
+            .await
+            .unwrap();
+        let started = vec!["talk-candidate-1".to_owned()];
+        // Nothing new: the running continue is the only request.
+        assert!(
+            engine
+                .late_continue_ids(&context, &started)
+                .await
+                .is_empty()
+        );
+        // The second Finish arrives while the first runs.
+        sessions
+            .append_message("talk", press("talk-candidate-2"))
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.late_continue_ids(&context, &started).await,
+            vec!["talk-candidate-2".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_progress_group_takes_shares_as_they_start() {
+        let reported = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let sink: ProgressSink = {
+            let reported = Arc::clone(&reported);
+            Arc::new(move |percent| reported.lock().unwrap().push(percent))
+        };
+        let group = ProgressGroup {
+            shares: Arc::new(std::sync::Mutex::new(Vec::new())),
+            sink: Some(sink),
+            design_sink: None,
+            base: 0,
+            span: 100,
+        };
+        let first = group.share("a");
+        first(1.0);
+        // A second share halves the mean: the bar steps back for the
+        // late arrival instead of hiding it.
+        let second = group.share("b");
+        second(0.0);
+        second(0.5);
+        assert_eq!(*reported.lock().unwrap(), vec![100, 50, 75]);
     }
 
     #[tokio::test]
