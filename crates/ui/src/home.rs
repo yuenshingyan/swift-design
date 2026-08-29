@@ -276,7 +276,7 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                             let id = summary.id.clone();
                             move |_| on_open_session.call(id.clone())
                         },
-                        span { class: "project-title", "{summary.title}" }
+                        span { class: "project-title", title: "{summary.title}", "{summary.title}" }
                         span { class: "project-kind", "{summary.artifact_kind.label()}" }
                         span {
                             class: "project-time",
