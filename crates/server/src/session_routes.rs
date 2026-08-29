@@ -500,12 +500,14 @@ async fn post_message(
             );
         }
         // Generating counts: a Finish pressed while a run works joins
-        // that run instead of being refused.
+        // that run instead of being refused. A halted session counts
+        // too: the Finish is the resume.
         if !matches!(
             session.state,
             WorkflowState::Reviewing | WorkflowState::Generating
-        ) {
-            return conflict("continue is only allowed while reviewing or generating");
+        ) && !session.state.is_halted()
+        {
+            return conflict("continue is only allowed while reviewing, generating, or halted");
         }
     } else if session.state == WorkflowState::Generating {
         return conflict("cannot send a message while generating");
@@ -955,7 +957,10 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
         let session = view(&application, "talk").await;
-        assert_eq!(session["session"]["state"], "generating");
+        // The run halted in generating, so the message resumes on the
+        // canvas, where the next turn goes through the planner. No model
+        // is configured here, so no run moves it on.
+        assert_eq!(session["session"]["state"], "reviewing");
         assert_eq!(session["messages"][0]["content"], "Try again, smaller.");
     }
 
@@ -1062,6 +1067,37 @@ mod tests {
         assert_eq!(session["session"]["state"], "generating");
         assert_eq!(session["messages"][0]["design"], "talk-candidate-1");
         assert_eq!(session["messages"][1]["design"], "talk-candidate-2");
+    }
+
+    #[tokio::test]
+    async fn a_finish_after_a_stop_resumes_the_session() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "talk").await;
+        send(application.clone(), "POST", "/sessions/talk/generate", None).await;
+        // The process died with the run: the boot sweep stops it.
+        let sessions = crate::sessions::SessionStore::new(directory.path().join("data/sessions"));
+        sessions
+            .apply("talk", design_model::WorkflowEvent::RunStopped)
+            .await
+            .unwrap();
+        assert_eq!(
+            view(&application, "talk").await["session"]["state"],
+            "stopped"
+        );
+        let body = r#"{"content":"Finish it.","design":"talk-candidate-1","action":"continue"}"#;
+        let (status, body) = send(
+            application.clone(),
+            "POST",
+            "/sessions/talk/messages",
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        assert_eq!(
+            view(&application, "talk").await["session"]["state"],
+            "generating"
+        );
     }
 
     #[tokio::test]
