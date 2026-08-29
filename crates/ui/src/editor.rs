@@ -202,18 +202,31 @@ pub(crate) fn selection_of(message: &PreviewMessage) -> Vec<SelectionEntry> {
         .collect()
 }
 
-/// The chat reference for a selection: one node reference per node,
-/// space separated.
+/// The chat reference for a selection. One node gets the full node
+/// reference, with its text. Several nodes share one bracket without
+/// the texts, so the chip stays short:
+/// `[slide 9, nodes 0/5/0 <p>; 0/5/1 <div.rule>]`.
 pub(crate) fn selection_reference(
     unit: &str,
     screen_index: usize,
     entries: &[SelectionEntry],
 ) -> String {
-    entries
+    if let [entry] = entries {
+        return node_reference(unit, screen_index, &entry.to_node());
+    }
+    let nodes: Vec<String> = entries
         .iter()
-        .map(|entry| node_reference(unit, screen_index, &entry.to_node()))
-        .collect::<Vec<String>>()
-        .join(" ")
+        .map(|entry| {
+            let class = entry
+                .classes
+                .split_whitespace()
+                .next()
+                .map(|class| format!(".{class}"))
+                .unwrap_or_default();
+            format!("{} <{}{class}>", entry.path, entry.tag)
+        })
+        .collect();
+    format!("[{unit} {}, nodes {}]", screen_index + 1, nodes.join("; "))
 }
 
 /// The node the user selected in the preview.
@@ -279,10 +292,14 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
     let mut selected = use_signal(|| 0usize);
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
     let mut selection = use_signal(Vec::<SelectionEntry>::new);
+    // The screens pinned for the chat with a command-click on a tile.
+    let mut pinned = use_signal(Vec::<usize>::new);
     let mut messages = use_signal(Vec::<String>::new);
     let mut preview_version = use_signal(|| 0u32);
     let mut user_paths = use_signal(Vec::<String>::new);
     let mut is_dirty = use_signal(|| false);
+    // Autosave: the newest change wins the delay.
+    let save_generation = use_signal(|| 0u64);
     let mut show_properties = use_signal(|| false);
     // The toolbar's `…` menu, and the template name being typed while
     // its save prompt is open.
@@ -502,6 +519,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
         .enumerate()
         .map(|(index, screen)| screen_label(index, screen))
         .collect();
+    let page_labels = thumbnail_labels.clone();
     let current_notes = design()
         .screens
         .get(selected())
@@ -512,6 +530,16 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
             DesignChat {
                 design_id: design_id.clone(),
                 context: chat_context,
+                page: page_reference("screen", &pinned()),
+                is_pinned: !pinned().is_empty(),
+                on_pin_page: move |index: usize| {
+                    if !pinned().contains(&index) {
+                        pinned.write().push(index);
+                    }
+                },
+                pages: page_labels.clone(),
+                page_unit: Some("screen".to_owned()),
+                on_drop_page: move |_| pinned.write().clear(),
                 on_before_send: move |_| {
                     if is_dirty() {
                         save.call(false);
@@ -529,17 +557,10 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                     span { class: "preview-heading", "{selected() + 1} / {screen_count}" }
                     span { class: "badge", "agent {agent_count}" }
                     span { class: "badge you", "you {user_count}" }
+                    // Every change saves by itself, shortly after it. The
+                    // cue shows only while a save is due.
                     if is_dirty() {
-                        button {
-                            class: "primary",
-                            onclick: move |_| save.call(true),
-                            "Save"
-                        }
-                    } else {
-                        span { class: "save-state",
-                            span { dangerous_inner_html: icons::CHECK }
-                            "saved"
-                        }
+                        span { class: "save-state pending", "saving…" }
                     }
                     div { class: "actions",
                         button { onclick: move |_| show_properties.set(!show_properties()),
@@ -657,7 +678,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                     }
                     p { class: "preview-hint",
                         span {
-                            "Click a node to reference it in the chat and edit its text · ⌘-click adds more"
+                            "Click a node to reference it in the chat and edit its text · ⌘-click adds more · ⌘-click a tile to pin pages"
                         }
                         span { class: "dot", "·" }
                         span { "right-click for quick edits" }
@@ -686,6 +707,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                                         }
                                     });
                                 is_dirty.set(true);
+                                schedule_save(save_generation, save, false);
                             },
                         }
                     }
@@ -726,15 +748,22 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                                     is_dragging: dragged() == Some(index),
                                     is_portrait,
                                     is_deleting,
+                                    is_pinned: pinned().contains(&index),
                                 });
                                 rsx! {
                                     div {
                                         key: "{index}",
                                         class: "{class}",
-                                        title: "{label} · drag to reorder",
+                                        title: "{label} · drag to reorder · ⌘-click to pin for the chat",
                                         style: "--tile-width: {tile_width}rem",
                                         "data-index": "{index}",
-                                        onclick: move |_| {
+                                        onclick: move |event: MouseEvent| {
+                                            // A command-click pins the screen for
+                                            // the chat; a plain click opens it.
+                                            if event.modifiers().meta() || event.modifiers().ctrl() {
+                                                toggle_pin(&mut pinned.write(), index);
+                                                return;
+                                            }
                                             selected.set(index);
                                             selected_node.set(None);
                                             pending_screen_delete.set(None);
@@ -807,10 +836,9 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                     div { class: "sheet-head",
                         span { class: "kicker", "Properties" }
                         span { class: "spacer" }
-                        button {
-                            class: "primary",
-                            onclick: move |_| save.call(true),
-                            "Save"
+                        // The same cue as the toolbar.
+                        if is_dirty() {
+                            span { class: "save-state pending", "saving…" }
                         }
                         button { onclick: move |_| show_properties.set(false), "Close" }
                     }
@@ -829,6 +857,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                                     oninput: move |event| {
                                         design.with_mut(|design| design.title = event.value());
                                         is_dirty.set(true);
+                                        schedule_save(save_generation, save, false);
                                     },
                                 }
                             }
@@ -838,6 +867,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                             on_change: move |theme: Theme| {
                                 design.with_mut(|design| design.theme = theme);
                                 is_dirty.set(true);
+                                schedule_save(save_generation, save, true);
                             },
                         }
                         TransitionForm {
@@ -1481,6 +1511,57 @@ pub(crate) fn strip_summary(written: usize, planned: usize) -> String {
     format!("{written} written · {planned} planned")
 }
 
+/// Waits a moment on the page, so a burst of keystrokes saves once.
+const AUTOSAVE_DELAY_SCRIPT: &str = "setTimeout(() => dioxus.send(0), 700);";
+
+/// Saves shortly after the last change. Every call bumps `generation`;
+/// only the call that is still the newest when the delay ends saves,
+/// so typing saves once, after the typing stops. `reload_preview` is
+/// for a change the preview must redraw, like the theme.
+pub(crate) fn schedule_save(
+    mut generation: Signal<u64>,
+    save: Callback<bool>,
+    reload_preview: bool,
+) {
+    let mine = generation() + 1;
+    generation.set(mine);
+    spawn(async move {
+        let mut sleeper = document::eval(AUTOSAVE_DELAY_SCRIPT);
+        let _ = sleeper.recv::<i32>().await;
+        if generation() == mine {
+            save.call(reload_preview);
+        }
+    });
+}
+
+/// The page reference the chat carries: the pinned pages, in order, or
+/// `None` when nothing is pinned. The open page is never pinned by
+/// itself: a change with no pins is about the whole artifact.
+pub(crate) fn page_reference(unit: &str, pinned: &[usize]) -> Option<String> {
+    if pinned.is_empty() {
+        return None;
+    }
+    let mut pinned = pinned.to_vec();
+    pinned.sort_unstable();
+    Some(
+        pinned
+            .iter()
+            .map(|index| format!("[{unit} {}]", index + 1))
+            .collect::<Vec<String>>()
+            .join(" "),
+    )
+}
+
+/// Adds `index` to the pins, or removes it when it is pinned.
+pub(crate) fn toggle_pin(pinned: &mut Vec<usize>, index: usize) {
+    match pinned.iter().position(|pin| *pin == index) {
+        Some(position) => {
+            pinned.remove(position);
+        }
+        None => pinned.push(index),
+    }
+}
+
 /// What decides a written tile's class list.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ThumbnailState {
@@ -1492,6 +1573,8 @@ pub(crate) struct ThumbnailState {
     pub is_portrait: bool,
     /// The delete button waits for its confirm click.
     pub is_deleting: bool,
+    /// The tile is pinned for the chat: the next message is about it.
+    pub is_pinned: bool,
 }
 
 /// The class list of a written tile: `thumbnail` plus one word per flag.
@@ -1508,6 +1591,9 @@ pub(crate) fn thumbnail_class(state: ThumbnailState) -> String {
     }
     if state.is_deleting {
         class.push_str(" deleting");
+    }
+    if state.is_pinned {
+        class.push_str(" pinned");
     }
     class
 }
@@ -1613,8 +1699,8 @@ mod tests {
         MONO_FONTS, NodeStyles, SelectedNode, SelectionEntry, TEXT_FONTS, ThumbnailState,
         default_screen, effect_uses_motion, field_count, first_heading, font_options,
         history_label, move_screen, node_reference, optional, outline_entry, outline_title,
-        preview_stage_class, screen_label, selection_paths, selection_reference, strip_summary,
-        strip_tags, thumbnail_class,
+        page_reference, preview_stage_class, screen_label, selection_paths, selection_reference,
+        strip_summary, strip_tags, thumbnail_class, toggle_pin,
     };
 
     #[test]
@@ -1680,11 +1766,25 @@ mod tests {
             is_dragging: true,
             is_portrait: true,
             is_deleting: true,
+            is_pinned: true,
         };
         assert_eq!(
             thumbnail_class(everything),
-            "thumbnail current dragging portrait deleting"
+            "thumbnail current dragging portrait deleting pinned"
         );
+    }
+
+    #[test]
+    fn pinned_pages_replace_the_open_page_in_the_reference() {
+        assert_eq!(page_reference("slide", &[]), None);
+        assert_eq!(
+            page_reference("slide", &[6, 1]).as_deref(),
+            Some("[slide 2] [slide 7]")
+        );
+        let mut pinned = vec![1];
+        toggle_pin(&mut pinned, 6);
+        toggle_pin(&mut pinned, 1);
+        assert_eq!(pinned, vec![6]);
     }
 
     #[test]
@@ -1769,7 +1869,11 @@ mod tests {
         ];
         assert_eq!(
             selection_reference("slide", 3, &entries),
-            "[slide 4, node 0/1 <h2.title>: Hello] [slide 4, node 0/2 <p>]"
+            "[slide 4, nodes 0/1 <h2.title>; 0/2 <p>]"
+        );
+        assert_eq!(
+            selection_reference("slide", 3, &entries[..1]),
+            "[slide 4, node 0/1 <h2.title>: Hello]"
         );
         assert_eq!(
             selection_paths(&entries, "0/2"),
