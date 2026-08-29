@@ -5,7 +5,7 @@
 
 use design_model::{
     ArtifactKind, BriefQuestion, BriefQuestionSet, QUESTIONS_PER_TURN_LIMIT, QuestionKind,
-    QuestionOption,
+    QuestionOption, app_axes, axis_by_key,
 };
 
 use crate::request::{SessionRequest, request_input};
@@ -29,6 +29,10 @@ pub(crate) struct Plan {
     /// True when the model wants to apply the request to the artifact
     /// open in the editor.
     pub(crate) should_edit: bool,
+    /// The app questions the request answers by itself, as (option
+    /// key, value) pairs from the fixed lists. The setup turn fills the
+    /// blank axes from them.
+    pub(crate) suggestions: Vec<(String, String)>,
 }
 
 /// One question as the model writes it: a label, short options, and
@@ -57,6 +61,8 @@ pub(crate) fn parse_plan(content: &str) -> Plan {
         generate: bool,
         #[serde(default)]
         edit: bool,
+        #[serde(default)]
+        suggestions: std::collections::BTreeMap<String, String>,
     }
     let parsed = content
         .find('{')
@@ -88,7 +94,36 @@ pub(crate) fn parse_plan(content: &str) -> Plan {
         question_set,
         should_generate: parsed.generate,
         should_edit: parsed.edit,
+        suggestions: known_suggestions(parsed.suggestions),
     }
+}
+
+/// The suggestions that name a real axis and one of its fixed values.
+/// The rest are dropped: a made-up value would land on a chip that
+/// does not exist.
+fn known_suggestions(
+    suggestions: std::collections::BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    suggestions
+        .into_iter()
+        .map(|(key, value)| (key.trim().to_owned(), value.trim().to_owned()))
+        .filter(|(key, value)| {
+            axis_by_key(key)
+                .is_some_and(|axis| axis.choices.iter().any(|(known, _)| known == value))
+        })
+        .collect()
+}
+
+/// The app questions of `kind` as the planner reads them: one line per
+/// axis with its option key, its wording, and its values.
+fn axis_lines(kind: ArtifactKind) -> String {
+    app_axes(kind)
+        .map(|axis| {
+            let values: Vec<&str> = axis.choices.iter().map(|(value, _)| *value).collect();
+            format!("- {} ({}): {}", axis.key, axis.name, values.join(", "))
+        })
+        .collect::<Vec<String>>()
+        .join("\n")
 }
 
 /// One planned question as a studio question: a choice among the
@@ -154,18 +189,26 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
     let (subject, owned) = match kind {
         ArtifactKind::Demo => (
             "You plan software demos with the user: landing pages, app screens, and similar layouts on a device canvas.",
-            "the audience, the tone, light or dark, how much of the demo to build, what kind of product it is, what state the screens show, the canvases to build for, and the number of candidates",
+            "how the colors read, how much of the demo to build, what kind of product it is, what state the screens show, the canvases to build for, and the number of candidates",
         ),
         ArtifactKind::Deck => (
             "You plan slide decks with the user.",
-            "the audience, the tone, light or dark, the scenario, the deck length in slides, how much goes on a slide, how much the deck leans on data, the number of candidates, and how different the candidates are",
+            "how the colors read, the audience, the tone, the scenario, the deck length in slides, how much goes on a slide, how much the deck leans on data, the number of candidates, and how different the candidates are",
         ),
     };
+    // The example in the JSON names a real axis of this kind, so the
+    // model copies a shape it can use.
+    let example = app_axes(kind)
+        .last()
+        .unwrap_or(&design_model::SHARED_AXES[0]);
     format!(
         "{subject}\n\
          Read the request, the answers, and the conversation. Reply with only this JSON:\n\
-         {{\"reply\":\"text for the user\",\"questions\":[{{\"question\":\"...\",\"options\":[\"...\"],\"multi\":false}}],\"generate\":false,\"edit\":false}}\n\
+         {{\"reply\":\"text for the user\",\"questions\":[{{\"question\":\"...\",\"options\":[\"...\"],\"multi\":false}}],\"suggestions\":{{\"{first_key}\":\"{first_value}\"}},\"generate\":false,\"edit\":false}}\n\
          The app always asks the user its own fixed questions first. Your questions are added to that card.\n\
+         The app questions, as key (wording): values:\n\
+         {axes}\n\
+         Put in suggestions every app question the request answers by itself. Use the key and one of its values. Leave out a question the request does not answer. Use an empty object when it answers none. The card shows a suggestion as picked, and the user can change it.\n\
          Ask 0 to {per_turn} extra questions. Ask none when the request and the source files already say enough. Give 2 to 4 short options for each question you do ask.\n\
          Set multi to true when the user can pick more than one option at once, such as the topics to cover or the sections to include.\n\
          Set multi to false when the options rule each other out, such as the audience or the tone.\n\
@@ -184,6 +227,9 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
          Keep reply to 1 to 3 sentences. Reply with only the JSON.",
         per_turn = QUESTIONS_PER_TURN_LIMIT,
         answered = ANSWERED_QUESTION_LIMIT,
+        first_key = example.key,
+        first_value = example.choices.first().map_or("", |(value, _)| *value),
+        axes = axis_lines(kind),
     )
 }
 
@@ -337,17 +383,54 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_carries_the_suggestions_the_lists_know() {
+        let plan = parse_plan(
+            r#"{"reply":"Got it.","questions":[],"suggestions":{"product_kind":"developer_tool","color_mode":" dark ","scope":"everything","vibe":"loud"},"generate":false,"edit":false}"#,
+        );
+        assert_eq!(
+            plan.suggestions,
+            [
+                ("color_mode".to_owned(), "dark".to_owned()),
+                ("product_kind".to_owned(), "developer_tool".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reply_without_suggestions_suggests_nothing() {
+        let plan = parse_plan(r#"{"reply":"Hi.","generate":false,"edit":false}"#);
+        assert!(plan.suggestions.is_empty());
+        assert!(parse_plan("plain prose").suggestions.is_empty());
+    }
+
+    #[test]
+    fn the_prompt_lists_the_app_questions_of_the_kind_to_suggest_from() {
+        let demo = planner_prompt(ArtifactKind::Demo);
+        assert!(demo.contains("\"suggestions\":{\"data_state\":\"populated\"}"));
+        assert!(demo.contains("- product_kind (Product kind): consumer_app, business_app"));
+        assert!(!demo.contains("- audience (Audience)"));
+        let deck = planner_prompt(ArtifactKind::Deck);
+        assert!(deck.contains("- audience (Audience): newcomers"));
+        assert!(deck.contains("- evidence_style (Evidence): narrative"));
+        assert!(!deck.contains("- scope (Scope)"));
+    }
+
+    #[test]
     fn the_prompts_name_what_the_app_asks() {
         let demo = planner_prompt(ArtifactKind::Demo);
         assert!(demo.contains("the canvases to build for, and the number of candidates"));
         assert!(demo.contains("what kind of product it is"));
         let deck = planner_prompt(ArtifactKind::Deck);
         assert!(deck.contains("how much goes on a slide"));
+        // The audience and the tone are a deck's questions: a demo's
+        // request already says what the product is.
+        assert!(deck.contains("how the colors read, the audience, the tone"));
+        assert!(!demo.contains("the audience, the tone"));
         // The recurring axes are the app's, for both kinds. The app
         // asks them itself, and asking nothing on top of them is a
         // valid turn.
         for prompt in [&demo, &deck] {
-            assert!(prompt.contains("the audience, the tone, light or dark"));
+            assert!(prompt.contains("how the colors read"));
             assert!(prompt.contains("never ask them in other words"));
             assert!(prompt.contains("the list above does not cover"));
             assert!(prompt.contains("Ask 0 to 3 extra questions"));
