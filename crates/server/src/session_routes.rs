@@ -797,12 +797,12 @@ mod tests {
             application.clone(),
             "PUT",
             "/sessions/intro/options",
-            Some(r#"{"effort":"medium","variety":"high","templates":[],"preview":true,"platforms":[],"scenario":"Startup pitch"}"#),
+            Some(r#"{"effort":"medium","variety":"high","templates":[],"preview":true,"platforms":[],"scenario":"Pitch or launch"}"#),
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
         let session = view(&application, "intro").await;
-        assert_eq!(session["session"]["options"]["scenario"], "Startup pitch");
+        assert_eq!(session["session"]["options"]["scenario"], "Pitch or launch");
         assert!(session.get("brief").is_none());
     }
 
