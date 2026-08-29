@@ -17,18 +17,35 @@ pub const AUDIENCES: [(&str, &str); 5] = [
 ];
 
 /// The tone the artifact takes, as (value, label).
+///
+/// Each value names a voice, not a purpose. An earlier list mixed the
+/// two, so `Executive overview` and `Educational` overlapped and read
+/// as a purpose the user had already stated in the request.
 pub const TONES: [(&str, &str); 5] = [
-    ("educational", "Educational"),
-    ("practical", "Practical and hands-on"),
-    ("executive", "Executive overview"),
-    ("persuasive", "Persuasive"),
+    ("plain", "Plain and direct"),
+    ("confident", "Confident and bold"),
+    ("warm", "Warm and friendly"),
+    ("technical", "Technical and precise"),
     ("playful", "Playful"),
 ];
 
-/// Whether the artifact reads light or dark, as (value, label). Both
-/// kinds ask it; `either` leaves the choice to the agent's theme.
-pub const COLOR_MODES: [(&str, &str); 3] =
-    [("light", "Light"), ("dark", "Dark"), ("either", "Either")];
+/// How the colors read, as (value, label).
+///
+/// Each option is a complete look, not a single dial: it settles the
+/// background and the color character together, so one pick is a full
+/// answer. The values `light` and `dark` predate the longer labels and
+/// stay stable for stored sessions. There is no `Either`: every card
+/// already carries the judgment chip, which says the same thing.
+pub const COLOR_MODES: [(&str, &str); 8] = [
+    ("light", "Light and airy"),
+    ("dark", "Dark and sleek"),
+    ("colorful", "Bright and colorful"),
+    ("pastel", "Soft pastels"),
+    ("warm", "Warm and earthy"),
+    ("corporate", "Cool and corporate"),
+    ("high_contrast", "Stark, high contrast"),
+    ("monochrome", "Black and white"),
+];
 
 /// What kind of product a demo shows, as (value, label). It decides the
 /// layout vocabulary: a dashboard and a storefront share no furniture.
@@ -72,6 +89,23 @@ pub const DEMO_SCOPES: [(&str, &str); 4] = [
     ("landing_page", "A landing page"),
     ("landing_and_app", "A landing page plus app screens"),
 ];
+
+/// Longest answer a user may type into an app question.
+pub const CUSTOM_ANSWER_LIMIT: usize = 120;
+
+/// True when `value` is an answer the user typed instead of picking.
+///
+/// The fixed lists cover the common answers. They cannot cover every
+/// answer, so every app question also takes text. The rule keeps a
+/// typed answer short and printable: it goes straight into a prompt
+/// line, where a control character or a run of text would break the
+/// line the model reads.
+pub fn is_custom_answer(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed.chars().count() <= CUSTOM_ANSWER_LIMIT
+        && !trimmed.chars().any(char::is_control)
+}
 
 /// The label for `value` in `choices`, or `None` when it is not one.
 fn label_of(choices: &[(&'static str, &'static str)], value: &str) -> Option<&'static str> {
@@ -136,11 +170,23 @@ mod tests {
             audience_label("practitioners"),
             Some("Practitioners in the field")
         );
-        assert_eq!(tone_label(" educational "), Some("Educational"));
+        assert_eq!(tone_label(" technical "), Some("Technical and precise"));
         assert_eq!(
             demo_scope_label("short_flow"),
             Some("A short flow of screens")
         );
+    }
+
+    #[test]
+    fn a_typed_answer_is_short_and_printable() {
+        assert!(is_custom_answer("Wry, like a good changelog"));
+        assert!(is_custom_answer("  spaced  "));
+        assert!(!is_custom_answer(""));
+        assert!(!is_custom_answer("   "));
+        assert!(!is_custom_answer(&"a".repeat(CUSTOM_ANSWER_LIMIT + 1)));
+        assert!(is_custom_answer(&"a".repeat(CUSTOM_ANSWER_LIMIT)));
+        // A newline would break the prompt line the value lands in.
+        assert!(!is_custom_answer("two\nlines"));
     }
 
     #[test]
