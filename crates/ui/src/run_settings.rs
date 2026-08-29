@@ -137,6 +137,28 @@ fn fixed_choices(choices: &[(&'static str, &'static str)]) -> Vec<(String, Strin
     options
 }
 
+/// Most label characters a card may hold before it takes the full row.
+const NARROW_CARD_CHARACTERS: usize = 90;
+
+/// Most chips a card may hold before it takes the full row.
+const NARROW_CARD_CHIPS: usize = 5;
+
+/// True when a card's chips need the full row. A card with few short
+/// chips shares a row with its neighbours, so the question grid stays
+/// short.
+fn is_wide_card(choices: &[(String, String)]) -> bool {
+    let chips = choices
+        .iter()
+        .filter(|(value, _)| !is_judgment_choice(value))
+        .count();
+    let characters: usize = choices
+        .iter()
+        .filter(|(value, _)| !is_judgment_choice(value))
+        .map(|(_, label)| label.chars().count())
+        .sum();
+    chips > NARROW_CARD_CHIPS || characters > NARROW_CARD_CHARACTERS
+}
+
 /// One app-owned question: the field it writes, its wording, and its
 /// fixed choices.
 struct Axis {
@@ -165,14 +187,14 @@ fn axes_for(kind: ArtifactKind) -> Vec<Axis> {
             label: "What tone should it have?",
             choices: &TONES,
         },
-        Axis {
-            key: "color_mode",
-            label: "How should the colors read?",
-            choices: &COLOR_MODES,
-        },
     ];
     match kind {
         ArtifactKind::Demo => axes.extend([
+            Axis {
+                key: "color_mode",
+                label: "How should the colors read?",
+                choices: &COLOR_MODES,
+            },
             Axis {
                 key: "scope",
                 label: "How much should I build?",
@@ -189,18 +211,13 @@ fn axes_for(kind: ArtifactKind) -> Vec<Axis> {
                 choices: &DATA_STATES,
             },
         ]),
-        ArtifactKind::Deck => axes.extend([
-            Axis {
-                key: "slide_density",
-                label: "How much goes on a slide?",
-                choices: &SLIDE_DENSITIES,
-            },
-            Axis {
-                key: "evidence_style",
-                label: "How much does it lean on data?",
-                choices: &EVIDENCE_STYLES,
-            },
-        ]),
+        // A deck draws its colors card beside the scenario card, and
+        // its evidence card last, so `DeckQuestions` draws both.
+        ArtifactKind::Deck => axes.push(Axis {
+            key: "slide_density",
+            label: "How much goes on a slide?",
+            choices: &SLIDE_DENSITIES,
+        }),
     }
     axes
 }
@@ -273,13 +290,15 @@ pub(crate) fn SharedQuestions(
                 // for this page only.
                 let current = axis_value(&options, axis.key)
                     .or_else(|| picked().contains(axis.key).then(String::new));
+                let choices = fixed_choices(axis.choices);
+                let is_wide = is_wide_card(&choices);
                 rsx! {
                     ChoiceCard {
                         key: "{axis.key}",
                         label: axis.label,
                         current,
-                        choices: fixed_choices(axis.choices),
-                        is_wide: true,
+                        choices,
+                        is_wide,
                         allows_custom: true,
                         on_pick: move |value: String| {
                             picked.write().insert(key.clone());
@@ -481,6 +500,25 @@ pub(crate) fn DeckQuestions(
             .unwrap_or_default(),
     );
     let variety = shown("variety", options.variety.clone());
+    let evidence = shown(
+        "evidence",
+        options.evidence_style.clone().unwrap_or_default(),
+    );
+    let colors = shown("colors", options.color_mode.clone().unwrap_or_default());
+    let pick_colors = {
+        let options = options.clone();
+        move |value: String| {
+            picked.write().insert("colors");
+            save.call(with_axis(&options, "color_mode", value));
+        }
+    };
+    let pick_evidence = {
+        let options = options.clone();
+        move |value: String| {
+            picked.write().insert("evidence");
+            save.call(with_axis(&options, "evidence_style", value));
+        }
+    };
     let pick_scenario = {
         let options = options.clone();
         move |value: String| {
@@ -522,13 +560,29 @@ pub(crate) fn DeckQuestions(
         }
     };
     rsx! {
+        // The two long cards share one row, each at half width, so
+        // they cost one row between them instead of two.
+        div { class: "question-pair",
+            ChoiceCard {
+                label: "How should the colors read?",
+                current: colors,
+                choices: fixed_choices(&COLOR_MODES),
+                allows_custom: true,
+                on_pick: pick_colors,
+            }
+            ChoiceCard {
+                label: "What scenario is the deck for?",
+                current: scenario,
+                choices: scenario_choices(),
+                allows_custom: true,
+                on_pick: pick_scenario,
+            }
+        }
         ChoiceCard {
-            label: "What scenario is the deck for?",
-            current: scenario,
-            choices: scenario_choices(),
-            is_wide: true,
-            allows_custom: true,
-            on_pick: pick_scenario,
+            label: "How different should the candidates be?",
+            current: variety,
+            choices: variety_choices(),
+            on_pick: pick_variety,
         }
         ChoiceCard {
             label: "How long should the deck be?",
@@ -543,10 +597,11 @@ pub(crate) fn DeckQuestions(
             on_pick: pick_candidates,
         }
         ChoiceCard {
-            label: "How different should the candidates be?",
-            current: variety,
-            choices: variety_choices(),
-            on_pick: pick_variety,
+            label: "How much does it lean on data?",
+            current: evidence,
+            choices: fixed_choices(&EVIDENCE_STYLES),
+            allows_custom: true,
+            on_pick: pick_evidence,
         }
     }
 }
@@ -687,6 +742,25 @@ mod tests {
         assert!(is_judgment_choice(&choices[0].0));
         assert_eq!(choices[1].0, "newcomers".to_owned());
         assert_eq!(choices[1].1, "Newcomers to the subject".to_owned());
+    }
+
+    #[test]
+    fn a_card_takes_the_full_row_only_when_its_chips_need_it() {
+        // Few short chips share a row.
+        assert!(!is_wide_card(&fixed_choices(&EVIDENCE_STYLES)));
+        assert!(!is_wide_card(&fixed_choices(&SLIDE_DENSITIES)));
+        assert!(!is_wide_card(&fixed_choices(&DATA_STATES)));
+        // Many chips, or long ones, take the row.
+        assert!(is_wide_card(&fixed_choices(&COLOR_MODES)));
+        assert!(is_wide_card(&fixed_choices(&PRODUCT_KINDS)));
+        assert!(is_wide_card(&fixed_choices(&AUDIENCES)));
+        assert!(is_wide_card(&scenario_choices()));
+        // The judgment choice is drawn as a chip too, but it is short
+        // and always present, so it does not count.
+        assert!(!is_wide_card(&[(
+            String::new(),
+            "The agent decides".to_owned()
+        )]));
     }
 
     #[test]
