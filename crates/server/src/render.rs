@@ -36,10 +36,39 @@ pub(crate) const FIT_SCRIPT: &str = r##"(() => {
   // The box keeps the canvas ratio at every factor, so a screen built
   // around full-height boxes and centred flex rows still measures the
   // way it will be shown.
+  // An agent often wraps a screen in a box of its own that has the
+  // canvas size and clips. That box hides its overflow from the root,
+  // so the fit marks it: the stylesheet sizes it with the root, and the
+  // text inside it is measured against the root box.
+  const markInnerRoot = (root) => {
+    const children = Array.from(root.children);
+    const child = children.length === 1 ? children[0] : null;
+    if (child && child.offsetWidth >= canvasWidth - 2 && child.offsetHeight >= canvasHeight - 2) {
+      child.dataset.swiftDesignInnerRoot = '';
+    }
+  };
+  // Only an element that holds text or media counts, its box included:
+  // a decoration that bleeds past the edge is meant to be clipped.
+  const hasContent = (element) =>
+    element.matches('img, svg, video, canvas, input, textarea') ||
+    element.textContent.trim() !== '';
+  const contentOverflows = (root) => {
+    const box = root.getBoundingClientRect();
+    const scale = box.width / (root.clientWidth || 1);
+    const bottom = box.bottom + 2 * scale;
+    const right = box.right + 2 * scale;
+    return Array.from(root.querySelectorAll('*')).some((element) => {
+      if (element.closest('svg') && element.tagName.toLowerCase() !== 'svg') { return false; }
+      if (element.hasAttribute('data-swift-design-inner-root') || !hasContent(element)) { return false; }
+      const rect = element.getBoundingClientRect();
+      return rect.bottom > bottom || rect.right > right;
+    });
+  };
   const overflowsAt = (root, factor) => {
     root.style.width = Math.round(canvasWidth / factor) + 'px';
     root.style.height = Math.round(canvasHeight / factor) + 'px';
-    return root.scrollHeight > root.clientHeight + 2 || root.scrollWidth > root.clientWidth + 2;
+    if (root.scrollHeight > root.clientHeight + 2 || root.scrollWidth > root.clientWidth + 2) { return true; }
+    return root.querySelector('[data-swift-design-inner-root]') !== null && contentOverflows(root);
   };
   const fitRoot = (root) => {
     let factor = 1;
@@ -58,7 +87,7 @@ pub(crate) const FIT_SCRIPT: &str = r##"(() => {
     root.style.setProperty('--swift-design-fit', String(factor));
     root.dataset.swiftDesignFit = factor.toFixed(4);
   };
-  const fitAll = () => document.querySelectorAll('[data-swift-design-root]').forEach(fitRoot);
+  const fitAll = () => document.querySelectorAll('[data-swift-design-root]').forEach((root) => { markInnerRoot(root); fitRoot(root); });
   fitAll();
   // A web font changes the metrics, so the fit is measured again once
   // the fonts are in.
@@ -897,6 +926,8 @@ pub(crate) fn stylesheet(theme: &Theme, viewport: Viewport) -> String {
            background: var(--background); color: var(--text);\n\
            font: 32px/1.3 var(--body-font); }}\n\
          [data-swift-design-root] * {{ box-sizing: border-box; }}\n\
+         [data-swift-design-inner-root] {{ width: 100% !important; height: 100% !important;\n\
+           min-height: 0 !important; max-height: none !important; max-width: none !important; }}\n\
          [data-swift-design-root] :is(h1, h2, h3, h4, h5, h6) {{ font-family: var(--heading-font);\n\
            line-height: 1.1; margin: 0; letter-spacing: -0.02em; }}\n\
          [data-swift-design-root] :is(p, ul, ol, figure, blockquote) {{ margin: 0; }}\n\
@@ -946,7 +977,8 @@ mod tests {
 
     use crate::export::base64_encode;
     use crate::render::{
-        MAX_TRANSITION_MS, RenderOptions, css_safe, escape_html, render_design, render_design_with,
+        FIT_SCRIPT, MAX_TRANSITION_MS, RenderOptions, css_safe, escape_html, render_design,
+        render_design_with,
     };
 
     fn sample_design() -> Design {
@@ -1080,6 +1112,19 @@ mod tests {
             let html = render_design_with(&design, options);
             assert!(html.contains("--swift-design-fit"), "{html}");
         }
+    }
+
+    #[test]
+    fn the_fit_measures_through_an_agents_own_root() {
+        // An agent's own canvas-sized, clipped box hides its overflow
+        // from the root: the script marks it, the stylesheet sizes it
+        // with the root, and the text inside is measured directly.
+        assert!(FIT_SCRIPT.contains("swiftDesignInnerRoot"));
+        assert!(FIT_SCRIPT.contains("contentOverflows(root)"));
+        let html = render_design(&sample_design(), false);
+        assert!(html.contains(
+            "[data-swift-design-inner-root] { width: 100% !important; height: 100% !important;"
+        ));
     }
 
     #[test]
