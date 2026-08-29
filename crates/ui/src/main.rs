@@ -724,8 +724,9 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
 .deck-questions { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
   align-items: start; }
 .app-question { display: flex; flex-direction: column; gap: 0.6rem; padding: 0.9rem 1rem; }
-/* A deck card mixes short and tall cards: fill the rows, keep each row one height. */
-.workbench-questions .with-app-questions .question-cards { grid-auto-flow: dense; align-items: stretch; }
+/* The cards mix short and tall: fill the rows, and keep every card at
+   its own height, aligned to the top of its row. */
+.workbench-questions .with-app-questions .question-cards { grid-auto-flow: dense; align-items: start; }
 .project-kind { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.72rem;
   color: #6C7178; white-space: nowrap; }
 .effect-chips { display: flex; flex-wrap: wrap; gap: 0.375rem; }
@@ -882,6 +883,10 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
 .question-grid { display: grid; gap: 0.8rem;
   grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr)); }
 .question-card.wide { grid-column: 1 / -1; }
+/* Two cards that share one row at half width each. They fold to one
+   column when the row is too narrow for both. */
+.question-pair { grid-column: 1 / -1; display: grid; gap: 0.75rem; align-items: start;
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); }
 .question-panel button.primary { align-self: flex-start; }
 .question-card { background: var(--raised); border: 1px solid #E0DDD6; border-radius: var(--r-card);
   padding: 1.1rem 1.25rem; display: flex; flex-direction: column; gap: 0.8rem;
@@ -941,14 +946,10 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
 .question-set { align-self: stretch; background: var(--raised); border: 1px solid var(--line-soft);
   border-radius: 12px; box-shadow: var(--sh-card, 0 1px 2px rgba(21,24,28,.06));
   padding: 0.9rem 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
-.question-set-title { font-size: 0.85rem; font-weight: 600; }
-.question-set-message { font-size: 0.8rem; color: var(--ink-2); }
 .question-cards { display: flex; flex-direction: column; gap: 0.75rem; }
 /* The open question set sits in the workbench, where the questions
    can share the width. */
 .workbench-questions .question-set { padding: 1.1rem 1.25rem; gap: 0.9rem; }
-.workbench-questions .question-set-title { font-size: 1rem; }
-.workbench-questions .question-set-message { font-size: 0.85rem; }
 .workbench-questions .question-cards { display: grid; gap: 0.75rem;
   grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); align-items: start; }
 .workbench-questions .question-card { padding: 0.9rem 1rem; }
