@@ -226,7 +226,10 @@ button.control-cell:focus-visible { outline-offset: -2px; }
 .project-row .row-delete.confirm { width: auto; padding: 0 0.6rem; border-color: var(--danger);
   background: var(--danger); color: #FFFFFF;
   font-family: var(--mono); font-size: 0.65rem; }
-.project-title { flex: 1; font-size: 0.9375rem; font-weight: 600; letter-spacing: -0.01em; }
+.project-title { flex: 1; font-size: 0.9375rem; font-weight: 600; letter-spacing: -0.01em;
+  /* A long name is cut with an ellipsis. min-width lets a flex
+     item shrink below its text width, which the cut needs. */
+  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .project-count { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
 .project-time { font-family: var(--mono); font-size: 0.68rem; color: var(--faint);
   white-space: nowrap; }
@@ -900,6 +903,16 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
    marks an assumption rather than an answer. */
 .option-chip.skip.selected { color: var(--paper); border-color: var(--ink); }
 .option-chip.other { }
+/* The write-in: a dashed chip that opens one text field under the row. */
+.option-chip.write-in { border-style: dashed; border-color: var(--line); color: var(--muted); }
+.option-chip.write-in:hover:not(:disabled) { border-color: var(--ink); color: var(--ink); }
+.write-in-row { display: flex; align-items: center; gap: 0.45rem; margin-top: 0.5rem; }
+.write-in-field { flex: 1; min-width: 0; font: inherit; font-size: 0.78rem;
+  border: 1px solid var(--line); border-radius: 999px; padding: 0.375rem 0.8125rem;
+  background: var(--raised); color: var(--ink); }
+.write-in-field:focus { outline: none; border-color: var(--ink); }
+.option-chip.write-in-save { flex: none; }
+.option-chip.write-in-save:disabled { opacity: .45; cursor: not-allowed; }
 
 /* The session workspace: the chat with the Q&A on the left, the candidates on the right. */
 /* minmax(0, 1fr): the workbench must never widen to its content, or WebKit
