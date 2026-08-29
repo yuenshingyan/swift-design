@@ -16,8 +16,9 @@ use crate::canvas::frame_width_rem;
 use crate::chat::DesignChat;
 use crate::editor::{
     APPLY_TO_PREVIEW, HistorySection, NodeCommand, NodeInspector, PREVIEW_LISTENER, PreviewMessage,
-    STRIP_TILE_HEIGHT_REM, SelectedNode, ThemeForm, ThumbnailState, TransitionForm, fragment_label,
-    move_screen, node_reference, optional, outline_entry, strip_summary, thumbnail_class,
+    STRIP_TILE_HEIGHT_REM, SelectedNode, SelectionEntry, ThemeForm, ThumbnailState, TransitionForm,
+    fragment_label, move_screen, node_reference, optional, outline_entry, selection_of,
+    selection_paths, selection_reference, strip_summary, thumbnail_class,
 };
 use crate::icons;
 use crate::settings::artifact_project;
@@ -51,6 +52,7 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
     let mut deck = use_signal(|| initial.clone());
     let mut selected = use_signal(|| 0usize);
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
+    let mut selection = use_signal(Vec::<SelectionEntry>::new);
     let mut messages = use_signal(Vec::<String>::new);
     let mut preview_version = use_signal(|| 0u32);
     let mut user_paths = use_signal(Vec::<String>::new);
@@ -142,9 +144,15 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                 "swift-design-select" if message.screen < deck.peek().slides.len() => {
                     selected.set(message.screen);
                     let node = SelectedNode::from_message(&message);
-                    if let Some(node) = &node {
-                        chat_context.set(Some(node_reference("slide", message.screen, node)));
+                    let entries = selection_of(&message);
+                    if node.is_some() {
+                        chat_context.set(Some(selection_reference(
+                            "slide",
+                            message.screen,
+                            &entries,
+                        )));
                     }
+                    selection.set(entries);
                     selected_node.set(node);
                 }
                 "swift-design-html" => {
@@ -227,9 +235,15 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
         }
     });
 
+    // One command per selected node: see the design editor.
     let apply = use_callback(move |command: NodeCommand| {
-        let channel = document::eval(APPLY_TO_PREVIEW);
-        let _ = channel.send(command);
+        for path in selection_paths(&selection.peek(), &command.path) {
+            let channel = document::eval(APPLY_TO_PREVIEW);
+            let _ = channel.send(NodeCommand {
+                path,
+                ..command.clone()
+            });
+        }
     });
 
     let slide_count = deck().slides.len();
@@ -381,7 +395,9 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                         }
                     }
                     p { class: "preview-hint",
-                        span { "Click a node to reference it in the chat and edit its text" }
+                        span {
+                            "Click a node to reference it in the chat and edit its text · ⌘-click adds more"
+                        }
                         span { class: "dot", "·" }
                         span { "right-click for quick edits" }
                         span { class: "dot", "·" }
