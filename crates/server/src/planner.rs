@@ -171,6 +171,10 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
          Set multi to false when the options rule each other out, such as the audience or the tone.\n\
          The app asks the user for {owned} itself. Never ask these, and never ask them in other words. The input shows their answers, or `not chosen yet`.\n\
          Ask only what this request raises and the list above does not cover, such as the features to show, the steps of a flow, or the data on a screen.\n\
+         Write every option from this request and the source files. Use their words.\n\
+         An option that would fit any other project is wrong. `Product overview`, `User workflow`, and `Technical architecture` are wrong options.\n\
+         Name the real thing the option builds: a named feature, a named screen, a named section, a named step.\n\
+         Two options must differ in what you build, not in wording.\n\
          Read the user's source files before you ask. Never ask what a source file already answers.\n\
          After {answered} answered questions, do not ask more.\n\
          Set generate to true when you know enough to write. Then say in reply what you will write.\n\
@@ -349,6 +353,12 @@ mod tests {
             assert!(prompt.contains("Ask 0 to 3 extra questions"));
             assert!(prompt.contains("asks the user its own fixed questions first"));
             assert!(prompt.contains("Never ask what a source file already answers"));
+            // The bar for the options of a question the model adds.
+            // Without these it offered `Product overview` and
+            // `Technical architecture`, which fit any project.
+            assert!(prompt.contains("Write every option from this request and the source files"));
+            assert!(prompt.contains("would fit any other project is wrong"));
+            assert!(prompt.contains("Two options must differ in what you build"));
         }
         assert!(demo.contains("After 5 answered questions, do not ask more."));
         assert!(deck.contains("the scenario, the deck length in slides"));
