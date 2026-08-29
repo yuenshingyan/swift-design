@@ -12,6 +12,7 @@ mod deck_editor;
 mod editor;
 mod home;
 mod icons;
+mod prompt_history;
 mod question_card;
 mod revert;
 mod route;
@@ -606,6 +607,14 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .editor-chat { border-right: 1px solid var(--hairline); background: var(--raised);
   overflow: hidden; height: calc(100vh - 3.6rem); box-sizing: border-box; }
 .editor-chat .thread { overflow-y: auto; }
+.mention-menu { display: flex; flex-direction: column; gap: 0.125rem; padding: 0.25rem;
+  border: 1px solid var(--line); border-radius: var(--r-control); background: var(--raised);
+  max-height: 12rem; overflow: auto; }
+.mention-item { display: flex; align-items: center; gap: 0.5rem; text-align: left; border: 0;
+  background: transparent; color: var(--ink); padding: 0.3rem 0.5rem; border-radius: 5px;
+  font-size: 0.8rem; box-shadow: none; }
+.mention-item .mono { color: var(--muted); font-size: 0.7rem; }
+.mention-item.active, .mention-item:hover { background: var(--teal-tint); }
 .context-chip { display: flex; align-items: center; gap: 0.4rem; align-self: flex-start;
   margin: 0.6rem 0.8rem 0; padding: 0.2rem 0.5rem; border-radius: 999px;
   background: var(--teal-tint); color: var(--teal); font-size: 0.68rem; }
@@ -623,6 +632,7 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .editor-toolbar .save-state { display: inline-flex; align-items: center; gap: 0.25rem;
   font-family: var(--mono); font-size: 0.6875rem; color: var(--faint); }
 .editor-toolbar .save-state span { display: flex; }
+.save-state.pending { color: var(--muted); animation: status-pulse 1.2s ease-in-out infinite; }
 .editor-toolbar button.primary { padding: 0.4375rem 0.75rem; font-size: 0.78rem; }
 .editor-toolbar .actions { margin-left: auto; display: flex; align-items: center;
   gap: 0.4375rem; }
@@ -813,6 +823,8 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
   pointer-events: none; }
 .thumbnail.current { border-color: var(--teal); box-shadow: 0 0 0 3px var(--teal-tint); }
 .thumbnail.dragging { opacity: 0.6; cursor: grabbing; }
+.thumbnail.pinned { border-color: var(--teal); border-style: dashed; }
+.thumbnail.pinned .thumbnail-number { background: var(--teal); color: #FFFFFF; }
 .thumbnail-number { position: absolute; left: 0.25rem; bottom: 0.25rem; z-index: 1;
   padding: 0.05rem 0.4rem; border-radius: var(--r-badge); background: var(--sunken);
   color: var(--ink); font-family: var(--mono); font-size: 0.6rem; line-height: 1.5; }
@@ -1134,6 +1146,11 @@ pub(crate) struct TopbarContext {
 fn App() -> Element {
     let mut view = use_signal(|| Option::<View>::None);
     let topbar_context = use_context_provider(|| Signal::new(Option::<TopbarContext>::None));
+    // The arrow keys move the caret inside a draft; only on its first
+    // or last line do they recall an earlier prompt.
+    use_hook(|| {
+        document::eval(prompt_history::ARROW_GUARD);
+    });
     // Read the hash on load and on every hashchange.
     use_future(move || async move {
         let mut channel = document::eval(route::HASH_LISTENER);
