@@ -557,6 +557,10 @@ struct RenderQuery {
     /// same deck instead of its own keyboard and wheel.
     #[serde(default)]
     audience: bool,
+    /// The presenter page's token: which presenter of this deck the
+    /// audience page follows. Empty for the per-deck channel.
+    #[serde(default)]
+    channel: String,
 }
 
 /// Renders one stored deck to HTML, or reports every validation error.
@@ -595,7 +599,9 @@ async fn render_stored_deck(
     let options = deck_render::RenderOptions {
         is_editable: query.editable,
         only_slide,
-        audience_channel: query.audience.then(|| presenter::channel_name(&id)),
+        audience_channel: query
+            .audience
+            .then(|| presenter::channel_name(&id, &query.channel)),
         ..deck_render::RenderOptions::default()
     };
     Html(deck_render::render_deck_with(&deck, options)).into_response()
