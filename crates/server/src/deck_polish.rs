@@ -9,7 +9,7 @@
 use design_model::Deck;
 
 use crate::model_client::LogSink;
-use crate::polish::{Finding, finding_advice, raw_findings};
+use crate::polish::{Finding, finding_advice, prioritized, raw_findings};
 
 /// Layout findings for a deck, measured in a browser. Empty when no
 /// Chrome is installed or the audit fails; both are logged.
@@ -37,7 +37,10 @@ pub async fn dom_findings(deck: &Deck, base_url: &str, label: &str, log: &LogSin
 
 /// Reads the audit report out of a dumped deck DOM as slide findings.
 pub fn parse_findings(dom: &str) -> Vec<String> {
-    raw_findings(dom).iter().map(format_finding).collect()
+    prioritized(raw_findings(dom))
+        .iter()
+        .map(format_finding)
+        .collect()
 }
 
 /// One finding as a fix instruction for the model, with a slide path.
