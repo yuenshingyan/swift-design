@@ -36,7 +36,7 @@ Both kinds share the theme, the HTML and CSS rules, the workflow, the templates,
 - Ask only choices that change the result, with 2 to 4 short options each.
 - Ask at most three questions per turn, and no more once five are answered.
 - Never require an answer: every question has `Use your best judgment`, and the whole set can be skipped.
-- The app asks its own closed questions itself, from fixed lists: how the colors read for both kinds; the canvas, how much to build, the product kind, the screen state, and the number of variations for a demo; the audience, the tone, the scenario, the length, the slide density, how much it leans on data, the candidates, and the variety for a deck. Their wording and options are the same in every session. The questions the request already answers come pre-selected, marked `suggested`, and one press accepts them.
+- The app asks its own closed questions itself, from fixed lists: how the colors read for both kinds; the canvas, how much to build, the product kind, the screen state, the fidelity (finished or wireframe), and the number of variations for a demo; the audience, the tone, the scenario, the length, the slide density, how much it leans on data, the candidates, and the variety for a deck. Their wording and options are the same in every session. The questions the request already answers come pre-selected, marked `suggested`, and one press accepts them.
 - The agent asks 0 to 3 more, only what the request raises and the fixed list does not cover, such as which features a demo must show. Asking nothing is a normal turn.
 - After the candidates exist, the chat edits: a message with a candidate open changes that candidate, a message without one writes new candidates.
 
@@ -69,11 +69,41 @@ folder, keeps the path in each stored name, and skips hidden entries,
 `node_modules`, `target`, `dist`, files above 45 MB, and everything past 200
 files. It reports what it skipped.
 
+The run reads what it can of each file: an image is shown to a model that
+sees images, a PDF is sent as a file, and a text file is inlined. A Word
+document, a PowerPoint deck, or an Excel workbook is inlined as its text:
+one line per paragraph, one block per slide, one tab-separated line per row.
+
+A link in the request or in a chat message is captured: the server opens
+each `http(s)://` address (up to three per message) in Chrome and saves a
+screenshot and the page text into the session's files, as
+`capture-{host}.png` and `capture-{host}.txt`. The run reads them like any
+upload, so "make it look like https://example.com" works. Addresses on this
+machine and on private networks are refused. Without Chrome, links are left
+as text.
+
 A file belongs to one session. Files attached on the landing page wait in a
 draft scope, and creating the session takes them. A run reads only its own
 session's files, so a file attached to one project never reaches another
 project's prompt. Deleting a session deletes its files. Two sessions may hold
 the same name: the second is stored as `name-2.ext`.
+
+## Templates
+
+A template is a look kept for later: a theme plus a few example screens,
+saved from a candidate with **Save as template** in the editor. The
+template button on the landing page opens the picker. Pick one or more, and
+every candidate of the new session is written in that look.
+
+The picker also makes a template with no candidate behind it. Type a name
+and a website, or attach brand files (a logo, a screenshot, a style guide)
+to the composer, and press **Extract**: the model reads the material and
+writes a theme (palette and fonts) plus a short style note. The template
+shows as a swatch in the picker, and the note goes into every prompt that
+uses it. A website extraction needs Chrome on the server machine.
+
+Mark a template as **default** on its card (★): every new session starts
+with it picked. Several templates can be default.
 
 ## Candidates
 
@@ -124,6 +154,13 @@ Edit a click selects a node. In Play a click acts as it would for a user:
 a link to `#screen-3` opens screen 3, a `<details>` menu opens, and a
 checkbox or radio toggle flips. A demo carries no script. Flows are links
 between screens, and widgets are CSS states.
+
+In Edit, a click also puts a reference to the node in the chat, so "make
+this bigger" names the exact element. To send several notes as one turn,
+type a note and press **+ Comment** (or ⌘Enter): the note is kept with its
+reference, the composer clears, and the next click starts the next note.
+**Send** posts every kept comment as one message, one per line, and the
+agent applies them in one edit.
 
 A demo exports as one HTML file. It has no PDF export: a print loses
 the flows and the widgets.
