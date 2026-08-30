@@ -353,6 +353,11 @@ pub(crate) fn content_type_of(name: &str) -> &'static str {
         "svg" => "image/svg+xml",
         "webp" => "image/webp",
         "pdf" => "application/pdf",
+        // Office files are zip archives of XML; `office.rs` reads
+        // their text for the prompt.
+        "docx" => crate::office::DOCX,
+        "pptx" => crate::office::PPTX,
+        "xlsx" => crate::office::XLSX,
         "txt" => "text/plain; charset=utf-8",
         "md" => "text/markdown; charset=utf-8",
         // Data files are text, so the prompt carries their rows.
@@ -680,5 +685,13 @@ mod tests {
         );
         assert_eq!(content_type_of("a.yml"), "text/yaml; charset=utf-8");
         assert_eq!(content_type_of("a.xml"), "text/xml; charset=utf-8");
+    }
+
+    #[test]
+    fn an_office_upload_is_typed_so_its_text_reaches_the_prompt() {
+        assert_eq!(content_type_of("brief.docx"), crate::office::DOCX);
+        assert_eq!(content_type_of("old-deck.pptx"), crate::office::PPTX);
+        assert_eq!(content_type_of("figures.xlsx"), crate::office::XLSX);
+        assert_eq!(content_type_of("figures.xls"), "application/octet-stream");
     }
 }
