@@ -434,8 +434,27 @@ struct MessageRequest {
     content: String,
     #[serde(default)]
     design: Option<String>,
+    /// Candidate ids of this session the turn edits.
+    #[serde(default)]
+    pinned: Vec<String>,
     #[serde(default)]
     action: Option<String>,
+}
+
+/// Why the pinned candidates of a message are refused: an id that is
+/// not a candidate id, or one that belongs to another session.
+fn pinned_problem(session_id: &str, pinned: &[String]) -> Option<String> {
+    pinned.iter().find_map(|id| {
+        if !is_valid_design_id(id) {
+            return Some(format!("pinned candidate `{id}` is not a valid id"));
+        }
+        if session_id_of_artifact(id) != session_id {
+            return Some(format!(
+                "pinned candidate `{id}` does not belong to session `{session_id}`"
+            ));
+        }
+        None
+    })
 }
 
 /// Appends a conversation turn. A `continue` action on a reviewing
@@ -467,6 +486,9 @@ async fn post_message(
             &format!("design `{design}` is not a valid id"),
             Vec::new(),
         );
+    }
+    if let Some(problem) = pinned_problem(&id, &request.pinned) {
+        return api_error::error_response(StatusCode::UNPROCESSABLE_ENTITY, &problem, Vec::new());
     }
     let is_continue = request.action.as_deref() == Some("continue");
     if let Some(action) = &request.action
@@ -515,7 +537,7 @@ async fn post_message(
     }
     let message = match (is_continue, request.design.as_deref()) {
         (true, Some(design)) => ChatMessage::continue_request(content, design),
-        _ => ChatMessage::user(content, request.design.as_deref()),
+        _ => ChatMessage::user(content, request.design.as_deref()).with_pinned(request.pinned),
     };
     if let Err(error) = sessions.append_message(&id, message).await {
         return session_error_response(&error);
@@ -726,6 +748,32 @@ mod tests {
         let body = format!("{{\"id\":\"{id}\",\"request\":\"Design {id}.\"}}");
         let (status, _) = send(application.clone(), "POST", "/sessions", Some(&body)).await;
         assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn a_message_pins_candidates_of_its_own_session_only() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "finance-app").await;
+        let (status, body) = send(
+            application.clone(),
+            "POST",
+            "/sessions/finance-app/messages",
+            Some(r#"{"content":"Bigger title.","pinned":["other-candidate-1"]}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body.contains("does not belong to session `finance-app`"));
+        let (status, body) = send(
+            application.clone(),
+            "POST",
+            "/sessions/finance-app/messages",
+            Some(r#"{"content":"Bigger title.","pinned":["finance-app-candidate-1","finance-app-candidate-2"]}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        let messages = &view(&application, "finance-app").await["messages"];
+        assert_eq!(messages[0]["pinned"][1], "finance-app-candidate-2");
     }
 
     #[tokio::test]
