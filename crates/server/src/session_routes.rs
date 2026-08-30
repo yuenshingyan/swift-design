@@ -211,6 +211,9 @@ async fn create_session(
                 Ok(_) => {}
                 Err(error) => tracing::warn!(session_id = %id, %error, "adopting uploads failed"),
             }
+            // A link in the request is captured before the first run
+            // reads the uploads.
+            crate::capture::capture_urls(&uploads, &id, prompt).await;
             notifier.notify();
             try_start(&runner, &id).await;
             tracing::info!(
@@ -482,6 +485,7 @@ fn regenerate_problem(session: &Session, request: &MessageRequest) -> Option<Str
 async fn post_message(
     State(sessions): State<SessionStore>,
     State(runner): State<AgentRunner>,
+    State(uploads): State<crate::uploads::UploadStore>,
     State(notifier): State<ChangeNotifier>,
     Path(id): Path<String>,
     Json(request): Json<MessageRequest>,
@@ -565,6 +569,11 @@ async fn post_message(
         (_, true, Some(design)) => ChatMessage::regenerate_request(content, design),
         _ => ChatMessage::user(content, request.design.as_deref()).with_pinned(request.pinned),
     };
+    // A link in the message becomes source files before the run reads
+    // the uploads, so the model sees the page.
+    if !is_continue && !is_regenerate {
+        crate::capture::capture_urls(&uploads, &id, content).await;
+    }
     if let Err(error) = sessions.append_message(&id, message).await {
         return session_error_response(&error);
     }
@@ -840,6 +849,32 @@ mod tests {
         let messages = &view(&application, "finance-app").await["messages"];
         assert_eq!(messages[0]["is_regenerate"], true);
         assert_eq!(messages[0]["design"], "finance-app-candidate-1");
+    }
+
+    #[tokio::test]
+    async fn a_link_to_a_private_address_is_not_captured_and_the_message_still_posts() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "finance-app").await;
+        let (status, body) = send(
+            application.clone(),
+            "POST",
+            "/sessions/finance-app/messages",
+            Some(r#"{"content":"Copy the look of http://127.0.0.1:1/admin please."}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        let (status, body) = send(
+            application.clone(),
+            "GET",
+            "/uploads?session=finance-app",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.trim(), "[]");
+        let messages = &view(&application, "finance-app").await["messages"];
+        assert_eq!(messages[0]["role"], "user");
     }
 
     #[tokio::test]
