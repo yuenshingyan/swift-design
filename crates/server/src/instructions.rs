@@ -136,7 +136,7 @@ fn steps() -> Vec<String> {
         "A 422 response lists every problem in error.details. Fix each one. PUT again.".to_owned(),
         "When the user asks for a change in the chat while an artifact is open, edit that artifact and PUT it again. When no artifact is open, write new candidates.".to_owned(),
         "GET /uploads?session={id} lists the source files of that session. Each row has name, size_bytes, content_type, and is_image. GET /uploads/{name} returns the file. Use an image row as `<img src='/uploads/{name}'>`. A file belongs to one session: never read another session's files.".to_owned(),
-        "After you save a design, look at it: GET /designs/{id}/screens/{n}.png returns a PNG of screen n, 1-based. It needs Chrome or Chromium and answers 503 without one. Review every screen for overlap, overflow, empty space, and weak contrast. Fix what you see and PUT the design again. GET /designs/{id}/export returns the design as one HTML file. GET /designs/{id}/export.pdf returns it as a PDF, one page per screen.".to_owned(),
+        "After you save a design, look at it: GET /designs/{id}/screens/{n}.png returns a PNG of screen n, 1-based. It needs Chrome or Chromium and answers 503 without one. Review every screen for overlap, overflow, empty space, and weak contrast. Fix what you see and PUT the design again. GET /designs/{id}/export returns the design as one HTML file. A design has no PDF export.".to_owned(),
         "After you save a deck, look at it: GET /decks/{id}/slides/{n}.png returns a PNG of slide n, 1-based. Review every slide the same way and PUT the deck again. GET /decks/{id}/export returns the deck as one HTML file. GET /decks/{id}/export.pdf returns it as a PDF, one page per slide. GET /decks/{id}/export.pptx returns it as a PowerPoint file. GET /decks/{id}/present is the presenter view with the notes.".to_owned(),
         "When the design or the deck is written, POST /sessions/{id}/complete, or exit with code 0. The session moves to reviewing.".to_owned(),
         "GET /events returns {\"revision\": n}. The revision increases when data changes. To wait for a change in one run, call GET /events?after={revision}&wait=25 in a loop. Each call returns within the wait time, so loop; do not treat a timeout as an error.".to_owned(),
@@ -196,7 +196,6 @@ fn instructions() -> serde_json::Value {
             "render_design": "GET /designs/{id}/render",
             "screen_image": "GET /designs/{id}/screens/{n}.png",
             "export_html": "GET /designs/{id}/export",
-            "export_pdf": "GET /designs/{id}/export.pdf",
             "save_deck": "PUT /decks/{id}",
             "check_deck": "POST /decks/render",
             "render_deck": "GET /decks/{id}/render",
@@ -360,16 +359,13 @@ mod tests {
     fn instructions_name_every_export() {
         let payload = instructions();
         assert_eq!(payload["routes"]["export_html"], "GET /designs/{id}/export");
-        assert_eq!(
-            payload["routes"]["export_pdf"],
-            "GET /designs/{id}/export.pdf"
-        );
+        assert!(payload["routes"].get("export_pdf").is_none());
+        assert!(payload.to_string().contains("A design has no PDF export."));
         assert_eq!(
             payload["routes"]["export_pptx"],
             "GET /decks/{id}/export.pptx"
         );
         let text = payload.to_string();
-        assert!(text.contains("one page per screen"));
         assert!(text.contains("one page per slide"));
         assert!(text.contains("PowerPoint"));
     }
