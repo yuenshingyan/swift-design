@@ -393,6 +393,29 @@ pub async fn continue_artifact(session_id: &str, artifact_id: &str) -> Result<()
         .map(|_| ())
 }
 
+/// Asks the app to write one unit of an artifact anew: `unit` is
+/// `screen` or `slide`, `number` is one-based. The server starts the
+/// run itself, without a planner turn.
+pub async fn regenerate_unit(
+    session_id: &str,
+    artifact_id: &str,
+    unit: &str,
+    number: usize,
+) -> Result<(), String> {
+    let content = format!("[{unit} {number}] Write this {unit} anew.");
+    let builder = Request::post(&format!("/sessions/{session_id}/messages"))
+        .json(&MessageRequest {
+            content: &content,
+            design: Some(artifact_id),
+            action: Some("regenerate"),
+            pinned: &[],
+        })
+        .map_err(|error| error.to_string())?;
+    send_checked(builder, "POST /sessions/messages regenerate")
+        .await
+        .map(|_| ())
+}
+
 /// Body of `POST /sessions/{id}/answers`.
 #[derive(Serialize)]
 struct AnswersRequest<'value> {
@@ -545,6 +568,36 @@ pub async fn delete_design(id: &str) -> Result<(), String> {
         "DELETE /designs",
     )
     .await
+}
+
+/// Response of a fork: the id of the new candidate.
+#[derive(Debug, Deserialize)]
+struct ForkResponse {
+    id: String,
+}
+
+/// Copies one design candidate under the next free number of its
+/// session. Returns the new id.
+pub async fn fork_design(id: &str) -> Result<String, String> {
+    let request = built(Request::post(&format!("/designs/{id}/fork")))?;
+    let response = send_checked(request, "POST /designs/fork").await?;
+    response
+        .json::<ForkResponse>()
+        .await
+        .map(|fork| fork.id)
+        .map_err(|error| error.to_string())
+}
+
+/// Copies one deck candidate under the next free number of its
+/// session. Returns the new id.
+pub async fn fork_deck(id: &str) -> Result<String, String> {
+    let request = built(Request::post(&format!("/decks/{id}/fork")))?;
+    let response = send_checked(request, "POST /decks/fork").await?;
+    response
+        .json::<ForkResponse>()
+        .await
+        .map(|fork| fork.id)
+        .map_err(|error| error.to_string())
 }
 
 /// Response of `GET /designs/{id}/authors`.
