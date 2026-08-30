@@ -49,6 +49,12 @@ impl SessionRequest {
 
 /// The request, the app's choices, and the answers, rendered as
 /// labelled lines for a generation prompt.
+/// What a wireframe is, for the prompt. The label alone reads as a
+/// style; this line says what to draw and what to leave out.
+const WIREFRAME_NOTE: &str = "A wireframe shows the layout only. Use one neutral gray palette. \
+     Draw a gray block with a label in place of every image, logo, and chart. Use one \
+     system font. Keep the real copy and the real labels. Add no decoration.\n";
+
 pub(crate) fn request_input(request: &SessionRequest) -> String {
     let mut input = format!("Request:\n{}\n", request.request.trim());
     input.push_str(&format!("Kind: {}\n", request.kind.label()));
@@ -78,6 +84,9 @@ pub(crate) fn request_input(request: &SessionRequest) -> String {
     for (name, value) in request.options.axes(request.kind) {
         let text = axis_label(name, value).unwrap_or(value);
         input.push_str(&format!("{name}: {text}\n"));
+    }
+    if request.options.fidelity.as_deref() == Some("wireframe") {
+        input.push_str(WIREFRAME_NOTE);
     }
     if !request.answers.is_empty() {
         input.push_str("Answers from the user:\n");
@@ -186,12 +195,28 @@ mod tests {
         assert!(input.contains("Scope: A short flow of screens"));
         assert!(input.contains("Product kind: Developer tool"));
         assert!(input.contains("Screen data: Filled with realistic data"));
+        assert!(!input.contains("Fidelity"));
+        assert!(!input.contains("A wireframe shows"));
         let mut deck = request(ArtifactKind::Deck);
         deck.options.audience = Some("practitioners".to_owned());
         deck.options.tone = Some("technical".to_owned());
         let input = request_input(&deck);
         assert!(input.contains("Audience: Practitioners in the field"));
         assert!(input.contains("Tone: Technical and precise"));
+    }
+
+    #[test]
+    fn a_wireframe_pick_says_what_a_wireframe_is() {
+        let mut demo = request(ArtifactKind::Demo);
+        demo.options.fidelity = Some("wireframe".to_owned());
+        let input = request_input(&demo);
+        assert!(input.contains("Fidelity: Wireframe, gray boxes"));
+        assert!(input.contains("A wireframe shows the layout only."));
+        // The finished look is the default and needs no note.
+        demo.options.fidelity = Some("high_fidelity".to_owned());
+        let input = request_input(&demo);
+        assert!(input.contains("Fidelity: Finished, high fidelity"));
+        assert!(!input.contains("A wireframe shows"));
     }
 
     #[test]
