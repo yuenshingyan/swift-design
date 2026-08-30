@@ -153,7 +153,9 @@ The design editor has two modes on a tab pair: **Play** (the default) and **Edit
 Edit a click selects a node. In Play a click acts as it would for a user:
 a link to `#screen-3` opens screen 3, a `<details>` menu opens, and a
 checkbox or radio toggle flips. A demo carries no script. Flows are links
-between screens, and widgets are CSS states.
+between screens, and widgets are CSS states. The deck editor has the same
+pair as **Read** (the default) and **Edit**: Read shows the slide as a
+reader sees it, with no selection outlines.
 
 In Edit, a click also puts a reference to the node in the chat, so "make
 this bigger" names the exact element. To send several notes as one turn,
