@@ -35,12 +35,42 @@ pub(crate) fn usage_line(run: &api::AgentRun) -> String {
     format!("context {context} tokens · {percent}% used this run")
 }
 
-/// The status text while a run is active: `Working… 45%` when the
-/// engine reports progress, else `Working…`.
+/// What the run is doing, from what the record shows: the designs it
+/// writes, else its last log line. A run that has only planned so far
+/// is `Thinking…`: the model may be answering a question, and no
+/// artifact is touched until the planner decides.
+pub(crate) fn phase_name(run: &api::AgentRun) -> String {
+    match run.designs.len() {
+        0 => {}
+        1 => return "Writing a candidate…".to_owned(),
+        count => return format!("Writing {count} candidates…"),
+    }
+    let last = last_log_line(&run.log_tail)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if last.starts_with("merging") || last.starts_with("merge") {
+        "Merging…".to_owned()
+    } else if last.starts_with("edit ") {
+        "Editing…".to_owned()
+    } else if last.starts_with("continue ") {
+        "Writing the rest…".to_owned()
+    } else if last.contains("fix round") || last.contains("polish") || last.contains("audit") {
+        "Polishing…".to_owned()
+    } else if last.contains("concept") {
+        "Planning candidates…".to_owned()
+    } else if run.progress.is_none() {
+        "Thinking…".to_owned()
+    } else {
+        "Working…".to_owned()
+    }
+}
+
+/// The status text while a run is active: the phase, with the
+/// percent when the engine reports progress: `Writing 2 candidates… 45%`.
 pub(crate) fn working_label(run: &api::AgentRun) -> String {
     match run.progress {
-        Some(percent) => format!("Working… {percent}%"),
-        None => "Working…".to_owned(),
+        Some(percent) => format!("{} {percent}%", phase_name(run)),
+        None => phase_name(run),
     }
 }
 
@@ -68,7 +98,7 @@ pub(crate) fn RunStatusCard(run: api::AgentRun) -> Element {
             div { class: "status-card",
                 div { class: "status-line",
                     span { class: "status-dot" }
-                    span { "Working…" }
+                    span { "{phase_name(&run)}" }
                     if let Some(percent) = run.progress {
                         span { class: "pct", "{percent}%" }
                     }
@@ -136,8 +166,39 @@ mod tests {
     }
 
     #[test]
+    fn a_run_that_has_only_planned_is_thinking() {
+        let mut planning = run();
+        planning.log_tail = "planning the turn\n".to_owned();
+        assert_eq!(phase_name(&planning), "Thinking…");
+        assert_eq!(phase_name(&run()), "Thinking…");
+        let mut editing = run();
+        editing.log_tail =
+            "planning the turn\nedit talk-candidate-2: requesting (round 1)".to_owned();
+        assert_eq!(phase_name(&editing), "Editing…");
+        let mut merging = run();
+        merging.log_tail =
+            "merging talk-candidate-1, talk-candidate-3 into talk-candidate-4".to_owned();
+        assert_eq!(phase_name(&merging), "Merging…");
+        let mut polishing = run();
+        polishing.log_tail = "candidate 1: fix round 2 failed: overfull".to_owned();
+        assert_eq!(phase_name(&polishing), "Polishing…");
+        let mut concepts = run();
+        concepts.log_tail = "planning 3 concepts".to_owned();
+        assert_eq!(phase_name(&concepts), "Planning candidates…");
+        let mut writing = run();
+        writing.designs.insert("talk-candidate-1".to_owned(), 10);
+        writing.designs.insert("talk-candidate-2".to_owned(), 0);
+        assert_eq!(phase_name(&writing), "Writing 2 candidates…");
+        writing.designs.remove("talk-candidate-2");
+        assert_eq!(phase_name(&writing), "Writing a candidate…");
+        assert_eq!(working_label(&writing), "Writing a candidate…");
+        writing.progress = Some(45);
+        assert_eq!(working_label(&writing), "Writing a candidate… 45%");
+    }
+
+    #[test]
     fn working_labels_carry_the_progress() {
-        assert_eq!(working_label(&run()), "Working…");
+        assert_eq!(working_label(&run()), "Thinking…");
         assert_eq!(
             working_label(&api::AgentRun {
                 progress: Some(45),
