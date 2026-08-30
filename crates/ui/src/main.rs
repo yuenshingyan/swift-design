@@ -515,27 +515,19 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
   box-shadow: 0 0 0 1px rgba(21,24,28,.15); }
 .bezel iframe, .bezel .card-blank { width: 100%; height: 100%; border-radius: 0.875rem; }
 /* The tick box owns the top-left corner, so the pills start to its right. */
-.card-pills { position: absolute; top: 0.5rem; left: 2.375rem; z-index: 2; display: flex;
+.card-pills { position: absolute; top: 0.5rem; left: 0.5rem; z-index: 2; display: flex;
   align-items: center; gap: 0.375rem; }
-/* Below the count, which owns the top-right corner of a narrow card. */
-.canvas-card.phone .card-pills { top: 2.25rem; left: 0.5rem; flex-direction: column;
+.canvas-card.phone .card-pills { top: 0.5rem; left: 0.5rem; flex-direction: column;
   align-items: flex-start; }
-/* The selection box: empty until ticked, and always visible so the card
-   says whether it is selected without a hover. */
-.card-select { position: absolute; top: 0.5rem; left: 0.5rem; z-index: 3; display: flex;
-  align-items: center; justify-content: center; width: 1.375rem; height: 1.375rem; padding: 0;
-  border: 1px solid var(--line); border-radius: var(--r-badge); background: rgba(255,255,255,.96);
-  color: var(--teal); box-shadow: var(--sh-control); }
-.card-select:hover:not(:disabled) { border-color: var(--teal); background: rgba(255,255,255,.96); }
-.card-select.ticked, .card-select.ticked:hover:not(:disabled) { border-color: var(--teal);
-  background: var(--teal); color: #FFFFFF; }
-.card-select span { display: flex; }
-/* The tick and the page count stay out of the way until the card is
-   hovered; a ticked box stays shown. */
-.card-select, .card-count { opacity: 0; transition: opacity 0.15s ease; }
-.canvas-card:hover .card-select, .canvas-card:hover .card-count, .card-select.ticked,
-.card-select:focus-visible { opacity: 1; }
-.canvas-card.selected, .canvas-card.selected:hover { border: 1.5px solid var(--teal); }
+/* A selected card wears the accent on its border and its name. The
+   footer is the control: a click on it ticks the card. */
+.canvas-card.selected, .canvas-card.selected:hover { border-color: var(--teal);
+  box-shadow: 0 0 0 1px var(--teal); }
+.canvas-card.selected .card-footer { background: var(--teal-tint); }
+.canvas-card.selected .card-label { color: var(--teal); font-weight: 500; }
+.card-tick { display: flex; color: var(--teal); }
+.card-footer { cursor: pointer; }
+.card-footer:hover { background: var(--sunken); }
 /* The bulk actions for the ticked cards. */
 .selection-bar { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;
   padding: 0.375rem 0.5rem; border: 1px solid var(--hairline); border-radius: var(--r-panel);
@@ -572,9 +564,7 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
   border: 1px solid var(--hairline); background: rgba(255,255,255,.96); color: var(--teal);
   font-family: var(--mono); font-size: 0.68rem; box-shadow: var(--sh-control); }
 .card-pill .dot { width: 6px; height: 6px; border-radius: 999px; background: var(--teal); }
-.card-count { position: absolute; top: 0.5rem; right: 0.5rem; z-index: 2; padding: 0.15rem 0.45rem;
-  border-radius: 999px; border: 1px solid var(--hairline); background: rgba(255,255,255,.96);
-  color: var(--ink-2); font-family: var(--mono); font-size: 0.66rem; box-shadow: var(--sh-control); }
+.card-count { flex: none; color: var(--ink-2); font-family: var(--mono); font-size: 0.68rem; }
 .card-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; z-index: 3;
   background: rgba(255,255,255,.18); }
 .card-progress-fill { height: 100%; background: var(--teal); transition: width 0.4s ease; }
