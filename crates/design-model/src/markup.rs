@@ -11,8 +11,9 @@ pub const SCREEN_HTML_LIMIT: usize = 100_000;
 /// Most characters one screen's `css` may have.
 pub const SCREEN_CSS_LIMIT: usize = 50_000;
 
-/// Tags a screen may not contain.
-const FORBIDDEN_TAGS: [&str; 33] = [
+/// Tags a screen may not contain. `<input>` is allowed with the
+/// `checkbox` and `radio` types only; `open_tag` checks the type.
+const FORBIDDEN_TAGS: [&str; 32] = [
     "script",
     "style",
     "iframe",
@@ -28,7 +29,6 @@ const FORBIDDEN_TAGS: [&str; 33] = [
     "template",
     "slot",
     "form",
-    "input",
     "button",
     "textarea",
     "select",
@@ -57,6 +57,10 @@ const FORBIDDEN_ATTRIBUTES: [&str; 6] = [
     "ping",
     "http-equiv",
 ];
+
+/// The `<input>` types a screen may use. Each one keeps a state in CSS
+/// through `:checked` and needs no script.
+const INPUT_TYPES: [&str; 2] = ["checkbox", "radio"];
 
 /// Attributes whose value is a URL.
 const URL_ATTRIBUTES: [&str; 8] = [
@@ -139,6 +143,8 @@ struct HtmlChecker<'html> {
     problems: Vec<String>,
     open: Vec<String>,
     svg_depth: usize,
+    /// The `type` of the `<input>` being read, once seen.
+    input_type: Option<String>,
     source: &'html str,
 }
 
@@ -150,6 +156,7 @@ impl<'html> HtmlChecker<'html> {
             problems: Vec::new(),
             open: Vec::new(),
             svg_depth: 0,
+            input_type: None,
             source,
         }
     }
@@ -242,6 +249,7 @@ impl<'html> HtmlChecker<'html> {
                 .push(format!("contains <{name}>: this tag is not allowed"));
         }
         let mut is_self_closing = false;
+        self.input_type = None;
         loop {
             self.skip_whitespace_and_slashes(&mut is_self_closing);
             match self.characters.get(self.position) {
@@ -279,6 +287,9 @@ impl<'html> HtmlChecker<'html> {
                 None
             };
             self.check_attribute(&name, &attribute, value.as_deref());
+        }
+        if name == "input" {
+            self.check_input_type();
         }
         if name == "svg" {
             self.svg_depth += 1;
@@ -363,9 +374,30 @@ impl<'html> HtmlChecker<'html> {
         }
     }
 
+    /// Reports an `<input>` whose type is not `checkbox` or `radio`. A
+    /// missing type means a text field, which needs a script to do
+    /// anything.
+    fn check_input_type(&mut self) {
+        let input_type = self.input_type.take().unwrap_or_default();
+        if INPUT_TYPES.contains(&input_type.as_str()) {
+            return;
+        }
+        let shown = if input_type.is_empty() {
+            "no type".to_owned()
+        } else {
+            format!("type `{}`", truncate(&input_type, 30))
+        };
+        self.problems.push(format!(
+            "contains <input> with {shown}: only type='checkbox' and type='radio' are allowed"
+        ));
+    }
+
     /// Applies the attribute rules: no handlers, no renderer hooks, no
     /// forbidden names, safe URLs, safe inline styles.
     fn check_attribute(&mut self, tag: &str, attribute: &str, value: Option<&str>) {
+        if tag == "input" && attribute == "type" {
+            self.input_type = Some(value.unwrap_or_default().trim().to_ascii_lowercase());
+        }
         if attribute.starts_with("on") {
             self.problems.push(format!(
                 "<{tag}> has attribute `{attribute}`: event handler attributes are not allowed"
@@ -734,6 +766,27 @@ mod tests {
         }
         assert!(first(html_problems("<html><body>x</body></html>")).contains("fragment"));
         assert!(first(html_problems("<!-- x --><p>y</p>")).contains("comment"));
+    }
+
+    #[test]
+    fn an_input_is_allowed_as_a_checkbox_or_a_radio_only() {
+        let toggle = "<input type='checkbox' id='s1-menu' class='s1-toggle'><label for='s1-menu'>Menu</label>";
+        assert_eq!(html_problems(toggle), Vec::<String>::new());
+        assert_eq!(
+            html_problems("<input type='RADIO' name='s1-tab' checked>"),
+            Vec::<String>::new()
+        );
+        assert!(first(html_problems("<input type='text'>")).contains("type `text`"));
+        assert!(first(html_problems("<input placeholder='Search'>")).contains("no type"));
+        assert!(
+            first(html_problems("<input type='checkbox' onchange='x()'>")).contains("onchange")
+        );
+    }
+
+    #[test]
+    fn a_details_block_and_a_screen_link_are_allowed() {
+        let menu = "<details><summary>File</summary><ul><li><a href='#screen-2'>Open</a></li></ul></details>";
+        assert_eq!(html_problems(menu), Vec::<String>::new());
     }
 
     #[test]
