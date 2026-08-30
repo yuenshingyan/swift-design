@@ -335,6 +335,9 @@ struct MessageRequest<'value> {
     design: Option<&'value str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     action: Option<&'value str>,
+    /// The candidates the turn edits, pinned with `@` in the session chat.
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    pinned: &'value [String],
 }
 
 /// Appends a user turn to the conversation.
@@ -343,11 +346,30 @@ pub async fn send_session_message(
     content: &str,
     design: Option<&str>,
 ) -> Result<(), String> {
+    post_message(id, content, design, &[]).await
+}
+
+/// Appends a user turn that edits the pinned candidates.
+pub async fn send_session_message_about(
+    id: &str,
+    content: &str,
+    pinned: &[String],
+) -> Result<(), String> {
+    post_message(id, content, None, pinned).await
+}
+
+async fn post_message(
+    id: &str,
+    content: &str,
+    design: Option<&str>,
+    pinned: &[String],
+) -> Result<(), String> {
     let builder = Request::post(&format!("/sessions/{id}/messages"))
         .json(&MessageRequest {
             content,
             design,
             action: None,
+            pinned,
         })
         .map_err(|error| error.to_string())?;
     send_checked(builder, "POST /sessions/messages")
@@ -363,6 +385,7 @@ pub async fn continue_artifact(session_id: &str, artifact_id: &str) -> Result<()
             content: "Write the remaining screens from the outline.",
             design: Some(artifact_id),
             action: Some("continue"),
+            pinned: &[],
         })
         .map_err(|error| error.to_string())?;
     send_checked(builder, "POST /sessions/messages continue")
