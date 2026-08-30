@@ -221,7 +221,7 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
          Read the user's source files before you ask. Never ask what a source file already answers.\n\
          After {answered} answered questions about one request, do not ask more about it. A later request for a change starts fresh: when the change is unclear, ask first and set edit and generate to false. When it is clear, edit.\n\
          Set generate to true when you know enough to write. Then say in reply what you will write.\n\
-         When the input names an artifact open in the editor and the user asks for a change, set edit to true and generate to false. Say in reply what you will change. The app applies the change to that artifact.\n\
+         When the input names artifacts to edit and the user asks for a change, set edit to true and generate to false. Say in reply what you will change. The app applies the change to each of those artifacts.\n\
          When no artifact is open and candidates exist and the user asks for changes, set generate to true to write new candidates.\n\
          When the user only chats, set generate to false and answer in reply.\n\
          Keep reply to 1 to 3 sentences. Reply with only the JSON.",
@@ -239,7 +239,7 @@ pub(crate) fn planner_input(
     request: &SessionRequest,
     messages: &[ChatMessage],
     candidate_count: usize,
-    open_artifact: Option<&str>,
+    targets: &[String],
 ) -> String {
     let options = &request.options;
     let mut input = request_input(request);
@@ -264,8 +264,12 @@ pub(crate) fn planner_input(
     input.push_str(&format!("Effort: {}\n", options.effort));
     input.push_str(&format!("Candidates on the canvas: {candidate_count}\n"));
     input.push_str(&format!(
-        "Artifact open in the editor: {}\n",
-        open_artifact.unwrap_or("none")
+        "Artifacts to edit this turn: {}\n",
+        if targets.is_empty() {
+            "none".to_owned()
+        } else {
+            targets.join(", ")
+        }
     ));
     input.push_str(&format!(
         "Questions answered so far: {}\n",
@@ -276,12 +280,18 @@ pub(crate) fn planner_input(
     } else {
         input.push_str("Conversation, oldest first:\n");
         for message in messages {
-            match &message.design {
-                Some(artifact) => input.push_str(&format!(
-                    "{} (editing {artifact}): {}\n",
+            let about = if !message.pinned.is_empty() {
+                message.pinned.join(", ")
+            } else {
+                message.design.clone().unwrap_or_default()
+            };
+            if about.is_empty() {
+                input.push_str(&format!("{}: {}\n", message.role, message.content));
+            } else {
+                input.push_str(&format!(
+                    "{} (editing {about}): {}\n",
                     message.role, message.content
-                )),
-                None => input.push_str(&format!("{}: {}\n", message.role, message.content)),
+                ));
             }
         }
     }
@@ -473,10 +483,10 @@ mod tests {
             ChatMessage::user("Make it bolder.", Some("todo-candidate-1")),
             ChatMessage::assistant("Done."),
         ];
-        let input = planner_input(&request, &messages, 2, Some("todo-candidate-1"));
+        let input = planner_input(&request, &messages, 2, &["todo-candidate-1".to_owned()]);
         assert!(input.contains("Scenario: not chosen yet"));
         assert!(input.contains("Candidates on the canvas: 2"));
-        assert!(input.contains("Artifact open in the editor: todo-candidate-1"));
+        assert!(input.contains("Artifacts to edit this turn: todo-candidate-1"));
         assert!(input.contains("user (editing todo-candidate-1): Make it bolder."));
         assert!(input.contains("Questions answered so far: 0"));
         assert!(input.ends_with("Reply with only the JSON."));
