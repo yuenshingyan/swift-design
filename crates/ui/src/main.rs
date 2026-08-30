@@ -486,10 +486,10 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .canvas-card:hover { border-color: #B4B0A7; }
 .canvas-card.chosen, .canvas-card.chosen:hover { border: 1.5px solid var(--teal);
   box-shadow: 0.5rem 0.5rem 0 0 rgba(14,110,99,.12), var(--sh-card); }
-/* A phone card is as wide as `Candidate 12` plus the Finish icon need; the bezel sits centred in it. */
-.canvas-card.phone { width: 8.75rem; }
+/* A phone card is as wide as `Candidate 12` plus the Finish icon need, or as wide as its bezel; the bezel sits centred in it. */
+.canvas-card.phone { width: max(8.75rem, calc(var(--frame-width) + 2rem)); }
 .canvas-card.placeholder { cursor: default; }
-.card-stage { position: relative; height: 13.5rem; overflow: hidden; background: var(--sunken);
+.card-stage { position: relative; height: var(--stage-height, 13.5rem); overflow: hidden; background: var(--sunken);
   border-bottom: 1px solid var(--hairline); }
 .canvas-card:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
 .card-arrow { position: absolute; top: 50%; z-index: 3; width: 1.75rem; height: 1.75rem;
@@ -510,7 +510,7 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
   pointer-events: none; background: #0B0F14; }
 .canvas-card.phone .card-stage { display: flex; align-items: center; justify-content: center;
   box-sizing: border-box; padding: 0.25rem 0; }
-.bezel { flex: none; box-sizing: content-box; width: var(--frame-width); height: 12rem;
+.bezel { flex: none; box-sizing: content-box; width: var(--frame-width); height: var(--bezel-height, 12rem);
   padding: 0.5rem; border-radius: 1.375rem; background: #15181C; overflow: hidden;
   box-shadow: 0 0 0 1px rgba(21,24,28,.15); }
 .bezel iframe, .bezel .card-blank { width: 100%; height: 100%; border-radius: 0.875rem; }
