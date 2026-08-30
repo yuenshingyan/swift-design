@@ -15,11 +15,12 @@ use crate::settings::{SettingsPanel, pause_briefly};
 use crate::uploads::{AttachButton, AttachmentChips, PasteUploads};
 
 /// The label on the template button: how many templates are chosen.
-fn template_button_label(chosen: usize) -> String {
-    match chosen {
-        0 => "none".to_owned(),
-        1 => "1 chosen".to_owned(),
-        count => format!("{count} chosen"),
+fn template_button_label(saved: usize, chosen: usize) -> String {
+    match (saved, chosen) {
+        (0, _) => "No templates yet: save one from the editor, or make one above".to_owned(),
+        (_, 0) => "None chosen: the candidates get their own look".to_owned(),
+        (_, 1) => "1 chosen".to_owned(),
+        (_, count) => format!("{count} chosen"),
     }
 }
 
@@ -72,6 +73,8 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
     let mut effort = use_signal(|| "medium".to_owned());
     let mut templates = use_signal(Vec::<api::TemplateSummary>::new);
     let chosen_templates = use_signal(Vec::<String>::new);
+    let mut chosen_for_defaults = chosen_templates;
+    let mut has_applied_defaults = use_signal(|| false);
     let mut is_picking_templates = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
     let mut uploads = use_signal(Vec::<api::UploadSummary>::new);
@@ -110,6 +113,19 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                 settings.set(Some(fetched));
             }
             if let Ok(fetched) = api::fetch_templates().await {
+                // A default template is picked for the first session of
+                // this visit. A later pick by the user is kept as it is.
+                if !has_applied_defaults() {
+                    let defaults: Vec<String> = fetched
+                        .iter()
+                        .filter(|template| template.is_default)
+                        .map(|template| template.id.clone())
+                        .collect();
+                    if !defaults.is_empty() && chosen_templates().is_empty() {
+                        chosen_for_defaults.set(defaults);
+                    }
+                    has_applied_defaults.set(true);
+                }
                 templates.set(fetched);
             }
             refresh_uploads.call(());
@@ -210,16 +226,15 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                                 },
                                 on_error: move |message| error.set(Some(message)),
                             }
-                            if !templates().is_empty() {
-                                button {
-                                    class: if chosen_templates().is_empty() { "template-button" } else { "template-button chosen" },
-                                    onclick: move |_| is_picking_templates.set(true),
-                                    span { dangerous_inner_html: icons::LAYOUT }
-                                    if !chosen_templates().is_empty() {
-                                        span { class: "template-button-count",
-                                            "{chosen_templates().len()}"
-                                        }
-                                    }
+                            // Always shown: the picker also makes a
+                            // template from a website or brand files.
+                            button {
+                                class: if chosen_templates().is_empty() { "template-button" } else { "template-button chosen" },
+                                title: "Templates: pick a saved look, or make one from a website",
+                                onclick: move |_| is_picking_templates.set(true),
+                                span { dangerous_inner_html: icons::LAYOUT }
+                                if !chosen_templates().is_empty() {
+                                    span { class: "template-button-count", "{chosen_templates().len()}" }
                                 }
                             }
                             span { class: "divider" }
@@ -257,6 +272,7 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                     templates,
                     chosen: chosen_templates,
                     is_open: is_picking_templates,
+                    uploads: uploads().iter().map(|upload| upload.name.clone()).collect::<Vec<String>>(),
                     on_error: move |message| error.set(Some(message)),
                 }
             }
@@ -371,6 +387,10 @@ fn TemplatePicker(
     templates: Signal<Vec<api::TemplateSummary>>,
     chosen: Signal<Vec<String>>,
     is_open: Signal<bool>,
+    /// The names of the files attached to the composer, as brand
+    /// material for a new template.
+    #[props(default)]
+    uploads: Vec<String>,
     on_error: EventHandler<String>,
 ) -> Element {
     let mut chosen = chosen;
@@ -378,6 +398,42 @@ fn TemplatePicker(
     let close = move |_| is_open.set(false);
     let saved = templates();
     let count = chosen().len();
+    // The extraction form: a name, a website, or the attached files.
+    let mut extract_name = use_signal(String::new);
+    let mut extract_url = use_signal(String::new);
+    let mut is_extracting = use_signal(|| false);
+    let upload_count = uploads.len();
+    let has_url = !extract_url().trim().is_empty();
+    let can_extract =
+        !extract_name().trim().is_empty() && (has_url || upload_count > 0) && !is_extracting();
+    let extract = use_callback(move |_: ()| {
+        let name = extract_name().trim().to_owned();
+        let url = extract_url().trim().to_owned();
+        let files = uploads.clone();
+        is_extracting.set(true);
+        spawn(async move {
+            let source_url = (!url.is_empty()).then_some(url.as_str());
+            let files = if source_url.is_some() {
+                Vec::new()
+            } else {
+                files
+            };
+            let made = api::extract_template(&name, source_url, &files, api::DRAFT_SCOPE).await;
+            is_extracting.set(false);
+            match made {
+                Ok(summary) => {
+                    extract_name.set(String::new());
+                    extract_url.set(String::new());
+                    let mut ids = chosen();
+                    if !ids.contains(&summary.id) {
+                        ids.push(summary.id);
+                    }
+                    chosen.set(ids);
+                }
+                Err(message) => on_error.call(message),
+            }
+        });
+    });
     rsx! {
         div { class: "modal-backdrop", onclick: close }
         div {
@@ -390,6 +446,34 @@ fn TemplatePicker(
                 button { class: "icon-button", title: "Close", onclick: close, "×" }
             }
             div { class: "modal-body",
+                div { class: "extract-form",
+                    span { class: "extract-title", "New template from a brand" }
+                    input {
+                        class: "extract-name",
+                        placeholder: "Template name",
+                        value: "{extract_name()}",
+                        oninput: move |event| extract_name.set(event.value()),
+                    }
+                    input {
+                        class: "extract-url",
+                        placeholder: "https://example.com",
+                        value: "{extract_url()}",
+                        oninput: move |event| extract_url.set(event.value()),
+                    }
+                    button {
+                        class: "extract-button",
+                        disabled: !can_extract,
+                        title: "The model reads the website, or the files attached to the composer, and writes a theme",
+                        onclick: move |_| extract.call(()),
+                        if is_extracting() {
+                            "Reading…"
+                        } else if has_url {
+                            "Extract from the website"
+                        } else {
+                            "{extract_label(upload_count)}"
+                        }
+                    }
+                }
                 div { class: "template-grid",
                     for saved_template in saved.iter().cloned() {
                         {
@@ -428,6 +512,28 @@ fn TemplatePicker(
                                         }
                                     }
                                     button {
+                                        class: if saved_template.is_default { "template-card-default on" } else { "template-card-default" },
+                                        title: if saved_template.is_default { "New sessions start with this template. Click to stop that." } else { "Start new sessions with this template" },
+                                        onclick: {
+                                            let id = id.clone();
+                                            let is_default = saved_template.is_default;
+                                            move |_| {
+                                                let id = id.clone();
+                                                spawn(async move {
+                                                    let set = api::set_default_template(&id, !is_default).await;
+                                                    if let Err(message) = set {
+                                                        on_error.call(message);
+                                                    }
+                                                });
+                                            }
+                                        },
+                                        if saved_template.is_default {
+                                            "★ default"
+                                        } else {
+                                            "☆"
+                                        }
+                                    }
+                                    button {
                                         class: "template-card-delete",
                                         title: "Delete this template",
                                         onclick: {
@@ -450,7 +556,7 @@ fn TemplatePicker(
                 }
             }
             div { class: "modal-foot",
-                span { class: "step-count", "{template_button_label(count)}" }
+                span { class: "step-count", "{template_button_label(saved.len(), count)}" }
                 button { class: "primary", onclick: close, "Done" }
                 if count > 0 {
                     button { onclick: move |_| chosen.set(Vec::new()), "Clear" }
@@ -460,11 +566,30 @@ fn TemplatePicker(
     }
 }
 
+/// The extract button's label when no website is typed: the attached
+/// files are the material.
+fn extract_label(upload_count: usize) -> String {
+    match upload_count {
+        0 => "Type a website, or attach brand files".to_owned(),
+        1 => "Extract from the attached file".to_owned(),
+        count => format!("Extract from the {count} attached files"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use design_model::ArtifactKind;
 
-    use crate::home::{COMPOSER_PLACEHOLDER, kind_detail, short_time, template_button_label};
+    use crate::home::{
+        COMPOSER_PLACEHOLDER, extract_label, kind_detail, short_time, template_button_label,
+    };
+
+    #[test]
+    fn the_extract_button_names_its_material() {
+        assert_eq!(extract_label(0), "Type a website, or attach brand files");
+        assert_eq!(extract_label(1), "Extract from the attached file");
+        assert_eq!(extract_label(3), "Extract from the 3 attached files");
+    }
 
     #[test]
     fn a_row_time_keeps_the_date_the_minute_and_the_zone() {
@@ -476,9 +601,10 @@ mod tests {
 
     #[test]
     fn the_template_button_counts_what_is_chosen() {
-        assert_eq!(template_button_label(0), "none");
-        assert_eq!(template_button_label(1), "1 chosen");
-        assert_eq!(template_button_label(4), "4 chosen");
+        assert!(template_button_label(0, 0).starts_with("No templates yet"));
+        assert!(template_button_label(2, 0).starts_with("None chosen"));
+        assert_eq!(template_button_label(2, 1), "1 chosen");
+        assert_eq!(template_button_label(5, 4), "4 chosen");
     }
 
     #[test]
