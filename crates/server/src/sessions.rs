@@ -245,6 +245,11 @@ pub struct ChatMessage {
     /// `design`. A plain message with a design open is an edit.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_continue: bool,
+    /// True when the user asked to write the units named in the content
+    /// anew, in the artifact named in `design`. The run skips the
+    /// planner and rewrites them without their old markup.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_regenerate: bool,
     /// When the turn was recorded, RFC 3339. Set on append.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
@@ -264,6 +269,7 @@ impl ChatMessage {
             design: design.map(str::to_owned),
             question_set: None,
             is_continue: false,
+            is_regenerate: false,
             at: None,
             artifacts: Vec::new(),
             pinned: Vec::new(),
@@ -278,6 +284,15 @@ impl ChatMessage {
         }
     }
 
+    /// A user turn that asks to write the units named in `content`
+    /// anew, in `design`.
+    pub fn regenerate_request(content: &str, design: &str) -> Self {
+        Self {
+            is_regenerate: true,
+            ..Self::user(content, Some(design))
+        }
+    }
+
     /// An assistant turn.
     pub fn assistant(content: &str) -> Self {
         Self {
@@ -286,6 +301,7 @@ impl ChatMessage {
             design: None,
             question_set: None,
             is_continue: false,
+            is_regenerate: false,
             at: None,
             artifacts: Vec::new(),
             pinned: Vec::new(),
@@ -312,6 +328,7 @@ impl ChatMessage {
             design: None,
             question_set: Some(number),
             is_continue: false,
+            is_regenerate: false,
             at: None,
             artifacts: Vec::new(),
             pinned: Vec::new(),
@@ -1074,6 +1091,21 @@ mod tests {
         assert_eq!(back, message);
         let plain = serde_json::to_value(ChatMessage::user("Hi.", None)).unwrap();
         assert!(plain.get("pinned").is_none());
+    }
+
+    #[test]
+    fn a_regenerate_turn_names_its_artifact_and_round_trips() {
+        let message =
+            ChatMessage::regenerate_request("[screen 2] Write it anew.", "talk-candidate-1");
+        assert!(message.is_regenerate);
+        assert!(!message.is_continue);
+        assert_eq!(message.design.as_deref(), Some("talk-candidate-1"));
+        let json = serde_json::to_value(&message).unwrap();
+        assert_eq!(json["is_regenerate"], true);
+        let back: ChatMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(back, message);
+        let plain = serde_json::to_value(ChatMessage::user("Hi.", None)).unwrap();
+        assert!(plain.get("is_regenerate").is_none());
     }
 
     #[test]
