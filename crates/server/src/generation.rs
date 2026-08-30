@@ -2332,9 +2332,24 @@ fn attachment_parts(file: &UploadAttachment, can_see_images: bool) -> Vec<serde_
             ))],
         };
     }
+    // The type comes from the extension, and no table names every
+    // source or configuration file. A file that reads as text is text.
+    if let Some(text) = text_of(&file.bytes) {
+        return vec![inlined_text_part(file, text, &size)];
+    }
     vec![label(
         ": a file this request cannot carry. Tell the user if you need its content.",
     )]
+}
+
+/// The bytes as text when they are valid UTF-8 with no NUL byte, which
+/// is what a source file, a configuration file, or a log looks like.
+/// A binary file fails one of the two checks in its first bytes.
+fn text_of(bytes: &[u8]) -> Option<&str> {
+    if bytes.contains(&0) {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok()
 }
 
 /// One text part with the file's text inlined, cut at
@@ -3126,7 +3141,8 @@ mod tests {
     use super::{
         Attachments, GenerationContext, GenerationEngine, GenerationOutcome, ProgressGroup,
         ProgressSink, UploadAttachment, answers_since_last_write, candidate_plans, edit_prompt,
-        focused_design_json, system_prompt, trailing_continue_ids, user_content_with_attachments,
+        focused_design_json, system_prompt, text_of, trailing_continue_ids,
+        user_content_with_attachments,
     };
     use crate::designs::DesignStore;
     use crate::edit_focus::EditInput;
@@ -3299,6 +3315,35 @@ mod tests {
         };
         let content = user_content_with_attachments("Go.", &broken, false).to_string();
         assert!(content.contains("could not be read"));
+    }
+
+    #[test]
+    fn a_source_file_of_unknown_type_reaches_the_prompt_as_its_text() {
+        let source = Attachments {
+            files: vec![UploadAttachment {
+                name: "main.zig".to_owned(),
+                content_type: "application/octet-stream".to_owned(),
+                bytes: b"pub fn main() void {}\n".to_vec(),
+            }],
+            skipped: Vec::new(),
+        };
+        let content = user_content_with_attachments("Go.", &source, false).to_string();
+        assert!(content.contains("pub fn main() void {}"));
+        assert!(!content.contains("cannot carry"));
+        // A binary file is still named only.
+        let binary = Attachments {
+            files: vec![UploadAttachment {
+                name: "font.bin".to_owned(),
+                content_type: "application/octet-stream".to_owned(),
+                bytes: vec![0, 159, 146, 150, 0, 1],
+            }],
+            skipped: Vec::new(),
+        };
+        let content = user_content_with_attachments("Go.", &binary, false).to_string();
+        assert!(content.contains("cannot carry"));
+        assert_eq!(text_of(b"plain"), Some("plain"));
+        assert_eq!(text_of(b"a\0b"), None);
+        assert_eq!(text_of(&[0xff, 0xfe]), None);
     }
 
     #[test]

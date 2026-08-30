@@ -360,6 +360,11 @@ pub(crate) fn content_type_of(name: &str) -> &'static str {
         "xlsx" => crate::office::XLSX,
         "txt" => "text/plain; charset=utf-8",
         "md" => "text/markdown; charset=utf-8",
+        // Source files are text, so the prompt carries their code. A
+        // browser has no type for them and would send octet-stream.
+        "rs" | "toml" | "py" | "ts" | "tsx" | "jsx" | "go" | "java" | "kt" | "swift" | "c"
+        | "h" | "cpp" | "hpp" | "cs" | "rb" | "php" | "sh" | "sql" | "ini" | "cfg" | "conf"
+        | "lock" | "log" => "text/plain; charset=utf-8",
         // Data files are text, so the prompt carries their rows.
         "csv" => "text/csv; charset=utf-8",
         "tsv" => "text/tab-separated-values; charset=utf-8",
@@ -685,6 +690,13 @@ mod tests {
         );
         assert_eq!(content_type_of("a.yml"), "text/yaml; charset=utf-8");
         assert_eq!(content_type_of("a.xml"), "text/xml; charset=utf-8");
+    }
+
+    #[test]
+    fn a_source_upload_is_text() {
+        for name in ["main.rs", "Cargo.toml", "app.py", "index.tsx", "Cargo.lock"] {
+            assert_eq!(content_type_of(name), "text/plain; charset=utf-8", "{name}");
+        }
     }
 
     #[test]
