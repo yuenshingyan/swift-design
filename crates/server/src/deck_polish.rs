@@ -37,10 +37,13 @@ pub async fn dom_findings(deck: &Deck, base_url: &str, label: &str, log: &LogSin
 
 /// Reads the audit report out of a dumped deck DOM as slide findings.
 pub fn parse_findings(dom: &str) -> Vec<String> {
-    prioritized(raw_findings(dom))
-        .iter()
-        .map(format_finding)
-        .collect()
+    // A slide is not clicked, so a box styled as a button is a design
+    // choice there, not a static control.
+    let findings = raw_findings(dom)
+        .into_iter()
+        .filter(|finding| finding.kind != "static_control")
+        .collect();
+    prioritized(findings).iter().map(format_finding).collect()
 }
 
 /// One finding as a fix instruction for the model, with a slide path.
@@ -93,6 +96,12 @@ pub fn polish_prompt(deck_json: &str, findings: &[String], image_count: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_deck_drops_the_static_control_findings() {
+        let dom = "<html lang=\"en\" data-swift-design-findings=\"[{&quot;screen&quot;:0,&quot;node&quot;:&quot;a.cta (0/1)&quot;,&quot;kind&quot;:&quot;static_control&quot;,&quot;detail&quot;:&quot;looks like a control but does nothing when clicked&quot;}]\"><head>";
+        assert_eq!(parse_findings(dom), Vec::<String>::new());
+    }
 
     #[test]
     fn deck_findings_use_slide_paths() {
