@@ -54,13 +54,14 @@ enum MenuPage {
 
 /// The model chip: `provider/model`, or `Choose a model`. With a model
 /// chosen, a click opens its menu; without one, it opens the setup
-/// panel. `effort` is the run's effort signal where the chat box
-/// starts runs, so the menu can change it.
+/// panel. `effort` is the run's effort level where the chat box starts
+/// runs; a pick in the menu calls `on_effort` with the new level.
 #[component]
 pub(crate) fn ModelChip(
     settings: Signal<Option<api::SettingsView>>,
     is_configuring: Signal<bool>,
-    #[props(default)] effort: Option<Signal<String>>,
+    #[props(default)] effort: Option<String>,
+    #[props(default)] on_effort: Option<EventHandler<String>>,
 ) -> Element {
     let mut anchor = use_signal(|| Option::<Anchor>::None);
     let mut page = use_signal(|| MenuPage::Models);
@@ -155,13 +156,13 @@ pub(crate) fn ModelChip(
                                 key: "{level}",
                                 class: "menu-item",
                                 onclick: move |_| {
-                                    if let Some(mut effort) = effort {
-                                        effort.set(level.to_owned());
+                                    if let Some(on_effort) = on_effort {
+                                        on_effort.call(level.to_owned());
                                     }
                                     anchor.set(None);
                                 },
                                 span { class: "menu-title", "{level}" }
-                                if effort.is_some_and(|effort| effort() == level) {
+                                if effort.as_deref() == Some(level) {
                                     span {
                                         class: "menu-tick",
                                         dangerous_inner_html: icons::CHECK,
@@ -188,12 +189,12 @@ pub(crate) fn ModelChip(
                             }
                         }
                         div { class: "menu-rule" }
-                        if let Some(effort) = effort {
+                        if let Some(effort) = effort.clone() {
                             button {
                                 class: "menu-item menu-row",
                                 onclick: move |_| page.set(MenuPage::Effort),
                                 span { class: "menu-title", "Effort" }
-                                span { class: "menu-value", "{effort()}" }
+                                span { class: "menu-value", "{effort}" }
                                 span {
                                     class: "menu-glyph",
                                     dangerous_inner_html: icons::CHEVRON_RIGHT,
@@ -272,9 +273,31 @@ pub(crate) fn SendButton(
     }
 }
 
+/// The options with `level` as the effort and everything else as it
+/// is. The whole record goes to `PUT /sessions/{id}/options`.
+pub(crate) fn with_effort(options: &api::SessionOptions, level: &str) -> api::SessionOptions {
+    let mut next = options.clone();
+    next.effort = level.to_owned();
+    next
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_effort_pick_changes_only_the_effort() {
+        let options = api::SessionOptions {
+            variations: Some(3),
+            platforms: vec!["phone".to_owned()],
+            ..Default::default()
+        };
+        let next = with_effort(&options, "high");
+        assert_eq!(next.effort, "high");
+        assert_eq!(next.variations, Some(3));
+        assert_eq!(next.platforms, options.platforms);
+        assert!(EFFORT_LEVELS.contains(&"high"));
+    }
 
     fn view(current_model: Option<&str>) -> api::SettingsView {
         api::SettingsView {
