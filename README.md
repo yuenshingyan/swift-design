@@ -81,7 +81,7 @@ Every candidate is a card with a live preview. Cards on one tab share a height, 
 
 Type `@` in the chat to pin a candidate, or `All candidates`, for the next message: the change is applied to each pinned candidate. Without a pin the message edits the chosen candidate, or writes new ones.
 
-The box at the top left of a card selects it. Every action on candidates works the same way: tick cards, then press a button in the bar over the canvas. `Delete` takes two clicks: one arms the button, the second deletes. A deleted candidate that was the chosen one leaves the session with no choice.
+Click a card's footer to select it, or ⌘-click anywhere on the card; a selected card shows a teal border and a teal name. Every action on candidates works the same way: tick cards, then press a button in the bar over the canvas. `Delete` takes two clicks: one arms the button, the second deletes. A deleted candidate that was the chosen one leaves the session with no choice.
 
 Three more ways to work a candidate:
 
