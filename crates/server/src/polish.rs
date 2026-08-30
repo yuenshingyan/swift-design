@@ -25,7 +25,7 @@ pub(crate) struct Finding {
     #[serde(default)]
     pub(crate) node: String,
     /// `overflow`, `off_screen`, `overfull`, `tiny_text`, `overlap`,
-    /// `empty`, `contrast`, or `long_lines`.
+    /// `empty`, `contrast`, `long_lines`, or `static_control`.
     #[serde(default)]
     pub(crate) kind: String,
     /// What was measured.
@@ -137,11 +137,12 @@ fn kind_rank(kind: &str) -> usize {
         "off_screen" => 1,
         "overflow" => 2,
         "overlap" => 3,
-        "empty" => 4,
-        "contrast" => 5,
-        "long_lines" => 6,
-        "tiny_text" => 7,
-        _ => 8,
+        "static_control" => 4,
+        "empty" => 5,
+        "contrast" => 6,
+        "long_lines" => 7,
+        "tiny_text" => 8,
+        _ => 9,
     }
 }
 
@@ -216,6 +217,9 @@ pub(crate) fn finding_advice(kind: &str) -> &'static str {
         "contrast" => "use a darker or lighter text color, or change the background",
         "long_lines" => "narrow the box, split the text, or use a larger font size",
         "overfull" => "cut a section, shorten the text, or reduce the sizes until it fits",
+        "static_control" => {
+            "give it href='#screen-N' to the screen it opens, or make it a <label for> of a checkbox or radio input, or the <summary> of a <details>"
+        }
         _ => "fix it",
     }
 }
@@ -270,6 +274,7 @@ pub fn polish_prompt(design_json: &str, findings: &[String], image_count: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::AUDIT_SCRIPT;
 
     #[test]
     fn findings_are_read_from_the_dumped_dom() {
@@ -323,6 +328,15 @@ mod tests {
             "4 more tiny_text finding(s) on this screen, not listed"
         );
         assert_eq!(ordered.len(), 9);
+    }
+
+    #[test]
+    fn a_static_control_is_a_layout_finding_with_its_own_advice() {
+        assert!(kind_rank("static_control") < kind_rank("contrast"));
+        assert!(kind_rank("overlap") < kind_rank("static_control"));
+        assert!(finding_advice("static_control").contains("href='#screen-N'"));
+        assert!(AUDIT_SCRIPT.contains("kind: 'static_control'"));
+        assert!(AUDIT_SCRIPT.contains("controlPattern"));
     }
 
     #[test]
