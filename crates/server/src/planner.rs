@@ -29,6 +29,9 @@ pub(crate) struct Plan {
     /// True when the model wants to apply the request to the artifact
     /// open in the editor.
     pub(crate) should_edit: bool,
+    /// True when the model wants to combine parts of the named
+    /// artifacts into one new candidate.
+    pub(crate) should_merge: bool,
     /// The app questions the request answers by itself, as (option
     /// key, value) pairs from the fixed lists. The setup turn fills the
     /// blank axes from them.
@@ -62,6 +65,8 @@ pub(crate) fn parse_plan(content: &str) -> Plan {
         #[serde(default)]
         edit: bool,
         #[serde(default)]
+        merge: bool,
+        #[serde(default)]
         suggestions: std::collections::BTreeMap<String, String>,
     }
     let parsed = content
@@ -94,6 +99,7 @@ pub(crate) fn parse_plan(content: &str) -> Plan {
         question_set,
         should_generate: parsed.generate,
         should_edit: parsed.edit,
+        should_merge: parsed.merge,
         suggestions: known_suggestions(parsed.suggestions),
     }
 }
@@ -204,7 +210,7 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
     format!(
         "{subject}\n\
          Read the request, the answers, and the conversation. Reply with only this JSON:\n\
-         {{\"reply\":\"text for the user\",\"questions\":[{{\"question\":\"...\",\"options\":[\"...\"],\"multi\":false}}],\"suggestions\":{{\"{first_key}\":\"{first_value}\"}},\"generate\":false,\"edit\":false}}\n\
+         {{\"reply\":\"text for the user\",\"questions\":[{{\"question\":\"...\",\"options\":[\"...\"],\"multi\":false}}],\"suggestions\":{{\"{first_key}\":\"{first_value}\"}},\"generate\":false,\"edit\":false,\"merge\":false}}\n\
          The app always asks the user its own fixed questions first. Your questions are added to that card.\n\
          The app questions, as key (wording): values:\n\
          {axes}\n\
@@ -221,7 +227,8 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
          Read the user's source files before you ask. Never ask what a source file already answers.\n\
          After {answered} answered questions about one request, do not ask more about it. A later request for a change starts fresh: when the change is unclear, ask first and set edit and generate to false. When it is clear, edit.\n\
          Set generate to true when you know enough to write. Then say in reply what you will write.\n\
-         When the input names artifacts to edit and the user asks for a change, set edit to true and generate to false. Say in reply what you will change. The app applies the change to each of those artifacts.\n\
+         When the input names artifacts and the user asks for a change, set edit to true and generate to false. Say in reply what you will change. The app applies the change to each of those artifacts.\n\
+         When the input names two or more artifacts and the user asks to combine parts of them into one, set merge to true and edit to false. Say in reply which parts you take from each. The app writes one new candidate.\n\
          When no artifact is open and candidates exist and the user asks for changes, set generate to true to write new candidates.\n\
          When the user only chats, set generate to false and answer in reply.\n\
          Keep reply to 1 to 3 sentences. Reply with only the JSON.",
@@ -264,7 +271,7 @@ pub(crate) fn planner_input(
     input.push_str(&format!("Effort: {}\n", options.effort));
     input.push_str(&format!("Candidates on the canvas: {candidate_count}\n"));
     input.push_str(&format!(
-        "Artifacts to edit this turn: {}\n",
+        "Artifacts named this turn: {}\n",
         if targets.is_empty() {
             "none".to_owned()
         } else {
@@ -304,6 +311,19 @@ pub(crate) fn planner_input(
 mod tests {
     use super::*;
     use crate::sessions::RunOptions;
+
+    #[test]
+    fn a_merge_reply_sets_the_merge_flag_and_the_prompt_explains_it() {
+        let plan = parse_plan(r#"{"reply":"Hero from 1, pricing from 3.","merge":true}"#);
+        assert!(plan.should_merge);
+        assert!(!plan.should_edit);
+        assert!(!plan.should_generate);
+        assert!(!parse_plan(r#"{"reply":"Hi.","edit":true}"#).should_merge);
+        let prompt = planner_prompt(ArtifactKind::Demo);
+        assert!(prompt.contains("\"edit\":false,\"merge\":false}"));
+        assert!(prompt.contains("set merge to true and edit to false"));
+        assert!(prompt.contains("The app writes one new candidate."));
+    }
 
     #[test]
     fn a_json_reply_becomes_a_plan_with_a_question_set() {
@@ -486,7 +506,7 @@ mod tests {
         let input = planner_input(&request, &messages, 2, &["todo-candidate-1".to_owned()]);
         assert!(input.contains("Scenario: not chosen yet"));
         assert!(input.contains("Candidates on the canvas: 2"));
-        assert!(input.contains("Artifacts to edit this turn: todo-candidate-1"));
+        assert!(input.contains("Artifacts named this turn: todo-candidate-1"));
         assert!(input.contains("user (editing todo-candidate-1): Make it bolder."));
         assert!(input.contains("Questions answered so far: 0"));
         assert!(input.ends_with("Reply with only the JSON."));
