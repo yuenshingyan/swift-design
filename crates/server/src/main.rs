@@ -3,7 +3,9 @@
 
 mod agent_runs;
 mod api_error;
+mod brand;
 mod candidates;
+mod capture;
 mod concepts;
 mod deck_generation;
 mod deck_patch;
@@ -20,6 +22,7 @@ mod history;
 mod icon;
 mod instructions;
 mod model_client;
+mod office;
 mod patch;
 mod planner;
 mod polish;
