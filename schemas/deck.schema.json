@@ -110,7 +110,7 @@
           ]
         },
         "html": {
-          "description": "The slide as one HTML fragment. The canvas is 1920 by 1080 px;\nuse px units. Allowed: headings, text, lists, tables, `<img>`\nwith `src=\"/uploads/{name}\"`, inline `<svg>`, `<pre><code>`,\n`<blockquote>`, `<a>`. Not allowed: `<script>`, `<style>`,\n`<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, forms,\nmedia, comments, `on*` attributes, `javascript:` and `data:`\nURLs, external images. Close every tag.",
+          "description": "The slide as one HTML fragment. The canvas is 1920 by 1080 px;\nuse px units. Allowed: headings, text, lists, tables, `<img>`\nwith `src=\"/uploads/{name}\"`, inline `<svg>`, `<pre><code>`,\n`<blockquote>`, `<a>`, `<details>`, `<label>`, `<input>` with\ntype `checkbox` or `radio`. Not allowed: `<script>`, `<style>`,\n`<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, `<form>`,\n`<button>`, other input types, media, comments, `on*`\nattributes, `javascript:` and `data:` URLs, external images.\nClose every tag.",
           "type": "string"
         },
         "notes": {
