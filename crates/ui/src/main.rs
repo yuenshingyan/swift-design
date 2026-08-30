@@ -627,6 +627,7 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .editor-toolbar .back { display: inline-flex; align-items: center; gap: 0.25rem;
   font-size: 0.78rem; color: var(--ink-2); padding: 0.375rem 0.625rem 0.375rem 0.4375rem; }
 .editor-toolbar .back span { display: flex; }
+.editor-toolbar .preview-modes { margin-bottom: 0; align-self: center; }
 .editor-toolbar .preview-heading { font-family: var(--mono); font-size: 0.72rem;
   letter-spacing: 0.04em; text-transform: none; color: var(--ink-2); }
 .editor-toolbar .save-state { display: inline-flex; align-items: center; gap: 0.25rem;
