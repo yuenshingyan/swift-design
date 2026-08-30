@@ -9,7 +9,7 @@ use dioxus::document;
 use dioxus::prelude::*;
 
 use crate::api;
-use crate::chat_controls::{ModelChip, SendButton};
+use crate::chat_controls::{ModelChip, SendButton, with_effort};
 use crate::prompt_history::{PromptHistory, prompt_entries};
 use crate::settings::{SettingsPanel, artifact_project, pause_briefly};
 use crate::status::RunStatusCard;
@@ -69,6 +69,8 @@ pub fn DesignChat(
     let mut is_configuring = use_signal(|| false);
     let mut draft = use_signal(String::new);
     let mut error = use_signal(|| Option::<String>::None);
+    // The run options, for the effort pick on the model chip.
+    let mut options = use_signal(|| Option::<api::SessionOptions>::None);
     // The page the user dropped with the chip's ×. A new page brings
     // the chip back.
     let mut dropped_page = use_signal(|| Option::<String>::None);
@@ -133,6 +135,7 @@ pub fn DesignChat(
                 let mut seen = 0u64;
                 loop {
                     if let Ok(view) = api::fetch_session(&session_id).await {
+                        options.set(Some(view.session.options));
                         messages.set(view.messages);
                     }
                     refresh_uploads.call(());
@@ -382,7 +385,28 @@ pub fn DesignChat(
                         }
                     }
                     div { class: "chat-box-right",
-                        ModelChip { settings, is_configuring }
+                        ModelChip {
+                            settings,
+                            is_configuring,
+                            effort: options().map(|options| options.effort),
+                            on_effort: {
+                                let session_id = session_id.clone();
+                                move |level: String| {
+                                    let Some(current) = options() else {
+                                        return;
+                                    };
+                                    let next = with_effort(&current, &level);
+                                    options.set(Some(next.clone()));
+                                    let session_id = session_id.clone();
+                                    spawn(async move {
+                                        let saved = api::save_session_options(&session_id, &next).await;
+                                        if let Err(message) = saved {
+                                            error.set(Some(message));
+                                        }
+                                    });
+                                }
+                            },
+                        }
                         SendButton {
                             label: "Send",
                             is_enabled: can_send,
