@@ -127,8 +127,9 @@ pub(crate) enum PreviewMode {
 }
 
 impl PreviewMode {
-    /// Both modes, in tab order.
-    pub(crate) const ALL: [PreviewMode; 2] = [PreviewMode::Edit, PreviewMode::Play];
+    /// Both modes, in tab order. Play comes first: it is the default,
+    /// so a demo opens clickable.
+    pub(crate) const ALL: [PreviewMode; 2] = [PreviewMode::Play, PreviewMode::Edit];
 
     /// The tab label.
     pub(crate) fn label(self) -> &'static str {
@@ -348,7 +349,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
     // The toolbar's `…` menu, and the template name being typed while
     // its save prompt is open.
     let mut is_menu_open = use_signal(|| false);
-    let mut mode = use_signal(|| PreviewMode::Edit);
+    let mut mode = use_signal(|| PreviewMode::Play);
     let mut template_name = use_signal(|| Option::<String>::None);
     // The node reference the chat prepends to the next message.
     let mut chat_context = use_signal(|| Option::<String>::None);
@@ -365,11 +366,6 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
             }
         }
     });
-    // Until the settings answer, the PDF and PPTX buttons stay enabled:
-    // the server answers 503 with the install hint when Chrome is missing.
-    let settings = use_resource(|| async { api::fetch_settings().await.ok() });
-    let can_export_pdf = settings().flatten().is_none_or(|view| view.has_chrome);
-
     // Saves the design and refreshes the badges. The preview reloads only
     // when `reload_preview` is true: in-place edits already show.
     let save = use_callback({
@@ -630,26 +626,6 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                                 title: "Export as one HTML file",
                                 span { dangerous_inner_html: icons::DOWNLOAD }
                                 "HTML"
-                            }
-                            if can_export_pdf {
-                                a {
-                                    class: "button",
-                                    href: "/designs/{design_id}/export.pdf",
-                                    title: "Export as a PDF",
-                                    span { dangerous_inner_html: icons::DOWNLOAD }
-                                    "PDF"
-                                }
-                            } else {
-                                span {
-                                    class: "export-cell",
-                                    title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
-                                    a {
-                                        class: "button",
-                                        "aria-disabled": "true",
-                                        span { dangerous_inner_html: icons::DOWNLOAD }
-                                        "PDF"
-                                    }
-                                }
                             }
                         }
                         button {
@@ -1789,7 +1765,8 @@ mod tests {
     fn play_mode_asks_the_render_for_no_editing_script() {
         assert_eq!(PreviewMode::Edit.render_query(), "&editable=true");
         assert_eq!(PreviewMode::Play.render_query(), "");
-        assert_eq!(PreviewMode::ALL.map(PreviewMode::label), ["Edit", "Play"]);
+        assert_eq!(PreviewMode::ALL.map(PreviewMode::label), ["Play", "Edit"]);
+        assert_eq!(PreviewMode::ALL[0], PreviewMode::Play);
     }
 
     #[test]
