@@ -79,6 +79,8 @@ the same name: the second is stored as `name-2.ext`.
 
 Every candidate is a card with a live preview. Cards on one tab share a height, so a desktop card is wide and a phone card is a tall bezel. Click a card to open it in the editor. Arrows at the edges of the preview, or `←` and `→` on a focused card, step through the screens or slides; the pill in the corner shows `n/m`. A preview candidate (the first screens plus an outline) carries a `Finish` button that writes the rest; pressing it on a second card while the first is running joins that run. The chosen card is marked `Chosen`.
 
+Type `@` in the chat to pin a candidate, or `All candidates`, for the next message: the change is applied to each pinned candidate. Without a pin the message edits the chosen candidate, or writes new ones.
+
 The box at the top left of a card selects it. With cards selected, a bar over the canvas deletes them: one click arms the button, the second deletes. A deleted candidate that was the chosen one leaves the session with no choice.
 
 In `reviewing`, the chat is the edit input: type what should change and press **Send**. With a candidate chosen, the change is applied to it; otherwise new candidates are written.
