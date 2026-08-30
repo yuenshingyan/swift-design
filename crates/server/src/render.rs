@@ -631,6 +631,26 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
     if (fitFactor < 0.97) {
       findings.push({ screen, node: 'root', kind: 'overfull', detail: 'the screen holds more than the ' + canvasWidth + ' by ' + canvasHeight + ' canvas fits, so it was scaled to ' + Math.round(fitFactor * 100) + '%: cut content or reduce the sizes' });
     }
+    // A control that looks clickable and does nothing. A link acts
+    // when it names a screen or a real URL, a label when it names an
+    // input, a summary or a details when it opens. A box that only
+    // holds acting controls is a container, not a control.
+    const controlPattern = /(^|[-_ ])(button|btn|cta|toggle|switch|tab|menu|dropdown)([-_ ]|$)/i;
+    const acts = (element) => {
+      const tag = element.tagName.toLowerCase();
+      const href = element.getAttribute('href') || '';
+      if (tag === 'a') { return /^#screen-\d+$/.test(href) || /^(https?:|mailto:|tel:)/i.test(href); }
+      if (tag === 'label') { return !!element.getAttribute('for'); }
+      return tag === 'summary' || tag === 'details' || tag === 'input';
+    };
+    all.forEach((element) => {
+      if (element.closest('svg')) { return; }
+      const tag = element.tagName.toLowerCase();
+      const looksLikeControl = tag === 'a' || tag === 'button' || element.getAttribute('role') === 'button' || controlPattern.test(element.getAttribute('class') || '');
+      if (!looksLikeControl || acts(element)) { return; }
+      if (element.closest('a[href], label[for], summary') || element.querySelector('a[href], label[for], summary, input')) { return; }
+      findings.push({ screen, node: name(element), kind: 'static_control', detail: 'looks like a control but does nothing when clicked' });
+    });
     // The smallest readable text depends on the canvas. A slide is
     // read from across a room; a desktop app screen uses 12 to 14px
     // labels, and a phone screen 11 to 12px. The deck floor applied
