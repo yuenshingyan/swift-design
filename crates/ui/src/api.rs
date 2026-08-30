@@ -204,6 +204,9 @@ pub struct SessionOptions {
     /// What state a demo's screens are in, one of `DATA_STATES`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_state: Option<String>,
+    /// How finished a demo looks, one of `FIDELITIES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fidelity: Option<String>,
     /// How much goes on one slide, one of `SLIDE_DENSITIES`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slide_density: Option<String>,
@@ -233,6 +236,7 @@ impl Default for SessionOptions {
             color_mode: None,
             product_kind: None,
             data_state: None,
+            fidelity: None,
             slide_density: None,
             evidence_style: None,
             suggested: Vec::new(),
@@ -756,6 +760,57 @@ pub struct TemplateSummary {
     pub theme: String,
     /// How many example screens it holds.
     pub screen_count: usize,
+    /// True when a new session starts with this template picked.
+    #[serde(default)]
+    pub is_default: bool,
+}
+
+/// Body of `POST /templates/extract`: one of `url` and `uploads`.
+#[derive(Serialize)]
+struct ExtractTemplateRequest<'value> {
+    name: &'value str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<&'value str>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    uploads: &'value [String],
+    scope: &'value str,
+}
+
+/// Makes a template from a website or from uploaded brand files in
+/// `scope`: the model reads them and answers with a theme.
+pub async fn extract_template(
+    name: &str,
+    url: Option<&str>,
+    uploads: &[String],
+    scope: &str,
+) -> Result<TemplateSummary, String> {
+    let builder = Request::post("/templates/extract")
+        .json(&ExtractTemplateRequest {
+            name,
+            url,
+            uploads,
+            scope,
+        })
+        .map_err(|error| error.to_string())?;
+    let response = send_checked(builder, "POST /templates/extract").await?;
+    response.json().await.map_err(|error| error.to_string())
+}
+
+/// Body of `PUT /templates/{id}/default`.
+#[derive(Serialize)]
+struct DefaultTemplateRequest {
+    is_default: bool,
+}
+
+/// Marks a template as one every new session starts with, or clears
+/// the mark.
+pub async fn set_default_template(id: &str, is_default: bool) -> Result<(), String> {
+    let builder = Request::put(&format!("/templates/{id}/default"))
+        .json(&DefaultTemplateRequest { is_default })
+        .map_err(|error| error.to_string())?;
+    send_checked(builder, "PUT /templates/default")
+        .await
+        .map(|_| ())
 }
 
 /// Body of `POST /templates`. Exactly one source id is set.
