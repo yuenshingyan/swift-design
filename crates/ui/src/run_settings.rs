@@ -195,7 +195,7 @@ fn axes_for(kind: ArtifactKind) -> Vec<Axis> {
             },
             Axis {
                 key: "data_state",
-                label: "What should the screens show?",
+                label: "What data should the screens show?",
                 choices: &DATA_STATES,
             },
         ],
