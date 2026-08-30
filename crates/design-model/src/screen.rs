@@ -15,10 +15,13 @@ pub struct Screen {
     /// The screen as one HTML fragment. The canvas is the design's
     /// `viewport` in px; use px units. Allowed: headings, text, lists, tables, `<img>`
     /// with `src="/uploads/{name}"`, inline `<svg>`, `<pre><code>`,
-    /// `<blockquote>`, `<a>`. Not allowed: `<script>`, `<style>`,
-    /// `<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, forms,
-    /// media, comments, `on*` attributes, `javascript:` and `data:`
-    /// URLs, external images. Close every tag.
+    /// `<blockquote>`, `<a>`, `<details>`, `<label>`, `<input>` with
+    /// type `checkbox` or `radio`. Not allowed: `<script>`, `<style>`,
+    /// `<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, `<form>`,
+    /// `<button>`, other input types, media, comments, `on*`
+    /// attributes, `javascript:` and `data:` URLs, external images.
+    /// Close every tag. A link with `href="#screen-3"` opens screen 3,
+    /// counted from 1.
     pub html: String,
     /// CSS for this screen only. The server scopes every selector to
     /// this screen. Use plain selectors such as `.title` or `h1`. Use the
