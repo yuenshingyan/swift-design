@@ -234,6 +234,10 @@ pub struct ChatMessage {
     /// The design open in the editor when the user sent this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub design: Option<String>,
+    /// The candidates the user pinned with `@` in the session chat. The
+    /// turn edits each of them. Empty when the user pinned none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned: Vec<String>,
     /// The number of the question set this turn posed, when it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question_set: Option<u32>,
@@ -262,6 +266,7 @@ impl ChatMessage {
             is_continue: false,
             at: None,
             artifacts: Vec::new(),
+            pinned: Vec::new(),
         }
     }
 
@@ -283,7 +288,14 @@ impl ChatMessage {
             is_continue: false,
             at: None,
             artifacts: Vec::new(),
+            pinned: Vec::new(),
         }
+    }
+
+    /// The same user turn, naming the candidates the user pinned.
+    pub fn with_pinned(mut self, pinned: Vec<String>) -> Self {
+        self.pinned = pinned;
+        self
     }
 
     /// The same turn, naming the artifacts it wrote.
@@ -302,6 +314,7 @@ impl ChatMessage {
             is_continue: false,
             at: None,
             artifacts: Vec::new(),
+            pinned: Vec::new(),
         }
     }
 }
@@ -1048,6 +1061,20 @@ pub fn new_session_id() -> anyhow::Result<String> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_user_turn_keeps_the_candidates_it_pinned() {
+        let message = ChatMessage::user("Bigger title.", None).with_pinned(vec![
+            "talk-candidate-1".to_owned(),
+            "talk-candidate-3".to_owned(),
+        ]);
+        let json = serde_json::to_value(&message).unwrap();
+        assert_eq!(json["pinned"][1], "talk-candidate-3");
+        let back: ChatMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(back, message);
+        let plain = serde_json::to_value(ChatMessage::user("Hi.", None)).unwrap();
+        assert!(plain.get("pinned").is_none());
+    }
 
     #[test]
     fn a_suggestion_fills_a_blank_axis_and_marks_it() {
