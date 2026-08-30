@@ -40,8 +40,8 @@ pub const DEMO_RULES: &[&str] = &[
     "Size text for the viewport. On a 1440 px desktop canvas: titles 48 to 72px, body 18 to 24px, captions 14 to 16px, margins of at least 64px. On a 390 px phone canvas: titles 28 to 36px, body 16 to 18px, captions 12 to 14px, margins of at least 20px. Give boxes enough height for every line.",
     SHARED_RULES[5],
     "Put one idea on each screen. Put intent, states, and handoff remarks in notes. The renderer does not show notes on the screen.",
-    "Make a button or a link open another screen: write `<a href='#screen-3'>` with the screen number, counted from 1. The demo shows that screen when the user clicks the link. Give each step of a flow its own screen. Link the screens.",
-    "Make a menu or a dropdown open without a script: write `<details>` with a `<summary>`. Make a toggle, a tab set, or a modal: write `<input type='checkbox'>` or `<input type='radio'>` with a `<label for>`, and style the state with `:checked`. Give the input an id with the screen prefix. Do not write `<button>`. Style an `<a>` or a `<label>` as the button.",
+    "Every control acts. A button or a link opens a screen: write `<a href='#screen-3'>` with the screen number, counted from 1. Write the screen the link opens. Give each step of a flow its own screen.",
+    "A menu or a dropdown is `<details>` with a `<summary>`. A toggle, a tab set, or a modal is `<input type='checkbox'>` or `<input type='radio'>` with a `<label for>`, styled through `:checked`. Give the input an id with the screen prefix. Do not write `<button>`. Style the `<a>` or the `<label>` as the button. Do not write a control that does nothing: the audit reports it as `static_control`.",
     "`transition` is optional. Leave it out and the design scrolls. Set it to give the design a page transition: `effect` is `none`, `fade`, `push`, `cover`, or `zoom`; `axis` is `vertical` or `horizontal`; `duration_ms` is 0 to 3000. `axis` moves `push` and `cover` only. Set it only when the user asks for one.",
 ];
 
@@ -320,6 +320,8 @@ mod tests {
         assert!(demo.contains("`<details>` with a `<summary>`"));
         assert!(demo.contains("`<input type='checkbox'>`"));
         assert!(demo.contains("Do not write `<button>`."));
+        assert!(demo.contains("Every control acts."));
+        assert!(demo.contains("`static_control`"));
         let deck = DECK_RULES.join("\n");
         assert!(!deck.contains("#screen-"));
         assert!(deck.contains("`<input>` with type `checkbox` or `radio`"));
