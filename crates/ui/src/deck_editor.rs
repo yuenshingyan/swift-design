@@ -68,6 +68,8 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
     let mut chat_context = use_signal(|| Option::<String>::None);
     let mut dragged = use_signal(|| Option::<usize>::None);
     let mut pending_slide_delete = use_signal(|| Option::<usize>::None);
+    // The tile whose Redo waits for its second click.
+    let mut pending_redo = use_signal(|| Option::<usize>::None);
 
     let authors_id = deck_id.clone();
     use_future(move || {
@@ -469,6 +471,7 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                         for (index, label) in thumbnail_labels.into_iter().enumerate() {
                             {
                                 let is_deleting = pending_slide_delete() == Some(index);
+                                let is_redoing = pending_redo() == Some(index);
                                 let class = thumbnail_class(ThumbnailState {
                                     is_current: index == selected(),
                                     is_dragging: dragged() == Some(index),
@@ -493,6 +496,7 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                                             selected.set(index);
                                             selected_node.set(None);
                                             pending_slide_delete.set(None);
+                                            pending_redo.set(None);
                                         },
                                         iframe {
                                             title: "Slide {index + 1}",
@@ -524,6 +528,45 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                                                 if is_deleting {
                                                     span { class: "delete-text", "delete?" }
                                                 }
+                                            }
+                                        }
+                                        // A redo writes the slide anew: the model
+                                        // sees its notes, not its markup.
+                                        button {
+                                            class: if is_redoing { "thumbnail-redo confirm" } else { "thumbnail-redo" },
+                                            title: "Write this slide anew",
+                                            onclick: {
+                                                let deck_id = deck_id.clone();
+                                                move |event: Event<MouseData>| {
+                                                    event.stop_propagation();
+                                                    pending_slide_delete.set(None);
+                                                    if pending_redo() != Some(index) {
+                                                        pending_redo.set(Some(index));
+                                                        return;
+                                                    }
+                                                    pending_redo.set(None);
+                                                    if is_dirty() {
+                                                        save.call(true);
+                                                    }
+                                                    let deck_id = deck_id.clone();
+                                                    spawn(async move {
+                                                        let session_id = artifact_project(&deck_id);
+                                                        let sent = api::regenerate_unit(
+                                                                &session_id,
+                                                                &deck_id,
+                                                                "slide",
+                                                                index + 1,
+                                                            )
+                                                            .await;
+                                                        if let Err(message) = sent {
+                                                            messages.write().push(message);
+                                                        }
+                                                    });
+                                                }
+                                            },
+                                            span { dangerous_inner_html: icons::REDO }
+                                            if is_redoing {
+                                                span { class: "redo-text", "redo?" }
                                             }
                                         }
                                     }
