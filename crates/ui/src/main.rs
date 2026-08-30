@@ -548,15 +548,14 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .selection-clear { padding: 0.3rem 0.75rem; border: 1px solid var(--hairline);
   border-radius: var(--r-button); background: var(--raised); color: var(--ink-2);
   font-family: var(--mono); font-size: 0.72rem; }
-.selection-finish, .selection-fork, .selection-merge { display: inline-flex; align-items: center;
+.selection-finish, .selection-fork { display: inline-flex; align-items: center;
   gap: 0.35rem; padding: 0.3rem 0.75rem; border: 1px solid var(--teal-line);
   border-radius: var(--r-button); background: var(--raised); color: var(--teal);
   font-family: var(--mono); font-size: 0.72rem; }
 .selection-finish span { display: flex; }
-.selection-finish:hover:not(:disabled), .selection-fork:hover:not(:disabled), .selection-merge:hover:not(:disabled) { background: var(--teal-tint); border-color: var(--teal); }
+.selection-finish:hover:not(:disabled), .selection-fork:hover:not(:disabled) { background: var(--teal-tint); border-color: var(--teal); }
 .selection-finish:disabled, .selection-finish:disabled:hover,
-.selection-fork:disabled, .selection-fork:disabled:hover,
-.selection-merge:disabled, .selection-merge:disabled:hover { background: var(--raised);
+.selection-fork:disabled, .selection-fork:disabled:hover { background: var(--raised);
   border-color: var(--line); color: var(--muted); }
 .card-pill { display: inline-flex;
   align-items: center; gap: 0.375rem; padding: 0.2rem 0.6rem; border-radius: 999px;
