@@ -185,7 +185,7 @@ mod tests {
         assert!(input.contains("Color mode: Dark and sleek"));
         assert!(input.contains("Scope: A short flow of screens"));
         assert!(input.contains("Product kind: Developer tool"));
-        assert!(input.contains("Screen state: A full, realistic working state"));
+        assert!(input.contains("Screen data: Filled with realistic data"));
         let mut deck = request(ArtifactKind::Deck);
         deck.options.audience = Some("practitioners".to_owned());
         deck.options.tone = Some("technical".to_owned());
