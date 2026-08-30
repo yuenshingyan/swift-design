@@ -95,6 +95,9 @@ pub struct RunOptions {
     /// What state a demo's screens are in, one of `DATA_STATES`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_state: Option<String>,
+    /// How finished a demo looks, one of `FIDELITIES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fidelity: Option<String>,
     /// How much goes on one slide, one of `SLIDE_DENSITIES`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slide_density: Option<String>,
@@ -119,6 +122,7 @@ impl RunOptions {
             "scope" => &self.scope,
             "product_kind" => &self.product_kind,
             "data_state" => &self.data_state,
+            "fidelity" => &self.fidelity,
             "slide_density" => &self.slide_density,
             "evidence_style" => &self.evidence_style,
             _ => return None,
@@ -134,6 +138,7 @@ impl RunOptions {
             "scope" => &mut self.scope,
             "product_kind" => &mut self.product_kind,
             "data_state" => &mut self.data_state,
+            "fidelity" => &mut self.fidelity,
             "slide_density" => &mut self.slide_density,
             "evidence_style" => &mut self.evidence_style,
             _ => return None,
@@ -197,6 +202,7 @@ impl Default for RunOptions {
             color_mode: None,
             product_kind: None,
             data_state: None,
+            fidelity: None,
             slide_density: None,
             evidence_style: None,
             suggested: Vec::new(),
