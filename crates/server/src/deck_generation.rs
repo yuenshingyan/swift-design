@@ -97,14 +97,13 @@ impl GenerationEngine {
         match task {
             GenerationTask::Candidates => self.generate_deck_candidates(client, context, log).await,
             GenerationTask::Edit {
-                design,
+                designs,
                 instruction,
             } => {
-                self.edit_deck(client, context, &design, &instruction, log)
+                let design_ids = self
+                    .edit_decks(client, context, &designs, &instruction, log)
                     .await?;
-                Ok(GenerationOutcome::Wrote {
-                    design_ids: vec![design],
-                })
+                Ok(GenerationOutcome::Wrote { design_ids })
             }
             GenerationTask::Continue(deck_ids) => {
                 let outcomes = self
@@ -264,6 +263,40 @@ impl GenerationEngine {
     /// Applies a critique to one chosen deck: the model rewrites the deck
     /// against the brief and the critique as a patch, the result is
     /// validated, polished at high effort, and saved under the same id.
+    /// Applies `instruction` to each deck in turn and returns the ones
+    /// it saved. One failure is logged and the rest still run; the turn
+    /// fails only when every edit failed.
+    async fn edit_decks(
+        &self,
+        client: &reqwest::Client,
+        context: &GenerationContext,
+        deck_ids: &[String],
+        instruction: &str,
+        log: &LogSink,
+    ) -> Result<Vec<String>, GenerationStop> {
+        let mut saved = Vec::new();
+        let mut last_error = None;
+        for deck_id in deck_ids {
+            match self
+                .edit_deck(client, context, deck_id, instruction, log)
+                .await
+            {
+                Ok(()) => saved.push(deck_id.clone()),
+                Err(GenerationStop::NeedsClarification(set)) => {
+                    return Err(GenerationStop::NeedsClarification(set));
+                }
+                Err(GenerationStop::Failed(message)) => {
+                    log(&format!("edit {deck_id}: {message}"));
+                    last_error = Some(GenerationStop::Failed(message));
+                }
+            }
+        }
+        match (saved.is_empty(), last_error) {
+            (true, Some(stop)) => Err(stop),
+            _ => Ok(saved),
+        }
+    }
+
     async fn edit_deck(
         &self,
         client: &reqwest::Client,
