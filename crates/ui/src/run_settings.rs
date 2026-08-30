@@ -4,7 +4,7 @@
 //! the number of variations. Each has a closed set of answers, so a
 //! chip settles it in one click.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use design_model::{
     AUDIENCES, AnsweredQuestion, ArtifactKind, COLOR_MODES, CUSTOM_ANSWER_LIMIT, DATA_STATES,
@@ -456,19 +456,73 @@ fn with_axis(options: &api::SessionOptions, key: &str, value: String) -> api::Se
     next
 }
 
-/// The app's own questions for this kind, as cards of chips.
-#[component]
-pub(crate) fn SharedQuestions(
+/// The options after one pick on a setup card. `key` is an axis key, or
+/// `scenario`, `slides`, `pages`, `candidates`, or `variety`. An empty
+/// value is the judgment choice: it clears the field, or sets the
+/// server default where the field has no blank state.
+fn with_pick(options: &api::SessionOptions, key: &str, value: &str) -> api::SessionOptions {
+    let mut next = options.clone();
+    match key {
+        "scenario" => next.scenario = (!value.is_empty()).then(|| value.to_owned()),
+        "slides" => next.slide_count = value.parse().ok(),
+        "pages" => next.page_count = value.parse().ok(),
+        "candidates" => next.variations = value.parse().ok(),
+        "variety" => {
+            next.variety = if value.is_empty() {
+                "medium".to_owned()
+            } else {
+                value.to_owned()
+            };
+        }
+        _ => return with_axis(options, key, value.to_owned()),
+    }
+    next
+}
+
+/// The options with every pick made on this page applied. A save is
+/// built from the options the session holds plus all the picks, so a
+/// second pick made before the session polls back keeps the first.
+fn with_picks(
+    options: &api::SessionOptions,
+    picks: &HashMap<String, String>,
+) -> api::SessionOptions {
+    picks.iter().fold(options.clone(), |next, (key, value)| {
+        with_pick(&next, key, value)
+    })
+}
+
+/// True when the planner filled `key` and the user has not picked it
+/// on this page either. A pick drops the tag at once, before the
+/// session polls back without the suggestion.
+fn is_still_suggested(
+    options: &api::SessionOptions,
+    picks: &HashMap<String, String>,
+    key: &str,
+) -> bool {
+    is_suggested(options, key) && !picks.contains_key(key)
+}
+
+/// The picks made on this page, keyed by card.
+type Picks = Signal<HashMap<String, String>>;
+
+/// The callback that records a pick as (card key, value).
+type Pick = Callback<(String, String)>;
+
+/// The picks made on this page, and the callback that records one and
+/// saves the options. A card reads its pick from the map, so it shows
+/// the choice at once instead of waiting for the session to poll back,
+/// and the judgment choice shows as itself even where the server keeps
+/// a default in its place.
+fn use_setup_picks(
     session_id: String,
-    kind: ArtifactKind,
     options: api::SessionOptions,
     on_error: EventHandler<String>,
-) -> Element {
-    // The cards the user has touched. A server default is not an answer.
-    let mut picked = use_signal(HashSet::<String>::new);
-    let saved = options.clone();
-    let save = use_callback(move |next: api::SessionOptions| {
-        if next == saved {
+) -> (Picks, Pick) {
+    let mut picks = use_signal(HashMap::<String, String>::new);
+    let pick = use_callback(move |(key, value): (String, String)| {
+        picks.write().insert(key, value);
+        let next = with_picks(&options, &picks());
+        if next == options {
             return;
         }
         let id = session_id.clone();
@@ -478,21 +532,32 @@ pub(crate) fn SharedQuestions(
             }
         });
     });
+    (picks, pick)
+}
+
+/// The app's own questions for this kind, as cards of chips.
+#[component]
+pub(crate) fn SharedQuestions(
+    session_id: String,
+    kind: ArtifactKind,
+    options: api::SessionOptions,
+    on_error: EventHandler<String>,
+) -> Element {
+    let (picks, pick) = use_setup_picks(session_id, options.clone(), on_error);
     rsx! {
         for axis in axes_for(kind) {
             {
-                let options = options.clone();
-                let key = axis.key.to_owned();
-                // A stored answer shows on every visit, so a reload
-                // never hides what the run will use. These fields have
-                // no server default: absent means unanswered. The
-                // judgment choice stores nothing, so it is remembered
-                // for this page only.
-                let current = axis_value(&options, axis.key)
-                    .or_else(|| picked().contains(axis.key).then(String::new));
+                // A pick on this page shows first. Otherwise a stored
+                // answer shows on every visit, so a reload never hides
+                // what the run will use. These fields have no server
+                // default: absent means unanswered.
+                let current = picks()
+                    .get(axis.key)
+                    .cloned()
+                    .or_else(|| axis_value(&options, axis.key));
                 let choices = fixed_choices(axis.choices);
                 let is_wide = is_wide_card(&choices);
-                let is_suggested = is_suggested(&options, axis.key);
+                let is_suggested = is_still_suggested(&options, &picks(), axis.key);
                 rsx! {
                     ChoiceCard {
                         key: "{axis.key}",
@@ -502,10 +567,7 @@ pub(crate) fn SharedQuestions(
                         is_wide,
                         is_suggested,
                         allows_custom: true,
-                        on_pick: move |value: String| {
-                            picked.write().insert(key.clone());
-                            save.call(with_axis(&options, &key, value));
-                        },
+                        on_pick: move |value: String| pick.call((axis.key.to_owned(), value)),
                     }
                 }
             }
@@ -681,105 +743,20 @@ pub(crate) fn DeckQuestions(
     options: api::SessionOptions,
     on_error: EventHandler<String>,
 ) -> Element {
-    // The cards the user has touched on this page. The server keeps
-    // defaults for the rest, and a default is not an answer.
-    let mut picked = use_signal(HashSet::<&'static str>::new);
-    let saved = options.clone();
-    let save = use_callback(move |next: api::SessionOptions| {
-        if next == saved {
-            return;
-        }
-        let id = session_id.clone();
-        spawn(async move {
-            if let Err(message) = api::save_session_options(&id, &next).await {
-                on_error.call(message);
-            }
-        });
-    });
-    let shown = |key: &'static str, value: String| picked().contains(key).then_some(value);
+    let (picks, pick) = use_setup_picks(session_id, options.clone(), on_error);
+    let shown = |key: &str| picks().get(key).cloned();
     // A suggestion shows on the card as picked, so the user sees what
     // the planner read from the request.
-    let suggested =
-        |key: &str, value: Option<String>| value.filter(|_| is_suggested(&options, key));
-    let scenario = shown("scenario", options.scenario.clone().unwrap_or_default());
-    let slides = shown(
-        "slides",
-        options
-            .slide_count
-            .map(|count| count.to_string())
-            .unwrap_or_default(),
-    );
-    let candidates = shown(
-        "candidates",
-        options
-            .variations
-            .map(|count| count.to_string())
-            .unwrap_or_default(),
-    );
-    let variety = shown("variety", options.variety.clone());
-    let evidence = shown(
-        "evidence",
-        options.evidence_style.clone().unwrap_or_default(),
-    )
-    .or_else(|| suggested("evidence_style", options.evidence_style.clone()));
-    let colors = shown("colors", options.color_mode.clone().unwrap_or_default())
-        .or_else(|| suggested("color_mode", options.color_mode.clone()));
-    let is_colors_suggested = is_suggested(&options, "color_mode");
-    let is_evidence_suggested = is_suggested(&options, "evidence_style");
-    let pick_colors = {
-        let options = options.clone();
-        move |value: String| {
-            picked.write().insert("colors");
-            save.call(with_axis(&options, "color_mode", value));
-        }
+    let suggested = |key: &str, value: Option<String>| {
+        value.filter(|_| is_still_suggested(&options, &picks(), key))
     };
-    let pick_evidence = {
-        let options = options.clone();
-        move |value: String| {
-            picked.write().insert("evidence");
-            save.call(with_axis(&options, "evidence_style", value));
-        }
-    };
-    let pick_scenario = {
-        let options = options.clone();
-        move |value: String| {
-            picked.write().insert("scenario");
-            let mut next = options.clone();
-            next.scenario = (!value.is_empty()).then_some(value);
-            save.call(next);
-        }
-    };
-    let pick_slides = {
-        let options = options.clone();
-        move |value: String| {
-            picked.write().insert("slides");
-            let mut next = options.clone();
-            next.slide_count = value.parse::<u32>().ok();
-            save.call(next);
-        }
-    };
-    let pick_candidates = {
-        let options = options.clone();
-        move |value: String| {
-            picked.write().insert("candidates");
-            let mut next = options.clone();
-            next.variations = value.parse::<usize>().ok();
-            save.call(next);
-        }
-    };
-    let pick_variety = {
-        let options = options.clone();
-        move |value: String| {
-            picked.write().insert("variety");
-            let mut next = options.clone();
-            next.variety = if value.is_empty() {
-                "medium".to_owned()
-            } else {
-                value
-            };
-            save.call(next);
-        }
-    };
+    let colors =
+        shown("color_mode").or_else(|| suggested("color_mode", options.color_mode.clone()));
+    let evidence = shown("evidence_style")
+        .or_else(|| suggested("evidence_style", options.evidence_style.clone()));
+    let is_colors_suggested = suggested("color_mode", options.color_mode.clone()).is_some();
+    let is_evidence_suggested =
+        suggested("evidence_style", options.evidence_style.clone()).is_some();
     rsx! {
         // The two long cards share one row, each at half width, so
         // they cost one row between them instead of two.
@@ -790,33 +767,33 @@ pub(crate) fn DeckQuestions(
                 choices: fixed_choices(&COLOR_MODES),
                 is_suggested: is_colors_suggested,
                 allows_custom: true,
-                on_pick: pick_colors,
+                on_pick: move |value: String| pick.call(("color_mode".to_owned(), value)),
             }
             ChoiceCard {
                 label: "What scenario is the deck for?",
-                current: scenario,
+                current: shown("scenario"),
                 choices: scenario_choices(),
                 allows_custom: true,
-                on_pick: pick_scenario,
+                on_pick: move |value: String| pick.call(("scenario".to_owned(), value)),
             }
         }
         ChoiceCard {
             label: "How different should the candidates be?",
-            current: variety,
+            current: shown("variety"),
             choices: variety_choices(),
-            on_pick: pick_variety,
+            on_pick: move |value: String| pick.call(("variety".to_owned(), value)),
         }
         ChoiceCard {
             label: "How long should the deck be?",
-            current: slides,
+            current: shown("slides"),
             choices: slide_count_options(),
-            on_pick: pick_slides,
+            on_pick: move |value: String| pick.call(("slides".to_owned(), value)),
         }
         ChoiceCard {
             label: "How many candidates should I write?",
-            current: candidates,
+            current: shown("candidates"),
             choices: candidate_choices(),
-            on_pick: pick_candidates,
+            on_pick: move |value: String| pick.call(("candidates".to_owned(), value)),
         }
         ChoiceCard {
             label: "How much does it lean on data?",
@@ -824,7 +801,7 @@ pub(crate) fn DeckQuestions(
             choices: fixed_choices(&EVIDENCE_STYLES),
             is_suggested: is_evidence_suggested,
             allows_custom: true,
-            on_pick: pick_evidence,
+            on_pick: move |value: String| pick.call(("evidence_style".to_owned(), value)),
         }
     }
 }
@@ -840,95 +817,20 @@ pub(crate) fn DocumentQuestions(
     options: api::SessionOptions,
     on_error: EventHandler<String>,
 ) -> Element {
-    // The cards the user has touched on this page. The server keeps
-    // defaults for the rest, and a default is not an answer.
-    let mut picked = use_signal(HashSet::<&'static str>::new);
-    let saved = options.clone();
-    let save = use_callback(move |next: api::SessionOptions| {
-        if next == saved {
-            return;
-        }
-        let id = session_id.clone();
-        spawn(async move {
-            if let Err(message) = api::save_session_options(&id, &next).await {
-                on_error.call(message);
-            }
-        });
-    });
-    let shown = |key: &'static str, value: String| picked().contains(key).then_some(value);
+    let (picks, pick) = use_setup_picks(session_id, options.clone(), on_error);
+    let shown = |key: &str| picks().get(key).cloned();
     // A suggestion shows on the card as picked, so the user sees what
     // the planner read from the request.
-    let suggested =
-        |key: &str, value: Option<String>| value.filter(|_| is_suggested(&options, key));
-    let pages = shown(
-        "pages",
-        options
-            .page_count
-            .map(|count| count.to_string())
-            .unwrap_or_default(),
-    );
-    let candidates = shown(
-        "candidates",
-        options
-            .variations
-            .map(|count| count.to_string())
-            .unwrap_or_default(),
-    );
-    let variety = shown("variety", options.variety.clone());
-    let evidence = shown(
-        "evidence",
-        options.evidence_style.clone().unwrap_or_default(),
-    )
-    .or_else(|| suggested("evidence_style", options.evidence_style.clone()));
-    let colors = shown("colors", options.color_mode.clone().unwrap_or_default())
-        .or_else(|| suggested("color_mode", options.color_mode.clone()));
-    let is_colors_suggested = is_suggested(&options, "color_mode");
-    let is_evidence_suggested = is_suggested(&options, "evidence_style");
-    let pick_colors = {
-        let options = options.clone();
-        move |value: String| {
-            picked.write().insert("colors");
-            save.call(with_axis(&options, "color_mode", value));
-        }
+    let suggested = |key: &str, value: Option<String>| {
+        value.filter(|_| is_still_suggested(&options, &picks(), key))
     };
-    let pick_evidence = {
-        let options = options.clone();
-        move |value: String| {
-            picked.write().insert("evidence");
-            save.call(with_axis(&options, "evidence_style", value));
-        }
-    };
-    let pick_pages = {
-        let options = options.clone();
-        move |value: String| {
-            picked.write().insert("pages");
-            let mut next = options.clone();
-            next.page_count = value.parse::<u32>().ok();
-            save.call(next);
-        }
-    };
-    let pick_candidates = {
-        let options = options.clone();
-        move |value: String| {
-            picked.write().insert("candidates");
-            let mut next = options.clone();
-            next.variations = value.parse::<usize>().ok();
-            save.call(next);
-        }
-    };
-    let pick_variety = {
-        let options = options.clone();
-        move |value: String| {
-            picked.write().insert("variety");
-            let mut next = options.clone();
-            next.variety = if value.is_empty() {
-                "medium".to_owned()
-            } else {
-                value
-            };
-            save.call(next);
-        }
-    };
+    let colors =
+        shown("color_mode").or_else(|| suggested("color_mode", options.color_mode.clone()));
+    let evidence = shown("evidence_style")
+        .or_else(|| suggested("evidence_style", options.evidence_style.clone()));
+    let is_colors_suggested = suggested("color_mode", options.color_mode.clone()).is_some();
+    let is_evidence_suggested =
+        suggested("evidence_style", options.evidence_style.clone()).is_some();
     rsx! {
         ChoiceCard {
             label: "How should the colors read?",
@@ -937,25 +839,25 @@ pub(crate) fn DocumentQuestions(
             is_wide: true,
             is_suggested: is_colors_suggested,
             allows_custom: true,
-            on_pick: pick_colors,
+            on_pick: move |value: String| pick.call(("color_mode".to_owned(), value)),
         }
         ChoiceCard {
             label: "How different should the candidates be?",
-            current: variety,
+            current: shown("variety"),
             choices: variety_choices(),
-            on_pick: pick_variety,
+            on_pick: move |value: String| pick.call(("variety".to_owned(), value)),
         }
         ChoiceCard {
             label: "How long should the document be?",
-            current: pages,
+            current: shown("pages"),
             choices: page_count_options(),
-            on_pick: pick_pages,
+            on_pick: move |value: String| pick.call(("pages".to_owned(), value)),
         }
         ChoiceCard {
             label: "How many candidates should I write?",
-            current: candidates,
+            current: shown("candidates"),
             choices: candidate_choices(),
-            on_pick: pick_candidates,
+            on_pick: move |value: String| pick.call(("candidates".to_owned(), value)),
         }
         ChoiceCard {
             label: "How much does it lean on data?",
@@ -963,7 +865,7 @@ pub(crate) fn DocumentQuestions(
             choices: fixed_choices(&EVIDENCE_STYLES),
             is_suggested: is_evidence_suggested,
             allows_custom: true,
-            on_pick: pick_evidence,
+            on_pick: move |value: String| pick.call(("evidence_style".to_owned(), value)),
         }
     }
 }
@@ -1336,6 +1238,51 @@ mod tests {
     fn the_empty_choice_is_the_judgment_one() {
         assert!(is_judgment_choice(""));
         assert!(!is_judgment_choice("5"));
+    }
+
+    #[test]
+    fn a_judgment_pick_clears_the_field_or_sets_the_default() {
+        let options = api::SessionOptions {
+            variety: "high".to_owned(),
+            slide_count: Some(12),
+            scenario: Some("pitch".to_owned()),
+            ..Default::default()
+        };
+        // The variety has no blank state, so judgment is the default.
+        assert_eq!(with_pick(&options, "variety", "").variety, "medium");
+        assert_eq!(with_pick(&options, "variety", "low").variety, "low");
+        assert_eq!(with_pick(&options, "slides", "").slide_count, None);
+        assert_eq!(with_pick(&options, "slides", "8").slide_count, Some(8));
+        assert_eq!(with_pick(&options, "pages", "3").page_count, Some(3));
+        assert_eq!(with_pick(&options, "candidates", "2").variations, Some(2));
+        assert_eq!(with_pick(&options, "scenario", "").scenario, None);
+        // Any other key is an axis.
+        assert_eq!(
+            with_pick(&options, "color_mode", "dark").color_mode,
+            Some("dark".to_owned())
+        );
+    }
+
+    #[test]
+    fn every_pick_on_the_page_lands_in_one_save() {
+        let options = api::SessionOptions {
+            suggested: vec!["color_mode".to_owned()],
+            color_mode: Some("light".to_owned()),
+            ..Default::default()
+        };
+        let picks = HashMap::from([
+            ("color_mode".to_owned(), "dark".to_owned()),
+            ("variety".to_owned(), String::new()),
+            ("slides".to_owned(), "10".to_owned()),
+        ]);
+        let next = with_picks(&options, &picks);
+        assert_eq!(next.color_mode, Some("dark".to_owned()));
+        assert_eq!(next.variety, "medium");
+        assert_eq!(next.slide_count, Some(10));
+        // A pick by the user is no longer a suggestion.
+        assert!(next.suggested.is_empty());
+        // No picks is no change.
+        assert_eq!(with_picks(&options, &HashMap::new()), options);
     }
 
     #[test]
