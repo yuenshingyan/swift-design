@@ -111,16 +111,19 @@ Open `http://127.0.0.1:3000`, pick a model in the studio settings, and describe
 what you need. Pressing **Create** asks whether to build a software demo or a
 deck. The agent runs on your own model account.
 
-The design editor has two modes on a tab pair: **Edit** and **Play**. In
+The design editor has two modes on a tab pair: **Play** (the default) and **Edit**. In
 Edit a click selects a node. In Play a click acts as it would for a user:
 a link to `#screen-3` opens screen 3, a `<details>` menu opens, and a
 checkbox or radio toggle flips. A demo carries no script. Flows are links
 between screens, and widgets are CSS states.
 
+A demo exports as one HTML file. It has no PDF export: a print loses
+the flows and the widgets.
+
 For a deck, the editor adds **Present** (the presenter view with notes, a
-timer, and an audience window that follows it) and **PPTX** next to the
-HTML and PDF exports. PDF, PPTX, and screenshots need Chrome or Chromium
-on the server machine.
+timer, and an audience window that follows it), **PDF**, and **PPTX**
+next to the HTML export. PDF, PPTX, and screenshots need Chrome or
+Chromium on the server machine.
 
 ## Agent routes
 
