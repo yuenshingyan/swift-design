@@ -118,7 +118,7 @@
           ]
         },
         "html": {
-          "description": "The screen as one HTML fragment. The canvas is the design's\n`viewport` in px; use px units. Allowed: headings, text, lists, tables, `<img>`\nwith `src=\"/uploads/{name}\"`, inline `<svg>`, `<pre><code>`,\n`<blockquote>`, `<a>`. Not allowed: `<script>`, `<style>`,\n`<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, forms,\nmedia, comments, `on*` attributes, `javascript:` and `data:`\nURLs, external images. Close every tag.",
+          "description": "The screen as one HTML fragment. The canvas is the design's\n`viewport` in px; use px units. Allowed: headings, text, lists, tables, `<img>`\nwith `src=\"/uploads/{name}\"`, inline `<svg>`, `<pre><code>`,\n`<blockquote>`, `<a>`, `<details>`, `<label>`, `<input>` with\ntype `checkbox` or `radio`. Not allowed: `<script>`, `<style>`,\n`<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, `<form>`,\n`<button>`, other input types, media, comments, `on*`\nattributes, `javascript:` and `data:` URLs, external images.\nClose every tag. A link with `href=\"#screen-3\"` opens screen 3,\ncounted from 1.",
           "type": "string"
         },
         "name": {
