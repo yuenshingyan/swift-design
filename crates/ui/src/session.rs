@@ -168,6 +168,7 @@ pub(crate) fn SessionWorkspace(
     let is_running = run_value.as_ref().is_some_and(|run| run.is_running);
     let can_chat = is_chat_open(state, is_running);
 
+    let artifact_kind = session.artifact_kind;
     let cards = match session.artifact_kind {
         ArtifactKind::Demo => {
             cards_from_designs(&designs(), &session_id, session.chosen_design.as_deref())
@@ -668,6 +669,22 @@ pub(crate) fn SessionWorkspace(
                                     }
                                 });
                             }
+                        },
+                        on_fork: move |artifact_id: String| {
+                            spawn(async move {
+                                let forked = match artifact_kind {
+                                    ArtifactKind::Demo => api::fork_design(&artifact_id).await,
+                                    ArtifactKind::Deck => api::fork_deck(&artifact_id).await,
+                                };
+                                if let Err(message) = forked {
+                                    error.set(Some(message));
+                                }
+                            });
+                        },
+                        // The pins carry the ids; the user's next message
+                        // says which parts to take from each.
+                        on_merge: move |ids: Vec<String>| {
+                            pin_candidates(&mut pinned.write(), &ids);
                         },
                     }
                 }
