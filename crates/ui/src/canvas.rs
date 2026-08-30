@@ -301,6 +301,7 @@ pub(crate) fn CandidateCanvas(
     on_open: EventHandler<(ArtifactKind, String)>,
     on_continue: EventHandler<String>,
     /// A Fork press: copy this candidate under the next free number.
+    /// Called once per ticked card.
     on_fork: EventHandler<String>,
     /// A Merge press: pin these candidates in the chat, so the next
     /// message says which parts to combine.
@@ -338,6 +339,18 @@ pub(crate) fn CandidateCanvas(
         .map(|card| (card.id.clone(), card.kind))
         .collect();
     let selected_count = selected().len();
+    // The ticked cards Finish acts on: previews no run is writing.
+    let finishable: HashSet<String> = cards
+        .iter()
+        .filter(|card| {
+            card.is_preview() && !run_designs.contains_key(&card.id) && !queued.contains(&card.id)
+        })
+        .map(|card| card.id.clone())
+        .collect();
+    let finish_count = selected()
+        .iter()
+        .filter(|id| finishable.contains(*id))
+        .count();
     let delete_selected = use_callback(move |_: ()| {
         let ids: Vec<String> = selected().iter().cloned().collect();
         let kinds = kinds.clone();
@@ -367,21 +380,46 @@ pub(crate) fn CandidateCanvas(
                 }
             }
             button {
-                class: if is_confirming_delete() { "selection-delete confirm" } else { "selection-delete" },
-                disabled: selected_count == 0,
+                class: "selection-finish",
+                disabled: finish_count == 0,
+                title: "Write the remaining screens of each ticked preview from its outline",
                 onclick: move |_| {
-                    if is_confirming_delete() {
-                        delete_selected.call(());
-                    } else {
-                        is_confirming_delete.set(true);
+                    let mut ids: Vec<String> = selected()
+                        .iter()
+                        .filter(|id| finishable.contains(*id))
+                        .cloned()
+                        .collect();
+                    ids.sort();
+                    for id in ids {
+                        on_continue.call(id);
                     }
+                    selected.write().clear();
+                    is_confirming_delete.set(false);
                 },
-                if is_confirming_delete() {
-                    "Delete {selected_count}? This cannot be undone"
-                } else if selected_count > 0 {
-                    "Delete {selected_count}"
+                span { dangerous_inner_html: icons::PLAY }
+                if finish_count > 0 {
+                    "Finish {finish_count}"
                 } else {
-                    "Delete"
+                    "Finish"
+                }
+            }
+            button {
+                class: "selection-fork",
+                disabled: selected_count == 0,
+                title: "Copy each ticked candidate as a new one",
+                onclick: move |_| {
+                    let mut ids: Vec<String> = selected().iter().cloned().collect();
+                    ids.sort();
+                    for id in ids {
+                        on_fork.call(id);
+                    }
+                    selected.write().clear();
+                    is_confirming_delete.set(false);
+                },
+                if selected_count > 0 {
+                    "Fork {selected_count}"
+                } else {
+                    "Fork"
                 }
             }
             button {
@@ -399,6 +437,24 @@ pub(crate) fn CandidateCanvas(
                     "Merge {selected_count}"
                 } else {
                     "Merge"
+                }
+            }
+            button {
+                class: if is_confirming_delete() { "selection-delete confirm" } else { "selection-delete" },
+                disabled: selected_count == 0,
+                onclick: move |_| {
+                    if is_confirming_delete() {
+                        delete_selected.call(());
+                    } else {
+                        is_confirming_delete.set(true);
+                    }
+                },
+                if is_confirming_delete() {
+                    "Delete {selected_count}? This cannot be undone"
+                } else if selected_count > 0 {
+                    "Delete {selected_count}"
+                } else {
+                    "Delete"
                 }
             }
             button {
@@ -447,8 +503,6 @@ pub(crate) fn CandidateCanvas(
                             is_selected,
                             revision,
                             on_open,
-                            on_continue,
-                            on_fork,
                             on_select: move |id: String| {
                                 let mut picks = selected.write();
                                 if !picks.remove(&id) {
@@ -503,8 +557,6 @@ fn CandidateCard(
     is_selected: bool,
     revision: u64,
     on_open: EventHandler<(ArtifactKind, String)>,
-    on_continue: EventHandler<String>,
-    on_fork: EventHandler<String>,
     on_select: EventHandler<String>,
     on_page: EventHandler<(String, usize)>,
 ) -> Element {
@@ -523,8 +575,8 @@ fn CandidateCard(
     let ratio = card.ratio.clone();
     let preview = card.preview_url(revision, current);
     let remaining = card.remaining_count();
-    // A preview waits for the rest of its outline. The button asks the
-    // app for it, and the run then shows its progress on this card.
+    // A preview waits for the rest of its outline. Finish in the bar
+    // asks the app for it, and the run then shows its progress here.
     let is_finish_offered = card.is_preview() && progress.is_none();
     let is_finishing = is_finish_offered && is_queued;
     let has_pages = count > 1;
@@ -633,6 +685,11 @@ fn CandidateCard(
                             "queued"
                         }
                     }
+                    // A preview waits for the rest of its outline. The
+                    // pill says how much, and Finish in the bar writes it.
+                    if is_finish_offered && !is_finishing {
+                        span { class: "card-pill planned", "{remaining} planned" }
+                    }
                 }
                 if let Some(percent) = progress {
                     div { class: "card-progress",
@@ -653,45 +710,6 @@ fn CandidateCard(
             div { class: "card-footer",
                 div { class: "card-name",
                     span { class: "card-label", "{candidate_label(&id)}" }
-                }
-                // A fork copies the candidate as a new one, so an edit
-                // can try something without losing this version.
-                button {
-                    class: "card-fork",
-                    title: "Copy this candidate as a new one",
-                    disabled: progress.is_some(),
-                    onclick: {
-                        let id = id.clone();
-                        move |event: MouseEvent| {
-                            event.stop_propagation();
-                            on_fork.call(id.clone());
-                        }
-                    },
-                    span { dangerous_inner_html: icons::FORK }
-                    span { class: "fork-text", "Fork" }
-                }
-                if is_finishing {
-                    button {
-                        class: "card-finish finishing",
-                        disabled: true,
-                        title: "The run will write the remaining screens",
-                        span { class: "finish-spinner" }
-                        span { class: "finish-text", "Finishing…" }
-                    }
-                } else if is_finish_offered {
-                    button {
-                        class: "card-finish",
-                        title: "Write the remaining screens from the outline",
-                        onclick: {
-                            let id = id.clone();
-                            move |event: MouseEvent| {
-                                event.stop_propagation();
-                                on_continue.call(id.clone());
-                            }
-                        },
-                        span { dangerous_inner_html: icons::PLAY }
-                        span { class: "finish-text", "Finish {remaining}" }
-                    }
                 }
             }
         }
