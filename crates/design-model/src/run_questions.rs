@@ -68,7 +68,7 @@ pub const PRODUCT_KINDS: [(&str, &str); 6] = [
 /// What state a demo's screens are in, as (value, label). A demo that
 /// shows empty screens reads as unfinished, so the app asks.
 pub const DATA_STATES: [(&str, &str); 3] = [
-    ("populated", "A full, realistic working state"),
+    ("populated", "Filled with realistic data"),
     ("empty", "The first-run empty state"),
     ("mixed", "A mix across the screens"),
 ];
@@ -170,7 +170,7 @@ pub const DEMO_AXES: [AppAxis; 3] = [
     },
     AppAxis {
         key: "data_state",
-        name: "Screen state",
+        name: "Screen data",
         choices: &DATA_STATES,
     },
 ];
@@ -271,10 +271,7 @@ mod tests {
     #[test]
     fn each_kind_asks_its_own_axes_and_the_shared_ones() {
         let demo: Vec<&str> = app_axes(ArtifactKind::Demo).map(|axis| axis.name).collect();
-        assert_eq!(
-            demo,
-            ["Color mode", "Scope", "Product kind", "Screen state"]
-        );
+        assert_eq!(demo, ["Color mode", "Scope", "Product kind", "Screen data"]);
         let deck: Vec<&str> = app_axes(ArtifactKind::Deck).map(|axis| axis.name).collect();
         assert_eq!(
             deck,
