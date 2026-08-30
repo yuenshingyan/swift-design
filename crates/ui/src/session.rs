@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 use crate::api;
 use crate::canvas::{CandidateCanvas, cards_from_decks, cards_from_designs, queued_finishes};
 use crate::chat::recall_prompt;
-use crate::chat_controls::{ModelChip, SendButton};
+use crate::chat_controls::{ModelChip, SendButton, with_effort};
 use crate::prompt_history::{PromptHistory, prompt_entries};
 use crate::question_card::{
     DraftAnswer, QaRow, QuestionCardState, QuestionSetCard, answered_entries, question_card_state,
@@ -456,7 +456,28 @@ pub(crate) fn SessionWorkspace(
                         },
                     }
                     div { class: "chat-controls",
-                        ModelChip { settings, is_configuring }
+                        ModelChip {
+                            settings,
+                            is_configuring,
+                            effort: Some(session.options.effort.clone()),
+                            on_effort: {
+                                let session_id = session_id.clone();
+                                let options = session.options.clone();
+                                move |level: String| {
+                                    let next = with_effort(&options, &level);
+                                    if let Some(view) = view.write().as_mut() {
+                                        view.session.options = next.clone();
+                                    }
+                                    let session_id = session_id.clone();
+                                    spawn(async move {
+                                        let saved = api::save_session_options(&session_id, &next).await;
+                                        if let Err(message) = saved {
+                                            error.set(Some(message));
+                                        }
+                                    });
+                                }
+                            },
+                        }
                         SendButton {
                             label: "Send",
                             is_enabled: can_chat && !draft.read().trim().is_empty(),
