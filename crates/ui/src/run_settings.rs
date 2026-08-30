@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use design_model::{
     AUDIENCES, AnsweredQuestion, ArtifactKind, COLOR_MODES, CUSTOM_ANSWER_LIMIT, DATA_STATES,
-    DECK_SCENARIOS, DECK_VARIETY_LEVELS, DEMO_SCOPES, EVIDENCE_STYLES, PRODUCT_KINDS,
+    DECK_SCENARIOS, DECK_VARIETY_LEVELS, DEMO_SCOPES, EVIDENCE_STYLES, FIDELITIES, PRODUCT_KINDS,
     SLIDE_DENSITIES, TONES, Viewport, WorkflowState,
 };
 use dioxus::prelude::*;
@@ -198,6 +198,11 @@ fn axes_for(kind: ArtifactKind) -> Vec<Axis> {
                 label: "What data should the screens show?",
                 choices: &DATA_STATES,
             },
+            Axis {
+                key: "fidelity",
+                label: "How finished should it look?",
+                choices: &FIDELITIES,
+            },
         ],
         // The audience and the tone are a deck's questions: a deck
         // speaks to a room. A demo's request already says what the
@@ -338,6 +343,7 @@ fn axis_value(options: &api::SessionOptions, key: &str) -> Option<String> {
         "scope" => options.scope.clone(),
         "product_kind" => options.product_kind.clone(),
         "data_state" => options.data_state.clone(),
+        "fidelity" => options.fidelity.clone(),
         "slide_density" => options.slide_density.clone(),
         "evidence_style" => options.evidence_style.clone(),
         _ => None,
@@ -358,6 +364,7 @@ fn with_axis(options: &api::SessionOptions, key: &str, value: String) -> api::Se
         "scope" => next.scope = picked,
         "product_kind" => next.product_kind = picked,
         "data_state" => next.data_state = picked,
+        "fidelity" => next.fidelity = picked,
         "slide_density" => next.slide_density = picked,
         "evidence_style" => next.evidence_style = picked,
         _ => {}
