@@ -115,6 +115,47 @@ pub(crate) struct NodeStyles {
     pub(crate) is_leaf: bool,
 }
 
+/// How the preview takes a click: as a selection, or as the user of the
+/// demo would.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreviewMode {
+    /// A click selects a node, a double-click edits its text.
+    Edit,
+    /// A click acts: a link opens its screen, a menu opens, a toggle
+    /// flips.
+    Play,
+}
+
+impl PreviewMode {
+    /// Both modes, in tab order.
+    pub(crate) const ALL: [PreviewMode; 2] = [PreviewMode::Edit, PreviewMode::Play];
+
+    /// The tab label.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            PreviewMode::Edit => "Edit",
+            PreviewMode::Play => "Play",
+        }
+    }
+
+    /// The tab tooltip.
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            PreviewMode::Edit => "Click a node to select it",
+            PreviewMode::Play => "Click buttons, links, and menus as a user would",
+        }
+    }
+
+    /// The query that asks the render for the editing script. Play mode
+    /// asks for nothing, so a click reaches the content.
+    pub(crate) fn render_query(self) -> &'static str {
+        match self {
+            PreviewMode::Edit => "&editable=true",
+            PreviewMode::Play => "",
+        }
+    }
+}
+
 /// One message posted by the editable preview page.
 #[derive(Debug, Deserialize)]
 pub(crate) struct PreviewMessage {
@@ -153,6 +194,9 @@ pub(crate) struct PreviewMessage {
     /// Screens to move by, on navigate messages: 1 or -1.
     #[serde(default)]
     pub(crate) step: i32,
+    /// The screen to open, on a navigate message from a screen link.
+    #[serde(default)]
+    pub(crate) target: Option<usize>,
     /// Every node selected, on select messages, the primary one last.
     /// A command-click adds to it.
     #[serde(default)]
@@ -304,6 +348,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
     // The toolbar's `…` menu, and the template name being typed while
     // its save prompt is open.
     let mut is_menu_open = use_signal(|| false);
+    let mut mode = use_signal(|| PreviewMode::Edit);
     let mut template_name = use_signal(|| Option::<String>::None);
     // The node reference the chat prepends to the next message.
     let mut chat_context = use_signal(|| Option::<String>::None);
@@ -381,11 +426,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                 "swift-design-navigate" => {
                     let count = design.peek().screens.len();
                     let current = selected();
-                    let next = if message.step > 0 {
-                        (current + 1).min(count.saturating_sub(1))
-                    } else {
-                        current.saturating_sub(1)
-                    };
+                    let next = navigation_target(current, count, message.step, message.target);
                     if next != current {
                         selected.set(next);
                         selected_node.set(None);
@@ -555,6 +596,21 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                     }
                     span { class: "divider" }
                     span { class: "preview-heading", "{selected() + 1} / {screen_count}" }
+                    div { class: "canvas-tabs preview-modes", role: "tablist",
+                        for candidate in PreviewMode::ALL {
+                            button {
+                                key: "{candidate.label()}",
+                                role: "tab",
+                                class: if mode() == candidate { "canvas-tab open" } else { "canvas-tab" },
+                                title: "{candidate.title()}",
+                                onclick: move |_| {
+                                    mode.set(candidate);
+                                    selected_node.set(None);
+                                },
+                                span { class: "tab-name", "{candidate.label()}" }
+                            }
+                        }
+                    }
                     span { class: "badge", "agent {agent_count}" }
                     span { class: "badge you", "you {user_count}" }
                     // Every change saves by itself, shortly after it. The
@@ -673,15 +729,21 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                             title: "Design preview",
                             style: "aspect-ratio: {ratio}",
                             "data-preview": "true",
-                            src: "/designs/{design_id}/render?version={preview_version()}&editable=true&screen={selected() + 1}",
+                            src: "/designs/{design_id}/render?version={preview_version()}{mode().render_query()}&screen={selected() + 1}",
                         }
                     }
                     p { class: "preview-hint",
-                        span {
-                            "Click a node to reference it in the chat and edit its text · ⌘-click adds more · ⌘-click a tile to pin pages"
+                        if mode() == PreviewMode::Play {
+                            span {
+                                "Click buttons, links, and menus as a user would · a link to another screen opens it"
+                            }
+                        } else {
+                            span {
+                                "Click a node to reference it in the chat and edit its text · ⌘-click adds more · ⌘-click a tile to pin pages"
+                            }
+                            span { class: "dot", "·" }
+                            span { "right-click for quick edits" }
                         }
-                        span { class: "dot", "·" }
-                        span { "right-click for quick edits" }
                         span { class: "dot", "·" }
                         span {
                             kbd { "←" }
@@ -1598,6 +1660,25 @@ pub(crate) fn thumbnail_class(state: ThumbnailState) -> String {
     class
 }
 
+/// The screen a navigate message opens: `target` when the message names
+/// one that exists, else one step from `current`, kept inside the
+/// design.
+pub(crate) fn navigation_target(
+    current: usize,
+    count: usize,
+    step: i32,
+    target: Option<usize>,
+) -> usize {
+    if let Some(target) = target {
+        return if target < count { target } else { current };
+    }
+    if step > 0 {
+        (current + 1).min(count.saturating_sub(1))
+    } else {
+        current.saturating_sub(1)
+    }
+}
+
 /// The class of the stage around the main preview. A narrow canvas is
 /// limited by height, and a portrait canvas also gets the bezel.
 pub(crate) fn preview_stage_class(viewport: Viewport) -> &'static str {
@@ -1696,12 +1777,30 @@ mod tests {
     use design_model::TransitionEffect;
 
     use crate::editor::{
-        MONO_FONTS, NodeStyles, SelectedNode, SelectionEntry, TEXT_FONTS, ThumbnailState,
-        default_screen, effect_uses_motion, field_count, first_heading, font_options,
-        history_label, move_screen, node_reference, optional, outline_entry, outline_title,
-        page_reference, preview_stage_class, screen_label, selection_paths, selection_reference,
-        strip_summary, strip_tags, thumbnail_class, toggle_pin,
+        MONO_FONTS, NodeStyles, PreviewMode, SelectedNode, SelectionEntry, TEXT_FONTS,
+        ThumbnailState, default_screen, effect_uses_motion, field_count, first_heading,
+        font_options, history_label, move_screen, navigation_target, node_reference, optional,
+        outline_entry, outline_title, page_reference, preview_stage_class, screen_label,
+        selection_paths, selection_reference, strip_summary, strip_tags, thumbnail_class,
+        toggle_pin,
     };
+
+    #[test]
+    fn play_mode_asks_the_render_for_no_editing_script() {
+        assert_eq!(PreviewMode::Edit.render_query(), "&editable=true");
+        assert_eq!(PreviewMode::Play.render_query(), "");
+        assert_eq!(PreviewMode::ALL.map(PreviewMode::label), ["Edit", "Play"]);
+    }
+
+    #[test]
+    fn a_screen_link_opens_its_screen_and_a_step_moves_one() {
+        assert_eq!(navigation_target(0, 4, 0, Some(2)), 2);
+        assert_eq!(navigation_target(1, 4, 0, Some(9)), 1);
+        assert_eq!(navigation_target(1, 4, 1, None), 2);
+        assert_eq!(navigation_target(3, 4, 1, None), 3);
+        assert_eq!(navigation_target(0, 4, -1, None), 0);
+        assert_eq!(navigation_target(0, 0, 1, None), 0);
+    }
 
     #[test]
     fn only_moving_effects_show_direction_and_duration() {
