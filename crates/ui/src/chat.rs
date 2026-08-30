@@ -12,7 +12,7 @@ use crate::api;
 use crate::chat_controls::{ModelChip, SendButton, with_effort};
 use crate::prompt_history::{PromptHistory, prompt_entries};
 use crate::settings::{SettingsPanel, artifact_project, pause_briefly};
-use crate::status::RunStatusCard;
+use crate::status::{RunStatusCard, phase_name};
 use crate::uploads::{AttachButton, AttachmentChips, PasteUploads};
 
 /// Scrolls the conversation to its newest message. Runs after the
@@ -68,6 +68,9 @@ pub fn DesignChat(
     let mut settings = use_signal(|| Option::<api::SettingsView>::None);
     let mut is_configuring = use_signal(|| false);
     let mut draft = use_signal(String::new);
+    // The comments kept for one message: each a node or page reference
+    // and a note, so several changes go out as one turn.
+    let mut comments = use_signal(Vec::<String>::new);
     let mut error = use_signal(|| Option::<String>::None);
     // The run options, for the effort pick on the model chip.
     let mut options = use_signal(|| Option::<api::SessionOptions>::None);
@@ -75,6 +78,7 @@ pub fn DesignChat(
     // the chip back.
     let mut dropped_page = use_signal(|| Option::<String>::None);
     let page_for_send = page.clone();
+    let page_for_comment = page.clone();
     // ↑ and ↓ walk the prompts sent before, as a shell does, when the
     // caret is on the first or the last line.
     let mut history = use_signal(PromptHistory::default);
@@ -95,6 +99,7 @@ pub fn DesignChat(
         .map(|(_, query)| mention_matches(&pages, query))
         .unwrap_or_default();
     let unit_for_send = page_unit.clone().unwrap_or_default();
+    let unit_for_comment = unit_for_send.clone();
     // Picks row `row` of the menu: the page is pinned, and the `@` and
     // its query leave the draft.
     let pick_mention = {
@@ -181,25 +186,53 @@ pub fn DesignChat(
         }
     });
 
+    // Keeps the draft as one comment on the referenced node or page,
+    // for a message that carries several. The composer clears for the
+    // next one.
+    let queue_comment = use_callback(move |_: ()| {
+        let text = draft().trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        let page = page_for_comment
+            .as_deref()
+            .filter(|_| !has_page_reference(&text, &unit_for_comment));
+        let Some(reference) = reference_for(&context(), page, &dropped_page()) else {
+            return;
+        };
+        comments.write().push(comment_line(&reference, &text));
+        draft.set(String::new());
+        history.write().reset();
+        context.set(None);
+        if is_pinned && let Some(on_drop_page) = &on_drop_page {
+            on_drop_page.call(());
+        }
+    });
+
     let send = use_callback({
         let design_id = design_id.clone();
         let session_id = session_id.clone();
         move |_: ()| {
             let text = draft().trim().to_owned();
-            if text.is_empty() {
+            let queued = comments();
+            if text.is_empty() && queued.is_empty() {
                 return;
             }
             // A page the text names itself needs no chip in front of it.
             let page = page_for_send
                 .as_deref()
                 .filter(|_| !has_page_reference(&text, &unit_for_send));
-            let content = match reference_for(&context(), page, &dropped_page()) {
-                Some(reference) => format!("{reference} {text}"),
-                None => text,
-            };
+            let tail = (!text.is_empty()).then(|| {
+                match reference_for(&context(), page, &dropped_page()) {
+                    Some(reference) => format!("{reference} {text}"),
+                    None => text,
+                }
+            });
+            let content = message_with_comments(&queued, tail);
             let design_id = design_id.clone();
             let session_id = session_id.clone();
             draft.set(String::new());
+            comments.set(Vec::new());
             history.write().reset();
             context.set(None);
             // The pins were for this message. The next one starts clean.
@@ -227,8 +260,11 @@ pub fn DesignChat(
     let is_model_chosen = current_settings.is_some();
     let show_setup = settings().is_some() && is_configuring();
     let is_running = agent_run().is_some_and(|run| run.is_running);
-    let can_send = is_model_chosen && !draft().trim().is_empty();
-
+    let running_placeholder = agent_run()
+        .map(|run| format!("{} Your next request queues up.", phase_name(&run)))
+        .unwrap_or_default();
+    let has_draft = !draft().trim().is_empty();
+    let can_send = is_model_chosen && (has_draft || !comments().is_empty());
     rsx! {
         section { class: "conversation editor-chat",
             div { class: "thread",
@@ -258,6 +294,25 @@ pub fn DesignChat(
                         SettingsPanel { settings, is_configuring }
                     }
                 }
+                // The comments kept so far. They go out as one message
+                // with the next Send.
+                if !comments().is_empty() {
+                    div { class: "comment-list",
+                        div { class: "comment-head", {comment_summary(comments().len())} }
+                        for (index, line) in comments().iter().enumerate() {
+                            div { key: "{index}", class: "comment-row mono",
+                                span { class: "comment-text", "{line}" }
+                                button {
+                                    title: "Drop this comment",
+                                    onclick: move |_| {
+                                        comments.write().remove(index);
+                                    },
+                                    "×"
+                                }
+                            }
+                        }
+                    }
+                }
                 if let Some(reference) = reference_for(
                     &context(),
                     page
@@ -268,24 +323,35 @@ pub fn DesignChat(
                     &dropped_page(),
                 )
                 {
-                    div { class: "context-chip mono",
-                        span { "{reference}" }
-                        button {
-                            title: "Drop this reference",
-                            onclick: {
-                                let page = page.clone();
-                                move |_| {
-                                    context.set(None);
-                                    if is_pinned {
-                                        if let Some(on_drop_page) = &on_drop_page {
-                                            on_drop_page.call(());
+                    div { class: "context-row",
+                        div { class: "context-chip mono",
+                            span { "{reference}" }
+                            button {
+                                title: "Drop this reference",
+                                onclick: {
+                                    let page = page.clone();
+                                    move |_| {
+                                        context.set(None);
+                                        if is_pinned {
+                                            if let Some(on_drop_page) = &on_drop_page {
+                                                on_drop_page.call(());
+                                            }
+                                        } else {
+                                            dropped_page.set(page.clone());
                                         }
-                                    } else {
-                                        dropped_page.set(page.clone());
                                     }
-                                }
-                            },
-                            "×"
+                                },
+                                "×"
+                            }
+                        }
+                        // A note on the referenced node can wait for more
+                        // notes, so several changes go out as one turn.
+                        button {
+                            class: "queue-comment",
+                            disabled: !has_draft,
+                            title: "Keep this note as a comment and add more before sending (⌘Enter)",
+                            onclick: move |_| queue_comment.call(()),
+                            "+ Comment"
                         }
                     }
                 }
@@ -309,7 +375,7 @@ pub fn DesignChat(
                     }
                 }
                 textarea {
-                    placeholder: if is_running { "Working… your next request queues up." } else if page_unit.is_some() { "Ask for a change: “make this title bigger”, “@3 more margin”…" } else { "Ask for a change: “make this title bigger”, “swap screens 2 and 4”…" },
+                    placeholder: if is_running { running_placeholder } else if page_unit.is_some() { "Ask for a change: “make this title bigger”, “@3 more margin”…" } else { "Ask for a change: “make this title bigger”, “swap screens 2 and 4”…" },
                     value: "{draft()}",
                     oninput: move |event| {
                         draft.set(event.value());
@@ -355,7 +421,13 @@ pub fn DesignChat(
                             }
                             if event.key() == Key::Enter && !event.modifiers().shift() {
                                 event.prevent_default();
-                                send.call(());
+                                // ⌘Enter keeps the note as a comment;
+                                // Enter sends everything.
+                                if event.modifiers().meta() || event.modifiers().ctrl() {
+                                    queue_comment.call(());
+                                } else {
+                                    send.call(());
+                                }
                             }
                         }
                     },
@@ -416,6 +488,30 @@ pub fn DesignChat(
                 }
             }
         }
+    }
+}
+
+/// One kept comment: the reference, then the note.
+pub(crate) fn comment_line(reference: &str, text: &str) -> String {
+    format!("{reference}: {text}")
+}
+
+/// The message the kept comments make, one per line, with the text
+/// typed last after them.
+pub(crate) fn message_with_comments(comments: &[String], tail: Option<String>) -> String {
+    let mut lines: Vec<&str> = comments.iter().map(String::as_str).collect();
+    if let Some(tail) = &tail {
+        lines.push(tail);
+    }
+    lines.join("\n")
+}
+
+/// The head of the comment list: `1 comment for the next message`.
+pub(crate) fn comment_summary(count: usize) -> String {
+    if count == 1 {
+        "1 comment for the next message".to_owned()
+    } else {
+        format!("{count} comments for the next message")
     }
 }
 
@@ -549,8 +645,37 @@ pub(crate) fn has_page_reference(text: &str, unit: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        has_page_reference, mention_at, mention_matches, page_title, reference_for, remove_mention,
+        comment_line, comment_summary, has_page_reference, mention_at, mention_matches,
+        message_with_comments, page_title, reference_for, remove_mention,
     };
+
+    #[test]
+    fn kept_comments_go_out_as_one_message_one_per_line() {
+        let first = comment_line("[screen 2, node 0/1 <h2.title>: Plans]", "make it bigger");
+        let second = comment_line("[screen 3]", "more margin");
+        assert_eq!(
+            first,
+            "[screen 2, node 0/1 <h2.title>: Plans]: make it bigger"
+        );
+        assert_eq!(
+            message_with_comments(&[first.clone(), second.clone()], None),
+            format!("{first}\n{second}")
+        );
+        // The text typed last follows the comments.
+        assert_eq!(
+            message_with_comments(
+                std::slice::from_ref(&first),
+                Some("and a footer".to_owned())
+            ),
+            format!("{first}\nand a footer")
+        );
+        assert_eq!(
+            message_with_comments(&[], Some("plain".to_owned())),
+            "plain"
+        );
+        assert_eq!(comment_summary(1), "1 comment for the next message");
+        assert_eq!(comment_summary(3), "3 comments for the next message");
+    }
 
     #[test]
     fn an_at_sign_opens_a_page_mention() {
