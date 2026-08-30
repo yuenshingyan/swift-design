@@ -59,6 +59,23 @@ pub(crate) fn focus_note(unit: &str, plural: &str, indexes: &[usize], total: usi
     )
 }
 
+/// The prompt block that explains a fresh view: the units named are
+/// shown without their markup, and the model writes them anew.
+pub(crate) fn fresh_note(unit: &str, plural: &str, indexes: &[usize], total: usize) -> String {
+    let shown: Vec<String> = indexes
+        .iter()
+        .map(|index| (index + 1).to_string())
+        .collect();
+    format!(
+        "Write {unit} {} of {total} anew. The old html and css of these {plural} are removed \
+         from the view: write new markup for each, do not repeat the old one. Keep the title \
+         and the notes as the purpose of each {unit}. Keep the theme and every other {unit}. \
+         Patch indexes refer to the whole set. Replace only these {plural}. Do not delete or \
+         insert any {unit}.\n",
+        shown.join(", ")
+    )
+}
+
 /// The prompt block with the measured findings. Empty when there are
 /// none.
 pub(crate) fn findings_note(findings: &[String]) -> String {
@@ -117,6 +134,62 @@ pub(crate) struct EditFix<'a, T> {
     pub(crate) context: &'a ArtifactRequest<'a, T>,
     /// The units the edit touched: the ones measured and fixed.
     pub(crate) indexes: Vec<usize>,
+}
+
+/// What an edit turn does: the artifacts to change, the change, and
+/// whether the named units are written anew.
+pub(crate) struct EditOrder<'a> {
+    /// The artifacts to edit, each in turn.
+    pub(crate) artifact_ids: &'a [String],
+    /// The user's change, with its references.
+    pub(crate) instruction: &'a str,
+    /// True for a regenerate: the units the instruction names are shown
+    /// without their markup, and the model writes them from scratch.
+    pub(crate) is_fresh: bool,
+}
+
+/// What a merge writes from: the candidates to combine, each with its
+/// number and its JSON, and the user's instruction.
+pub(crate) struct MergeInput {
+    /// The source candidates, as (candidate number, artifact JSON).
+    pub(crate) sources: Vec<(usize, String)>,
+    /// What to take from each, in the user's words.
+    pub(crate) instruction: String,
+}
+
+/// The prompt block for a merge: the sources and the rule for taking
+/// parts from them. `unit` is `design` or `deck`.
+pub(crate) fn merge_note(unit: &str, input: &MergeInput) -> String {
+    let mut note = format!(
+        "Combine these candidates into one {unit}, as the user asks:\n{}\n",
+        input.instruction.trim()
+    );
+    for (number, json) in &input.sources {
+        note.push_str(&format!("Candidate {number}:\n{json}\n"));
+    }
+    note.push_str(&format!(
+        "Take each part from the candidate the user names for it. Keep the markup of a part you \
+         take. Where the user names no source for a part, take it from the first candidate. Use \
+         one theme for the whole {unit}, and adapt the parts to it so the {unit} reads as one. \
+         Write the whole {unit}.\n"
+    ));
+    note
+}
+
+/// The merge sources as the prompt names them: each loaded artifact
+/// with its candidate number, or its position when the id has none.
+pub(crate) fn merge_sources<T: serde::Serialize>(
+    loaded: &[(&str, T)],
+) -> Result<Vec<(usize, String)>, String> {
+    loaded
+        .iter()
+        .enumerate()
+        .map(|(position, (id, artifact))| {
+            let number = crate::candidates::candidate_number_of(id).unwrap_or(position + 1);
+            let json = serde_json::to_string(artifact).map_err(|error| error.to_string())?;
+            Ok((number, json))
+        })
+        .collect()
 }
 
 /// What one edit prompt is built from.
@@ -182,5 +255,27 @@ mod tests {
             findings_note(&["slides[1] p: overflow".to_owned()])
                 .contains("- slides[1] p: overflow")
         );
+    }
+
+    #[test]
+    fn the_fresh_note_asks_for_new_markup_and_keeps_the_rest() {
+        let note = fresh_note("screen", "screens", &[2], 5);
+        assert!(note.contains("Write screen 3 of 5 anew."));
+        assert!(note.contains("do not repeat the old one"));
+        assert!(note.contains("Do not delete or insert any screen."));
+    }
+
+    #[test]
+    fn the_merge_note_lists_every_source_with_its_number() {
+        let input = MergeInput {
+            sources: vec![(1, "{\"a\":1}".to_owned()), (3, "{\"c\":3}".to_owned())],
+            instruction: "Hero from 1, pricing from 3.".to_owned(),
+        };
+        let note = merge_note("design", &input);
+        assert!(note.starts_with("Combine these candidates into one design"));
+        assert!(note.contains("Hero from 1, pricing from 3."));
+        assert!(note.contains("Candidate 1:\n{\"a\":1}\n"));
+        assert!(note.contains("Candidate 3:\n{\"c\":3}\n"));
+        assert!(note.contains("Write the whole design."));
     }
 }
