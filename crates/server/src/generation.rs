@@ -60,10 +60,11 @@ pub enum GenerationOutcome {
 pub(crate) enum GenerationTask {
     /// Write the requested candidates.
     Candidates,
-    /// Apply the user's latest request to the open artifact.
+    /// Apply the user's latest request to each artifact named.
     Edit {
-        /// The artifact id to edit.
-        design: String,
+        /// The artifact ids to edit: the candidates the user pinned,
+        /// the artifact open in the editor, or the chosen one.
+        designs: Vec<String>,
         /// What to change, in the user's words.
         instruction: String,
     },
@@ -110,14 +111,20 @@ enum PlanStep {
     Replied,
 }
 
-/// The artifact the latest user turn was sent from, when the editor
-/// was open.
-fn open_artifact(messages: &[ChatMessage]) -> Option<String> {
-    messages
-        .iter()
-        .rev()
-        .find(|message| message.role == "user")
-        .and_then(|message| message.design.clone())
+/// The artifacts the latest user turn is about: the candidates it
+/// pinned, else the artifact it was sent from in the editor, else the
+/// chosen one. Empty when it names none.
+fn edit_targets(messages: &[ChatMessage], chosen: Option<&str>) -> Vec<String> {
+    let latest = messages.iter().rev().find(|message| message.role == "user");
+    if let Some(message) = latest {
+        if !message.pinned.is_empty() {
+            return message.pinned.clone();
+        }
+        if let Some(design) = &message.design {
+            return vec![design.clone()];
+        }
+    }
+    chosen.map(str::to_owned).into_iter().collect()
 }
 
 /// How many questions the user answered since the last turn that
@@ -682,17 +689,12 @@ impl GenerationEngine {
             .await
             .map_err(|error| error.to_string())?;
         let candidate_count = self.candidate_count(context).await;
-        let open_artifact = open_artifact(&messages).or_else(|| session.chosen_design.clone());
+        let targets = edit_targets(&messages, session.chosen_design.as_deref());
         // The planner reads the user's source files, as the writing
         // turns do. Planning blind is what produced questions the files
         // already answered.
         let attachments = self.load_attachments(&context.session_id, log).await;
-        let input = planner_input(
-            &context.request,
-            &messages,
-            candidate_count,
-            open_artifact.as_deref(),
-        );
+        let input = planner_input(&context.request, &messages, candidate_count, &targets);
         let request = vec![
             serde_json::json!({ "role": "system", "content": planner_prompt(context.request.kind) }),
             self.user_message(&input, &attachments),
@@ -754,12 +756,10 @@ impl GenerationEngine {
         if !plan.reply.is_empty() {
             self.say(session_id, &plan.reply).await?;
         }
-        if plan.should_edit
-            && let Some(artifact) = open_artifact
-        {
+        if plan.should_edit && !targets.is_empty() {
             let instruction = latest_user_text(&messages).unwrap_or_default();
             return Ok(PlanStep::Task(GenerationTask::Edit {
-                design: artifact,
+                designs: targets,
                 instruction,
             }));
         }
@@ -837,14 +837,13 @@ impl GenerationEngine {
         match task {
             GenerationTask::Candidates => self.generate_candidates(client, context, log).await,
             GenerationTask::Edit {
-                design,
+                designs,
                 instruction,
             } => {
-                self.edit_design(client, context, &design, &instruction, log)
+                let design_ids = self
+                    .edit_designs(client, context, &designs, &instruction, log)
                     .await?;
-                Ok(GenerationOutcome::Wrote {
-                    design_ids: vec![design],
-                })
+                Ok(GenerationOutcome::Wrote { design_ids })
             }
             GenerationTask::Continue(design_ids) => {
                 let outcomes = self
@@ -1116,6 +1115,42 @@ impl GenerationEngine {
     /// Applies a critique to one chosen design: the model rewrites the
     /// design against the brief and the critique, the result is
     /// validated, polished, and saved under the same id.
+    /// Applies `instruction` to each design in turn and returns the ones
+    /// it saved. One failure is logged and the rest still run; the turn
+    /// fails only when every edit failed.
+    async fn edit_designs(
+        &self,
+        client: &reqwest::Client,
+        context: &GenerationContext,
+        design_ids: &[String],
+        instruction: &str,
+        log: &LogSink,
+    ) -> Result<Vec<String>, GenerationStop> {
+        let mut saved = Vec::new();
+        let mut last_error = None;
+        for design_id in design_ids {
+            match self
+                .edit_design(client, context, design_id, instruction, log)
+                .await
+            {
+                Ok(()) => saved.push(design_id.clone()),
+                // A question from the model halts the whole turn: the
+                // user answers it before any other edit.
+                Err(GenerationStop::NeedsClarification(set)) => {
+                    return Err(GenerationStop::NeedsClarification(set));
+                }
+                Err(GenerationStop::Failed(message)) => {
+                    log(&format!("edit {design_id}: {message}"));
+                    last_error = Some(GenerationStop::Failed(message));
+                }
+            }
+        }
+        match (saved.is_empty(), last_error) {
+            (true, Some(stop)) => Err(stop),
+            _ => Ok(saved),
+        }
+    }
+
     async fn edit_design(
         &self,
         client: &reqwest::Client,
@@ -2833,6 +2868,8 @@ mod tests {
 
     use design_model::WorkflowState;
 
+    use super::edit_targets;
+
     use super::{
         GenerationContext, GenerationEngine, GenerationOutcome, ProgressGroup, ProgressSink,
         answers_since_last_write, candidate_plans, edit_prompt, focused_design_json, system_prompt,
@@ -3415,6 +3452,90 @@ mod tests {
         let text = server.requests()[1].to_string();
         assert!(text.contains("Apply this change: Tighten the hero."));
         let planner = server.requests()[0].to_string();
-        assert!(planner.contains("Artifact open in the editor: talk-candidate-1"));
+        assert!(planner.contains("Artifacts to edit this turn: talk-candidate-1"));
+    }
+
+    #[tokio::test]
+    async fn a_message_with_pinned_candidates_patches_each_of_them() {
+        let server = FakeModelServer::start().await;
+        server.push_text(r#"{"reply":"Tightening both.","edit":true}"#);
+        // Each edit takes a patch reply and one fix-round reply.
+        for _ in 0..4 {
+            server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:64px;}"}}]}"#);
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+        designs.save("talk-candidate-1", &design).await.unwrap();
+        designs.save("talk-candidate-2", &design).await.unwrap();
+        designs.save("talk-candidate-3", &design).await.unwrap();
+        set_up_session(&sessions, "A landing page.").await;
+        sessions
+            .apply("talk", design_model::WorkflowEvent::GenerationStarted)
+            .await
+            .unwrap();
+        sessions
+            .apply("talk", design_model::WorkflowEvent::GenerationSucceeded)
+            .await
+            .unwrap();
+        let pinned = vec!["talk-candidate-1".to_owned(), "talk-candidate-3".to_owned()];
+        sessions
+            .append_message(
+                "talk",
+                ChatMessage::user("[candidate 1] [candidate 3] Tighten the hero.", None)
+                    .with_pinned(pinned),
+            )
+            .await
+            .unwrap();
+        let outcome = engine(&server, &designs, &sessions)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        let GenerationOutcome::Wrote { design_ids } = outcome else {
+            panic!("expected a write");
+        };
+        assert_eq!(
+            design_ids,
+            vec!["talk-candidate-1".to_owned(), "talk-candidate-3".to_owned()]
+        );
+        for id in ["talk-candidate-1", "talk-candidate-3"] {
+            let edited = designs.load(id).await.unwrap().unwrap();
+            assert!(edited.screens[0].html.contains("Tighter"), "{id}");
+        }
+        let untouched = designs.load("talk-candidate-2").await.unwrap().unwrap();
+        assert!(!untouched.screens[0].html.contains("Tighter"));
+        let planner = server.requests()[0].to_string();
+        assert!(
+            planner.contains("Artifacts to edit this turn: talk-candidate-1, talk-candidate-3")
+        );
+    }
+
+    #[test]
+    fn the_edit_targets_are_the_pins_then_the_open_artifact_then_the_chosen_one() {
+        let pinned = vec![
+            ChatMessage::user("Bigger.", Some("talk-candidate-1")).with_pinned(vec![
+                "talk-candidate-2".to_owned(),
+                "talk-candidate-3".to_owned(),
+            ]),
+        ];
+        assert_eq!(
+            edit_targets(&pinned, Some("talk-candidate-1")),
+            vec!["talk-candidate-2".to_owned(), "talk-candidate-3".to_owned()]
+        );
+        let open = vec![ChatMessage::user("Bigger.", Some("talk-candidate-1"))];
+        assert_eq!(
+            edit_targets(&open, Some("talk-candidate-2")),
+            vec!["talk-candidate-1".to_owned()]
+        );
+        let plain = vec![
+            ChatMessage::user("Bigger.", None),
+            ChatMessage::assistant("Done."),
+        ];
+        assert_eq!(
+            edit_targets(&plain, Some("talk-candidate-2")),
+            vec!["talk-candidate-2".to_owned()]
+        );
+        assert!(edit_targets(&plain, None).is_empty());
     }
 }
