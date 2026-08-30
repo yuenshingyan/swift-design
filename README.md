@@ -83,6 +83,14 @@ Type `@` in the chat to pin a candidate, or `All candidates`, for the next messa
 
 The box at the top left of a card selects it. With cards selected, a bar over the canvas deletes them: one click arms the button, the second deletes. A deleted candidate that was the chosen one leaves the session with no choice.
 
+Three more ways to work a candidate:
+
+- **Fork.** The `Fork` button on a card copies it under the next free number, so a change can be tried on the copy while the original stays.
+- **Merge.** Tick two or more cards and press `Merge`: the cards are pinned in the chat. Say which parts to take from each, for example "the hero from candidate 1 and the pricing table from candidate 3". The planner writes one new candidate from those parts. The candidates of a merge must share a canvas.
+- **Redo a screen or a slide.** In the editor, the circular arrow on a thumbnail writes that screen or slide anew: the model sees its name and notes, not its old markup. One click arms the button, the second sends. The old version stays in the history.
+
+Every new candidate takes the next free number: a later run adds candidates after the ones the session has instead of overwriting them.
+
 In `reviewing`, the chat is the edit input: type what should change and press **Send**. With a candidate chosen, the change is applied to it; otherwise new candidates are written.
 
 ## Architecture
