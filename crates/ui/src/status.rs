@@ -128,14 +128,27 @@ pub(crate) fn RunStatusCard(run: api::AgentRun) -> Element {
                 "SWIFT_DESIGN_AGENT_COMMAND and restart the server."
             }
         } else if run.exit_code.is_some_and(|code| code != 0) {
-            p { class: "error", "The agent exited with code {run.exit_code.unwrap_or_default()}." }
+            p { class: "error", "{failure_title(&run)}" }
             if let Some(line) = last_log_line(&run.log_tail) {
-                p { class: "agent-log", "{line}" }
+                p { class: "agent-log wrapped", "{line}" }
             }
         } else if run.total_tokens > 0 {
             p { class: "usage-line", "{usage_line(&run)}" }
         }
     }
+}
+
+/// The first line of a failed run. A custom command has an exit code
+/// worth reading; the built-in engine's code is only a flag, so the
+/// line says the run failed and leaves the reason to the log line.
+fn failure_title(run: &api::AgentRun) -> String {
+    if run.active_agent.as_deref() == Some("custom") {
+        return format!(
+            "The agent exited with code {}.",
+            run.exit_code.unwrap_or_default()
+        );
+    }
+    "The run failed.".to_owned()
 }
 
 #[cfg(test)]
@@ -156,6 +169,15 @@ mod tests {
             progress: None,
             designs: std::collections::HashMap::new(),
         }
+    }
+
+    #[test]
+    fn a_failed_run_names_the_exit_code_only_for_a_custom_command() {
+        let mut failed = run();
+        failed.exit_code = Some(1);
+        assert_eq!(failure_title(&failed), "The run failed.");
+        failed.active_agent = Some("custom".to_owned());
+        assert_eq!(failure_title(&failed), "The agent exited with code 1.");
     }
 
     #[test]

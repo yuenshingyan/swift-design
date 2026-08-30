@@ -411,7 +411,7 @@ async fn post_message(
 pub async fn continue_artifact(session_id: &str, artifact_id: &str) -> Result<(), String> {
     let builder = Request::post(&format!("/sessions/{session_id}/messages"))
         .json(&MessageRequest {
-            content: "Write the remaining screens from the outline.",
+            content: "Write the rest from the outline.",
             design: Some(artifact_id),
             action: Some("continue"),
             pinned: &[],

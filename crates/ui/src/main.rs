@@ -326,6 +326,8 @@ button.primary.send-button { display: inline-flex; align-items: center; justify-
 .question-hint { margin: 0; font-size: 0.75rem; color: var(--muted); }
 .agent-log { margin: 0; font-family: var(--mono); font-size: 0.68rem; color: var(--faint);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+/* A failure's log line is read whole, so it wraps instead of clipping. */
+.agent-log.wrapped { white-space: normal; overflow-wrap: anywhere; }
 .settings-head { display: flex; align-items: center; gap: 0.625rem;
   padding: 0.625rem 0.875rem; background: var(--subtle);
   border-bottom: 1px solid var(--hairline-2); }
@@ -1134,6 +1136,8 @@ button.brief-toggle:hover { background: transparent; color: var(--ink); }
 .error-card { background: var(--raised); border: 1px solid rgba(180,35,31,.35); border-radius: 10px;
   padding: 0.75rem 0.875rem; display: flex; flex-direction: column; gap: 0.4rem; align-items: flex-start; }
 .error-card .error-title { color: var(--danger, #b4231f); font-weight: 600; }
+/* An error names a candidate id, one long token, so it must break. */
+.error-card p { margin: 0; max-width: 100%; overflow-wrap: anywhere; }
 /* The stopped card mirrors the error card without the alarm. */
 .stopped-card { background: var(--raised); border: 1px solid var(--line); border-radius: 10px;
   padding: 0.75rem 0.875rem; display: flex; flex-direction: column; gap: 0.4rem; align-items: flex-start; }

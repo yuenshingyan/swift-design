@@ -415,15 +415,26 @@ impl ModelClient {
     /// Sends `body` and streams the reply. The accumulated assistant
     /// text goes to `on_text` after every delta, so callers can show
     /// partial results. Returns the full text and reports token usage.
-    /// A provider that answers with one JSON document instead of an
-    /// event stream is read the plain way.
+    /// A reply the connection dropped is sent once more.
     pub async fn chat_with(
         &self,
         client: &reqwest::Client,
         body: serde_json::Value,
         on_text: Option<&TextSink>,
     ) -> Result<String, String> {
-        let mut request = client.post(&self.configuration.chat_url).json(&body);
+        with_one_retry(|| self.chat_once(client, &body, on_text)).await
+    }
+
+    /// One send of `body` with the reply streamed. A provider that
+    /// answers with one JSON document instead of an event stream is
+    /// read the plain way.
+    async fn chat_once(
+        &self,
+        client: &reqwest::Client,
+        body: &serde_json::Value,
+        on_text: Option<&TextSink>,
+    ) -> Result<String, ChatFailure> {
+        let mut request = client.post(&self.configuration.chat_url).json(body);
         match &self.configuration.auth {
             ProviderAuth::None => {}
             ProviderAuth::ApiKey(api_key) => request = request.bearer_auth(api_key),
@@ -446,15 +457,16 @@ impl ModelClient {
             }
         }
         let provider = &self.configuration.provider;
-        let mut response = request
-            .send()
-            .await
-            .map_err(|error| format!("request to {provider} failed: {error}"))?;
+        let mut response = request.send().await.map_err(|error| {
+            ChatFailure::Dropped(format!("request to {provider} failed: {error}"))
+        })?;
         let status = response.status();
         if !status.is_success() {
             let mut detail = response.text().await.unwrap_or_default();
             detail.truncate(300);
-            return Err(format!("{provider} returned {status}: {detail}"));
+            return Err(ChatFailure::Final(format!(
+                "{provider} returned {status}: {detail}"
+            )));
         }
         let mut state = StreamState::default();
         let mut raw = String::new();
@@ -464,13 +476,15 @@ impl ModelClient {
                 Ok(Ok(Some(chunk))) => chunk,
                 Ok(Ok(None)) => break,
                 Ok(Err(error)) => {
-                    return Err(format!("reading the {provider} reply failed: {error}"));
+                    return Err(ChatFailure::Dropped(format!(
+                        "reading the {provider} reply failed: {error}"
+                    )));
                 }
                 Err(_) => {
-                    return Err(format!(
+                    return Err(ChatFailure::Final(format!(
                         "the {provider} reply went silent for {} s",
                         IDLE_TIMEOUT.as_secs()
-                    ));
+                    )));
                 }
             };
             pending.extend_from_slice(&chunk);
@@ -490,8 +504,8 @@ impl ModelClient {
         stream_line(self.configuration.wire, tail.trim_end(), &mut state);
         if !state.saw_event {
             // One JSON document, not an event stream.
-            let value: serde_json::Value =
-                serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+            let value: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|error| ChatFailure::Final(error.to_string()))?;
             self.report_usage(parse_usage(&value["usage"]));
             let content = match self.configuration.wire {
                 WireFormat::OpenAiChat => value["choices"][0]["message"]["content"].as_str(),
@@ -500,13 +514,15 @@ impl ModelClient {
             };
             return content
                 .map(str::to_owned)
-                .ok_or_else(|| "response has no message content".to_owned());
+                .ok_or_else(|| ChatFailure::Final("response has no message content".to_owned()));
         }
         self.report_usage(state.usage);
         if state.collected.is_empty() {
-            return Err(state
-                .failure
-                .unwrap_or_else(|| "the stream carried no output text".to_owned()));
+            return Err(ChatFailure::Final(
+                state
+                    .failure
+                    .unwrap_or_else(|| "the stream carried no output text".to_owned()),
+            ));
         }
         Ok(state.collected)
     }
@@ -514,6 +530,40 @@ impl ModelClient {
     fn report_usage(&self, usage: Option<TokenUsage>) {
         if let (Some(sink), Some(usage)) = (&self.usage_sink, usage) {
             sink(usage);
+        }
+    }
+}
+
+/// Why one send of a request failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ChatFailure {
+    /// The connection failed or the reply was cut off before its end.
+    /// A provider or a proxy closes a stream that runs for minutes,
+    /// and reqwest reports the cut as `error decoding response body`.
+    /// The same request may succeed when sent again.
+    Dropped(String),
+    /// The provider answered, and the answer is the failure: an error
+    /// status, a silent reply, or a body with no text.
+    Final(String),
+}
+
+/// Runs `attempt`, and once more when the first reply was dropped.
+/// A second drop reports both, so the log shows the retry.
+async fn with_one_retry<F, Future>(mut attempt: F) -> Result<String, String>
+where
+    F: FnMut() -> Future,
+    Future: std::future::Future<Output = Result<String, ChatFailure>>,
+{
+    let first = match attempt().await {
+        Ok(text) => return Ok(text),
+        Err(ChatFailure::Final(message)) => return Err(message),
+        Err(ChatFailure::Dropped(message)) => message,
+    };
+    match attempt().await {
+        Ok(text) => Ok(text),
+        Err(ChatFailure::Final(message)) => Err(message),
+        Err(ChatFailure::Dropped(message)) => {
+            Err(format!("{message} (sent twice; the first try: {first})"))
         }
     }
 }
@@ -810,10 +860,54 @@ fn parse_chatgpt_stream(stream_text: &str) -> Result<(String, Option<TokenUsage>
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::cell::Cell;
+
     use super::{
-        StreamState, TokenUsage, WireFormat, chatgpt_responses_body, context_window,
-        parse_chatgpt_stream, parse_usage, stream_line,
+        ChatFailure, StreamState, TokenUsage, WireFormat, chatgpt_responses_body, context_window,
+        parse_chatgpt_stream, parse_usage, stream_line, with_one_retry,
     };
+
+    #[tokio::test]
+    async fn a_dropped_reply_is_sent_once_more() {
+        let calls = Cell::new(0);
+        let result = with_one_retry(|| {
+            calls.set(calls.get() + 1);
+            let call = calls.get();
+            async move {
+                if call == 1 {
+                    Err(ChatFailure::Dropped("reading the reply failed".to_owned()))
+                } else {
+                    Ok("done".to_owned())
+                }
+            }
+        })
+        .await;
+        assert_eq!(result, Ok("done".to_owned()));
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_second_drop_reports_both_and_a_final_failure_is_not_retried() {
+        let calls = Cell::new(0);
+        let result = with_one_retry(|| {
+            calls.set(calls.get() + 1);
+            async { Err(ChatFailure::Dropped("cut off".to_owned())) }
+        })
+        .await;
+        assert_eq!(
+            result,
+            Err("cut off (sent twice; the first try: cut off)".to_owned())
+        );
+        assert_eq!(calls.get(), 2);
+        let calls = Cell::new(0);
+        let result = with_one_retry(|| {
+            calls.set(calls.get() + 1);
+            async { Err(ChatFailure::Final("fake returned 400".to_owned())) }
+        })
+        .await;
+        assert_eq!(result, Err("fake returned 400".to_owned()));
+        assert_eq!(calls.get(), 1);
+    }
 
     #[test]
     fn usage_parses_openai_and_anthropic_shapes() {

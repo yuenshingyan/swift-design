@@ -442,7 +442,7 @@ pub(crate) fn CandidateCanvas(
             button {
                 class: "selection-finish",
                 disabled: finish_count == 0,
-                title: "Write the remaining screens of each ticked preview from its outline",
+                title: "Write the rest of each ticked preview from its outline",
                 onclick: move |_| {
                     let mut ids: Vec<String> = selected()
                         .iter()
