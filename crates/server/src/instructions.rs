@@ -172,6 +172,7 @@ fn instructions() -> serde_json::Value {
             "base_styles": "32px body text in the body font and text color; headings in the heading font with margin 0; paragraphs and lists margin 0; images block and max-width 100%",
             "node_reference": "[screen N, node a/b/c <tag.class>: text] for a design; [slide N, node a/b/c <tag.class>: text] for a deck",
             "upload_reference": "[upload name]",
+            "comment_lines": "A message may carry several comments, one per line, each `<node or page reference>: <note>`. Apply every line in one edit.",
         },
         "payloads": {
             "PUT /sessions/{id}/question-set": "a BriefQuestionSet",
