@@ -375,6 +375,7 @@ pub fn routes() -> Router<crate::AppState> {
             "/decks/{id}",
             get(get_deck).put(put_deck).delete(delete_deck),
         )
+        .route("/decks/{id}/fork", post(fork_deck))
         .route("/decks/{id}/render", get(render_stored_deck))
         .route("/decks/{id}/authors", get(get_authors))
         .route("/decks/{id}/history", get(list_history))
@@ -540,6 +541,45 @@ async fn delete_deck(
         Ok(false) => api_error::deck_not_found(&id),
         Err(error) => api_error::internal_error(&error),
     }
+}
+
+/// Copies one candidate to the next free number of its session, as a
+/// new candidate, and answers its id. Refused while the session's run
+/// writes, so the number cannot race the run.
+async fn fork_deck(
+    State(store): State<DeckStore>,
+    State(sessions): State<crate::sessions::SessionStore>,
+    State(notifier): State<ChangeNotifier>,
+    Path(id): Path<String>,
+) -> Response {
+    if !is_valid_deck_id(&id) {
+        return api_error::invalid_deck_id(&id);
+    }
+    let base = crate::sessions::session_id_of_artifact(&id).to_owned();
+    if let Ok(Some(session)) = sessions.read(&base).await
+        && session.state == design_model::WorkflowState::Generating
+    {
+        return api_error::error_response(
+            StatusCode::CONFLICT,
+            &format!("session `{base}` is generating: fork when the run ends"),
+            Vec::new(),
+        );
+    }
+    let rows = match store.list().await {
+        Ok(rows) => rows,
+        Err(error) => return api_error::internal_error(&error),
+    };
+    let number =
+        crate::candidates::next_candidate_number(&base, rows.iter().map(|row| row.id.as_str()));
+    let new_id = crate::candidates::candidate_id(&base, number);
+    if let Err(response) = crate::candidates::copy_deck(&store, &id, &new_id).await {
+        return response;
+    }
+    // The session's updated_at moves, so the listing sorts it first.
+    let _ = sessions.update(&base, |_| {}).await;
+    notifier.notify();
+    tracing::info!(session_id = %base, from = %id, to = %new_id, "candidate forked");
+    Json(serde_json::json!({ "id": new_id })).into_response()
 }
 
 /// Query of `GET /decks/{id}/render`.
