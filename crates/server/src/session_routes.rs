@@ -22,6 +22,7 @@ use crate::api_error;
 use crate::candidates::{CANDIDATE_LIMIT, PLATFORM_LIMIT};
 use crate::decks::DeckStore;
 use crate::designs::{DesignStore, is_valid_design_id};
+use crate::edit_focus::referenced_indexes;
 use crate::events::ChangeNotifier;
 use crate::sessions::{
     AnswerRecord, ChatMessage, NewSession, RunOptions, Session, SessionError, SessionStore,
@@ -457,8 +458,27 @@ fn pinned_problem(session_id: &str, pinned: &[String]) -> Option<String> {
     })
 }
 
+/// Why a regenerate message is refused: it names no artifact, or its
+/// content names no unit of the session's kind.
+fn regenerate_problem(session: &Session, request: &MessageRequest) -> Option<String> {
+    if request.design.is_none() {
+        return Some("a regenerate message needs the design id whose units it rewrites".to_owned());
+    }
+    let unit = match session.artifact_kind {
+        design_model::ArtifactKind::Demo => "screen",
+        design_model::ArtifactKind::Deck => "slide",
+    };
+    if referenced_indexes(&request.content, unit).is_empty() {
+        return Some(format!(
+            "a regenerate message names the {unit}s to rewrite, like `[{unit} 2]`"
+        ));
+    }
+    None
+}
+
 /// Appends a conversation turn. A `continue` action on a reviewing
-/// session starts a generation run over the named design.
+/// session starts a generation run over the named design. A
+/// `regenerate` action rewrites the units its content names.
 async fn post_message(
     State(sessions): State<SessionStore>,
     State(runner): State<AgentRunner>,
@@ -491,14 +511,19 @@ async fn post_message(
         return api_error::error_response(StatusCode::UNPROCESSABLE_ENTITY, &problem, Vec::new());
     }
     let is_continue = request.action.as_deref() == Some("continue");
+    let is_regenerate = request.action.as_deref() == Some("regenerate");
     if let Some(action) = &request.action
-        && action != "continue"
+        && !is_continue
+        && !is_regenerate
     {
         return api_error::error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
-            &format!("action `{action}` is unknown: use continue, or omit it"),
+            &format!("action `{action}` is unknown: use continue or regenerate, or omit it"),
             Vec::new(),
         );
+    }
+    if is_regenerate && let Some(problem) = regenerate_problem(&session, &request) {
+        return api_error::error_response(StatusCode::UNPROCESSABLE_ENTITY, &problem, Vec::new());
     }
     if is_continue {
         if request.design.is_none() {
@@ -535,8 +560,9 @@ async fn post_message(
             return session_error_response(&error);
         }
     }
-    let message = match (is_continue, request.design.as_deref()) {
-        (true, Some(design)) => ChatMessage::continue_request(content, design),
+    let message = match (is_continue, is_regenerate, request.design.as_deref()) {
+        (true, _, Some(design)) => ChatMessage::continue_request(content, design),
+        (_, true, Some(design)) => ChatMessage::regenerate_request(content, design),
         _ => ChatMessage::user(content, request.design.as_deref()).with_pinned(request.pinned),
     };
     if let Err(error) = sessions.append_message(&id, message).await {
@@ -774,6 +800,46 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
         let messages = &view(&application, "finance-app").await["messages"];
         assert_eq!(messages[0]["pinned"][1], "finance-app-candidate-2");
+    }
+
+    #[tokio::test]
+    async fn a_regenerate_request_names_a_unit() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "finance-app").await;
+        let (status, body) = send(
+            application.clone(),
+            "POST",
+            "/sessions/finance-app/messages",
+            Some(r#"{"content":"[screen 2] Write it anew.","action":"regenerate"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body.contains("needs the design id"));
+        let (status, body) = send(
+            application.clone(),
+            "POST",
+            "/sessions/finance-app/messages",
+            Some(
+                r#"{"content":"Write it anew.","design":"finance-app-candidate-1","action":"regenerate"}"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body.contains("like `[screen 2]`"));
+        let (status, body) = send(
+            application.clone(),
+            "POST",
+            "/sessions/finance-app/messages",
+            Some(
+                r#"{"content":"[screen 2] Write it anew.","design":"finance-app-candidate-1","action":"regenerate"}"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        let messages = &view(&application, "finance-app").await["messages"];
+        assert_eq!(messages[0]["is_regenerate"], true);
+        assert_eq!(messages[0]["design"], "finance-app-candidate-1");
     }
 
     #[tokio::test]
