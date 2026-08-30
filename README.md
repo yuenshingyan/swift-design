@@ -86,7 +86,7 @@ Click a card's footer to select it, or ⌘-click anywhere on the card; a selecte
 Three more ways to work a candidate:
 
 - **Fork.** Tick a card and press `Fork` in the bar over the canvas: the card is copied under the next free number, so a change can be tried on the copy while the original stays. Several ticked cards fork together.
-- **Merge.** Tick two or more cards and press `Merge` in the same bar: the cards are pinned in the chat. Say which parts to take from each, for example "the hero from candidate 1 and the pricing table from candidate 3". The planner writes one new candidate from those parts. The candidates of a merge must share a canvas.
+- **Merge.** Pin two or more cards with `@` in the chat and say which parts to take from each, for example "the hero from candidate 1 and the pricing table from candidate 3". The planner writes one new candidate from those parts. The candidates of a merge must share a canvas.
 - **Redo a screen or a slide.** In the editor, the circular arrow on a thumbnail writes that screen or slide anew: the model sees its name and notes, not its old markup. One click arms the button, the second sends. The old version stays in the history.
 
 Every new candidate takes the next free number: a later run adds candidates after the ones the session has instead of overwriting them.
