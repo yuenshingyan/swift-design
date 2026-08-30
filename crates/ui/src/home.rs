@@ -69,7 +69,7 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
     let mut is_loaded = use_signal(|| false);
     let mut request = use_signal(String::new);
     let mut is_picking_kind = use_signal(|| false);
-    let effort = use_signal(|| "medium".to_owned());
+    let mut effort = use_signal(|| "medium".to_owned());
     let mut templates = use_signal(Vec::<api::TemplateSummary>::new);
     let chosen_templates = use_signal(Vec::<String>::new);
     let mut is_picking_templates = use_signal(|| false);
@@ -226,7 +226,8 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                             ModelChip {
                                 settings,
                                 is_configuring,
-                                effort: Some(effort),
+                                effort: Some(effort()),
+                                on_effort: move |level: String| effort.set(level),
                             }
                         }
                         SendButton {
