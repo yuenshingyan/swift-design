@@ -7,8 +7,10 @@ use std::collections::{HashMap, HashSet};
 use dioxus::prelude::*;
 
 use crate::api;
-use crate::canvas::{CandidateCanvas, cards_from_decks, cards_from_designs, queued_finishes};
-use crate::chat::recall_prompt;
+use crate::canvas::{
+    CandidateCanvas, candidate_label, cards_from_decks, cards_from_designs, queued_finishes,
+};
+use crate::chat::{mention_at, recall_prompt, remove_mention, watch_caret};
 use crate::chat_controls::{ModelChip, SendButton, with_effort};
 use crate::prompt_history::{PromptHistory, prompt_entries};
 use crate::question_card::{
@@ -88,6 +90,12 @@ pub(crate) fn SessionWorkspace(
     let mut drafts_key = use_signal(String::new);
     let mut revision = use_signal(|| 0u64);
     let mut error = use_signal(|| Option::<String>::None);
+    // The candidates pinned with `@` for the next message, the `@` menu
+    // row, the draft the menu was closed on, and the caret.
+    let mut pinned = use_signal(Vec::<String>::new);
+    let mut mention_row = use_signal(|| 0usize);
+    let mut mention_closed_on = use_signal(|| Option::<String>::None);
+    let caret = use_signal(|| 0usize);
 
     // The live loop: refetch on every server change.
     {
@@ -168,6 +176,30 @@ pub(crate) fn SessionWorkspace(
             cards_from_decks(&decks(), &session_id, session.chosen_design.as_deref())
         }
     };
+    // The `@` menu: the candidates that match what follows the `@`.
+    let candidate_ids: Vec<String> = cards.iter().map(|card| card.id.clone()).collect();
+    let mention = if candidate_ids.is_empty() || mention_closed_on() == Some(draft()) {
+        None
+    } else {
+        mention_at(&draft(), caret())
+    };
+    let mention_rows: Vec<CandidateMention> = mention
+        .as_ref()
+        .map(|(_, query)| candidate_mentions(&candidate_ids, query))
+        .unwrap_or_default();
+    // Picks row `row` of the menu: its candidates are pinned, and the
+    // `@` and its query leave the draft.
+    let pick_mention = {
+        let rows = mention_rows.clone();
+        let start = mention.as_ref().map(|(start, _)| *start);
+        move |row: usize| {
+            if let (Some(start), Some(entry)) = (start, rows.get(row)) {
+                draft.set(remove_mention(&draft(), start, caret()));
+                mention_row.set(0);
+                pin_candidates(&mut pinned.write(), &entry.ids);
+            }
+        }
+    };
     // Only a running turn reports progress. The finished run keeps its
     // last percentages, and reading those left every card marked
     // `writing` with its Finish button hidden.
@@ -201,10 +233,17 @@ pub(crate) fn SessionWorkspace(
             draft.set(String::new());
             history.write().reset();
             let session_id = session_id.clone();
+            // The pins were for this message. The next one starts clean.
+            let targets = std::mem::take(&mut *pinned.write());
+            let content = match pinned_reference(&targets) {
+                Some(reference) => format!("{reference} {text}"),
+                None => text,
+            };
             // Every message is a turn: the planner answers, asks,
-            // writes, or edits the chosen artifact.
+            // writes, or edits the pinned or chosen candidates.
             spawn(async move {
-                if let Err(message) = api::send_session_message(&session_id, &text, None).await {
+                let sent = api::send_session_message_about(&session_id, &content, &targets).await;
+                if let Err(message) = sent {
                     error.set(Some(message));
                 }
             });
@@ -434,19 +473,79 @@ pub(crate) fn SessionWorkspace(
                             SettingsPanel { settings, is_configuring }
                         }
                     }
+                    if let Some(reference) = pinned_reference(&pinned()) {
+                        div { class: "context-chip mono",
+                            span { "{reference}" }
+                            button {
+                                title: "Drop the pinned candidates",
+                                onclick: move |_| pinned.write().clear(),
+                                "×"
+                            }
+                        }
+                    }
+                    if !mention_rows.is_empty() {
+                        div { class: "mention-menu", role: "listbox",
+                            for (row, entry) in mention_rows.iter().enumerate() {
+                                button {
+                                    key: "{entry.key}",
+                                    class: if row == mention_row() { "mention-item active" } else { "mention-item" },
+                                    role: "option",
+                                    onmousedown: move |event: Event<MouseData>| event.prevent_default(),
+                                    onclick: {
+                                        let mut pick_mention = pick_mention.clone();
+                                        move |_| pick_mention(row)
+                                    },
+                                    span { class: "mono", "{entry.key}" }
+                                    span { "{entry.label}" }
+                                }
+                            }
+                        }
+                    }
                     textarea {
                         placeholder: chat_placeholder(state),
                         disabled: !can_chat,
                         value: "{draft}",
                         oninput: move |event: FormEvent| {
                             draft.set(event.value());
+                            mention_row.set(0);
                             history.write().reset();
+                            watch_caret(caret);
                         },
+                        onkeyup: move |_| watch_caret(caret),
+                        onmouseup: move |_| watch_caret(caret),
                         onkeydown: {
+                            let mut pick_mention = pick_mention.clone();
+                            let row_count = mention_rows.len();
                             let prompts = prompts.clone();
                             move |event: KeyboardEvent| {
-                                if recall_prompt(&event, &prompts, &mut history.write(), &mut draft) {
+                                if row_count == 0
+                                    && recall_prompt(&event, &prompts, &mut history.write(), &mut draft)
+                                {
                                     return;
+                                }
+                                if row_count > 0 {
+                                    match event.key() {
+                                        Key::ArrowDown => {
+                                            event.prevent_default();
+                                            mention_row.set((mention_row() + 1) % row_count);
+                                            return;
+                                        }
+                                        Key::ArrowUp => {
+                                            event.prevent_default();
+                                            mention_row.set((mention_row() + row_count - 1) % row_count);
+                                            return;
+                                        }
+                                        Key::Enter | Key::Tab => {
+                                            event.prevent_default();
+                                            pick_mention(mention_row());
+                                            return;
+                                        }
+                                        Key::Escape => {
+                                            mention_closed_on.set(Some(draft()));
+                                            return;
+                                        }
+                                        _ => {}
+                                    }
                                 }
                                 if event.key() == Key::Enter && !event.modifiers().shift() {
                                     event.prevent_default();
@@ -617,12 +716,74 @@ fn set_answers(
 }
 
 /// The chat box placeholder for a state.
+/// One row of the `@` menu: the candidates it pins, with its key and
+/// label.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CandidateMention {
+    /// `all`, or the candidate number.
+    pub(crate) key: String,
+    /// `All candidates`, or the card name.
+    pub(crate) label: String,
+    /// The ids the row pins.
+    pub(crate) ids: Vec<String>,
+}
+
+/// The rows a query matches: `All candidates` first when there is more
+/// than one, then each candidate whose number starts with the query.
+/// Every row for an empty query. At most eight.
+pub(crate) fn candidate_mentions(ids: &[String], query: &str) -> Vec<CandidateMention> {
+    let query = query.trim().to_lowercase();
+    let mut rows = Vec::new();
+    if ids.len() > 1 && (query.is_empty() || "all".starts_with(&query)) {
+        rows.push(CandidateMention {
+            key: "all".to_owned(),
+            label: "All candidates".to_owned(),
+            ids: ids.to_vec(),
+        });
+    }
+    for id in ids {
+        let label = candidate_label(id);
+        let number = label.rsplit(' ').next().unwrap_or_default().to_owned();
+        if query.is_empty() || number.starts_with(&query) {
+            rows.push(CandidateMention {
+                key: number,
+                label,
+                ids: vec![id.clone()],
+            });
+        }
+    }
+    rows.truncate(8);
+    rows
+}
+
+/// Adds `ids` to the pins, each once, in the order they came.
+pub(crate) fn pin_candidates(pinned: &mut Vec<String>, ids: &[String]) {
+    for id in ids {
+        if !pinned.contains(id) {
+            pinned.push(id.clone());
+        }
+    }
+}
+
+/// The reference the pinned candidates put in front of a message, like
+/// `[candidate 2] [candidate 3]`. `None` with no pins.
+pub(crate) fn pinned_reference(pinned: &[String]) -> Option<String> {
+    if pinned.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = pinned
+        .iter()
+        .map(|id| format!("[{}]", candidate_label(id).to_lowercase()))
+        .collect();
+    Some(parts.join(" "))
+}
+
 fn chat_placeholder(state: WorkflowState) -> &'static str {
     match state {
         WorkflowState::Intake => "Reply, or add detail…",
         WorkflowState::Clarifying => "Answer the questions above, or reply here…",
         WorkflowState::Generating => "Generating… send after it finishes",
-        WorkflowState::Reviewing => "Ask for a change, or for new candidates…",
+        WorkflowState::Reviewing => "Ask for a change, or for new candidates… @ pins a candidate",
         WorkflowState::Stopped => "The run stopped. Send a message to carry on…",
         WorkflowState::Error => "The run failed. Send a message to try again…",
     }
@@ -631,10 +792,53 @@ fn chat_placeholder(state: WorkflowState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        chat_placeholder, generation_step, is_canvas_shown, is_chat_open, is_start_offered,
-        progress_label,
+        candidate_mentions, chat_placeholder, generation_step, is_canvas_shown, is_chat_open,
+        is_start_offered, pin_candidates, pinned_reference, progress_label,
     };
     use design_model::WorkflowState;
+
+    fn ids() -> Vec<String> {
+        vec![
+            "talk-candidate-1".to_owned(),
+            "talk-candidate-2".to_owned(),
+            "talk-candidate-3".to_owned(),
+        ]
+    }
+
+    #[test]
+    fn an_empty_query_lists_all_candidates_then_each_one() {
+        let rows = candidate_mentions(&ids(), "");
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].key, "all");
+        assert_eq!(rows[0].ids, ids());
+        assert_eq!(rows[2].label, "Candidate 2");
+        assert_eq!(rows[2].ids, vec!["talk-candidate-2".to_owned()]);
+    }
+
+    #[test]
+    fn a_query_matches_the_number_or_the_word_all() {
+        let rows = candidate_mentions(&ids(), "3");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].key, "3");
+        let rows = candidate_mentions(&ids(), "al");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].key, "all");
+        let one = vec!["talk-candidate-1".to_owned()];
+        assert_eq!(candidate_mentions(&one, "").len(), 1);
+    }
+
+    #[test]
+    fn pins_hold_each_candidate_once_and_name_them_in_the_reference() {
+        let mut pinned = vec!["talk-candidate-2".to_owned()];
+        pin_candidates(&mut pinned, &ids());
+        assert_eq!(pinned.len(), 3);
+        assert_eq!(pinned[0], "talk-candidate-2");
+        assert_eq!(
+            pinned_reference(&pinned).as_deref(),
+            Some("[candidate 2] [candidate 1] [candidate 3]")
+        );
+        assert_eq!(pinned_reference(&[]), None);
+    }
 
     #[test]
     fn the_chat_is_open_except_while_a_run_works() {
