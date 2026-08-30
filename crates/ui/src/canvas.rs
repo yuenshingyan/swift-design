@@ -34,6 +34,9 @@ const BEZEL_INSET_REM: f64 = 1.5;
 pub(crate) struct CanvasCard {
     /// The design or deck id.
     pub id: String,
+    /// The artifact's own title, as the model named it. The footer
+    /// shows it after the candidate number.
+    pub title: String,
     /// Which store the card comes from.
     pub kind: ArtifactKind,
     /// How many screens or slides are written.
@@ -82,6 +85,7 @@ pub(crate) fn cards_from_designs(
         .filter(|summary| crate::settings::artifact_project(&summary.id) == session_id)
         .map(|summary| CanvasCard {
             id: summary.id.clone(),
+            title: summary.title.clone(),
             kind: ArtifactKind::Demo,
             count: summary.screen_count,
             outline_count: summary.outline_count,
@@ -104,6 +108,7 @@ pub(crate) fn cards_from_decks(
         .filter(|summary| crate::settings::artifact_project(&summary.id) == session_id)
         .map(|summary| CanvasCard {
             id: summary.id.clone(),
+            title: summary.title.clone(),
             kind: ArtifactKind::Deck,
             count: summary.slide_count,
             outline_count: summary.outline_count,
@@ -127,6 +132,15 @@ pub(crate) fn candidate_label(id: &str) -> String {
         return "Candidate".to_owned();
     }
     format!("Candidate {number}")
+}
+
+/// The candidate number from its id: `2` from `talk-candidate-2`, or
+/// empty when the id has no number.
+pub(crate) fn candidate_number(id: &str) -> &str {
+    id.rsplit("-candidate-")
+        .next()
+        .filter(|tail| tail.chars().all(|character| character.is_ascii_digit()))
+        .unwrap_or("")
 }
 
 /// The name of one canvas, for a tab: `Desktop`, `Tablet`, `Phone`, or
@@ -718,7 +732,12 @@ fn CandidateCard(
                             dangerous_inner_html: icons::CHECK,
                         }
                     }
-                    span { class: "card-label", "{candidate_label(&id)}" }
+                    // The number is what the chat calls the card (`@2`),
+                    // so it stays; the title tells the cards apart.
+                    span { class: "card-number", title: "{candidate_label(&id)}",
+                        "{candidate_number(&id)}"
+                    }
+                    span { class: "card-title", title: "{card.title}", "{card.title}" }
                 }
                 span { class: "card-count", "{current}/{count}" }
             }
@@ -827,6 +846,7 @@ mod tests {
     fn card(id: &str, viewport: Viewport) -> CanvasCard {
         CanvasCard {
             id: id.to_owned(),
+            title: "Today board".to_owned(),
             kind: ArtifactKind::Demo,
             count: 3,
             outline_count: 0,
@@ -938,6 +958,9 @@ mod tests {
         assert_eq!(candidate_label("talk-candidate-2"), "Candidate 2");
         assert_eq!(candidate_label("talk-candidate-12"), "Candidate 12");
         assert_eq!(candidate_label("talk"), "Candidate");
+        assert_eq!(candidate_number("talk-candidate-12"), "12");
+        assert_eq!(candidate_number("talk-candidate-x"), "");
+        assert_eq!(candidate_number("talk"), "");
     }
 
     #[test]
