@@ -681,11 +681,6 @@ pub(crate) fn SessionWorkspace(
                                 }
                             });
                         },
-                        // The pins carry the ids; the user's next message
-                        // says which parts to take from each.
-                        on_merge: move |ids: Vec<String>| {
-                            pin_candidates(&mut pinned.write(), &ids);
-                        },
                     }
                 }
                 if let Some(message) = error() {
