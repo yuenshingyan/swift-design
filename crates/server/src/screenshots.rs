@@ -207,9 +207,37 @@ pub async fn dump_rendered_dom(
     })?;
     let (html_path, _) = scratch_paths("-audit", "dom").await?;
     tokio::fs::write(&html_path, with_base_href(html, base_url)).await?;
-    let result = run_chrome_dump(&chrome, &html_path, viewport).await;
+    let result = run_chrome_dump(&chrome, &file_url(&html_path), viewport).await;
     let _ = tokio::fs::remove_file(&html_path).await;
     result
+}
+
+/// Opens `url` in Chrome and returns the DOM after scripts ran. The
+/// URL is a web address; the caller checks it first.
+pub(crate) async fn dump_url(
+    chrome: &std::path::Path,
+    url: &str,
+    viewport: Viewport,
+) -> anyhow::Result<String> {
+    run_chrome_dump(chrome, url, viewport).await
+}
+
+/// Opens `url` in Chrome and returns a PNG of the first viewport.
+pub(crate) async fn screenshot_url(
+    chrome: &std::path::Path,
+    url: &str,
+    viewport: Viewport,
+) -> anyhow::Result<Vec<u8>> {
+    let (_, png_path) = scratch_paths("-capture", "png").await?;
+    run_chrome(chrome, url, &png_path, viewport).await?;
+    let bytes = tokio::fs::read(&png_path).await?;
+    let _ = tokio::fs::remove_file(&png_path).await;
+    Ok(bytes)
+}
+
+/// The `file://` URL of a scratch file.
+fn file_url(path: &std::path::Path) -> String {
+    format!("file://{}", path.display())
 }
 
 /// Creates the scratch directory and returns a fresh pair of paths in
@@ -255,14 +283,13 @@ fn chrome_command(
 /// page after scripts ran.
 async fn run_chrome_dump(
     chrome: &std::path::Path,
-    html_path: &std::path::Path,
+    url: &str,
     viewport: Viewport,
 ) -> anyhow::Result<String> {
-    let url = format!("file://{}", html_path.display());
     for headless_flag in ["--headless=new", "--headless"] {
         let command = chrome_command(chrome, headless_flag, 2500, viewport)
             .arg("--dump-dom")
-            .arg(&url)
+            .arg(url)
             .stdout(std::process::Stdio::piped())
             .output();
         let output = tokio::time::timeout(SCREENSHOT_TIMEOUT, command)
@@ -274,7 +301,7 @@ async fn run_chrome_dump(
             return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
         }
     }
-    anyhow::bail!("Chrome did not dump the page {}", html_path.display())
+    anyhow::bail!("Chrome did not dump the page {url}")
 }
 
 /// Writes `html` to a temp file, prints it to a PDF with Chrome, and
@@ -357,7 +384,7 @@ async fn screenshot_html(
 ) -> anyhow::Result<Vec<u8>> {
     let (html_path, png_path) = scratch_paths("", "png").await?;
     tokio::fs::write(&html_path, html).await?;
-    let result = run_chrome(chrome, &html_path, &png_path, viewport).await;
+    let result = run_chrome(chrome, &file_url(&html_path), &png_path, viewport).await;
     let _ = tokio::fs::remove_file(&html_path).await;
     result?;
     let bytes = tokio::fs::read(&png_path).await?;
@@ -369,16 +396,15 @@ async fn screenshot_html(
 /// the old flag for older builds.
 async fn run_chrome(
     chrome: &std::path::Path,
-    html_path: &std::path::Path,
+    url: &str,
     png_path: &std::path::Path,
     viewport: Viewport,
 ) -> anyhow::Result<()> {
-    let url = format!("file://{}", html_path.display());
     let screenshot_flag = format!("--screenshot={}", png_path.display());
     for headless_flag in ["--headless=new", "--headless"] {
         let command = chrome_command(chrome, headless_flag, 1200, viewport)
             .arg(&screenshot_flag)
-            .arg(&url)
+            .arg(url)
             .stdout(std::process::Stdio::null())
             .output();
         let output = tokio::time::timeout(SCREENSHOT_TIMEOUT, command)
@@ -390,10 +416,7 @@ async fn run_chrome(
             return Ok(());
         }
     }
-    anyhow::bail!(
-        "Chrome did not write a screenshot for {}",
-        html_path.display()
-    )
+    anyhow::bail!("Chrome did not write a screenshot for {url}")
 }
 
 /// The `/designs/{id}/screens/{n}.png` and `/decks/{id}/slides/{n}.png`
