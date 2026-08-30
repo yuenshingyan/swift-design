@@ -2196,7 +2196,7 @@ const ATTACHMENT_TOTAL_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Longest text file inlined into a request; the rest is cut with a
 /// note.
-const ATTACHMENT_TEXT_LIMIT_BYTES: usize = 100 * 1024;
+pub(crate) const ATTACHMENT_TEXT_LIMIT_BYTES: usize = 100 * 1024;
 
 /// A short human size: `512 B`, `3.4 KB`, `1.2 MB`.
 fn describe_size(bytes: usize) -> String {
@@ -2289,23 +2289,37 @@ fn attachment_parts(file: &UploadAttachment, can_see_images: bool) -> Vec<serde_
     }
     if file.content_type.starts_with("text/") || file.content_type == "application/json" {
         let text = String::from_utf8_lossy(&file.bytes);
-        let (shown, note) = if text.len() > ATTACHMENT_TEXT_LIMIT_BYTES {
-            let mut end = ATTACHMENT_TEXT_LIMIT_BYTES;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            (&text[..end], "\n[cut: the file continues]")
-        } else {
-            (&text[..], "")
+        return vec![inlined_text_part(file, &text, &size)];
+    }
+    if crate::office::is_office_type(&file.content_type) {
+        return match crate::office::office_text(&file.content_type, &file.bytes) {
+            Ok(text) => vec![inlined_text_part(file, &text, &size)],
+            Err(error) => vec![label(&format!(
+                ": the file could not be read ({error:#}). Tell the user if you need its content."
+            ))],
         };
-        return vec![serde_json::json!({
-            "type": "text",
-            "text": format!("File {} ({}, {size}):\n{shown}{note}", file.name, file.content_type),
-        })];
     }
     vec![label(
         ": a file this request cannot carry. Tell the user if you need its content.",
     )]
+}
+
+/// One text part with the file's text inlined, cut at
+/// `ATTACHMENT_TEXT_LIMIT_BYTES` on a character boundary.
+fn inlined_text_part(file: &UploadAttachment, text: &str, size: &str) -> serde_json::Value {
+    let (shown, note) = if text.len() > ATTACHMENT_TEXT_LIMIT_BYTES {
+        let mut end = ATTACHMENT_TEXT_LIMIT_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        (&text[..end], "\n[cut: the file continues]")
+    } else {
+        (text, "")
+    };
+    serde_json::json!({
+        "type": "text",
+        "text": format!("File {} ({}, {size}):\n{shown}{note}", file.name, file.content_type),
+    })
 }
 
 /// The reasoning effort for requests that write screen HTML: one level
@@ -3022,11 +3036,22 @@ pub(crate) fn template_note(template: &crate::templates::Template) -> String {
         name = template.name,
         theme = serde_json::to_string(&template.theme).unwrap_or_default(),
     );
-    note.push_str(
-        "These screens show the template style. Match their CSS: the same font sizes, \
-         spacing, alignment, colors, and layout language. Write new content for the \
-         request. Do not copy their text.\n",
-    );
+    if let Some(style_note) = template
+        .note
+        .as_deref()
+        .filter(|note| !note.trim().is_empty())
+    {
+        note.push_str(&format!(
+            "The template's style note, from its brand material. Follow it:\n{style_note}\n"
+        ));
+    }
+    if !template.screens.is_empty() {
+        note.push_str(
+            "These screens show the template style. Match their CSS: the same font sizes, \
+             spacing, alignment, colors, and layout language. Write new content for the \
+             request. Do not copy their text.\n",
+        );
+    }
     for (index, screen) in template.screens.iter().enumerate() {
         let Ok(json) = serde_json::to_string(screen) else {
             continue;
@@ -3060,9 +3085,9 @@ mod tests {
     use super::edit_targets;
 
     use super::{
-        GenerationContext, GenerationEngine, GenerationOutcome, ProgressGroup, ProgressSink,
-        answers_since_last_write, candidate_plans, edit_prompt, focused_design_json, system_prompt,
-        trailing_continue_ids,
+        Attachments, GenerationContext, GenerationEngine, GenerationOutcome, ProgressGroup,
+        ProgressSink, UploadAttachment, answers_since_last_write, candidate_plans, edit_prompt,
+        focused_design_json, system_prompt, trailing_continue_ids, user_content_with_attachments,
     };
     use crate::designs::DesignStore;
     use crate::edit_focus::EditInput;
@@ -3195,6 +3220,46 @@ mod tests {
         let planner_call = server.requests()[0].to_string();
         assert!(planner_call.contains("The user's source files follow"));
         assert!(planner_call.contains("iOS developers new to Swift"));
+    }
+
+    #[test]
+    fn an_office_file_reaches_the_prompt_as_its_text() {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "word/document.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        std::io::Write::write_all(
+            &mut writer,
+            b"<w:document><w:p><w:r><w:t>Pricing starts at 9 a month.</w:t></w:r></w:p></w:document>",
+        )
+        .unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        let attachments = Attachments {
+            files: vec![UploadAttachment {
+                name: "brief.docx".to_owned(),
+                content_type: crate::office::DOCX.to_owned(),
+                bytes,
+            }],
+            skipped: Vec::new(),
+        };
+        let content = user_content_with_attachments("Go.", &attachments, false).to_string();
+        assert!(content.contains("File brief.docx"));
+        assert!(content.contains("Pricing starts at 9 a month."));
+        assert!(!content.contains("cannot carry"));
+        // A broken archive is reported, not dropped in silence.
+        let broken = Attachments {
+            files: vec![UploadAttachment {
+                name: "brief.docx".to_owned(),
+                content_type: crate::office::DOCX.to_owned(),
+                bytes: b"not a zip".to_vec(),
+            }],
+            skipped: Vec::new(),
+        };
+        let content = user_content_with_attachments("Go.", &broken, false).to_string();
+        assert!(content.contains("could not be read"));
     }
 
     #[test]
