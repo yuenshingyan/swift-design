@@ -31,6 +31,29 @@ pub const PLATFORM_LIMIT: usize = 3;
 /// canvas, since a run writes one design per platform per variation.
 pub const CARD_LIMIT: usize = CANDIDATE_LIMIT * PLATFORM_LIMIT;
 
+/// The number after the highest `{base}-candidate-{n}` in `ids`, or 1.
+/// Ids of another base and ids without a numeric tail are skipped. A
+/// fork, a merge, and a later run all number after the candidates
+/// that exist, so none overwrites an earlier one.
+pub(crate) fn next_candidate_number<'id>(base: &str, ids: impl Iterator<Item = &'id str>) -> usize {
+    let prefix = format!("{base}{}", crate::sessions::CANDIDATE_MARKER);
+    ids.filter_map(|id| id.strip_prefix(&prefix))
+        .filter_map(|tail| tail.parse::<usize>().ok())
+        .max()
+        .map_or(1, |highest| highest + 1)
+}
+
+/// The id of candidate `number` of `base`.
+pub(crate) fn candidate_id(base: &str, number: usize) -> String {
+    format!("{base}{}{number}", crate::sessions::CANDIDATE_MARKER)
+}
+
+/// The candidate number in `id`, when its tail is one.
+pub(crate) fn candidate_number_of(id: &str) -> Option<usize> {
+    let (_, tail) = id.rsplit_once(crate::sessions::CANDIDATE_MARKER)?;
+    tail.parse().ok()
+}
+
 /// The `/candidates` route table.
 pub fn routes() -> Router<crate::AppState> {
     Router::new()
@@ -174,8 +197,8 @@ async fn choose(
 }
 
 /// Copies the design `id` to `base`. The copy is agent-authored: the
-/// candidate replaces the design wholesale.
-async fn copy_design(store: &DesignStore, id: &str, base: &str) -> Result<(), Response> {
+/// candidate replaces the design wholesale. A fork copies the same way.
+pub(crate) async fn copy_design(store: &DesignStore, id: &str, base: &str) -> Result<(), Response> {
     let design = match store.load(id).await {
         Ok(Some(design)) => design,
         Ok(None) => return Err(api_error::design_not_found(id)),
@@ -192,7 +215,7 @@ async fn copy_design(store: &DesignStore, id: &str, base: &str) -> Result<(), Re
 }
 
 /// Copies the deck `id` to `base`. The copy is agent-authored.
-async fn copy_deck(store: &DeckStore, id: &str, base: &str) -> Result<(), Response> {
+pub(crate) async fn copy_deck(store: &DeckStore, id: &str, base: &str) -> Result<(), Response> {
     let deck = match store.load(id).await {
         Ok(Some(deck)) => deck,
         Ok(None) => return Err(api_error::deck_not_found(id)),
@@ -303,10 +326,125 @@ fn chooser_page(base: &str, kind: ArtifactKind, candidates: &[CandidateCard]) ->
 mod tests {
     use design_model::ArtifactKind;
 
-    use super::{CandidateCard, chooser_page, chosen_url, deck_cards, design_cards};
+    use super::{
+        CandidateCard, candidate_id, candidate_number_of, chooser_page, chosen_url, deck_cards,
+        design_cards, next_candidate_number,
+    };
+    use axum::http::StatusCode;
+
     use crate::decks::DeckStore;
     use crate::designs::DesignStore;
-    use crate::test_support::sample_deck;
+    use crate::sessions::SessionStore;
+    use crate::test_support::{sample_deck, send, test_application};
+
+    #[tokio::test]
+    async fn a_fork_takes_the_next_candidate_number_and_reads_as_agent_authored() {
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let design: design_model::Design =
+            serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap();
+        designs.save("talk-candidate-1", &design).await.unwrap();
+        let mut edited = design.clone();
+        edited.title = "Edited by hand".to_owned();
+        designs.save("talk-candidate-3", &edited).await.unwrap();
+        designs
+            .record_authors("talk-candidate-3", Some(&design), &edited, true)
+            .await
+            .unwrap();
+        assert!(
+            !designs
+                .user_paths("talk-candidate-3")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let application = test_application(&directory);
+        let (status, body) = send(
+            application.clone(),
+            "POST",
+            "/designs/talk-candidate-3/fork",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, r#"{"id":"talk-candidate-4"}"#);
+        let copy = designs.load("talk-candidate-4").await.unwrap().unwrap();
+        assert_eq!(copy.title, "Edited by hand");
+        assert!(
+            designs
+                .user_paths("talk-candidate-4")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let (status, _) = send(
+            application.clone(),
+            "POST",
+            "/designs/talk-candidate-9/fork",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_deck_fork_is_refused_while_the_session_generates() {
+        let directory = tempfile::tempdir().unwrap();
+        let decks = DeckStore::new(directory.path().join("decks"));
+        decks
+            .save("talk-candidate-1", &sample_deck())
+            .await
+            .unwrap();
+        let application = test_application(&directory);
+        let (status, body) = send(
+            application.clone(),
+            "POST",
+            "/sessions",
+            Some(r#"{"id":"talk","request":"A deck.","artifact_kind":"deck"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let (status, body) = send(
+            application.clone(),
+            "POST",
+            "/decks/talk-candidate-1/fork",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, r#"{"id":"talk-candidate-2"}"#);
+        // The state moves through the store, so no run starts.
+        SessionStore::new(directory.path().join("data/sessions"))
+            .apply("talk", design_model::WorkflowEvent::GenerationStarted)
+            .await
+            .unwrap();
+        let (status, body) = send(
+            application.clone(),
+            "POST",
+            "/decks/talk-candidate-1/fork",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(decks.load("talk-candidate-3").await.unwrap().is_none());
+    }
+
+    #[test]
+    fn the_next_number_follows_the_highest_candidate() {
+        let ids = [
+            "talk-candidate-1",
+            "talk-candidate-3",
+            "other-candidate-9",
+            "talk-candidate-x",
+            "talk",
+        ];
+        assert_eq!(next_candidate_number("talk", ids.into_iter()), 4);
+        assert_eq!(next_candidate_number("talk", std::iter::empty()), 1);
+        assert_eq!(candidate_id("talk", 4), "talk-candidate-4");
+        assert_eq!(candidate_number_of("talk-candidate-4"), Some(4));
+        assert_eq!(candidate_number_of("talk-candidate-x"), None);
+        assert_eq!(candidate_number_of("talk"), None);
+    }
 
     #[tokio::test]
     async fn cards_carry_the_right_preview_url_per_kind() {
