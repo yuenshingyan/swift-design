@@ -355,6 +355,11 @@ pub(crate) fn content_type_of(name: &str) -> &'static str {
         "pdf" => "application/pdf",
         "txt" => "text/plain; charset=utf-8",
         "md" => "text/markdown; charset=utf-8",
+        // Data files are text, so the prompt carries their rows.
+        "csv" => "text/csv; charset=utf-8",
+        "tsv" => "text/tab-separated-values; charset=utf-8",
+        "yaml" | "yml" => "text/yaml; charset=utf-8",
+        "xml" => "text/xml; charset=utf-8",
         "json" => "application/json",
         "html" => "text/html; charset=utf-8",
         "css" => "text/css",
@@ -664,5 +669,16 @@ mod tests {
         assert_eq!(content_type_of("a.png"), "image/png");
         assert_eq!(content_type_of("a.pdf"), "application/pdf");
         assert_eq!(content_type_of("a.unknown"), "application/octet-stream");
+    }
+
+    #[test]
+    fn a_csv_upload_is_text() {
+        assert_eq!(content_type_of("data.csv"), "text/csv; charset=utf-8");
+        assert_eq!(
+            content_type_of("data.tsv"),
+            "text/tab-separated-values; charset=utf-8"
+        );
+        assert_eq!(content_type_of("a.yml"), "text/yaml; charset=utf-8");
+        assert_eq!(content_type_of("a.xml"), "text/xml; charset=utf-8");
     }
 }
