@@ -73,6 +73,14 @@ pub const DATA_STATES: [(&str, &str); 3] = [
     ("mixed", "A mix across the screens"),
 ];
 
+/// How finished a demo looks, as (value, label). A wireframe is a
+/// layout check: gray blocks for imagery, one neutral palette, real
+/// copy. The default is the finished look.
+pub const FIDELITIES: [(&str, &str); 2] = [
+    ("high_fidelity", "Finished, high fidelity"),
+    ("wireframe", "Wireframe, gray boxes"),
+];
+
 /// How much goes on one slide, as (value, label).
 pub const SLIDE_DENSITIES: [(&str, &str); 3] = [
     ("sparse", "One idea in large type"),
@@ -157,7 +165,7 @@ pub const SHARED_AXES: [AppAxis; 1] = [AppAxis {
 }];
 
 /// Every app-owned axis only a demo asks.
-pub const DEMO_AXES: [AppAxis; 3] = [
+pub const DEMO_AXES: [AppAxis; 4] = [
     AppAxis {
         key: "scope",
         name: "Scope",
@@ -172,6 +180,11 @@ pub const DEMO_AXES: [AppAxis; 3] = [
         key: "data_state",
         name: "Screen data",
         choices: &DATA_STATES,
+    },
+    AppAxis {
+        key: "fidelity",
+        name: "Fidelity",
+        choices: &FIDELITIES,
     },
 ];
 
@@ -271,7 +284,16 @@ mod tests {
     #[test]
     fn each_kind_asks_its_own_axes_and_the_shared_ones() {
         let demo: Vec<&str> = app_axes(ArtifactKind::Demo).map(|axis| axis.name).collect();
-        assert_eq!(demo, ["Color mode", "Scope", "Product kind", "Screen data"]);
+        assert_eq!(
+            demo,
+            [
+                "Color mode",
+                "Scope",
+                "Product kind",
+                "Screen data",
+                "Fidelity"
+            ]
+        );
         let deck: Vec<&str> = app_axes(ArtifactKind::Deck).map(|axis| axis.name).collect();
         assert_eq!(
             deck,
@@ -340,6 +362,7 @@ mod tests {
             &DEMO_SCOPES[..],
             &PRODUCT_KINDS[..],
             &DATA_STATES[..],
+            &FIDELITIES[..],
             &SLIDE_DENSITIES[..],
             &EVIDENCE_STYLES[..],
         ];
