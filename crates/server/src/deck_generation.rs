@@ -12,11 +12,12 @@ use std::sync::Arc;
 
 use design_model::{Deck, Slide};
 
+use crate::candidates::{candidate_id, next_candidate_number};
 use crate::concepts::{Concept, concept_note};
 use crate::decks::{DeckStore, PENDING_SLIDE_CLASS, is_pending_slide};
 use crate::edit_focus::{
-    EditFix, EditInput, findings_for, findings_note, fix_instruction, focus_note,
-    referenced_indexes, touched_indexes,
+    EditFix, EditInput, EditOrder, MergeInput, findings_for, findings_note, fix_instruction,
+    focus_note, fresh_note, merge_note, merge_sources, referenced_indexes, touched_indexes,
 };
 use crate::events::ChangeNotifier;
 use crate::generation::{
@@ -45,6 +46,8 @@ struct DeckCandidateRequest<'request> {
     /// The template the candidate takes its look from, when the options
     /// name one.
     template: Option<&'request crate::templates::Template>,
+    /// The candidates to combine, when this candidate is a merge.
+    merge: Option<&'request MergeInput>,
 }
 
 impl GenerationEngine {
@@ -100,10 +103,36 @@ impl GenerationEngine {
                 designs,
                 instruction,
             } => {
-                let design_ids = self
-                    .edit_decks(client, context, &designs, &instruction, log)
-                    .await?;
+                let order = EditOrder {
+                    artifact_ids: &designs,
+                    instruction: &instruction,
+                    is_fresh: false,
+                };
+                let design_ids = self.edit_decks(client, context, &order, log).await?;
                 Ok(GenerationOutcome::Wrote { design_ids })
+            }
+            GenerationTask::Regenerate {
+                design,
+                instruction,
+            } => {
+                let order = EditOrder {
+                    artifact_ids: std::slice::from_ref(&design),
+                    instruction: &instruction,
+                    is_fresh: true,
+                };
+                let design_ids = self.edit_decks(client, context, &order, log).await?;
+                Ok(GenerationOutcome::Wrote { design_ids })
+            }
+            GenerationTask::Merge {
+                sources,
+                instruction,
+            } => {
+                let deck_id = self
+                    .merge_decks(client, context, &sources, &instruction, log)
+                    .await?;
+                Ok(GenerationOutcome::Wrote {
+                    design_ids: vec![deck_id],
+                })
             }
             GenerationTask::Continue(deck_ids) => {
                 let outcomes = self
@@ -147,8 +176,14 @@ impl GenerationEngine {
         };
         self.report_progress(10);
         let base = context.session_id.clone();
-        let ids: Vec<String> = (1..=count)
-            .map(|candidate_number| format!("{base}-candidate-{candidate_number}"))
+        // A later run numbers after the candidates the session has, so
+        // it adds to them instead of overwriting them.
+        let first_number = match decks.list().await {
+            Ok(rows) => next_candidate_number(&base, rows.iter().map(|row| row.id.as_str())),
+            Err(_) => 1,
+        };
+        let ids: Vec<String> = (0..count)
+            .map(|offset| candidate_id(&base, first_number + offset))
             .collect();
         let shares = self.shared_progress(&ids, 10, 90);
         let templates = self.brief_templates(&context.options, log).await;
@@ -174,6 +209,7 @@ impl GenerationEngine {
                     preview_slides: context.preview_screens(),
                     deck_id: id.clone(),
                     template: template.as_ref(),
+                    merge: None,
                 };
                 engine
                     .generate_deck_candidate(&client, &request, &attachments, &share, &log)
@@ -260,6 +296,66 @@ impl GenerationEngine {
         Ok(polished)
     }
 
+    /// Combines parts of `sources` into one new deck candidate, as
+    /// `instruction` asks, and returns its id. The new candidate takes
+    /// the next free number and goes through the same fix and polish
+    /// rounds as a fresh candidate.
+    async fn merge_decks(
+        &self,
+        client: &reqwest::Client,
+        context: &GenerationContext,
+        sources: &[String],
+        instruction: &str,
+        log: &LogSink,
+    ) -> Result<String, GenerationStop> {
+        let decks = self.deck_store()?;
+        let mut loaded = Vec::new();
+        for id in sources {
+            let deck = decks
+                .load(id)
+                .await
+                .map_err(|error| GenerationStop::Failed(error.to_string()))?
+                .ok_or_else(|| GenerationStop::Failed(format!("deck `{id}` does not exist")))?;
+            loaded.push((id.as_str(), deck));
+        }
+        if loaded.is_empty() {
+            return Err(GenerationStop::Failed(
+                "a merge needs two candidates: pin them with @".to_owned(),
+            ));
+        }
+        let merge = MergeInput {
+            sources: merge_sources(&loaded).map_err(GenerationStop::Failed)?,
+            instruction: instruction.to_owned(),
+        };
+        let base = context.session_id.as_str();
+        let rows = decks
+            .list()
+            .await
+            .map_err(|error| GenerationStop::Failed(error.to_string()))?;
+        let number = next_candidate_number(base, rows.iter().map(|row| row.id.as_str()));
+        let deck_id = candidate_id(base, number);
+        log(&format!("merging {} into {deck_id}", sources.join(", ")));
+        let attachments = self.load_attachments(&context.session_id, log).await;
+        let share = self
+            .shared_progress(std::slice::from_ref(&deck_id), 5, 95)
+            .pop()
+            .ok_or_else(|| GenerationStop::Failed("no progress share".to_owned()))?;
+        share(0.0);
+        let request = DeckCandidateRequest {
+            context,
+            candidate_number: number,
+            concepts: &[],
+            preview_slides: None,
+            deck_id: deck_id.clone(),
+            template: None,
+            merge: Some(&merge),
+        };
+        self.generate_deck_candidate(client, &request, &attachments, &share, log)
+            .await?;
+        log(&format!("merge: saved as {deck_id}"));
+        Ok(deck_id)
+    }
+
     /// Applies a critique to one chosen deck: the model rewrites the deck
     /// against the brief and the critique as a patch, the result is
     /// validated, polished at high effort, and saved under the same id.
@@ -270,17 +366,13 @@ impl GenerationEngine {
         &self,
         client: &reqwest::Client,
         context: &GenerationContext,
-        deck_ids: &[String],
-        instruction: &str,
+        order: &EditOrder<'_>,
         log: &LogSink,
     ) -> Result<Vec<String>, GenerationStop> {
         let mut saved = Vec::new();
         let mut last_error = None;
-        for deck_id in deck_ids {
-            match self
-                .edit_deck(client, context, deck_id, instruction, log)
-                .await
-            {
+        for deck_id in order.artifact_ids {
+            match self.edit_deck(client, context, deck_id, order, log).await {
                 Ok(()) => saved.push(deck_id.clone()),
                 Err(GenerationStop::NeedsClarification(set)) => {
                     return Err(GenerationStop::NeedsClarification(set));
@@ -302,7 +394,7 @@ impl GenerationEngine {
         client: &reqwest::Client,
         context: &GenerationContext,
         deck_id: &str,
-        instruction: &str,
+        order: &EditOrder<'_>,
         log: &LogSink,
     ) -> Result<(), GenerationStop> {
         let decks = self.deck_store()?;
@@ -311,21 +403,29 @@ impl GenerationEngine {
             .await
             .map_err(|error| GenerationStop::Failed(error.to_string()))?
             .ok_or_else(|| GenerationStop::Failed(format!("deck `{deck_id}` does not exist")))?;
+        let instruction = order.instruction;
         let label = format!("edit {deck_id}");
         // A change that names slides is about those slides: the model
-        // sees only them. A change that names none is systemic.
+        // sees only them. A change that names none is systemic. A
+        // regenerate sees the named slides without their markup.
         let indexes: Vec<usize> = referenced_indexes(instruction, "slide")
             .into_iter()
             .filter(|index| *index < deck.slides.len())
             .collect();
         let measured = crate::deck_polish::dom_findings(&deck, &self.base_url(), &label, log).await;
         let findings = findings_for(&measured, "slides", &indexes);
+        let total = deck.slides.len();
         let (deck_json, note) = if indexes.is_empty() {
             (serde_json::to_string(&deck), String::new())
+        } else if order.is_fresh {
+            (
+                focused_deck_json(&deck, &indexes, true),
+                fresh_note("slide", "slides", &indexes, total),
+            )
         } else {
             (
-                focused_deck_json(&deck, &indexes),
-                focus_note("slide", "slides", &indexes, deck.slides.len()),
+                focused_deck_json(&deck, &indexes, false),
+                focus_note("slide", "slides", &indexes, total),
             )
         };
         let deck_json = deck_json.map_err(|error| GenerationStop::Failed(error.to_string()))?;
@@ -732,7 +832,7 @@ impl GenerationEngine {
                 findings.len()
             ));
             let deck_json =
-                focused_deck_json(&deck, &fix.indexes).map_err(|error| error.to_string())?;
+                focused_deck_json(&deck, &fix.indexes, false).map_err(|error| error.to_string())?;
             let note = focus_note("slide", "slides", &fix.indexes, deck.slides.len());
             let instruction = fix_instruction("slides");
             let input = EditInput {
@@ -1117,8 +1217,12 @@ fn deck_candidate_prompt(request: &DeckCandidateRequest<'_>) -> String {
         request.preview_slides,
     ));
     prompt.push_str(&scenario_note(options.scenario.as_deref()));
+    if let Some(merge) = request.merge {
+        prompt.push_str(&merge_note("deck", merge));
+    }
     let count = options.variation_count();
-    if count > 1 {
+    // A merge is one candidate on its own, not one of the run's set.
+    if count > 1 && request.merge.is_none() {
         prompt.push_str(&format!(
             "This is candidate {candidate_number} of {count}. Make it distinct from the other \
              candidates in theme, structure, and angle.\n"
@@ -1161,13 +1265,22 @@ fn deck_edit_prompt(request: &SessionRequest, input: &EditInput<'_>) -> String {
 
 /// The deck as a focused edit sees it: the title, the theme, the slide
 /// count, and only the slides at `indexes`, each with its index.
-fn focused_deck_json(deck: &Deck, indexes: &[usize]) -> Result<String, serde_json::Error> {
+fn focused_deck_json(
+    deck: &Deck,
+    indexes: &[usize],
+    is_fresh: bool,
+) -> Result<String, serde_json::Error> {
     let slides: Vec<serde_json::Value> = indexes
         .iter()
         .filter_map(|index| {
-            deck.slides
-                .get(*index)
-                .map(|slide| serde_json::json!({ "index": index, "slide": slide }))
+            deck.slides.get(*index).map(|slide| {
+                let slide = if is_fresh {
+                    fresh_slide(slide)
+                } else {
+                    slide.clone()
+                };
+                serde_json::json!({ "index": index, "slide": slide })
+            })
         })
         .collect();
     serde_json::to_string(&serde_json::json!({
@@ -1176,6 +1289,16 @@ fn focused_deck_json(deck: &Deck, indexes: &[usize]) -> Result<String, serde_jso
         "slide_count": deck.slides.len(),
         "slides": slides,
     }))
+}
+
+/// The slide as a regenerate shows it: its name and notes, without its
+/// markup, so the model writes it anew instead of tweaking it.
+fn fresh_slide(slide: &Slide) -> Slide {
+    Slide {
+        html: String::new(),
+        css: None,
+        ..slide.clone()
+    }
 }
 
 /// The user prompt for one deck continuation chunk: the preview deck and
@@ -1270,7 +1393,7 @@ mod tests {
     #[test]
     fn a_focused_deck_edit_shows_only_the_named_slides_and_their_findings() {
         let deck = crate::test_support::sample_deck();
-        let focused = focused_deck_json(&deck, &[1]).unwrap();
+        let focused = focused_deck_json(&deck, &[1], false).unwrap();
         let value: serde_json::Value = serde_json::from_str(&focused).unwrap();
         assert_eq!(value["slide_count"], deck.slides.len());
         assert_eq!(value["slides"].as_array().unwrap().len(), 1);
@@ -1538,6 +1661,115 @@ mod tests {
             stores.sessions.read("talk").await.unwrap().unwrap().state,
             WorkflowState::Generating
         );
+    }
+
+    /// A reviewing deck session with `count` saved candidates.
+    async fn reviewing_deck_session_with(stores: &Stores, count: usize) {
+        for number in 1..=count {
+            stores
+                .decks
+                .save(&format!("talk-candidate-{number}"), &sample_deck())
+                .await
+                .unwrap();
+        }
+        set_up_deck_session(&stores.sessions).await;
+        stores
+            .sessions
+            .apply("talk", design_model::WorkflowEvent::GenerationStarted)
+            .await
+            .unwrap();
+        stores
+            .sessions
+            .apply("talk", design_model::WorkflowEvent::GenerationSucceeded)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_regenerated_slide_is_written_without_its_old_markup() {
+        let server = FakeModelServer::start().await;
+        // No planner turn: the request names its slide itself.
+        server.push_text(
+            r#"{"slides":[{"index":0,"slide":{"html":"<h1 class='title'>Fresh</h1>","css":".title{font-size:96px;}"}}]}"#,
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let stores = stores(&directory);
+        let mut deck = sample_deck();
+        deck.slides[0].html = "<h1>Old title markup</h1>".to_owned();
+        stores.decks.save("talk-candidate-1", &deck).await.unwrap();
+        reviewing_deck_session_with(&stores, 0).await;
+        stores
+            .sessions
+            .append_message(
+                "talk",
+                ChatMessage::regenerate_request(
+                    "[slide 1] Write this slide anew.",
+                    "talk-candidate-1",
+                ),
+            )
+            .await
+            .unwrap();
+        let outcome = engine(&server, &stores)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
+        let text = server.requests()[0].to_string();
+        assert!(text.contains("Write slide 1 of"));
+        assert!(!text.contains("Old title markup"));
+        let edited = stores
+            .decks
+            .load("talk-candidate-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(edited.slides[0].html.contains("Fresh"));
+        assert_eq!(edited.slides.len(), deck.slides.len());
+    }
+
+    #[tokio::test]
+    async fn a_merge_of_two_pinned_decks_writes_a_new_one() {
+        let server = FakeModelServer::start().await;
+        server.push_text(r#"{"reply":"Merging the two.","merge":true}"#);
+        server.push_text(SAMPLE_DECK);
+        // The polish round, when Chrome can measure: no change.
+        server.push_text(r#"{"slides":[]}"#);
+        let directory = tempfile::tempdir().unwrap();
+        let stores = stores(&directory);
+        reviewing_deck_session_with(&stores, 2).await;
+        let pinned = vec!["talk-candidate-1".to_owned(), "talk-candidate-2".to_owned()];
+        stores
+            .sessions
+            .append_message(
+                "talk",
+                ChatMessage::user(
+                    "[candidate 1] [candidate 2] Opening from 1, close from 2.",
+                    None,
+                )
+                .with_pinned(pinned),
+            )
+            .await
+            .unwrap();
+        let outcome = engine(&server, &stores)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        let GenerationOutcome::Wrote { design_ids } = outcome else {
+            panic!("expected a write");
+        };
+        assert_eq!(design_ids, vec!["talk-candidate-3".to_owned()]);
+        assert!(
+            stores
+                .decks
+                .load("talk-candidate-3")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let text = server.requests()[1].to_string();
+        assert!(text.contains("Combine these candidates into one deck"));
+        assert!(text.contains("Candidate 2:"));
+        assert!(!text.contains("This is candidate"));
     }
 
     #[tokio::test]
