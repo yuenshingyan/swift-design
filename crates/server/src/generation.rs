@@ -10,11 +10,12 @@ use std::sync::Arc;
 
 use design_model::{BriefQuestionSet, Design, QuestionSetError, validate_question_set};
 
+use crate::candidates::{candidate_id, next_candidate_number};
 use crate::concepts::{Concept, concept_input, concept_note, concept_prompt, parse_concepts};
 use crate::designs::DesignStore;
 use crate::edit_focus::{
-    EditFix, EditInput, findings_for, findings_note, fix_instruction, focus_note,
-    referenced_indexes, touched_indexes,
+    EditFix, EditInput, EditOrder, MergeInput, findings_for, findings_note, fix_instruction,
+    focus_note, fresh_note, merge_note, merge_sources, referenced_indexes, touched_indexes,
 };
 use crate::events::ChangeNotifier;
 use crate::instructions::DEMO_RULES;
@@ -70,6 +71,20 @@ pub(crate) enum GenerationTask {
     },
     /// Continue the preview designs named here.
     Continue(Vec<String>),
+    /// Combine parts of the named candidates into one new candidate.
+    Merge {
+        /// The candidates to take parts from, in the order pinned.
+        sources: Vec<String>,
+        /// Which parts to take from each, in the user's words.
+        instruction: String,
+    },
+    /// Write the units the instruction names anew, in one artifact.
+    Regenerate {
+        /// The artifact whose units are rewritten.
+        design: String,
+        /// The request, with the `[screen N]` or `[slide N]` references.
+        instruction: String,
+    },
 }
 
 /// The request, the answers, and the options one run works from.
@@ -305,6 +320,20 @@ pub(crate) fn trailing_continue_ids(messages: &[ChatMessage]) -> Vec<String> {
     }
     ids.reverse();
     ids
+}
+
+/// The artifact and the instruction of a regenerate request, when the
+/// latest user turn is one.
+fn trailing_regenerate(messages: &[ChatMessage]) -> Option<(String, String)> {
+    let latest = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")?;
+    if !latest.is_regenerate {
+        return None;
+    }
+    let design = latest.design.clone()?;
+    Some((design, latest.content.clone()))
 }
 
 impl GenerationEngine {
@@ -625,11 +654,23 @@ impl GenerationEngine {
         }
     }
 
-    /// A continue request names its artifacts; no planning is needed.
+    /// A continue or a regenerate request names its artifacts; no
+    /// planning is needed.
     async fn pick_task(
         &self,
         context: &GenerationContext,
     ) -> Result<Option<GenerationTask>, String> {
+        let messages = self
+            .sessions
+            .messages(&context.session_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Some((design, instruction)) = trailing_regenerate(&messages) {
+            return Ok(Some(GenerationTask::Regenerate {
+                design,
+                instruction,
+            }));
+        }
         let continues = match context.request.kind {
             design_model::ArtifactKind::Demo => self.continue_requests(&context.session_id).await?,
             design_model::ArtifactKind::Deck => {
@@ -756,7 +797,15 @@ impl GenerationEngine {
         if !plan.reply.is_empty() {
             self.say(session_id, &plan.reply).await?;
         }
-        if plan.should_edit && !targets.is_empty() {
+        // A merge needs two sources. With one, the change is an edit.
+        if plan.should_merge && targets.len() >= 2 {
+            let instruction = latest_user_text(&messages).unwrap_or_default();
+            return Ok(PlanStep::Task(GenerationTask::Merge {
+                sources: targets,
+                instruction,
+            }));
+        }
+        if (plan.should_edit || plan.should_merge) && !targets.is_empty() {
             let instruction = latest_user_text(&messages).unwrap_or_default();
             return Ok(PlanStep::Task(GenerationTask::Edit {
                 designs: targets,
@@ -840,10 +889,36 @@ impl GenerationEngine {
                 designs,
                 instruction,
             } => {
-                let design_ids = self
-                    .edit_designs(client, context, &designs, &instruction, log)
-                    .await?;
+                let order = EditOrder {
+                    artifact_ids: &designs,
+                    instruction: &instruction,
+                    is_fresh: false,
+                };
+                let design_ids = self.edit_designs(client, context, &order, log).await?;
                 Ok(GenerationOutcome::Wrote { design_ids })
+            }
+            GenerationTask::Regenerate {
+                design,
+                instruction,
+            } => {
+                let order = EditOrder {
+                    artifact_ids: std::slice::from_ref(&design),
+                    instruction: &instruction,
+                    is_fresh: true,
+                };
+                let design_ids = self.edit_designs(client, context, &order, log).await?;
+                Ok(GenerationOutcome::Wrote { design_ids })
+            }
+            GenerationTask::Merge {
+                sources,
+                instruction,
+            } => {
+                let design_id = self
+                    .merge_designs(client, context, &sources, &instruction, log)
+                    .await?;
+                Ok(GenerationOutcome::Wrote {
+                    design_ids: vec![design_id],
+                })
             }
             GenerationTask::Continue(design_ids) => {
                 let outcomes = self
@@ -997,7 +1072,13 @@ impl GenerationEngine {
         // brief mirrors them, but only from the revision after the pick,
         // and a user who picks a canvas at approval writes no revision.
         let platforms = context.request.platforms();
-        let plans = candidate_plans(&base, &platforms, count);
+        // A later run numbers after the candidates the session has, so
+        // it adds to them instead of overwriting them.
+        let first_number = match self.designs.list().await {
+            Ok(rows) => next_candidate_number(&base, rows.iter().map(|row| row.id.as_str())),
+            Err(_) => 1,
+        };
+        let plans = candidate_plans(&base, &platforms, count, first_number);
         let ids: Vec<String> = plans.iter().map(|plan| plan.design_id.clone()).collect();
         if plans.len() > count {
             log(&format!(
@@ -1037,6 +1118,7 @@ impl GenerationEngine {
                     preview_screens: context.preview_screens(),
                     design_id: id.clone(),
                     template: template.as_ref(),
+                    merge: None,
                 };
                 engine
                     .generate_candidate(&client, &request, &attachments, &share, &log)
@@ -1075,6 +1157,79 @@ impl GenerationEngine {
             log(&format!("candidate failed: {failure}"));
         }
         Ok(GenerationOutcome::Wrote { design_ids: saved })
+    }
+
+    /// Combines parts of `sources` into one new candidate, as
+    /// `instruction` asks, and returns its id. The sources must share a
+    /// canvas: a phone screen and a desktop screen do not merge. The
+    /// new candidate takes the next free number and goes through the
+    /// same fix and polish rounds as a fresh candidate.
+    async fn merge_designs(
+        &self,
+        client: &reqwest::Client,
+        context: &GenerationContext,
+        sources: &[String],
+        instruction: &str,
+        log: &LogSink,
+    ) -> Result<String, GenerationStop> {
+        let mut loaded = Vec::new();
+        for id in sources {
+            let design = self
+                .designs
+                .load(id)
+                .await
+                .map_err(|error| GenerationStop::Failed(error.to_string()))?
+                .ok_or_else(|| GenerationStop::Failed(format!("design `{id}` does not exist")))?;
+            loaded.push((id.as_str(), design));
+        }
+        let Some((first_id, first)) = loaded.first() else {
+            return Err(GenerationStop::Failed(
+                "a merge needs two candidates: pin them with @".to_owned(),
+            ));
+        };
+        let viewport = first.viewport;
+        if let Some((other_id, _)) = loaded
+            .iter()
+            .find(|(_, design)| design.viewport != viewport)
+        {
+            return Err(GenerationStop::Failed(format!(
+                "`{first_id}` and `{other_id}` are on different canvases: merge candidates of one \
+                 canvas"
+            )));
+        }
+        let merge = MergeInput {
+            sources: merge_sources(&loaded).map_err(GenerationStop::Failed)?,
+            instruction: instruction.to_owned(),
+        };
+        let base = context.session_id.as_str();
+        let rows = self
+            .designs
+            .list()
+            .await
+            .map_err(|error| GenerationStop::Failed(error.to_string()))?;
+        let number = next_candidate_number(base, rows.iter().map(|row| row.id.as_str()));
+        let design_id = candidate_id(base, number);
+        log(&format!("merging {} into {design_id}", sources.join(", ")));
+        let attachments = self.load_attachments(&context.session_id, log).await;
+        let share = self
+            .shared_progress(std::slice::from_ref(&design_id), 5, 95)
+            .pop()
+            .ok_or_else(|| GenerationStop::Failed("no progress share".to_owned()))?;
+        share(0.0);
+        let request = CandidateRequest {
+            context,
+            candidate_number: number,
+            viewport,
+            concepts: &[],
+            preview_screens: None,
+            design_id: design_id.clone(),
+            template: None,
+            merge: Some(&merge),
+        };
+        self.generate_candidate(client, &request, &attachments, &share, log)
+            .await?;
+        log(&format!("merge: saved as {design_id}"));
+        Ok(design_id)
     }
 
     /// Asks the model for `count` distinct concepts in one call. A reply
@@ -1122,15 +1277,14 @@ impl GenerationEngine {
         &self,
         client: &reqwest::Client,
         context: &GenerationContext,
-        design_ids: &[String],
-        instruction: &str,
+        order: &EditOrder<'_>,
         log: &LogSink,
     ) -> Result<Vec<String>, GenerationStop> {
         let mut saved = Vec::new();
         let mut last_error = None;
-        for design_id in design_ids {
+        for design_id in order.artifact_ids {
             match self
-                .edit_design(client, context, design_id, instruction, log)
+                .edit_design(client, context, design_id, order, log)
                 .await
             {
                 Ok(()) => saved.push(design_id.clone()),
@@ -1156,7 +1310,7 @@ impl GenerationEngine {
         client: &reqwest::Client,
         context: &GenerationContext,
         design_id: &str,
-        instruction: &str,
+        order: &EditOrder<'_>,
         log: &LogSink,
     ) -> Result<(), GenerationStop> {
         let design = self
@@ -1167,21 +1321,29 @@ impl GenerationEngine {
             .ok_or_else(|| {
                 GenerationStop::Failed(format!("design `{design_id}` does not exist"))
             })?;
+        let instruction = order.instruction;
         let label = format!("edit {design_id}");
         // A change that names screens is about those screens: the model
-        // sees only them. A change that names none is systemic.
+        // sees only them. A change that names none is systemic. A
+        // regenerate sees the named screens without their markup.
         let indexes: Vec<usize> = referenced_indexes(instruction, "screen")
             .into_iter()
             .filter(|index| *index < design.screens.len())
             .collect();
         let measured = crate::polish::dom_findings(&design, &self.base_url(), &label, log).await;
         let findings = findings_for(&measured, "screens", &indexes);
+        let total = design.screens.len();
         let (design_json, note) = if indexes.is_empty() {
             (serde_json::to_string(&design), String::new())
+        } else if order.is_fresh {
+            (
+                focused_design_json(&design, &indexes, true),
+                fresh_note("screen", "screens", &indexes, total),
+            )
         } else {
             (
-                focused_design_json(&design, &indexes),
-                focus_note("screen", "screens", &indexes, design.screens.len()),
+                focused_design_json(&design, &indexes, false),
+                focus_note("screen", "screens", &indexes, total),
             )
         };
         let design_json = design_json.map_err(|error| GenerationStop::Failed(error.to_string()))?;
@@ -1678,8 +1840,8 @@ impl GenerationEngine {
                 "{label}: fix round {round} of at most {limit} ({} findings on the touched screens)",
                 findings.len()
             ));
-            let design_json =
-                focused_design_json(&design, &fix.indexes).map_err(|error| error.to_string())?;
+            let design_json = focused_design_json(&design, &fix.indexes, false)
+                .map_err(|error| error.to_string())?;
             let note = focus_note("screen", "screens", &fix.indexes, design.screens.len());
             let instruction = fix_instruction("screens");
             let input = EditInput {
@@ -2537,14 +2699,22 @@ fn edit_prompt(request: &SessionRequest, input: &EditInput<'_>) -> String {
 /// The design as a focused edit sees it: the title, the theme, the
 /// viewport, the screen count, and only the screens at `indexes`, each
 /// with its index.
-fn focused_design_json(design: &Design, indexes: &[usize]) -> Result<String, serde_json::Error> {
+fn focused_design_json(
+    design: &Design,
+    indexes: &[usize],
+    is_fresh: bool,
+) -> Result<String, serde_json::Error> {
     let screens: Vec<serde_json::Value> = indexes
         .iter()
         .filter_map(|index| {
-            design
-                .screens
-                .get(*index)
-                .map(|screen| serde_json::json!({ "index": index, "screen": screen }))
+            design.screens.get(*index).map(|screen| {
+                let screen = if is_fresh {
+                    fresh_screen(screen)
+                } else {
+                    screen.clone()
+                };
+                serde_json::json!({ "index": index, "screen": screen })
+            })
         })
         .collect();
     serde_json::to_string(&serde_json::json!({
@@ -2554,6 +2724,16 @@ fn focused_design_json(design: &Design, indexes: &[usize]) -> Result<String, ser
         "screen_count": design.screens.len(),
         "screens": screens,
     }))
+}
+
+/// The screen as a regenerate shows it: its name and notes, without
+/// its markup, so the model writes it anew instead of tweaking it.
+fn fresh_screen(screen: &design_model::Screen) -> design_model::Screen {
+    design_model::Screen {
+        html: String::new(),
+        css: None,
+        ..screen.clone()
+    }
 }
 
 /// What one candidate call needs: the run context, the candidate number,
@@ -2573,6 +2753,8 @@ struct CandidateRequest<'request> {
     /// The template the candidate takes its look from, when the options
     /// name one.
     template: Option<&'request crate::templates::Template>,
+    /// The candidates to combine, when this candidate is a merge.
+    merge: Option<&'request MergeInput>,
 }
 
 /// The prompt lines for a preview candidate: write `count` screens and
@@ -2742,11 +2924,14 @@ pub(crate) struct CandidatePlan {
 }
 
 /// Every candidate a run writes: `variations` concepts on each canvas,
-/// canvas by canvas.
+/// canvas by canvas, numbered from `first_number`. A run numbers after
+/// the candidates the session has, so it adds to them instead of
+/// overwriting them.
 pub(crate) fn candidate_plans(
     base: &str,
     platforms: &[String],
     variations: usize,
+    first_number: usize,
 ) -> Vec<CandidatePlan> {
     let mut plans = Vec::new();
     for viewport in platforms
@@ -2754,9 +2939,9 @@ pub(crate) fn candidate_plans(
         .map(|platform| design_model::Viewport::for_platform(platform))
     {
         for variation in 1..=variations.max(1) {
-            let candidate_number = plans.len() + 1;
+            let candidate_number = first_number.max(1) + plans.len();
             plans.push(CandidatePlan {
-                design_id: format!("{base}-candidate-{candidate_number}"),
+                design_id: crate::candidates::candidate_id(base, candidate_number),
                 candidate_number,
                 variation,
                 viewport,
@@ -2782,8 +2967,12 @@ fn candidate_prompt(request: &CandidateRequest<'_>) -> String {
     if let Some(count) = request.preview_screens {
         prompt.push_str(&preview_note(count));
     }
+    if let Some(merge) = request.merge {
+        prompt.push_str(&merge_note("design", merge));
+    }
     let count = options.variation_count();
-    if count > 1 {
+    // A merge is one candidate on its own, not one of the run's set.
+    if count > 1 && request.merge.is_none() {
         prompt.push_str(&format!(
             "This is candidate {candidate_number} of {count}. Make it distinct from the other \
              candidates in theme, structure, and angle.\n"
@@ -2926,7 +3115,7 @@ mod tests {
     #[test]
     fn a_run_writes_one_candidate_per_canvas_per_variation() {
         let platforms = vec!["desktop web".to_owned(), "phone".to_owned()];
-        let plans = candidate_plans("talk", &platforms, 2);
+        let plans = candidate_plans("talk", &platforms, 2, 1);
         assert_eq!(plans.len(), 4);
         let ids: Vec<&str> = plans.iter().map(|plan| plan.design_id.as_str()).collect();
         assert_eq!(
@@ -2949,12 +3138,27 @@ mod tests {
     #[test]
     fn one_canvas_leaves_the_candidate_numbering_alone() {
         let one = [String::new()];
-        let plans = candidate_plans("talk", &one, 3);
+        let plans = candidate_plans("talk", &one, 3, 1);
         assert_eq!(plans.len(), 3);
         assert_eq!(plans[0].design_id, "talk-candidate-1");
         assert_eq!(plans[2].variation, 3);
         // Zero variations still writes one candidate.
-        assert_eq!(candidate_plans("talk", &one, 0).len(), 1);
+        assert_eq!(candidate_plans("talk", &one, 0, 1).len(), 1);
+    }
+
+    #[test]
+    fn a_second_run_numbers_after_the_first() {
+        let one = [String::new()];
+        let plans = candidate_plans("talk", &one, 2, 4);
+        let ids: Vec<&str> = plans.iter().map(|plan| plan.design_id.as_str()).collect();
+        assert_eq!(ids, ["talk-candidate-4", "talk-candidate-5"]);
+        assert_eq!(plans[1].candidate_number, 5);
+        assert_eq!(plans[1].variation, 2);
+        // A first number of zero still starts at one.
+        assert_eq!(
+            candidate_plans("talk", &one, 1, 0)[0].design_id,
+            "talk-candidate-1"
+        );
     }
 
     #[test]
@@ -3282,7 +3486,7 @@ mod tests {
     fn a_focused_design_edit_shows_only_the_named_screens_and_their_findings() {
         let mut design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
         design.screens.push(design.screens[0].clone());
-        let focused = focused_design_json(&design, &[1]).unwrap();
+        let focused = focused_design_json(&design, &[1], false).unwrap();
         let value: serde_json::Value = serde_json::from_str(&focused).unwrap();
         assert_eq!(value["screen_count"], design.screens.len());
         assert_eq!(value["screens"].as_array().unwrap().len(), 1);
@@ -3452,7 +3656,7 @@ mod tests {
         let text = server.requests()[1].to_string();
         assert!(text.contains("Apply this change: Tighten the hero."));
         let planner = server.requests()[0].to_string();
-        assert!(planner.contains("Artifacts to edit this turn: talk-candidate-1"));
+        assert!(planner.contains("Artifacts named this turn: talk-candidate-1"));
     }
 
     #[tokio::test]
@@ -3506,9 +3710,190 @@ mod tests {
         let untouched = designs.load("talk-candidate-2").await.unwrap().unwrap();
         assert!(!untouched.screens[0].html.contains("Tighter"));
         let planner = server.requests()[0].to_string();
-        assert!(
-            planner.contains("Artifacts to edit this turn: talk-candidate-1, talk-candidate-3")
-        );
+        assert!(planner.contains("Artifacts named this turn: talk-candidate-1, talk-candidate-3"));
+    }
+
+    /// A reviewing session with `count` saved candidates of `design`.
+    async fn reviewing_session_with(
+        sessions: &SessionStore,
+        designs: &DesignStore,
+        design: &design_model::Design,
+        count: usize,
+    ) {
+        for number in 1..=count {
+            designs
+                .save(&format!("talk-candidate-{number}"), design)
+                .await
+                .unwrap();
+        }
+        set_up_session(sessions, "A landing page.").await;
+        sessions
+            .apply("talk", design_model::WorkflowEvent::GenerationStarted)
+            .await
+            .unwrap();
+        sessions
+            .apply("talk", design_model::WorkflowEvent::GenerationSucceeded)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_merge_of_two_pinned_candidates_writes_a_new_one() {
+        let server = FakeModelServer::start().await;
+        server.push_text(r#"{"reply":"Merging the two.","merge":true}"#);
+        server.push_text(SAMPLE_DESIGN);
+        // The polish round, when Chrome can measure: no change.
+        server.push_text(r#"{"screens":[]}"#);
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+        reviewing_session_with(&sessions, &designs, &design, 2).await;
+        let pinned = vec!["talk-candidate-1".to_owned(), "talk-candidate-2".to_owned()];
+        sessions
+            .append_message(
+                "talk",
+                ChatMessage::user(
+                    "[candidate 1] [candidate 2] Hero from 1, pricing from 2.",
+                    None,
+                )
+                .with_pinned(pinned),
+            )
+            .await
+            .unwrap();
+        let outcome = engine(&server, &designs, &sessions)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        let GenerationOutcome::Wrote { design_ids } = outcome else {
+            panic!("expected a write");
+        };
+        assert_eq!(design_ids, vec!["talk-candidate-3".to_owned()]);
+        assert!(designs.load("talk-candidate-3").await.unwrap().is_some());
+        let text = server.requests()[1].to_string();
+        assert!(text.contains("Combine these candidates into one design"));
+        assert!(text.contains("Hero from 1, pricing from 2."));
+        assert!(text.contains("Candidate 1:"));
+        assert!(text.contains("Candidate 2:"));
+        assert!(!text.contains("This is candidate"));
+    }
+
+    #[tokio::test]
+    async fn a_merge_across_canvases_is_refused() {
+        let server = FakeModelServer::start().await;
+        server.push_text(r#"{"reply":"Merging the two.","merge":true}"#);
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+        reviewing_session_with(&sessions, &designs, &design, 1).await;
+        let mut phone = design.clone();
+        phone.viewport = design_model::Viewport::for_platform("phone");
+        designs.save("talk-candidate-2", &phone).await.unwrap();
+        let pinned = vec!["talk-candidate-1".to_owned(), "talk-candidate-2".to_owned()];
+        sessions
+            .append_message(
+                "talk",
+                ChatMessage::user("[candidate 1] [candidate 2] Combine them.", None)
+                    .with_pinned(pinned),
+            )
+            .await
+            .unwrap();
+        let error = engine(&server, &designs, &sessions)
+            .run("talk", silent_log())
+            .await
+            .unwrap_err();
+        assert!(error.contains("different canvases"), "{error}");
+        assert!(designs.load("talk-candidate-3").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_merge_with_one_pin_is_an_edit() {
+        let server = FakeModelServer::start().await;
+        server.push_text(r#"{"reply":"Changing it.","merge":true}"#);
+        server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:64px;}"}}]}"#);
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+        reviewing_session_with(&sessions, &designs, &design, 1).await;
+        sessions
+            .append_message(
+                "talk",
+                ChatMessage::user("[candidate 1] Tighten the hero.", None)
+                    .with_pinned(vec!["talk-candidate-1".to_owned()]),
+            )
+            .await
+            .unwrap();
+        let outcome = engine(&server, &designs, &sessions)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        let GenerationOutcome::Wrote { design_ids } = outcome else {
+            panic!("expected a write");
+        };
+        assert_eq!(design_ids, vec!["talk-candidate-1".to_owned()]);
+        let edited = designs.load("talk-candidate-1").await.unwrap().unwrap();
+        assert!(edited.screens[0].html.contains("Tighter"));
+    }
+
+    #[tokio::test]
+    async fn a_regenerated_screen_is_written_without_its_old_markup() {
+        let server = FakeModelServer::start().await;
+        // No planner turn: the request names its screen itself.
+        server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Fresh</h1>","css":".title{font-size:64px;}"}}]}"#);
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let mut design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+        design.screens[0].html = "<h1>Old hero markup</h1>".to_owned();
+        reviewing_session_with(&sessions, &designs, &design, 1).await;
+        sessions
+            .append_message(
+                "talk",
+                ChatMessage::regenerate_request(
+                    "[screen 1] Write this screen anew.",
+                    "talk-candidate-1",
+                ),
+            )
+            .await
+            .unwrap();
+        let outcome = engine(&server, &designs, &sessions)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
+        let text = server.requests()[0].to_string();
+        assert!(text.contains("Write screen 1 of"));
+        assert!(text.contains("anew"));
+        assert!(!text.contains("Old hero markup"));
+        let edited = designs.load("talk-candidate-1").await.unwrap().unwrap();
+        assert!(edited.screens[0].html.contains("Fresh"));
+        assert_eq!(edited.screens.len(), design.screens.len());
+    }
+
+    #[tokio::test]
+    async fn a_later_run_numbers_after_the_candidates_the_session_has() {
+        let server = FakeModelServer::start().await;
+        server.push_text(WRITE_PLAN);
+        server.push_text(SAMPLE_DESIGN);
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+        reviewing_session_with(&sessions, &designs, &design, 2).await;
+        sessions
+            .append_message("talk", ChatMessage::user("Another take.", None))
+            .await
+            .unwrap();
+        let outcome = engine(&server, &designs, &sessions)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        let GenerationOutcome::Wrote { design_ids } = outcome else {
+            panic!("expected a write");
+        };
+        assert_eq!(design_ids, vec!["talk-candidate-3".to_owned()]);
     }
 
     #[test]
