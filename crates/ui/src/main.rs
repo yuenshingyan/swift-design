@@ -557,6 +557,12 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .selection-clear { padding: 0.3rem 0.75rem; border: 1px solid var(--hairline);
   border-radius: var(--r-button); background: var(--raised); color: var(--ink-2);
   font-family: var(--mono); font-size: 0.72rem; }
+.selection-merge { padding: 0.3rem 0.75rem; border: 1px solid var(--teal-line);
+  border-radius: var(--r-button); background: var(--raised); color: var(--teal);
+  font-family: var(--mono); font-size: 0.72rem; }
+.selection-merge:hover:not(:disabled) { background: var(--teal-tint); border-color: var(--teal); }
+.selection-merge:disabled, .selection-merge:disabled:hover { background: var(--raised);
+  border-color: var(--line); color: var(--muted); }
 .card-pill { display: inline-flex;
   align-items: center; gap: 0.375rem; padding: 0.2rem 0.6rem; border-radius: 999px;
   border: 1px solid var(--hairline); background: rgba(255,255,255,.96); color: var(--teal);
@@ -587,6 +593,15 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .canvas-card.phone .card-footer { padding: 0.375rem 0.5rem; min-height: 0; gap: 0.375rem; }
 .canvas-card.phone .card-finish { padding: 0.3rem; }
 .canvas-card.phone .card-finish .finish-text { display: none; }
+.card-fork { flex: none; display: inline-flex; align-items: center; gap: 0.3rem;
+  padding: 0.15rem 0.6rem; white-space: nowrap; border: 1px solid var(--hairline);
+  border-radius: 999px; background: var(--raised); color: var(--ink-2);
+  font-family: var(--mono); font-size: 0.68rem; font-weight: 500; box-shadow: none; }
+.card-fork:hover:not(:disabled) { border-color: var(--teal); color: var(--teal); }
+.card-fork:disabled { opacity: 0.45; cursor: default; }
+.card-fork span { display: flex; }
+.canvas-card.phone .card-fork { padding: 0.3rem; }
+.canvas-card.phone .card-fork .fork-text { display: none; }
 .chosen-pill { flex: none; display: inline-flex; align-items: center; gap: 0.3rem;
   padding: 0.2rem 0.6rem; border: 1px solid var(--teal-line); border-radius: 999px;
   background: var(--teal-tint); color: var(--teal); font-family: var(--mono); font-size: 0.68rem;
@@ -845,6 +860,20 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
   white-space: nowrap; }
 .thumbnail.portrait .thumbnail-delete.confirm { width: 1.5rem; height: 1.5rem; padding: 0; }
 .thumbnail.portrait .thumbnail-delete.confirm .delete-text { display: none; }
+/* Redo sits left of Delete and takes two clicks the same way. */
+.thumbnail-redo { position: absolute; top: 0.25rem; right: 1.85rem; z-index: 2; display: none;
+  align-items: center; justify-content: center; gap: 0.3rem; width: 1.375rem; height: 1.375rem;
+  padding: 0; border: 1px solid var(--hairline); border-radius: 999px;
+  background: rgba(255,255,255,.96); color: var(--ink-2); line-height: 1;
+  box-shadow: var(--sh-control); }
+.thumbnail-redo span { display: flex; }
+.thumbnail:hover .thumbnail-redo, .thumbnail-redo.confirm { display: inline-flex; }
+.thumbnail-redo.confirm { top: 50%; left: 50%; right: auto; transform: translate(-50%, -50%);
+  width: auto; height: auto; padding: 0.3rem 0.7rem; border-color: var(--teal);
+  background: var(--teal); color: #FFFFFF; font-family: var(--mono); font-size: 0.7rem;
+  white-space: nowrap; }
+.thumbnail.portrait .thumbnail-redo.confirm { width: 1.5rem; height: 1.5rem; padding: 0; }
+.thumbnail.portrait .thumbnail-redo.confirm .redo-text { display: none; }
 .strip-divider { flex: none; align-self: stretch; width: 1px; margin: 0 0.25rem;
   background: var(--line); }
 /* A planned tile is the size of a written tile and reads as a label, not
