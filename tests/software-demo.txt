@@ -1,1 +1,0 @@
-A TODO app with Zed IDE's aesthetics and styling.
