@@ -20,7 +20,7 @@ const SHARED_RULES: [&str; 6] = [
     "The server scopes your CSS to the screen or slide. Write plain selectors such as `.title` or `h1`. Do not write `html`, `body`, or `:root` selectors. Do not use `@import`. `@media`, `@keyframes`, and `@font-face` are allowed.",
     "Use the theme through CSS variables: `--background`, `--text`, `--accent`, `--muted`, `--heading-font`, `--body-font`, `--mono-font`. Write other colors as #rrggbb.",
     "The server loads the theme fonts from Google Fonts. Base styles: text is 32px in the body font and text color, headings use the heading font with margin 0, paragraphs and lists have margin 0, images are block and max-width 100%.",
-    "Allowed HTML: headings, text, lists, tables, `<img>`, inline `<svg>`, `<pre><code>`, `<blockquote>`, `<a>`. Close every tag. Do not write `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, forms, media, comments, on* attributes, javascript: URLs, or data: URLs.",
+    "Allowed HTML: headings, text, lists, tables, `<img>`, inline `<svg>`, `<pre><code>`, `<blockquote>`, `<a>`, `<details>` with `<summary>`, `<label>`, and `<input>` with type `checkbox` or `radio`. Close every tag. Do not write `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, `<form>`, `<button>`, `<select>`, `<textarea>`, other input types, media, comments, on* attributes, javascript: URLs, or data: URLs.",
     "Images: `<img src='/uploads/{name}'>` for files in GET /uploads?session={id}. Use no other image source. Draw charts, icons, and shapes as inline SVG or CSS.",
     "Keep html under 20,000 characters and css under 10,000 characters. Use single quotes for HTML attribute values inside the JSON string.",
 ];
@@ -40,6 +40,8 @@ pub const DEMO_RULES: &[&str] = &[
     "Size text for the viewport. On a 1440 px desktop canvas: titles 48 to 72px, body 18 to 24px, captions 14 to 16px, margins of at least 64px. On a 390 px phone canvas: titles 28 to 36px, body 16 to 18px, captions 12 to 14px, margins of at least 20px. Give boxes enough height for every line.",
     SHARED_RULES[5],
     "Put one idea on each screen. Put intent, states, and handoff remarks in notes. The renderer does not show notes on the screen.",
+    "Make a button or a link open another screen: write `<a href='#screen-3'>` with the screen number, counted from 1. The demo shows that screen when the user clicks the link. Give each step of a flow its own screen. Link the screens.",
+    "Make a menu or a dropdown open without a script: write `<details>` with a `<summary>`. Make a toggle, a tab set, or a modal: write `<input type='checkbox'>` or `<input type='radio'>` with a `<label for>`, and style the state with `:checked`. Give the input an id with the screen prefix. Do not write `<button>`. Style an `<a>` or a `<label>` as the button.",
     "`transition` is optional. Leave it out and the design scrolls. Set it to give the design a page transition: `effect` is `none`, `fade`, `push`, `cover`, or `zoom`; `axis` is `vertical` or `horizontal`; `duration_ms` is 0 to 3000. `axis` moves `push` and `cover` only. Set it only when the user asks for one.",
 ];
 
@@ -309,6 +311,18 @@ mod tests {
         let text = payload.to_string();
         assert!(text.contains("PUT it to /decks/{id}-candidate-1"));
         assert!(text.contains("SWIFT_DESIGN_ARTIFACT_KIND"));
+    }
+
+    #[test]
+    fn the_demo_rules_explain_screen_links_and_css_widgets() {
+        let demo = DEMO_RULES.join("\n");
+        assert!(demo.contains("`<a href='#screen-3'>`"));
+        assert!(demo.contains("`<details>` with a `<summary>`"));
+        assert!(demo.contains("`<input type='checkbox'>`"));
+        assert!(demo.contains("Do not write `<button>`."));
+        let deck = DECK_RULES.join("\n");
+        assert!(!deck.contains("#screen-"));
+        assert!(deck.contains("`<input>` with type `checkbox` or `radio`"));
     }
 
     #[test]
