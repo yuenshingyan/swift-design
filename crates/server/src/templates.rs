@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use design_model::{DECK_VIEWPORT, Design, Screen, Theme, Viewport};
 use serde::{Deserialize, Serialize};
@@ -49,8 +49,16 @@ pub struct Template {
     /// The px canvas the example screens were laid out on.
     #[serde(default)]
     pub viewport: design_model::Viewport,
-    /// Screens kept as layout examples, in design order.
+    /// Screens kept as layout examples, in design order. Empty for a
+    /// template extracted from brand material.
     pub screens: Vec<Screen>,
+    /// How the style looks beyond the theme, from an extraction. The
+    /// candidate prompt carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// True when a new session starts with this template picked.
+    #[serde(default)]
+    pub is_default: bool,
 }
 
 /// One row in the `GET /templates` listing.
@@ -66,6 +74,32 @@ pub struct TemplateSummary {
     pub theme: String,
     /// How many example screens the template holds.
     pub screen_count: usize,
+    /// True when a new session starts with this template picked.
+    pub is_default: bool,
+}
+
+/// Body of `POST /templates/extract`. One of `url` and `uploads` names
+/// the material.
+#[derive(Debug, Deserialize)]
+struct ExtractRequest {
+    /// The name to show in the template list.
+    name: String,
+    /// A website to capture.
+    #[serde(default)]
+    url: Option<String>,
+    /// Upload names to read, in `scope`.
+    #[serde(default)]
+    uploads: Vec<String>,
+    /// The session the uploads belong to. Absent means the draft scope
+    /// of the landing page.
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// Body of `PUT /templates/{id}/default`.
+#[derive(Debug, Deserialize)]
+struct DefaultRequest {
+    is_default: bool,
 }
 
 /// Body of `POST /templates`. Exactly one of `design_id` and `deck_id`
@@ -208,8 +242,174 @@ fn invalid_template_id(id: &str) -> Response {
 pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/templates", get(list_templates).post(save_template))
+        .route("/templates/extract", post(extract_template))
         .route("/templates/{id}", get(get_template).delete(delete_template))
+        .route("/templates/{id}/default", put(set_default_template))
         .route("/templates/{id}/render", get(render_template))
+}
+
+/// The one-screen page that shows a template with no example
+/// screens: the theme name, a heading, body copy, and an accent
+/// button, in the template's colors and fonts.
+fn swatch_screen(template: &Template) -> Screen {
+    let note = template
+        .note
+        .as_deref()
+        .unwrap_or("Extracted from brand material.");
+    Screen {
+        name: "Swatch".to_owned(),
+        html: format!(
+            "<section class='swatch'><p class='kicker'>{}</p><h1>{}</h1><p class='copy'>{}</p>\
+             <p><a class='button' href='#screen-1'>Get started</a></p></section>",
+            html_escape(&template.theme.name),
+            html_escape(&template.name),
+            html_escape(note),
+        ),
+        css: Some(
+            ".swatch { padding: 96px; display: flex; flex-direction: column; gap: 24px; \
+              justify-content: center; min-height: 100%; } \
+              .kicker { color: var(--muted); font-family: var(--mono-font); font-size: 24px; } \
+              h1 { font-size: 88px; line-height: 1; } \
+              .copy { max-width: 900px; color: var(--muted); } \
+              .button { display: inline-block; padding: 20px 40px; border-radius: 12px; \
+              background: var(--accent); color: var(--background); text-decoration: none; }"
+                .to_owned(),
+        ),
+        notes: None,
+    }
+}
+
+/// `text` with the HTML metacharacters escaped.
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Makes a template from a website or the user's files: the model
+/// reads the material and answers with a theme and a style note.
+async fn extract_template(
+    State(store): State<TemplateStore>,
+    State(uploads): State<crate::uploads::UploadStore>,
+    State(settings): State<crate::settings::SettingsStore>,
+    State(notifier): State<ChangeNotifier>,
+    Json(request): Json<ExtractRequest>,
+) -> Response {
+    let name = request.name.trim();
+    if name.is_empty() || name.chars().count() > NAME_LIMIT {
+        return api_error::error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("template name must be 1 to {NAME_LIMIT} characters"),
+            Vec::new(),
+        );
+    }
+    let url = request
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty());
+    if url.is_none() == request.uploads.is_empty() {
+        return api_error::error_response(
+            StatusCode::BAD_REQUEST,
+            "name exactly one source: `url` or `uploads`",
+            Vec::new(),
+        );
+    }
+    // The model the runner would use: the studio settings, else the
+    // environment.
+    let configuration = match settings.read().await {
+        Ok(Some(stored)) => crate::model_client::configuration_from_settings(&stored),
+        Ok(None) => None,
+        Err(error) => return api_error::internal_error(&error),
+    }
+    .or_else(crate::model_client::configured_model);
+    let Some(configuration) = configuration else {
+        return api_error::error_response(
+            StatusCode::CONFLICT,
+            "choose a model in the studio settings before extracting a template",
+            Vec::new(),
+        );
+    };
+    let material = match url {
+        Some(url) => crate::brand::material_from_url(url).await,
+        None => {
+            let scope = request
+                .scope
+                .as_deref()
+                .unwrap_or(crate::uploads::DRAFT_SCOPE);
+            crate::brand::material_from_uploads(&uploads, scope, &request.uploads).await
+        }
+    };
+    let material = match material {
+        Ok(material) => material,
+        Err(message) => {
+            return api_error::error_response(StatusCode::BAD_REQUEST, &message, Vec::new());
+        }
+    };
+    let http = match crate::model_client::ModelClient::build_http_client() {
+        Ok(http) => http,
+        Err(message) => {
+            return api_error::error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &message,
+                Vec::new(),
+            );
+        }
+    };
+    let client = crate::model_client::ModelClient::new(configuration, Some(settings));
+    let style = match crate::brand::extract_style(&client, &http, &material).await {
+        Ok(style) => style,
+        Err(message) => {
+            return api_error::error_response(StatusCode::BAD_GATEWAY, &message, Vec::new());
+        }
+    };
+    let template = Template {
+        id: template_id(name),
+        name: name.to_owned(),
+        saved_at: crate::time::rfc3339_now(),
+        source_design: material.source.clone(),
+        theme: style.theme,
+        viewport: Viewport::default(),
+        screens: Vec::new(),
+        note: Some(style.note).filter(|note| !note.trim().is_empty()),
+        is_default: false,
+    };
+    match store.save(&template).await {
+        Ok(()) => {
+            tracing::info!(template_id = %template.id, "template extracted");
+            notifier.notify();
+            (StatusCode::CREATED, Json(summarize(&template))).into_response()
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Marks a template as one a new session starts with, or clears the
+/// mark.
+async fn set_default_template(
+    State(store): State<TemplateStore>,
+    State(notifier): State<ChangeNotifier>,
+    Path(id): Path<String>,
+    Json(request): Json<DefaultRequest>,
+) -> Response {
+    if !is_valid_template_id(&id) {
+        return invalid_template_id(&id);
+    }
+    let mut template = match store.load(&id).await {
+        Ok(Some(template)) => template,
+        Ok(None) => return template_not_found(&id),
+        Err(error) => return api_error::internal_error(&error),
+    };
+    template.is_default = request.is_default;
+    match store.save(&template).await {
+        Ok(()) => {
+            tracing::info!(template_id = %id, is_default = request.is_default, "template default set");
+            notifier.notify();
+            Json(summarize(&template)).into_response()
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
 }
 
 /// Query of `GET /templates/{id}/render`.
@@ -237,11 +437,18 @@ async fn render_template(
         Ok(None) => return template_not_found(&id),
         Err(error) => return api_error::internal_error(&error),
     };
+    // A template extracted from brand material has no example screens:
+    // the picker shows a swatch of its theme instead.
+    let screens = if template.screens.is_empty() {
+        vec![swatch_screen(&template)]
+    } else {
+        template.screens.clone()
+    };
     let design = Design {
         title: template.name.clone(),
         theme: template.theme.clone(),
         viewport: template.viewport,
-        screens: template.screens.clone(),
+        screens,
         outline: Vec::new(),
         transition: None,
     };
@@ -404,6 +611,8 @@ async fn save_template(
         theme: style.theme,
         viewport: style.viewport,
         screens: style.screens,
+        note: None,
+        is_default: false,
     };
     match store.save(&template).await {
         Ok(()) => {
@@ -450,6 +659,7 @@ fn summarize(template: &Template) -> TemplateSummary {
         saved_at: template.saved_at.clone(),
         theme: template.theme.name.clone(),
         screen_count: template.screens.len(),
+        is_default: template.is_default,
     }
 }
 
@@ -526,6 +736,92 @@ mod tests {
         assert!(deck_style(&decks, "missing").await.is_err());
     }
 
+    #[tokio::test]
+    async fn a_screenless_template_renders_as_a_swatch_and_takes_the_default_mark() {
+        let directory = tempfile::tempdir().unwrap();
+        let application = crate::test_support::test_application(&directory);
+        let store = TemplateStore::new(directory.path().join("templates"));
+        let design = sample_design();
+        store
+            .save(&Template {
+                id: "acme-1".to_owned(),
+                name: "Acme".to_owned(),
+                saved_at: "2024-01-01T00:00:00Z".to_owned(),
+                source_design: "https://acme.com".to_owned(),
+                theme: design.theme.clone(),
+                viewport: design.viewport,
+                screens: Vec::new(),
+                note: Some("Generous whitespace & 8px corners.".to_owned()),
+                is_default: false,
+            })
+            .await
+            .unwrap();
+        let (status, body) = crate::test_support::send(
+            application.clone(),
+            "GET",
+            "/templates/acme-1/render?screen=1",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("Generous whitespace &amp; 8px corners."));
+        assert!(body.contains("Get started"));
+        let (status, body) = crate::test_support::send(
+            application.clone(),
+            "PUT",
+            "/templates/acme-1/default",
+            Some(r#"{"is_default":true}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("\"is_default\":true"));
+        let (_, listing) =
+            crate::test_support::send(application.clone(), "GET", "/templates", None).await;
+        assert!(listing.contains("\"is_default\":true"));
+        assert!(store.load("acme-1").await.unwrap().unwrap().is_default);
+        let (status, _) = crate::test_support::send(
+            application.clone(),
+            "PUT",
+            "/templates/missing/default",
+            Some(r#"{"is_default":true}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn an_extraction_needs_a_name_one_source_and_a_model() {
+        let directory = tempfile::tempdir().unwrap();
+        let application = crate::test_support::test_application(&directory);
+        let (status, body) = crate::test_support::send(
+            application.clone(),
+            "POST",
+            "/templates/extract",
+            Some(r#"{"name":"","url":"https://acme.com"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let (status, body) = crate::test_support::send(
+            application.clone(),
+            "POST",
+            "/templates/extract",
+            Some(r#"{"name":"Acme"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("exactly one source"));
+        // No model is chosen in a fresh test application.
+        let (status, body) = crate::test_support::send(
+            application.clone(),
+            "POST",
+            "/templates/extract",
+            Some(r#"{"name":"Acme","url":"https://acme.com"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("choose a model"));
+    }
+
     #[test]
     fn template_ids_are_slugs_with_the_save_time() {
         let id = template_id("Midnight Finance!");
@@ -547,6 +843,8 @@ mod tests {
             source_design: "talk".to_owned(),
             theme: design.theme.clone(),
             viewport: design.viewport,
+            note: None,
+            is_default: false,
             screens: design.screens.clone(),
         };
         let newer = Template {
