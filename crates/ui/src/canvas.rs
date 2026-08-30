@@ -300,6 +300,11 @@ pub(crate) fn CandidateCanvas(
     chosen: Option<String>,
     on_open: EventHandler<(ArtifactKind, String)>,
     on_continue: EventHandler<String>,
+    /// A Fork press: copy this candidate under the next free number.
+    on_fork: EventHandler<String>,
+    /// A Merge press: pin these candidates in the chat, so the next
+    /// message says which parts to combine.
+    on_merge: EventHandler<Vec<String>>,
     on_error: EventHandler<String>,
 ) -> Element {
     let mut shown = use_signal(HashMap::<String, usize>::new);
@@ -380,6 +385,23 @@ pub(crate) fn CandidateCanvas(
                 }
             }
             button {
+                class: "selection-merge",
+                disabled: selected_count < 2,
+                title: "Pin the ticked candidates in the chat, then say which parts to combine",
+                onclick: move |_| {
+                    let mut ids: Vec<String> = selected().iter().cloned().collect();
+                    ids.sort();
+                    on_merge.call(ids);
+                    selected.write().clear();
+                    is_confirming_delete.set(false);
+                },
+                if selected_count >= 2 {
+                    "Merge {selected_count}"
+                } else {
+                    "Merge"
+                }
+            }
+            button {
                 class: "selection-clear",
                 disabled: selected_count == 0,
                 onclick: move |_| {
@@ -426,6 +448,7 @@ pub(crate) fn CandidateCanvas(
                             revision,
                             on_open,
                             on_continue,
+                            on_fork,
                             on_select: move |id: String| {
                                 let mut picks = selected.write();
                                 if !picks.remove(&id) {
@@ -481,6 +504,7 @@ fn CandidateCard(
     revision: u64,
     on_open: EventHandler<(ArtifactKind, String)>,
     on_continue: EventHandler<String>,
+    on_fork: EventHandler<String>,
     on_select: EventHandler<String>,
     on_page: EventHandler<(String, usize)>,
 ) -> Element {
@@ -629,6 +653,22 @@ fn CandidateCard(
             div { class: "card-footer",
                 div { class: "card-name",
                     span { class: "card-label", "{candidate_label(&id)}" }
+                }
+                // A fork copies the candidate as a new one, so an edit
+                // can try something without losing this version.
+                button {
+                    class: "card-fork",
+                    title: "Copy this candidate as a new one",
+                    disabled: progress.is_some(),
+                    onclick: {
+                        let id = id.clone();
+                        move |event: MouseEvent| {
+                            event.stop_propagation();
+                            on_fork.call(id.clone());
+                        }
+                    },
+                    span { dangerous_inner_html: icons::FORK }
+                    span { class: "fork-text", "Fork" }
                 }
                 if is_finishing {
                     button {
