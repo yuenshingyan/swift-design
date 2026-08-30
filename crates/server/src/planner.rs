@@ -436,7 +436,8 @@ mod tests {
     #[test]
     fn the_prompt_lists_the_app_questions_of_the_kind_to_suggest_from() {
         let demo = planner_prompt(ArtifactKind::Demo);
-        assert!(demo.contains("\"suggestions\":{\"data_state\":\"populated\"}"));
+        assert!(demo.contains("\"suggestions\":{\"fidelity\":\"high_fidelity\"}"));
+        assert!(demo.contains("- fidelity (Fidelity): high_fidelity, wireframe"));
         assert!(demo.contains("- product_kind (Product kind): consumer_app, business_app"));
         assert!(!demo.contains("- audience (Audience)"));
         let deck = planner_prompt(ArtifactKind::Deck);
