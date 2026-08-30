@@ -6,11 +6,12 @@
 //! Google Fonts stylesheet and every font file it names and inlines
 //! them too, so the exported file opens offline. Images referenced
 //! inside text fragments are not rewritten. When the font fetch fails,
-//! the export keeps the online `<link>`. `GET /designs/{id}/export.pdf`
-//! prints the same page with the user's Chrome, one screen per page.
+//! the export keeps the online `<link>`. A design has no PDF export: a
+//! demo is clicked, and a print loses its flows and widgets.
 //!
-//! Decks export the same way under `/decks/{id}/export` and
-//! `/decks/{id}/export.pdf`. `GET /decks/{id}/export.pptx` builds a
+//! Decks export the same way under `/decks/{id}/export`, and
+//! `GET /decks/{id}/export.pdf` prints the deck with the user's Chrome,
+//! one slide per page. `GET /decks/{id}/export.pptx` builds a
 //! PowerPoint file from the measured slides; see `pptx.rs`.
 
 use std::collections::HashMap;
@@ -32,7 +33,7 @@ use crate::deck_render;
 use crate::decks::{DeckStore, is_valid_deck_id};
 use crate::designs::{DesignStore, is_valid_design_id};
 use crate::pptx;
-use crate::render::{self, RenderOptions};
+use crate::render;
 use crate::screenshots;
 use crate::settings::SettingsStore;
 use crate::uploads::{UploadStore, content_type_of, is_stored_name};
@@ -45,7 +46,6 @@ const PPTX_CONTENT_TYPE: &str =
 pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/designs/{id}/export", get(export_design))
-        .route("/designs/{id}/export.pdf", get(export_design_pdf))
         .route("/decks/{id}/export", get(export_deck))
         .route("/decks/{id}/export.pdf", get(export_deck_pdf))
         .route("/decks/{id}/export.pptx", get(export_deck_pptx))
@@ -232,58 +232,6 @@ async fn fetch_as_browser(url: String) -> anyhow::Result<Vec<u8>> {
 async fn fetch_as_browser(url: String) -> anyhow::Result<Vec<u8>> {
     let _ = (FONT_FETCH_TIMEOUT, BROWSER_USER_AGENT);
     anyhow::bail!("no network in tests: {url}")
-}
-
-/// Prints a stored design to a PDF with the user's Chrome and returns it
-/// as a file download. 503 when no Chrome is installed.
-async fn export_design_pdf(
-    State(designs): State<DesignStore>,
-    State(uploads): State<UploadStore>,
-    Path(id): Path<String>,
-) -> Response {
-    if !is_valid_design_id(&id) {
-        return api_error::invalid_design_id(&id);
-    }
-    let design = match designs.load(&id).await {
-        Ok(Some(design)) => design,
-        Ok(None) => return api_error::design_not_found(&id),
-        Err(error) => return api_error::internal_error(&error),
-    };
-    let errors = design.validate();
-    if !errors.is_empty() {
-        return api_error::validation_failed(&errors);
-    }
-    build_pdf_response(&id, design, &uploads, screenshots::find_chrome()).await
-}
-
-/// Inlines uploaded images, renders the print page, and prints it with
-/// `chrome`. `chrome` is a parameter so the no-Chrome path is testable.
-async fn build_pdf_response(
-    id: &str,
-    mut design: Design,
-    uploads: &UploadStore,
-    chrome: Option<PathBuf>,
-) -> Response {
-    let Some(chrome) = chrome else {
-        return screenshots::chrome_missing_response("PDF exports");
-    };
-    if let Err(error) = inline_uploaded_images(&mut design, uploads).await {
-        return api_error::internal_error(&error);
-    }
-    let html = render::render_design_with(
-        &design,
-        RenderOptions {
-            is_print: true,
-            ..RenderOptions::default()
-        },
-    );
-    match screenshots::print_html_to_pdf(&chrome, &html, design.viewport).await {
-        Ok(bytes) => {
-            tracing::info!(%id, size_bytes = bytes.len(), "design exported as pdf");
-            file_download(id, "pdf", "application/pdf", bytes)
-        }
-        Err(error) => api_error::internal_error(&error),
-    }
 }
 
 /// Renders a stored design with uploaded images and theme fonts inlined
@@ -605,9 +553,8 @@ mod tests {
 
     use crate::export::{
         FONT_LINK_PREFIX, FontLink, attachment_disposition, base64_encode, build_deck_pdf_response,
-        build_pdf_response, build_pptx_response, google_fonts_link, inline_font_urls,
-        inline_google_fonts, inline_uploaded_images, inline_uploaded_slide_images,
-        upload_references,
+        build_pptx_response, google_fonts_link, inline_font_urls, inline_google_fonts,
+        inline_uploaded_images, inline_uploaded_slide_images, upload_references,
     };
     use crate::pptx::ExportSources;
     use crate::render;
@@ -793,21 +740,6 @@ mod tests {
         assert!(deck.slides[0].html.contains(&expected));
         assert!(deck.slides[0].css.as_deref().unwrap().contains(&expected));
         assert!(!deck.slides[0].html.contains("/uploads/"));
-    }
-
-    #[tokio::test]
-    async fn pdf_export_without_chrome_is_503() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = UploadStore::new(directory.path().to_path_buf());
-        let response = build_pdf_response("overview", sample_design(), &store, None).await;
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let message = body["error"]["message"].as_str().unwrap();
-        assert!(message.contains("need Chrome or Chromium"));
-        assert!(message.contains("SWIFT_DESIGN_CHROME"));
     }
 
     #[test]
