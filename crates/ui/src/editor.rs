@@ -356,6 +356,8 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
     // Thumbnail being dragged, and a screen awaiting delete confirmation.
     let mut dragged = use_signal(|| Option::<usize>::None);
     let mut pending_screen_delete = use_signal(|| Option::<usize>::None);
+    // The tile whose Redo waits for its second click.
+    let mut pending_redo = use_signal(|| Option::<usize>::None);
 
     let authors_id = design_id.clone();
     use_future(move || {
@@ -781,6 +783,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                         for (index, label) in thumbnail_labels.into_iter().enumerate() {
                             {
                                 let is_deleting = pending_screen_delete() == Some(index);
+                                let is_redoing = pending_redo() == Some(index);
                                 let class = thumbnail_class(ThumbnailState {
                                     is_current: index == selected(),
                                     is_dragging: dragged() == Some(index),
@@ -805,6 +808,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                                             selected.set(index);
                                             selected_node.set(None);
                                             pending_screen_delete.set(None);
+                                            pending_redo.set(None);
                                         },
                                         iframe {
                                             title: "Screen {index + 1}",
@@ -837,6 +841,45 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                                                 if is_deleting {
                                                     span { class: "delete-text", "delete?" }
                                                 }
+                                            }
+                                        }
+                                        // A redo writes the screen anew: the model
+                                        // sees its name and notes, not its markup.
+                                        button {
+                                            class: if is_redoing { "thumbnail-redo confirm" } else { "thumbnail-redo" },
+                                            title: "Write this screen anew",
+                                            onclick: {
+                                                let design_id = design_id.clone();
+                                                move |event: Event<MouseData>| {
+                                                    event.stop_propagation();
+                                                    pending_screen_delete.set(None);
+                                                    if pending_redo() != Some(index) {
+                                                        pending_redo.set(Some(index));
+                                                        return;
+                                                    }
+                                                    pending_redo.set(None);
+                                                    if is_dirty() {
+                                                        save.call(true);
+                                                    }
+                                                    let design_id = design_id.clone();
+                                                    spawn(async move {
+                                                        let session_id = artifact_project(&design_id);
+                                                        let sent = api::regenerate_unit(
+                                                                &session_id,
+                                                                &design_id,
+                                                                "screen",
+                                                                index + 1,
+                                                            )
+                                                            .await;
+                                                        if let Err(message) = sent {
+                                                            messages.write().push(message);
+                                                        }
+                                                    });
+                                                }
+                                            },
+                                            span { dangerous_inner_html: icons::REDO }
+                                            if is_redoing {
+                                                span { class: "redo-text", "redo?" }
                                             }
                                         }
                                     }
