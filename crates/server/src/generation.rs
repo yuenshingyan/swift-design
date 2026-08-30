@@ -2231,6 +2231,11 @@ const ATTACHMENT_TOTAL_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 /// note.
 pub(crate) const ATTACHMENT_TEXT_LIMIT_BYTES: usize = 100 * 1024;
 
+/// Most text inlined into one request over every file. A codebase of
+/// source files adds up to more than a context window holds, so once
+/// the budget is spent the remaining text files are named only.
+pub(crate) const ATTACHMENT_TEXT_TOTAL_LIMIT_BYTES: usize = 256 * 1024;
+
 /// A short human size: `512 B`, `3.4 KB`, `1.2 MB`.
 fn describe_size(bytes: usize) -> String {
     if bytes < 1024 {
@@ -2260,8 +2265,24 @@ fn user_content_with_attachments(
         "text": "The user's source files follow. Use their content for the design. \
                  Use an image file as <img src='/uploads/{name}'>.",
     }));
+    let mut budget = ATTACHMENT_TEXT_TOTAL_LIMIT_BYTES;
+    let mut left_out = Vec::new();
     for file in &attachments.files {
-        parts.extend(attachment_parts(file, can_see_images));
+        let before = budget;
+        parts.extend(attachment_parts(file, can_see_images, &mut budget));
+        if before == 0 && is_text_attachment(file) {
+            left_out.push(file.name.clone());
+        }
+    }
+    if !left_out.is_empty() {
+        parts.push(serde_json::json!({
+            "type": "text",
+            "text": format!(
+                "Named only, the request has no room for more text: {}. \
+                 Ask the user for the part you need.",
+                left_out.join(", ")
+            ),
+        }));
     }
     if !attachments.skipped.is_empty() {
         parts.push(serde_json::json!({
@@ -2275,8 +2296,13 @@ fn user_content_with_attachments(
     serde_json::Value::Array(parts)
 }
 
-/// The content parts for one attached file.
-fn attachment_parts(file: &UploadAttachment, can_see_images: bool) -> Vec<serde_json::Value> {
+/// The content parts for one attached file. `budget` is the text the
+/// request may still inline; an inlined file takes its share.
+fn attachment_parts(
+    file: &UploadAttachment,
+    can_see_images: bool,
+    budget: &mut usize,
+) -> Vec<serde_json::Value> {
     let size = describe_size(file.bytes.len());
     let label = |detail: &str| {
         serde_json::json!({
@@ -2322,11 +2348,11 @@ fn attachment_parts(file: &UploadAttachment, can_see_images: bool) -> Vec<serde_
     }
     if file.content_type.starts_with("text/") || file.content_type == "application/json" {
         let text = String::from_utf8_lossy(&file.bytes);
-        return vec![inlined_text_part(file, &text, &size)];
+        return vec![inlined_text_part(file, &text, &size, budget)];
     }
     if crate::office::is_office_type(&file.content_type) {
         return match crate::office::office_text(&file.content_type, &file.bytes) {
-            Ok(text) => vec![inlined_text_part(file, &text, &size)],
+            Ok(text) => vec![inlined_text_part(file, &text, &size, budget)],
             Err(error) => vec![label(&format!(
                 ": the file could not be read ({error:#}). Tell the user if you need its content."
             ))],
@@ -2335,7 +2361,7 @@ fn attachment_parts(file: &UploadAttachment, can_see_images: bool) -> Vec<serde_
     // The type comes from the extension, and no table names every
     // source or configuration file. A file that reads as text is text.
     if let Some(text) = text_of(&file.bytes) {
-        return vec![inlined_text_part(file, text, &size)];
+        return vec![inlined_text_part(file, text, &size, budget)];
     }
     vec![label(
         ": a file this request cannot carry. Tell the user if you need its content.",
@@ -2352,11 +2378,38 @@ fn text_of(bytes: &[u8]) -> Option<&str> {
     std::str::from_utf8(bytes).ok()
 }
 
+/// True when the file reaches the prompt as text: a text or JSON
+/// type, an Office file, or an unknown type that reads as UTF-8.
+fn is_text_attachment(file: &UploadAttachment) -> bool {
+    file.content_type.starts_with("text/")
+        || file.content_type == "application/json"
+        || crate::office::is_office_type(&file.content_type)
+        || (!file.content_type.starts_with("image/")
+            && file.content_type != "application/pdf"
+            && text_of(&file.bytes).is_some())
+}
+
 /// One text part with the file's text inlined, cut at
-/// `ATTACHMENT_TEXT_LIMIT_BYTES` on a character boundary.
-fn inlined_text_part(file: &UploadAttachment, text: &str, size: &str) -> serde_json::Value {
-    let (shown, note) = if text.len() > ATTACHMENT_TEXT_LIMIT_BYTES {
-        let mut end = ATTACHMENT_TEXT_LIMIT_BYTES;
+/// `ATTACHMENT_TEXT_LIMIT_BYTES` or at what is left of `budget`, on a
+/// character boundary. With no budget left the file is named only.
+fn inlined_text_part(
+    file: &UploadAttachment,
+    text: &str,
+    size: &str,
+    budget: &mut usize,
+) -> serde_json::Value {
+    if *budget == 0 {
+        return serde_json::json!({
+            "type": "text",
+            "text": format!(
+                "File {} ({}, {size}): named only, the request has no room for its text.",
+                file.name, file.content_type
+            ),
+        });
+    }
+    let limit = ATTACHMENT_TEXT_LIMIT_BYTES.min(*budget);
+    let (shown, note) = if text.len() > limit {
+        let mut end = limit;
         while !text.is_char_boundary(end) {
             end -= 1;
         }
@@ -2364,6 +2417,7 @@ fn inlined_text_part(file: &UploadAttachment, text: &str, size: &str) -> serde_j
     } else {
         (text, "")
     };
+    *budget -= shown.len();
     serde_json::json!({
         "type": "text",
         "text": format!("File {} ({}, {size}):\n{shown}{note}", file.name, file.content_type),
@@ -3139,8 +3193,9 @@ mod tests {
     use super::edit_targets;
 
     use super::{
-        Attachments, GenerationContext, GenerationEngine, GenerationOutcome, ProgressGroup,
-        ProgressSink, UploadAttachment, answers_since_last_write, candidate_plans, edit_prompt,
+        ATTACHMENT_TEXT_LIMIT_BYTES, ATTACHMENT_TEXT_TOTAL_LIMIT_BYTES, Attachments,
+        GenerationContext, GenerationEngine, GenerationOutcome, ProgressGroup, ProgressSink,
+        UploadAttachment, answers_since_last_write, candidate_plans, edit_prompt,
         focused_design_json, system_prompt, text_of, trailing_continue_ids,
         user_content_with_attachments,
     };
@@ -3344,6 +3399,49 @@ mod tests {
         assert_eq!(text_of(b"plain"), Some("plain"));
         assert_eq!(text_of(b"a\0b"), None);
         assert_eq!(text_of(&[0xff, 0xfe]), None);
+    }
+
+    #[test]
+    fn the_inlined_text_stops_at_the_request_budget() {
+        let file = |name: &str, bytes: usize| UploadAttachment {
+            name: name.to_owned(),
+            content_type: "text/plain; charset=utf-8".to_owned(),
+            bytes: vec![b'~'; bytes],
+        };
+        // Three files at the per-file cap pass the budget: the third
+        // is cut at what is left, the fourth is named only, and the
+        // model is told which one it is.
+        let attachments = Attachments {
+            files: vec![
+                file("a.rs", ATTACHMENT_TEXT_LIMIT_BYTES),
+                file("b.rs", ATTACHMENT_TEXT_LIMIT_BYTES),
+                file("c.rs", ATTACHMENT_TEXT_LIMIT_BYTES),
+                file("d.rs", 10),
+            ],
+            skipped: Vec::new(),
+        };
+        let content = user_content_with_attachments("Go.", &attachments, false);
+        let text = content.to_string();
+        assert!(text.contains("File a.rs"));
+        assert!(text.contains("File c.rs"));
+        assert!(text.contains("[cut: the file continues]"));
+        assert!(text.contains("File d.rs (text/plain; charset=utf-8, 10 B): named only"));
+        assert!(text.contains("no room for more text: d.rs"));
+        let inlined: usize = content
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .map(|part| part.matches('~').count())
+            .sum();
+        assert_eq!(inlined, ATTACHMENT_TEXT_TOTAL_LIMIT_BYTES);
+        // A small set is inlined whole, with no note.
+        let small = Attachments {
+            files: vec![file("a.rs", 10), file("b.rs", 10)],
+            skipped: Vec::new(),
+        };
+        let text = user_content_with_attachments("Go.", &small, false).to_string();
+        assert!(!text.contains("named only"));
     }
 
     #[test]
