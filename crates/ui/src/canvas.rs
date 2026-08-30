@@ -1,14 +1,16 @@
-//! The candidate canvas: the designs or decks a generation run writes,
-//! each in a live preview iframe, plus placeholder cards for ids the run
-//! reports before they reach disk.
+//! The candidate canvas: the designs, decks, or documents a generation
+//! run writes, each in a live preview iframe, plus placeholder cards
+//! for ids the run reports before they reach disk.
 //!
 //! Every card shares one stage height. The frame width follows the
-//! canvas ratio, so a desktop card is wide, a deck card wider, and a
-//! phone card is a small device inside a bezel.
+//! canvas ratio, so a desktop card is wide, a deck card wider, a
+//! document page tall, and a phone card is a small device inside a
+//! bezel. Only a demo's portrait canvas gets the bezel: a page is
+//! portrait too, and it is paper, not a phone.
 
 use std::collections::{HashMap, HashSet};
 
-use design_model::{ArtifactKind, DECK_VIEWPORT, Viewport};
+use design_model::{A4_VIEWPORT, ArtifactKind, DECK_VIEWPORT, LETTER_VIEWPORT, Viewport};
 use dioxus::prelude::*;
 
 use crate::api;
@@ -29,17 +31,17 @@ const CARD_GAP_REM: f64 = 1.0;
 /// below a phone frame, in rem.
 const BEZEL_INSET_REM: f64 = 1.5;
 
-/// One card on the canvas: a design or a deck candidate.
+/// One card on the canvas: a design, a deck, or a document candidate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CanvasCard {
-    /// The design or deck id.
+    /// The design, deck, or document id.
     pub id: String,
     /// The artifact's own title, as the model named it. The footer
     /// shows it after the candidate number.
     pub title: String,
     /// Which store the card comes from.
     pub kind: ArtifactKind,
-    /// How many screens or slides are written.
+    /// How many screens, slides, or pages are written.
     pub count: usize,
     /// How many titles the outline plans. 0 without an outline.
     pub outline_count: usize,
@@ -70,7 +72,17 @@ impl CanvasCard {
             ArtifactKind::Deck => {
                 format!("/decks/{}/render?v={revision}&slide={current}", self.id)
             }
+            ArtifactKind::Document => {
+                format!("/documents/{}/render?v={revision}&page={current}", self.id)
+            }
         }
+    }
+
+    /// True when the preview sits in a phone bezel: a demo on a
+    /// portrait canvas. A document page is portrait too, but it is
+    /// paper.
+    pub fn is_bezelled(&self) -> bool {
+        self.kind == ArtifactKind::Demo && is_portrait_canvas(self.viewport)
     }
 }
 
@@ -120,6 +132,30 @@ pub(crate) fn cards_from_decks(
     mine
 }
 
+/// The document cards that belong to `session_id`, chosen document
+/// first.
+pub(crate) fn cards_from_documents(
+    documents: &[api::DocumentSummary],
+    session_id: &str,
+    chosen: Option<&str>,
+) -> Vec<CanvasCard> {
+    let mut mine: Vec<CanvasCard> = documents
+        .iter()
+        .filter(|summary| crate::settings::artifact_project(&summary.id) == session_id)
+        .map(|summary| CanvasCard {
+            id: summary.id.clone(),
+            title: summary.title.clone(),
+            kind: ArtifactKind::Document,
+            count: summary.page_count,
+            outline_count: summary.outline_count,
+            ratio: summary.aspect_ratio(),
+            viewport: summary.viewport(),
+        })
+        .collect();
+    mine.sort_by_key(|card| Some(card.id.as_str()) != chosen);
+    mine
+}
+
 /// The card name from its id: `Candidate 2` from `talk-candidate-2`, or
 /// `Candidate` when the id has no number.
 pub(crate) fn candidate_label(id: &str) -> String {
@@ -143,9 +179,15 @@ pub(crate) fn candidate_number(id: &str) -> &str {
         .unwrap_or("")
 }
 
-/// The name of one canvas, for a tab: `Desktop`, `Tablet`, `Phone`, or
-/// `Deck`.
+/// The name of one canvas, for a tab: `Desktop`, `Tablet`, `Phone`,
+/// `Deck`, `A4`, or `Letter`.
 pub(crate) fn canvas_name(viewport: Viewport) -> &'static str {
+    if viewport == A4_VIEWPORT {
+        return "A4";
+    }
+    if viewport == LETTER_VIEWPORT {
+        return "Letter";
+    }
     match (viewport.width, viewport.height) {
         (390, 844) => "Phone",
         (1024, 768) => "Tablet",
@@ -214,10 +256,11 @@ impl CardFrame {
 }
 
 /// The frame of a card on a tab that holds `count` cards of `viewport`.
-pub(crate) fn card_frame(viewport: Viewport, count: usize) -> CardFrame {
+/// A bezelled card follows the bezel, which sits inside the stage.
+pub(crate) fn card_frame(viewport: Viewport, count: usize, is_bezelled: bool) -> CardFrame {
     let stage = stage_height_rem(viewport, count);
     let bezel = stage - BEZEL_INSET_REM;
-    let height = match is_portrait_canvas(viewport) {
+    let height = match is_bezelled {
         true => bezel,
         false => stage,
     };
@@ -312,6 +355,11 @@ pub(crate) fn CandidateCanvas(
     queued: HashSet<String>,
     revision: u64,
     chosen: Option<String>,
+    /// What the session builds. A placeholder card takes the shape of
+    /// the kind before any card exists.
+    kind: ArtifactKind,
+    /// The canvas a placeholder takes when no tab is open yet.
+    blank_viewport: Viewport,
     on_open: EventHandler<(ArtifactKind, String)>,
     on_continue: EventHandler<String>,
     /// A Fork press: copy this candidate under the next free number.
@@ -336,7 +384,7 @@ pub(crate) fn CandidateCanvas(
     // scales, so each canvas gets a tab.
     let tabs = canvas_tabs(&cards);
     let tab = open_tab().min(tabs.len().saturating_sub(1));
-    let tab_viewport = tabs.get(tab).copied().unwrap_or_default();
+    let tab_viewport = tabs.get(tab).copied().unwrap_or(blank_viewport);
     let shown_cards: Vec<CanvasCard> = cards
         .iter()
         .filter(|card| tabs.len() <= 1 || card.viewport == tab_viewport)
@@ -367,9 +415,10 @@ pub(crate) fn CandidateCanvas(
         let kinds = kinds.clone();
         spawn(async move {
             for id in ids {
-                let deleted = match kinds.get(&id) {
-                    Some(ArtifactKind::Deck) => api::delete_deck(&id).await,
-                    _ => api::delete_design(&id).await,
+                let deleted = match kinds.get(&id).copied().unwrap_or(kind) {
+                    ArtifactKind::Demo => api::delete_design(&id).await,
+                    ArtifactKind::Deck => api::delete_deck(&id).await,
+                    ArtifactKind::Document => api::delete_document(&id).await,
                 };
                 if let Err(message) = deleted {
                     on_error.call(message);
@@ -516,6 +565,7 @@ pub(crate) fn CandidateCanvas(
                     key: "{id}",
                     percent: run_designs.get(&id).copied(),
                     viewport: tab_viewport,
+                    is_bezelled: kind == ArtifactKind::Demo && is_portrait_canvas(tab_viewport),
                     on_tab,
                     id,
                 }
@@ -558,8 +608,8 @@ fn CandidateCard(
     let kind = card.kind;
     let count = card.count.max(1);
     let current = current.clamp(1, count);
-    let is_phone = is_portrait_canvas(card.viewport);
-    let frame = card_frame(card.viewport, on_tab);
+    let is_phone = card.is_bezelled();
+    let frame = card_frame(card.viewport, on_tab, is_phone);
     let class = card_class(CardFlags {
         is_chosen,
         is_phone,
@@ -728,15 +778,22 @@ fn CandidateCard(
 /// A card for an artifact the run has reported but not saved yet. It
 /// takes the shape of the open tab's canvas.
 #[component]
-fn PlaceholderCard(id: String, viewport: Viewport, on_tab: usize, percent: Option<u8>) -> Element {
-    let is_phone = is_portrait_canvas(viewport);
+fn PlaceholderCard(
+    id: String,
+    viewport: Viewport,
+    /// True when the blank sits in a phone bezel.
+    is_bezelled: bool,
+    on_tab: usize,
+    percent: Option<u8>,
+) -> Element {
+    let is_phone = is_bezelled;
     let class = card_class(CardFlags {
         is_chosen: false,
         is_phone,
         is_placeholder: true,
         is_selected: false,
     });
-    let frame = card_frame(viewport, on_tab);
+    let frame = card_frame(viewport, on_tab, is_phone);
     rsx! {
         article { class: "{class}", style: "{frame.style()}",
             div { class: "card-stage",
@@ -878,8 +935,36 @@ mod tests {
         assert_eq!(canvas_name(phone()), "Phone");
         assert_eq!(canvas_name(tablet()), "Tablet");
         assert_eq!(canvas_name(DECK_VIEWPORT), "Deck");
+        assert_eq!(canvas_name(A4_VIEWPORT), "A4");
+        assert_eq!(canvas_name(LETTER_VIEWPORT), "Letter");
         assert_eq!(canvas_size(Viewport::default()), "1440 × 900");
         assert_eq!(canvas_size(DECK_VIEWPORT), "1920 × 1080");
+    }
+
+    #[test]
+    fn only_a_demo_on_a_portrait_canvas_gets_the_bezel() {
+        let phone_card = CanvasCard {
+            id: "app-candidate-1".to_owned(),
+            title: "App".to_owned(),
+            kind: ArtifactKind::Demo,
+            count: 1,
+            outline_count: 0,
+            ratio: phone().aspect_ratio_css(),
+            viewport: phone(),
+        };
+        assert!(phone_card.is_bezelled());
+        let page_card = CanvasCard {
+            kind: ArtifactKind::Document,
+            ratio: A4_VIEWPORT.aspect_ratio_css(),
+            viewport: A4_VIEWPORT,
+            ..phone_card.clone()
+        };
+        assert!(is_portrait_canvas(A4_VIEWPORT));
+        assert!(!page_card.is_bezelled());
+        assert_eq!(
+            page_card.preview_url(3, 2),
+            "/documents/app-candidate-1/render?v=3&page=2"
+        );
     }
 
     #[test]
@@ -919,7 +1004,7 @@ mod tests {
 
     #[test]
     fn a_card_frame_sets_the_width_and_both_heights() {
-        let frame = card_frame(Viewport::default(), 3);
+        let frame = card_frame(Viewport::default(), 3, false);
         assert_eq!(frame.stage_height, "17.08");
         assert_eq!(frame.width, "27.33");
         assert_eq!(
@@ -927,10 +1012,15 @@ mod tests {
             "--frame-width: 27.33rem; --stage-height: 17.08rem; --bezel-height: 15.58rem"
         );
         // A phone frame follows the bezel, which sits inside the stage.
-        let phone_frame = card_frame(phone(), 2);
+        let phone_frame = card_frame(phone(), 2, true);
         assert_eq!(phone_frame.stage_height, "30.00");
         assert_eq!(phone_frame.bezel_height, "28.50");
         assert_eq!(phone_frame.width, "13.17");
+        // A page is portrait too, but it has no bezel: the frame takes
+        // the whole stage.
+        let page_frame = card_frame(A4_VIEWPORT, 2, false);
+        assert_eq!(page_frame.stage_height, "30.00");
+        assert_eq!(page_frame.width, "21.21");
     }
 
     #[test]

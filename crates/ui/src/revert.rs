@@ -38,12 +38,14 @@ pub(crate) async fn revert_artifact(
     let history = match kind {
         ArtifactKind::Demo => api::fetch_design_history(id).await?,
         ArtifactKind::Deck => api::fetch_deck_history(id).await?,
+        ArtifactKind::Document => api::fetch_document_history(id).await?,
     };
     match snapshot_since(&history, since) {
         Some(stamp) => {
             match kind {
                 ArtifactKind::Demo => api::restore_design_history(id, &stamp).await?,
                 ArtifactKind::Deck => api::restore_deck_history(id, &stamp).await?,
+                ArtifactKind::Document => api::restore_document_history(id, &stamp).await?,
             }
             Ok("restored")
         }
@@ -52,6 +54,7 @@ pub(crate) async fn revert_artifact(
             match kind {
                 ArtifactKind::Demo => api::delete_design(id).await?,
                 ArtifactKind::Deck => api::delete_deck(id).await?,
+                ArtifactKind::Document => api::delete_document(id).await?,
             }
             Ok("deleted")
         }

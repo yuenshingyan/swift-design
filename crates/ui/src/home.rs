@@ -24,15 +24,19 @@ fn template_button_label(saved: usize, chosen: usize) -> String {
     }
 }
 
-/// The composer placeholder. It names both kinds, because the user
+/// The composer placeholder. It names every kind, because the user
 /// picks the kind after they send the request, not before.
-const COMPOSER_PLACEHOLDER: &str = "A landing page for my finance app, or a ten-slide pitch deck…";
+const COMPOSER_PLACEHOLDER: &str =
+    "A landing page for my finance app, a ten-slide pitch deck, or a two-page memo…";
 
 /// What one kind is for, under its name in the picker.
 fn kind_detail(kind: ArtifactKind) -> &'static str {
     match kind {
         ArtifactKind::Demo => "A landing page, app screens, or a flow, on a device canvas.",
         ArtifactKind::Deck => "Slides on a 1920 by 1080 px canvas, with a presenter view.",
+        ArtifactKind::Document => {
+            "A report, a memo, a proposal, or a guide on A4 or Letter pages, with PDF and DOCX exports."
+        }
     }
 }
 
@@ -608,17 +612,19 @@ mod tests {
     }
 
     #[test]
-    fn the_placeholder_names_both_kinds() {
+    fn the_placeholder_names_every_kind() {
         // The composer no longer knows the kind: the picker asks after
-        // the request is sent, so the hint must fit either answer.
+        // the request is sent, so the hint must fit any answer.
         assert!(COMPOSER_PLACEHOLDER.contains("landing page"));
         assert!(COMPOSER_PLACEHOLDER.contains("deck"));
+        assert!(COMPOSER_PLACEHOLDER.contains("memo"));
     }
 
     #[test]
     fn every_kind_has_a_detail_line_in_the_picker() {
         assert!(kind_detail(ArtifactKind::Demo).contains("device canvas"));
         assert!(kind_detail(ArtifactKind::Deck).contains("1920 by 1080"));
+        assert!(kind_detail(ArtifactKind::Document).contains("A4 or Letter"));
         for choice in ArtifactKind::ALL {
             assert!(!kind_detail(choice).is_empty());
         }

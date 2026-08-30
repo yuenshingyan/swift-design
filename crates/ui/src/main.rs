@@ -9,6 +9,7 @@ mod canvas;
 mod chat;
 mod chat_controls;
 mod deck_editor;
+mod document_editor;
 mod editor;
 mod home;
 mod icons;
@@ -779,8 +780,8 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
 .count-chips .effect-chips button { min-width: 1.8rem; padding: 0.3rem 0.55rem;
   justify-content: center; }
 .kind-field { margin-bottom: 0.75rem; }
-/* The app's deck questions: cards that look like the model's questions. */
-.deck-questions { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+/* The app's deck and document questions: cards that look like the model's questions. */
+.deck-questions, .document-questions { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
   align-items: start; }
 .app-question { display: flex; flex-direction: column; gap: 0.6rem; padding: 0.9rem 1rem; }
 /* The cards mix short and tall: fill the rows, and keep every card at
@@ -1249,6 +1250,7 @@ fn App() -> Element {
                     session_id: id,
                     on_open_design: move |design_id| view.set(Some(View::Design(design_id))),
                     on_open_deck: move |deck_id| view.set(Some(View::Deck(deck_id))),
+                    on_open_document: move |document_id| view.set(Some(View::Document(document_id))),
                     on_home: move |_| view.set(Some(View::Home)),
                 }
             },
@@ -1266,6 +1268,15 @@ fn App() -> Element {
                 rsx! {
                     deck_editor::DeckEditor {
                         deck_id: id,
+                        on_back: move |_| view.set(Some(View::Session(session.clone()))),
+                    }
+                }
+            }
+            Some(View::Document(id)) => {
+                let session = settings::artifact_project(&id);
+                rsx! {
+                    document_editor::DocumentEditor {
+                        document_id: id,
                         on_back: move |_| view.set(Some(View::Session(session.clone()))),
                     }
                 }

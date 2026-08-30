@@ -1,14 +1,15 @@
 //! The run settings the app asks for instead of the agent: the canvas
 //! for a demo, the scenario, the length, the candidate count, and the
-//! variety for a deck, and the number of variations. Each has a closed
-//! set of answers, so a chip settles it in one click.
+//! variety for a deck, the paper and the length for a document, and
+//! the number of variations. Each has a closed set of answers, so a
+//! chip settles it in one click.
 
 use std::collections::HashSet;
 
 use design_model::{
     AUDIENCES, AnsweredQuestion, ArtifactKind, COLOR_MODES, CUSTOM_ANSWER_LIMIT, DATA_STATES,
-    DECK_SCENARIOS, DECK_VARIETY_LEVELS, DEMO_SCOPES, EVIDENCE_STYLES, FIDELITIES, PRODUCT_KINDS,
-    SLIDE_DENSITIES, TONES, Viewport, WorkflowState,
+    DECK_SCENARIOS, DECK_VARIETY_LEVELS, DEMO_SCOPES, DOCUMENT_KINDS, EVIDENCE_STYLES, FIDELITIES,
+    PAGE_COUNT_LIMIT, PAPERS, PRODUCT_KINDS, SLIDE_DENSITIES, TONES, Viewport, WorkflowState,
 };
 use dioxus::prelude::*;
 
@@ -125,6 +126,24 @@ pub(crate) fn slide_count_options() -> Vec<(String, String)> {
     options
 }
 
+/// The page counts the app offers, as (brief value, label). The empty
+/// value leaves the length to the agent.
+pub(crate) fn page_count_options() -> Vec<(String, String)> {
+    let mut options = vec![(String::new(), "The agent decides".to_owned())];
+    for count in [1, 2, 3, 5, 8, 12, 20] {
+        if count > PAGE_COUNT_LIMIT {
+            break;
+        }
+        let label = if count == 1 {
+            "1 page".to_owned()
+        } else {
+            format!("{count} pages")
+        };
+        options.push((count.to_string(), label));
+    }
+    options
+}
+
 /// One app question's chips: the fixed choices, with a leading
 /// `the agent decides` that the card draws as the dashed chip.
 fn fixed_choices(choices: &[(&'static str, &'static str)]) -> Vec<(String, String)> {
@@ -226,6 +245,38 @@ fn axes_for(kind: ArtifactKind) -> Vec<Axis> {
                 choices: &SLIDE_DENSITIES,
             },
         ],
+        // A document speaks to a reader, so it asks the audience and
+        // the tone like a deck. Its own axes name the kind of document,
+        // the paper, and the density of a page. The colors, the
+        // evidence, the length, the candidates, and the variety sit on
+        // `DocumentQuestions`.
+        ArtifactKind::Document => vec![
+            Axis {
+                key: "audience",
+                label: "Who is it for?",
+                choices: &AUDIENCES,
+            },
+            Axis {
+                key: "tone",
+                label: "What tone should it have?",
+                choices: &TONES,
+            },
+            Axis {
+                key: "document_kind",
+                label: "What kind of document is it?",
+                choices: &DOCUMENT_KINDS,
+            },
+            Axis {
+                key: "paper",
+                label: "What paper is it for?",
+                choices: &PAPERS,
+            },
+            Axis {
+                key: "page_density",
+                label: "How much goes on a page?",
+                choices: &SLIDE_DENSITIES,
+            },
+        ],
     }
 }
 
@@ -296,6 +347,33 @@ pub(crate) fn app_answers(
                 &fixed_choices(&EVIDENCE_STYLES),
             ));
         }
+        ArtifactKind::Document => {
+            entries.push(recorded(
+                "How should the colors read?",
+                options.color_mode.as_deref(),
+                &fixed_choices(&COLOR_MODES),
+            ));
+            entries.push(recorded(
+                "How different should the candidates be?",
+                Some(&options.variety),
+                &variety_choices(),
+            ));
+            entries.push(recorded(
+                "How long should the document be?",
+                options.page_count.map(|count| count.to_string()).as_deref(),
+                &page_count_options(),
+            ));
+            entries.push(recorded(
+                "How many candidates should I write?",
+                options.variations.map(|count| count.to_string()).as_deref(),
+                &candidate_choices(),
+            ));
+            entries.push(recorded(
+                "How much does it lean on data?",
+                options.evidence_style.as_deref(),
+                &fixed_choices(&EVIDENCE_STYLES),
+            ));
+        }
     }
     entries
 }
@@ -346,6 +424,9 @@ fn axis_value(options: &api::SessionOptions, key: &str) -> Option<String> {
         "fidelity" => options.fidelity.clone(),
         "slide_density" => options.slide_density.clone(),
         "evidence_style" => options.evidence_style.clone(),
+        "document_kind" => options.document_kind.clone(),
+        "paper" => options.paper.clone(),
+        "page_density" => options.page_density.clone(),
         _ => None,
     }
 }
@@ -367,6 +448,9 @@ fn with_axis(options: &api::SessionOptions, key: &str, value: String) -> api::Se
         "fidelity" => next.fidelity = picked,
         "slide_density" => next.slide_density = picked,
         "evidence_style" => next.evidence_style = picked,
+        "document_kind" => next.document_kind = picked,
+        "paper" => next.paper = picked,
+        "page_density" => next.page_density = picked,
         _ => {}
     }
     next
@@ -472,8 +556,9 @@ pub(crate) fn RunSettings(
     }
 }
 
-/// The canvas control: which devices a demo is drawn for, or how many
-/// slides a deck has. Both write a user brief revision.
+/// The canvas control: which devices a demo is drawn for, how many
+/// slides a deck has, or how many pages a document has. All write a
+/// user brief revision.
 ///
 /// A demo run writes one design per canvas, so this is a multiple pick.
 #[component]
@@ -483,12 +568,22 @@ pub(crate) fn CanvasPicker(
     options: api::SessionOptions,
     on_error: EventHandler<String>,
 ) -> Element {
-    if kind == ArtifactKind::Deck {
-        return rsx! {
-            div { class: "deck-questions",
-                DeckQuestions { session_id, options, on_error }
-            }
-        };
+    match kind {
+        ArtifactKind::Deck => {
+            return rsx! {
+                div { class: "deck-questions",
+                    DeckQuestions { session_id, options, on_error }
+                }
+            };
+        }
+        ArtifactKind::Document => {
+            return rsx! {
+                div { class: "document-questions",
+                    DocumentQuestions { session_id, options, on_error }
+                }
+            };
+        }
+        ArtifactKind::Demo => {}
     }
     let picked = picked_platforms(&options.platforms);
     // A callback, not a closure: every button calls it, and each button
@@ -734,6 +829,145 @@ pub(crate) fn DeckQuestions(
     }
 }
 
+/// The app's own document questions: the colors, the variety, the
+/// length in pages, the candidate count, and the evidence. Each is a
+/// card of chips next to the agent's questions, in the same grid, like
+/// `DeckQuestions`. A card starts blank: nothing is chosen until the
+/// user picks a chip or `Use your best judgment`.
+#[component]
+pub(crate) fn DocumentQuestions(
+    session_id: String,
+    options: api::SessionOptions,
+    on_error: EventHandler<String>,
+) -> Element {
+    // The cards the user has touched on this page. The server keeps
+    // defaults for the rest, and a default is not an answer.
+    let mut picked = use_signal(HashSet::<&'static str>::new);
+    let saved = options.clone();
+    let save = use_callback(move |next: api::SessionOptions| {
+        if next == saved {
+            return;
+        }
+        let id = session_id.clone();
+        spawn(async move {
+            if let Err(message) = api::save_session_options(&id, &next).await {
+                on_error.call(message);
+            }
+        });
+    });
+    let shown = |key: &'static str, value: String| picked().contains(key).then_some(value);
+    // A suggestion shows on the card as picked, so the user sees what
+    // the planner read from the request.
+    let suggested =
+        |key: &str, value: Option<String>| value.filter(|_| is_suggested(&options, key));
+    let pages = shown(
+        "pages",
+        options
+            .page_count
+            .map(|count| count.to_string())
+            .unwrap_or_default(),
+    );
+    let candidates = shown(
+        "candidates",
+        options
+            .variations
+            .map(|count| count.to_string())
+            .unwrap_or_default(),
+    );
+    let variety = shown("variety", options.variety.clone());
+    let evidence = shown(
+        "evidence",
+        options.evidence_style.clone().unwrap_or_default(),
+    )
+    .or_else(|| suggested("evidence_style", options.evidence_style.clone()));
+    let colors = shown("colors", options.color_mode.clone().unwrap_or_default())
+        .or_else(|| suggested("color_mode", options.color_mode.clone()));
+    let is_colors_suggested = is_suggested(&options, "color_mode");
+    let is_evidence_suggested = is_suggested(&options, "evidence_style");
+    let pick_colors = {
+        let options = options.clone();
+        move |value: String| {
+            picked.write().insert("colors");
+            save.call(with_axis(&options, "color_mode", value));
+        }
+    };
+    let pick_evidence = {
+        let options = options.clone();
+        move |value: String| {
+            picked.write().insert("evidence");
+            save.call(with_axis(&options, "evidence_style", value));
+        }
+    };
+    let pick_pages = {
+        let options = options.clone();
+        move |value: String| {
+            picked.write().insert("pages");
+            let mut next = options.clone();
+            next.page_count = value.parse::<u32>().ok();
+            save.call(next);
+        }
+    };
+    let pick_candidates = {
+        let options = options.clone();
+        move |value: String| {
+            picked.write().insert("candidates");
+            let mut next = options.clone();
+            next.variations = value.parse::<usize>().ok();
+            save.call(next);
+        }
+    };
+    let pick_variety = {
+        let options = options.clone();
+        move |value: String| {
+            picked.write().insert("variety");
+            let mut next = options.clone();
+            next.variety = if value.is_empty() {
+                "medium".to_owned()
+            } else {
+                value
+            };
+            save.call(next);
+        }
+    };
+    rsx! {
+        ChoiceCard {
+            label: "How should the colors read?",
+            current: colors,
+            choices: fixed_choices(&COLOR_MODES),
+            is_wide: true,
+            is_suggested: is_colors_suggested,
+            allows_custom: true,
+            on_pick: pick_colors,
+        }
+        ChoiceCard {
+            label: "How different should the candidates be?",
+            current: variety,
+            choices: variety_choices(),
+            on_pick: pick_variety,
+        }
+        ChoiceCard {
+            label: "How long should the document be?",
+            current: pages,
+            choices: page_count_options(),
+            on_pick: pick_pages,
+        }
+        ChoiceCard {
+            label: "How many candidates should I write?",
+            current: candidates,
+            choices: candidate_choices(),
+            on_pick: pick_candidates,
+        }
+        ChoiceCard {
+            label: "How much does it lean on data?",
+            current: evidence,
+            choices: fixed_choices(&EVIDENCE_STYLES),
+            is_suggested: is_evidence_suggested,
+            allows_custom: true,
+            on_pick: pick_evidence,
+        }
+    }
+}
+
 /// True when a choice is the judgment one: an empty value stands for
 /// `the agent decides`, and the card draws it as the dashed chip.
 pub(crate) fn is_judgment_choice(value: &str) -> bool {
@@ -898,6 +1132,50 @@ mod tests {
         let audience = row("Who is it for?").expect("audience row");
         assert!(audience.is_assumed);
         assert_eq!(audience.answer, "");
+    }
+
+    #[test]
+    fn a_document_record_names_its_kind_paper_and_length() {
+        let options = api::SessionOptions {
+            document_kind: Some("memo".to_owned()),
+            paper: Some("letter".to_owned()),
+            page_count: Some(2),
+            audience: Some("decision_makers".to_owned()),
+            ..Default::default()
+        };
+        let entries = app_answers(ArtifactKind::Document, &options);
+        let row = |question: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.question == question)
+                .cloned()
+        };
+        let kind = row("What kind of document is it?").expect("kind row");
+        assert_eq!(kind.answer, "Memo or brief");
+        let paper = row("What paper is it for?").expect("paper row");
+        assert_eq!(paper.answer, "US Letter");
+        let length = row("How long should the document be?").expect("length row");
+        assert_eq!(length.answer, "2 pages");
+        let audience = row("Who is it for?").expect("audience row");
+        assert_eq!(audience.answer, "Decision makers");
+        assert!(row("What scenario is the deck for?").is_none());
+        assert!(row("Canvas").is_none());
+        let next = with_axis(&options, "paper", "a4".to_owned());
+        assert_eq!(axis_value(&next, "paper").as_deref(), Some("a4"));
+    }
+
+    #[test]
+    fn the_page_count_options_stay_under_the_limit() {
+        let options = page_count_options();
+        assert_eq!(options[0].1, "The agent decides");
+        assert_eq!(options[1], ("1".to_owned(), "1 page".to_owned()));
+        for (value, _) in options.iter().skip(1) {
+            let count = value.parse::<u32>().ok();
+            assert!(
+                count.is_some_and(|count| count <= PAGE_COUNT_LIMIT),
+                "{value}"
+            );
+        }
     }
 
     #[test]

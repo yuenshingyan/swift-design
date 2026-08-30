@@ -12,7 +12,8 @@
 use std::collections::HashMap;
 
 use design_model::{
-    ArtifactKind, BriefQuestionSet, DECK_VIEWPORT, Deck, Design, QuestionAnswer, WorkflowState,
+    ArtifactKind, BriefQuestionSet, DECK_VIEWPORT, Deck, Design, Document, Paper, QuestionAnswer,
+    WorkflowState,
 };
 use gloo_net::http::{Request, RequestBuilder, Response};
 use serde::{Deserialize, Serialize};
@@ -210,9 +211,23 @@ pub struct SessionOptions {
     /// How much goes on one slide, one of `SLIDE_DENSITIES`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slide_density: Option<String>,
-    /// How much a deck leans on data, one of `EVIDENCE_STYLES`.
+    /// How much a deck or a document leans on data, one of
+    /// `EVIDENCE_STYLES`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_style: Option<String>,
+    /// What kind of document to write, one of `DOCUMENT_KINDS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_kind: Option<String>,
+    /// The paper a document is laid out on, one of `PAPERS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper: Option<String>,
+    /// How much goes on one page, one of `SLIDE_DENSITIES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_density: Option<String>,
+    /// How many pages a document run writes. `None` leaves it to the
+    /// agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_count: Option<u32>,
     /// The axes the planner filled from the request, by option key.
     /// The card marks them as suggested until the user picks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -239,6 +254,10 @@ impl Default for SessionOptions {
             fidelity: None,
             slide_density: None,
             evidence_style: None,
+            document_kind: None,
+            paper: None,
+            page_density: None,
+            page_count: None,
             suggested: Vec::new(),
         }
     }
@@ -272,12 +291,18 @@ pub struct SessionView {
     /// The run records.
     #[serde(default)]
     pub runs: Vec<RunRecord>,
-    /// The designs that belong to this session. Empty for a deck session.
+    /// The designs that belong to this session. Empty unless the session
+    /// is a demo session.
     #[serde(default)]
     pub designs: Vec<DesignSummary>,
-    /// The decks that belong to this session. Empty for a demo session.
+    /// The decks that belong to this session. Empty unless the session
+    /// is a deck session.
     #[serde(default)]
     pub decks: Vec<DeckSummary>,
+    /// The documents that belong to this session. Empty unless the
+    /// session is a document session.
+    #[serde(default)]
+    pub documents: Vec<DocumentSummary>,
 }
 
 /// Body of `POST /sessions`.
@@ -285,7 +310,7 @@ pub struct SessionView {
 pub struct CreateSessionRequest<'value> {
     /// The user's request.
     pub request: &'value str,
-    /// `demo` or `deck`.
+    /// `demo`, `deck`, or `document`.
     pub artifact_kind: &'value str,
     /// How hard to work.
     pub options: CreateOptions<'value>,
@@ -604,6 +629,18 @@ pub async fn fork_deck(id: &str) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Copies one document candidate under the next free number of its
+/// session. Returns the new id.
+pub async fn fork_document(id: &str) -> Result<String, String> {
+    let request = built(Request::post(&format!("/documents/{id}/fork")))?;
+    let response = send_checked(request, "POST /documents/fork").await?;
+    response
+        .json::<ForkResponse>()
+        .await
+        .map(|fork| fork.id)
+        .map_err(|error| error.to_string())
+}
+
 /// Response of `GET /designs/{id}/authors`.
 #[derive(Debug, Deserialize)]
 struct AuthorsResponse {
@@ -745,6 +782,115 @@ pub async fn restore_deck_history(id: &str, stamp: &str) -> Result<(), String> {
     .await
 }
 
+// -- Documents -----------------------------------------------------------
+
+/// One row of `GET /documents`, mirrored from the server.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct DocumentSummary {
+    /// Document id used in `/documents/{id}` routes.
+    pub id: String,
+    /// Document title.
+    pub title: String,
+    /// Theme name.
+    pub theme: String,
+    /// The paper the pages are laid out on.
+    #[serde(default)]
+    pub paper: Paper,
+    /// Number of pages.
+    pub page_count: usize,
+    /// Number of titles in the planned outline.
+    #[serde(default)]
+    pub outline_count: usize,
+    /// Number of placeholder pages a run left behind.
+    #[serde(default)]
+    pub pending_count: usize,
+}
+
+impl DocumentSummary {
+    /// True when the document is a preview that waits for its pages.
+    pub fn is_preview(&self) -> bool {
+        self.outline_count > self.page_count
+    }
+
+    /// True when the document still owes pages.
+    pub fn is_unfinished(&self) -> bool {
+        self.is_preview() || self.pending_count > 0
+    }
+
+    /// The px canvas of every page.
+    pub fn viewport(&self) -> design_model::Viewport {
+        self.paper.viewport()
+    }
+
+    /// The CSS aspect-ratio of the document's paper.
+    pub fn aspect_ratio(&self) -> String {
+        self.viewport().aspect_ratio_css()
+    }
+}
+
+/// Fetches the document listing.
+pub async fn fetch_document_list() -> Result<Vec<DocumentSummary>, String> {
+    get_json("/documents").await
+}
+
+/// Fetches one document.
+pub async fn fetch_document(id: &str) -> Result<Document, String> {
+    get_json(&format!("/documents/{id}")).await
+}
+
+/// Saves one document as a user edit. `Err` carries one message per
+/// problem, so the editor can show every validation error at once.
+pub async fn save_document(id: &str, document: &Document) -> Result<(), Vec<String>> {
+    let response = Request::put(&format!("/documents/{id}"))
+        .header("x-swift-design-author", "user")
+        .json(document)
+        .map_err(|error| vec![error.to_string()])?
+        .send()
+        .await
+        .map_err(|error| vec![error.to_string()])?;
+    if response.ok() {
+        return Ok(());
+    }
+    let status = response.status();
+    match response.json::<ErrorEnvelope>().await {
+        Ok(envelope) if !envelope.error.details.is_empty() => Err(envelope.error.details),
+        Ok(envelope) => Err(vec![envelope.error.message]),
+        Err(_) => Err(vec![format!(
+            "PUT /documents/{id} failed with status {status}"
+        )]),
+    }
+}
+
+/// Deletes one document.
+pub async fn delete_document(id: &str) -> Result<(), String> {
+    send_empty(
+        Request::delete(&format!("/documents/{id}")),
+        "DELETE /documents",
+    )
+    .await
+}
+
+/// Fetches the field paths the user changed in this document.
+pub async fn fetch_document_user_paths(id: &str) -> Result<Vec<String>, String> {
+    get_json::<AuthorsResponse>(&format!("/documents/{id}/authors"))
+        .await
+        .map(|authors| authors.user_paths)
+}
+
+/// Fetches the saved snapshots of one document.
+pub async fn fetch_document_history(id: &str) -> Result<Vec<HistorySnapshot>, String> {
+    get_json(&format!("/documents/{id}/history")).await
+}
+
+/// Writes one snapshot back as the current document.
+pub async fn restore_document_history(id: &str, stamp: &str) -> Result<(), String> {
+    send_empty(
+        Request::post(&format!("/documents/{id}/history/{stamp}/restore")),
+        "restore",
+    )
+    .await
+}
+
 // -- Templates -----------------------------------------------------------
 
 /// One row of `GET /templates`.
@@ -820,6 +966,8 @@ struct SaveTemplateRequest<'value> {
     design_id: Option<&'value str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     deck_id: Option<&'value str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    document_id: Option<&'value str>,
     name: &'value str,
 }
 
@@ -833,6 +981,7 @@ pub async fn save_template(design_id: &str, name: &str) -> Result<TemplateSummar
     save_template_from(SaveTemplateRequest {
         design_id: Some(design_id),
         deck_id: None,
+        document_id: None,
         name,
     })
     .await
@@ -843,6 +992,21 @@ pub async fn save_deck_template(deck_id: &str, name: &str) -> Result<TemplateSum
     save_template_from(SaveTemplateRequest {
         design_id: None,
         deck_id: Some(deck_id),
+        document_id: None,
+        name,
+    })
+    .await
+}
+
+/// Saves the style of one document as a template.
+pub async fn save_document_template(
+    document_id: &str,
+    name: &str,
+) -> Result<TemplateSummary, String> {
+    save_template_from(SaveTemplateRequest {
+        design_id: None,
+        deck_id: None,
+        document_id: Some(document_id),
         name,
     })
     .await
