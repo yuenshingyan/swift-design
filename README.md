@@ -77,16 +77,16 @@ the same name: the second is stored as `name-2.ext`.
 
 ## Candidates
 
-Every candidate is a card with a live preview. Cards on one tab share a height, so a desktop card is wide and a phone card is a tall bezel. Click a card to open it in the editor. Arrows at the edges of the preview, or `←` and `→` on a focused card, step through the screens or slides; the pill in the corner shows `n/m`. A preview candidate (the first screens plus an outline) carries a `Finish` button that writes the rest; pressing it on a second card while the first is running joins that run. The chosen card is marked `Chosen`.
+Every candidate is a card with a live preview. Cards on one tab share a height, so a desktop card is wide and a phone card is a tall bezel. Click a card to open it in the editor. Arrows at the edges of the preview, or `←` and `→` on a focused card, step through the screens or slides; the pill in the corner shows `n/m`. A preview candidate (the first screens plus an outline) shows a `planned` pill with the count still to write; tick it and press `Finish` in the bar to write the rest. Pressing it on a second card while the first is running joins that run. The chosen card is marked `Chosen`.
 
 Type `@` in the chat to pin a candidate, or `All candidates`, for the next message: the change is applied to each pinned candidate. Without a pin the message edits the chosen candidate, or writes new ones.
 
-The box at the top left of a card selects it. With cards selected, a bar over the canvas deletes them: one click arms the button, the second deletes. A deleted candidate that was the chosen one leaves the session with no choice.
+The box at the top left of a card selects it. Every action on candidates works the same way: tick cards, then press a button in the bar over the canvas. `Delete` takes two clicks: one arms the button, the second deletes. A deleted candidate that was the chosen one leaves the session with no choice.
 
 Three more ways to work a candidate:
 
-- **Fork.** The `Fork` button on a card copies it under the next free number, so a change can be tried on the copy while the original stays.
-- **Merge.** Tick two or more cards and press `Merge`: the cards are pinned in the chat. Say which parts to take from each, for example "the hero from candidate 1 and the pricing table from candidate 3". The planner writes one new candidate from those parts. The candidates of a merge must share a canvas.
+- **Fork.** Tick a card and press `Fork` in the bar over the canvas: the card is copied under the next free number, so a change can be tried on the copy while the original stays. Several ticked cards fork together.
+- **Merge.** Tick two or more cards and press `Merge` in the same bar: the cards are pinned in the chat. Say which parts to take from each, for example "the hero from candidate 1 and the pricing table from candidate 3". The planner writes one new candidate from those parts. The candidates of a merge must share a canvas.
 - **Redo a screen or a slide.** In the editor, the circular arrow on a thumbnail writes that screen or slide anew: the model sees its name and notes, not its old markup. One click arms the button, the second sends. The old version stays in the history.
 
 Every new candidate takes the next free number: a later run adds candidates after the ones the session has instead of overwriting them.
