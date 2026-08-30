@@ -24,6 +24,47 @@ use crate::editor::{
 use crate::icons;
 use crate::settings::artifact_project;
 
+/// How the deck preview takes a click: as a selection, or as a reader
+/// of the deck would.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeckPreviewMode {
+    /// A click reaches the slide as it would for a reader.
+    Read,
+    /// A click selects a node, a double-click edits its text.
+    Edit,
+}
+
+impl DeckPreviewMode {
+    /// Both modes, in tab order. Read comes first: it is the default,
+    /// so a deck opens as its reader sees it.
+    pub(crate) const ALL: [DeckPreviewMode; 2] = [DeckPreviewMode::Read, DeckPreviewMode::Edit];
+
+    /// The tab label.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            DeckPreviewMode::Read => "Read",
+            DeckPreviewMode::Edit => "Edit",
+        }
+    }
+
+    /// The tab tooltip.
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            DeckPreviewMode::Read => "See the slide as a reader would",
+            DeckPreviewMode::Edit => "Click a node to select it",
+        }
+    }
+
+    /// The query that asks the render for the editing script. Read mode
+    /// asks for nothing, so the slide shows with no selection outlines.
+    pub(crate) fn render_query(self) -> &'static str {
+        match self {
+            DeckPreviewMode::Read => "",
+            DeckPreviewMode::Edit => "&editable=true",
+        }
+    }
+}
+
 /// Loads one deck, then hands it to the editor.
 #[component]
 pub fn DeckEditor(deck_id: String, on_back: EventHandler<()>) -> Element {
@@ -54,6 +95,7 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
     let mut selected = use_signal(|| 0usize);
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
     let mut selection = use_signal(Vec::<SelectionEntry>::new);
+    let mut mode = use_signal(|| DeckPreviewMode::Read);
     // The slides pinned for the chat with a command-click on a tile.
     let mut pinned = use_signal(Vec::<usize>::new);
     let mut messages = use_signal(Vec::<String>::new);
@@ -305,6 +347,21 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                     }
                     span { class: "divider" }
                     span { class: "preview-heading", "{selected() + 1} / {slide_count}" }
+                    div { class: "canvas-tabs preview-modes", role: "tablist",
+                        for candidate in DeckPreviewMode::ALL {
+                            button {
+                                key: "{candidate.label()}",
+                                role: "tab",
+                                class: if mode() == candidate { "canvas-tab open" } else { "canvas-tab" },
+                                title: "{candidate.title()}",
+                                onclick: move |_| {
+                                    mode.set(candidate);
+                                    selected_node.set(None);
+                                },
+                                span { class: "tab-name", "{candidate.label()}" }
+                            }
+                        }
+                    }
                     span { class: "badge", "agent {agent_count}" }
                     span { class: "badge you", "you {user_count}" }
                     // Every change saves by itself, shortly after it. The
@@ -402,15 +459,19 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                             // its default height and the slide sits in a
                             // band of the deck's own background.
                             style: "aspect-ratio: {deck_ratio}",
-                            src: "/decks/{deck_id}/render?version={preview_version()}&editable=true&slide={selected() + 1}",
+                            src: "/decks/{deck_id}/render?version={preview_version()}{mode().render_query()}&slide={selected() + 1}",
                         }
                     }
                     p { class: "preview-hint",
-                        span {
-                            "Click a node to reference it in the chat and edit its text · ⌘-click adds more · ⌘-click a tile to pin pages"
+                        if mode() == DeckPreviewMode::Read {
+                            span { "The slide as a reader sees it · switch to Edit to select a node" }
+                        } else {
+                            span {
+                                "Click a node to reference it in the chat and edit its text · ⌘-click adds more · ⌘-click a tile to pin pages"
+                            }
+                            span { class: "dot", "·" }
+                            span { "right-click for quick edits" }
                         }
-                        span { class: "dot", "·" }
-                        span { "right-click for quick edits" }
                         span { class: "dot", "·" }
                         span {
                             kbd { "←" }
@@ -767,7 +828,18 @@ fn field_count(deck: &Deck) -> usize {
 mod tests {
     use design_model::{Deck, FontSet, Palette, Slide, Theme};
 
-    use super::{default_slide, field_count, outline_title, slide_label};
+    use super::{DeckPreviewMode, default_slide, field_count, outline_title, slide_label};
+
+    #[test]
+    fn a_deck_opens_in_read_mode_and_edit_loads_the_editing_script() {
+        assert_eq!(DeckPreviewMode::ALL[0], DeckPreviewMode::Read);
+        assert_eq!(
+            DeckPreviewMode::ALL.map(DeckPreviewMode::label),
+            ["Read", "Edit"]
+        );
+        assert_eq!(DeckPreviewMode::Read.render_query(), "");
+        assert_eq!(DeckPreviewMode::Edit.render_query(), "&editable=true");
+    }
 
     fn deck() -> Deck {
         Deck {
