@@ -27,6 +27,20 @@ pub(crate) const PLAY: &str = "<svg width=\"12\" height=\"12\" viewBox=\"0 0 14 
 fill=\"none\" aria-hidden=\"true\"><path d=\"M3 2.5l8 4.5-8 4.5V2.5z\" stroke=\"currentColor\" \
 stroke-width=\"1.3\" stroke-linejoin=\"round\"></path></svg>";
 
+/// Two branches from one stem, for a fork.
+pub(crate) const FORK: &str = "<svg width=\"12\" height=\"12\" viewBox=\"0 0 14 14\" \
+fill=\"none\" aria-hidden=\"true\"><path d=\"M7 12V7M7 7L3.5 3.5M7 7l3.5-3.5\" \
+stroke=\"currentColor\" stroke-width=\"1.3\" stroke-linecap=\"round\" \
+stroke-linejoin=\"round\"></path><circle cx=\"3.5\" cy=\"3\" r=\"1.2\" \
+stroke=\"currentColor\" stroke-width=\"1.2\"></circle><circle cx=\"10.5\" cy=\"3\" r=\"1.2\" \
+stroke=\"currentColor\" stroke-width=\"1.2\"></circle></svg>";
+
+/// A circular arrow, for writing a unit anew.
+pub(crate) const REDO: &str = "<svg width=\"12\" height=\"12\" viewBox=\"0 0 14 14\" \
+fill=\"none\" aria-hidden=\"true\"><path d=\"M11.5 7a4.5 4.5 0 1 1-1.3-3.2M11.5 2.5v2.5H9\" \
+stroke=\"currentColor\" stroke-width=\"1.3\" stroke-linecap=\"round\" \
+stroke-linejoin=\"round\"></path></svg>";
+
 /// A down arrow onto a tray, for exports.
 pub(crate) const DOWNLOAD: &str = "<svg width=\"12\" height=\"12\" viewBox=\"0 0 14 14\" \
 fill=\"none\" aria-hidden=\"true\"><path d=\"M7 2v7M4 6.2L7 9.2l3-3M2.6 11.5h8.8\" \
