@@ -750,12 +750,14 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .kind-badge { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.04em;
   color: var(--muted); border: 1px solid var(--hairline); border-radius: 4px;
   padding: 0.05rem 0.35rem; }
-/* The kind picker: two cards, asked once when the request is sent. */
-.kind-modal { width: min(30rem, calc(100vw - 2rem)); }
+/* The kind picker: three cards, asked once when the request is sent. The base button
+   rule forbids wrapping, so the card allows it again and the detail line folds. */
+.kind-modal { width: min(38rem, calc(100vw - 2rem)); }
 .kind-choices { display: grid; gap: 0.625rem; }
-button.kind-choice { display: flex; flex-direction: column; align-items: flex-start; gap: 0.25rem;
-  width: 100%; padding: 0.9rem 1rem; text-align: left; border: 1px solid var(--line);
-  border-radius: var(--r-panel); background: var(--raised); box-shadow: none; }
+button.kind-choice { display: flex; flex-direction: column; align-items: stretch; gap: 0.25rem;
+  width: 100%; min-width: 0; padding: 0.9rem 1rem; text-align: left; white-space: normal;
+  border: 1px solid var(--line); border-radius: var(--r-panel); background: var(--raised);
+  box-shadow: none; }
 button.kind-choice:hover { border-color: var(--ink); background: var(--subtle); }
 .kind-choice-name { font-size: 0.95rem; font-weight: 500; color: var(--ink); }
 .kind-choice-detail { font-size: 0.78rem; color: var(--muted); line-height: 1.4; }
