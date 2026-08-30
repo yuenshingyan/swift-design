@@ -317,9 +317,6 @@ pub(crate) fn CandidateCanvas(
     /// A Fork press: copy this candidate under the next free number.
     /// Called once per ticked card.
     on_fork: EventHandler<String>,
-    /// A Merge press: pin these candidates in the chat, so the next
-    /// message says which parts to combine.
-    on_merge: EventHandler<Vec<String>>,
     on_error: EventHandler<String>,
 ) -> Element {
     let mut shown = use_signal(HashMap::<String, usize>::new);
@@ -434,23 +431,6 @@ pub(crate) fn CandidateCanvas(
                     "Fork {selected_count}"
                 } else {
                     "Fork"
-                }
-            }
-            button {
-                class: "selection-merge",
-                disabled: selected_count < 2,
-                title: "Pin the ticked candidates in the chat, then say which parts to combine",
-                onclick: move |_| {
-                    let mut ids: Vec<String> = selected().iter().cloned().collect();
-                    ids.sort();
-                    on_merge.call(ids);
-                    selected.write().clear();
-                    is_confirming_delete.set(false);
-                },
-                if selected_count >= 2 {
-                    "Merge {selected_count}"
-                } else {
-                    "Merge"
                 }
             }
             button {
