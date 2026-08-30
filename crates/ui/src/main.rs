@@ -524,7 +524,6 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .canvas-card.selected, .canvas-card.selected:hover { border-color: var(--teal);
   box-shadow: 0 0 0 1px var(--teal); }
 .canvas-card.selected .card-footer { background: var(--teal-tint); }
-.canvas-card.selected .card-label { color: var(--teal); font-weight: 500; }
 .card-tick { display: flex; color: var(--teal); }
 .card-footer { cursor: pointer; }
 .card-footer:hover { background: var(--sunken); }
@@ -579,6 +578,13 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
   background: var(--teal-tint); color: var(--teal); font-family: var(--mono); font-size: 0.68rem;
   box-shadow: var(--sh-control); }
 .chosen-pill span { display: flex; }
+.card-number { flex: none; min-width: 1.25rem; padding: 0.05rem 0.4rem; border-radius: var(--r-badge);
+  background: var(--sunken); color: var(--ink-2); font-family: var(--mono); font-size: 0.68rem;
+  line-height: 1.5; text-align: center; }
+.canvas-card.selected .card-number { background: var(--teal); color: #FFFFFF; }
+.card-title { flex: 1 1 auto; min-width: 0; font-size: 0.8rem; font-weight: 500; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-card.selected .card-title { color: var(--teal); }
 .card-label { font-family: var(--mono); font-size: 0.75rem; color: var(--ink);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .template-name { font: inherit; font-size: 0.82rem; padding: 0.45rem 0.65rem;
