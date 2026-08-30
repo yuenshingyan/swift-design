@@ -15,11 +15,19 @@ use crate::api;
 use crate::icons;
 use crate::settings::stepped_screen;
 
-/// The card stage height in rem, the same for every canvas.
+/// The card stage height in rem for a tab full of cards: the floor.
 const CARD_STAGE_HEIGHT_REM: f64 = 13.5;
-/// The frame height in rem inside a phone bezel, which leaves room for
-/// the bezel inside the stage.
-const BEZEL_FRAME_HEIGHT_REM: f64 = 12.0;
+/// The tallest stage, for a tab with one or two cards.
+const STAGE_HEIGHT_CAP_REM: f64 = 30.0;
+/// The row the cards of one tab share, in rem: the canvas column of a
+/// laptop window. The stage height is the tallest that fits every card
+/// of the tab in that row.
+const ROW_WIDTH_REM: f64 = 84.0;
+/// The gap between two cards in a row, in rem. Matches `.canvas-grid`.
+const CARD_GAP_REM: f64 = 1.0;
+/// The room the bezel padding and the stage padding take above and
+/// below a phone frame, in rem.
+const BEZEL_INSET_REM: f64 = 1.5;
 
 /// One card on the canvas: a design or a deck candidate.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -156,14 +164,54 @@ pub(crate) fn frame_width_rem(viewport: Viewport, height_rem: f64) -> String {
     format!("{width:.2}")
 }
 
-/// The card frame width in rem: the bezel frame for a portrait canvas,
-/// else the full stage height at the canvas ratio.
-pub(crate) fn card_frame_width(viewport: Viewport) -> String {
+/// The stage height in rem for `count` cards of `viewport` on one tab:
+/// the tallest that lets them share one row of `ROW_WIDTH_REM`, kept
+/// between the floor and the cap. A portrait canvas is narrow, so it
+/// stays tall for more cards than a desktop canvas does.
+pub(crate) fn stage_height_rem(viewport: Viewport, count: usize) -> f64 {
+    let count = count.max(1) as f64;
+    let width_each = (ROW_WIDTH_REM - CARD_GAP_REM * (count - 1.0)) / count;
+    let ratio = f64::from(viewport.width) / f64::from(viewport.height);
+    (width_each / ratio).clamp(CARD_STAGE_HEIGHT_REM, STAGE_HEIGHT_CAP_REM)
+}
+
+/// The sizes one card sets as CSS variables, in rem: the frame width at
+/// the canvas ratio, the stage height, and the bezel height a phone
+/// card uses.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CardFrame {
+    /// The frame width: the bezel frame for a portrait canvas, else the
+    /// full stage height at the canvas ratio.
+    pub(crate) width: String,
+    /// The stage height.
+    pub(crate) stage_height: String,
+    /// The bezel height, `BEZEL_INSET_REM` under the stage.
+    pub(crate) bezel_height: String,
+}
+
+impl CardFrame {
+    /// The `style` attribute of the card.
+    pub(crate) fn style(&self) -> String {
+        format!(
+            "--frame-width: {}rem; --stage-height: {}rem; --bezel-height: {}rem",
+            self.width, self.stage_height, self.bezel_height
+        )
+    }
+}
+
+/// The frame of a card on a tab that holds `count` cards of `viewport`.
+pub(crate) fn card_frame(viewport: Viewport, count: usize) -> CardFrame {
+    let stage = stage_height_rem(viewport, count);
+    let bezel = stage - BEZEL_INSET_REM;
     let height = match is_portrait_canvas(viewport) {
-        true => BEZEL_FRAME_HEIGHT_REM,
-        false => CARD_STAGE_HEIGHT_REM,
+        true => bezel,
+        false => stage,
     };
-    frame_width_rem(viewport, height)
+    CardFrame {
+        width: frame_width_rem(viewport, height),
+        stage_height: format!("{stage:.2}"),
+        bezel_height: format!("{bezel:.2}"),
+    }
 }
 
 /// How many cards were written for `viewport`, for the tab count.
@@ -277,6 +325,9 @@ pub(crate) fn CandidateCanvas(
         .filter(|card| tabs.len() <= 1 || card.viewport == tab_viewport)
         .cloned()
         .collect();
+    // Every card of the tab shares one height, picked so they fit one
+    // row: the placeholders count too, since they take the same shape.
+    let on_tab = shown_cards.len() + placeholders.len();
     let kinds: HashMap<String, ArtifactKind> = cards
         .iter()
         .map(|card| (card.id.clone(), card.kind))
@@ -366,6 +417,7 @@ pub(crate) fn CandidateCanvas(
                         CandidateCard {
                             key: "{id}",
                             card,
+                            on_tab,
                             current,
                             progress,
                             is_queued,
@@ -393,6 +445,7 @@ pub(crate) fn CandidateCanvas(
                     key: "{id}",
                     percent: run_designs.get(&id).copied(),
                     viewport: tab_viewport,
+                    on_tab,
                     id,
                 }
             }
@@ -414,6 +467,9 @@ pub(crate) fn key_step(key: &Key) -> Option<i32> {
 #[component]
 fn CandidateCard(
     card: CanvasCard,
+    /// How many cards the tab holds, placeholders included. Sets the
+    /// shared height.
+    on_tab: usize,
     current: usize,
     progress: Option<u8>,
     /// True while the run has this card's Finish in its queue but has
@@ -433,7 +489,7 @@ fn CandidateCard(
     let count = card.count.max(1);
     let current = current.clamp(1, count);
     let is_phone = is_portrait_canvas(card.viewport);
-    let frame_width = card_frame_width(card.viewport);
+    let frame = card_frame(card.viewport, on_tab);
     let class = card_class(CardFlags {
         is_chosen,
         is_phone,
@@ -470,7 +526,7 @@ fn CandidateCard(
     rsx! {
         article {
             class: "{class}",
-            style: "--frame-width: {frame_width}rem",
+            style: "{frame.style()}",
             tabindex: "0",
             onclick: open,
             onkeydown: {
@@ -605,7 +661,7 @@ fn CandidateCard(
 /// A card for an artifact the run has reported but not saved yet. It
 /// takes the shape of the open tab's canvas.
 #[component]
-fn PlaceholderCard(id: String, viewport: Viewport, percent: Option<u8>) -> Element {
+fn PlaceholderCard(id: String, viewport: Viewport, on_tab: usize, percent: Option<u8>) -> Element {
     let is_phone = is_portrait_canvas(viewport);
     let class = card_class(CardFlags {
         is_chosen: false,
@@ -613,9 +669,9 @@ fn PlaceholderCard(id: String, viewport: Viewport, percent: Option<u8>) -> Eleme
         is_placeholder: true,
         is_selected: false,
     });
-    let frame_width = card_frame_width(viewport);
+    let frame = card_frame(viewport, on_tab);
     rsx! {
-        article { class: "{class}", style: "--frame-width: {frame_width}rem",
+        article { class: "{class}", style: "{frame.style()}",
             div { class: "card-stage",
                 if is_phone {
                     div { class: "bezel",
@@ -778,8 +834,35 @@ mod tests {
         assert_eq!(frame_width_rem(phone(), 12.0), "5.55");
         assert_eq!(frame_width_rem(tablet(), 5.5), "7.33");
         assert_eq!(frame_width_rem(phone(), 5.5), "2.54");
-        assert_eq!(card_frame_width(phone()), "5.55");
-        assert_eq!(card_frame_width(Viewport::default()), "21.60");
+    }
+
+    #[test]
+    fn the_stage_height_fits_the_cards_of_the_tab_in_one_row() {
+        let desktop = Viewport::default();
+        assert!((stage_height_rem(desktop, 1) - 30.0).abs() < 0.01);
+        assert!((stage_height_rem(desktop, 2) - 25.94).abs() < 0.01);
+        assert!((stage_height_rem(desktop, 3) - 17.08).abs() < 0.01);
+        assert!((stage_height_rem(desktop, 4) - 13.5).abs() < 0.01);
+        assert!((stage_height_rem(desktop, 0) - 30.0).abs() < 0.01);
+        // A phone is narrow, so six still share a tall row.
+        assert!((stage_height_rem(phone(), 6) - 28.5).abs() < 0.01);
+        assert!((stage_height_rem(tablet(), 3) - 20.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_card_frame_sets_the_width_and_both_heights() {
+        let frame = card_frame(Viewport::default(), 3);
+        assert_eq!(frame.stage_height, "17.08");
+        assert_eq!(frame.width, "27.33");
+        assert_eq!(
+            frame.style(),
+            "--frame-width: 27.33rem; --stage-height: 17.08rem; --bezel-height: 15.58rem"
+        );
+        // A phone frame follows the bezel, which sits inside the stage.
+        let phone_frame = card_frame(phone(), 2);
+        assert_eq!(phone_frame.stage_height, "30.00");
+        assert_eq!(phone_frame.bezel_height, "28.50");
+        assert_eq!(phone_frame.width, "13.17");
     }
 
     #[test]
