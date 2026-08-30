@@ -1,0 +1,34 @@
+{
+  "title": "Swift Design Quarterly Report",
+  "theme": {
+    "name": "paper",
+    "colors": {
+      "background": "#ffffff",
+      "text": "#1a1d21",
+      "accent": "#2f6fdd",
+      "muted": "#6b7480"
+    },
+    "fonts": {
+      "heading": "Inter",
+      "body": "Inter",
+      "mono": "JetBrains Mono"
+    }
+  },
+  "paper": "a4",
+  "pages": [
+    {
+      "html": "<div class='p1-cover'><p class='p1-kicker'>Quarterly report</p><h1>Swift Design</h1><p class='p1-subtitle'>Candidates, edits, and exports from one harness</p><p class='p1-meta'>Q3 2026 · Prepared by the studio team</p></div>",
+      "css": ".p1-cover { height: 100%; padding: 96px 72px; display: flex; flex-direction: column; justify-content: center; gap: 16px; border-left: 12px solid var(--accent); } .p1-kicker { font-size: 14px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); } h1 { font-size: 48px; font-weight: 700; line-height: 1.1; } .p1-subtitle { font-size: 20px; color: var(--muted); } .p1-meta { margin-top: 48px; font-size: 14px; color: var(--muted); }",
+      "notes": "Keep the cover to one claim."
+    },
+    {
+      "html": "<div class='p2-page'><h2>Summary</h2><p>The harness asks a short set of questions, writes two candidates, and edits them from the chat. This quarter added link capture, Office uploads, and templates extracted from a brand.</p><h3>What changed</h3><ul><li>Link capture reads a website into the run.</li><li>Word, PowerPoint, and Excel files are inlined as text.</li><li>A template can be extracted from a website or from brand files.</li></ul><h3>What is next</h3><p>Documents join demos and decks as a third kind, with PDF and DOCX exports.</p></div>",
+      "css": ".p2-page { padding: 72px; display: flex; flex-direction: column; gap: 16px; font-size: 16px; line-height: 1.55; } h2 { font-size: 32px; font-weight: 700; padding-bottom: 8px; border-bottom: 2px solid var(--accent); } h3 { font-size: 20px; font-weight: 600; margin-top: 12px; } ul { padding-left: 24px; display: grid; gap: 6px; }"
+    },
+    {
+      "html": "<div class='p3-page'><h2>Runs per week</h2><table><thead><tr><th>Week</th><th>Runs</th><th>Edits</th></tr></thead><tbody><tr><td>1</td><td>42</td><td>118</td></tr><tr><td>2</td><td>57</td><td>164</td></tr><tr><td>3</td><td>63</td><td>201</td></tr><tr><td>4</td><td>71</td><td>240</td></tr></tbody></table><p class='p3-note'>Edits count every chat turn that changed a candidate.</p></div>",
+      "css": ".p3-page { padding: 72px; display: flex; flex-direction: column; gap: 24px; font-size: 16px; } h2 { font-size: 32px; font-weight: 700; padding-bottom: 8px; border-bottom: 2px solid var(--accent); } table { width: 100%; border-collapse: collapse; } th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--muted); } th { color: var(--accent); font-weight: 600; } .p3-note { color: var(--muted); font-size: 14px; }",
+      "notes": "Numbers come from the run log."
+    }
+  ]
+}

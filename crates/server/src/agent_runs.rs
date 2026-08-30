@@ -113,6 +113,7 @@ pub struct AgentRunner {
     settings: SettingsStore,
     designs: DesignStore,
     decks: Option<crate::decks::DeckStore>,
+    documents: Option<crate::documents::DocumentStore>,
     sessions: SessionStore,
     address: String,
     templates: Option<crate::templates::TemplateStore>,
@@ -137,6 +138,7 @@ impl AgentRunner {
             settings,
             designs,
             decks: None,
+            documents: None,
             sessions,
             address,
             templates: None,
@@ -162,6 +164,13 @@ impl AgentRunner {
     /// Lets deck sessions write their candidates to the deck store.
     pub fn with_decks(mut self, decks: crate::decks::DeckStore) -> Self {
         self.decks = Some(decks);
+        self
+    }
+
+    /// Lets document sessions write their candidates to the document
+    /// store.
+    pub fn with_documents(mut self, documents: crate::documents::DocumentStore) -> Self {
+        self.documents = Some(documents);
         self
     }
 
@@ -226,6 +235,9 @@ impl AgentRunner {
                 );
                 if let Some(decks) = &self.decks {
                     engine = engine.with_decks(decks.clone());
+                }
+                if let Some(documents) = &self.documents {
+                    engine = engine.with_documents(documents.clone());
                 }
                 if let Some(templates) = &self.templates {
                     engine = engine.with_templates(templates.clone());

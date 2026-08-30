@@ -35,6 +35,14 @@ pub(crate) fn sample_deck() -> design_model::Deck {
     serde_json::from_str(SAMPLE_DECK).unwrap()
 }
 
+/// The canonical valid document, as JSON.
+pub(crate) const SAMPLE_DOCUMENT: &str = include_str!("../../../fixtures/sample-document.json");
+
+/// The canonical valid document, parsed.
+pub(crate) fn sample_document() -> design_model::Document {
+    serde_json::from_str(SAMPLE_DOCUMENT).unwrap()
+}
+
 /// The multipart boundary the upload helper uses.
 pub(crate) const MULTIPART_BOUNDARY: &str = "swiftdesignboundary";
 
@@ -56,6 +64,9 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
     let decks = DeckStore::new(directory.path().join("decks")).with_history(
         crate::history::HistoryStore::new(directory.path().join("deck-history")),
     );
+    let documents = DocumentStore::new(directory.path().join("documents")).with_history(
+        crate::history::HistoryStore::new(directory.path().join("document-history")),
+    );
     let sessions = SessionStore::new(directory.path().join("data/sessions"));
     let settings = crate::settings::SettingsStore::new(
         directory.path().join("data/settings.json"),
@@ -69,10 +80,12 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
         "http://127.0.0.1:3000".to_owned(),
         changes.clone(),
     )
-    .with_decks(decks.clone());
+    .with_decks(decks.clone())
+    .with_documents(documents.clone());
     router(AppState {
         designs,
         decks,
+        documents,
         uploads: UploadStore::new(directory.path().join("uploads")),
         sessions,
         settings,
@@ -85,6 +98,7 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
 
 use crate::decks::DeckStore;
 use crate::designs::DesignStore;
+use crate::documents::DocumentStore;
 use crate::uploads::UploadStore;
 
 /// Sends a request with an optional content type and body.
@@ -198,6 +212,15 @@ pub(crate) async fn open_generating_session(application: &Router, id: &str) {
 pub(crate) async fn open_generating_deck_session(application: &Router, id: &str) {
     let body = format!(
         "{{\"id\":\"{id}\",\"request\":\"A deck about {id}.\",\"artifact_kind\":\"deck\"}}"
+    );
+    open_generating_session_with(application, id, &body).await;
+}
+
+/// Creates a document session and drives it to the generating state, so
+/// document writes are allowed.
+pub(crate) async fn open_generating_document_session(application: &Router, id: &str) {
+    let body = format!(
+        "{{\"id\":\"{id}\",\"request\":\"A report about {id}.\",\"artifact_kind\":\"document\"}}"
     );
     open_generating_session_with(application, id, &body).await;
 }

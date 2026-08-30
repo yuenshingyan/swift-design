@@ -1,9 +1,10 @@
-//! Screen and slide screenshots: how a model sees its own work.
+//! Screen, slide, and page screenshots: how a model sees its own work.
 //!
-//! The server renders one screen or slide to HTML and asks an installed
-//! Chrome or Chromium to draw it as a PNG. No browser crate is shipped:
-//! the binary is the user's own. `GET /designs/{id}/screens/{n}.png` and
-//! `GET /decks/{id}/slides/{n}.png` serve a screenshot to external
+//! The server renders one screen, slide, or page to HTML and asks an
+//! installed Chrome or Chromium to draw it as a PNG. No browser crate is
+//! shipped: the binary is the user's own. `GET
+//! /designs/{id}/screens/{n}.png`, `GET /decks/{id}/slides/{n}.png`, and
+//! `GET /documents/{id}/pages/{n}.png` serve a screenshot to external
 //! agents, and the polish pass sends the images to vision-capable
 //! models. Without Chrome, everything falls back to text.
 
@@ -16,12 +17,14 @@ use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use design_model::{DECK_VIEWPORT, Deck, Design, Viewport};
+use design_model::{DECK_VIEWPORT, Deck, Design, Document, Viewport};
 
 use crate::api_error;
 use crate::deck_render;
 use crate::decks::{DeckStore, is_valid_deck_id};
 use crate::designs::{DesignStore, is_valid_design_id};
+use crate::document_render;
+use crate::documents::{DocumentStore, is_valid_document_id};
 use crate::render::{RenderOptions, render_design_with};
 use crate::settings::SettingsStore;
 
@@ -190,6 +193,48 @@ pub async fn dump_deck_dom(deck: &Deck, base_url: &str) -> anyhow::Result<String
         },
     );
     dump_rendered_dom(&html, base_url, DECK_VIEWPORT).await
+}
+
+/// Renders page `index` (zero-based) of `document` to a PNG. `base_url`
+/// resolves relative image paths like `/uploads/…`.
+pub async fn screenshot_page(
+    document: &Document,
+    index: usize,
+    base_url: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let chrome = find_chrome().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
+        )
+    })?;
+    let html = document_render::render_document_with(
+        document,
+        document_render::RenderOptions {
+            only_page: Some(index),
+            asset_origin: Some(base_url.to_owned()),
+            ..document_render::RenderOptions::default()
+        },
+    );
+    screenshot_html(
+        &chrome,
+        &with_base_href(&html, base_url),
+        document.viewport(),
+    )
+    .await
+}
+
+/// Renders the whole document with the layout audit script and returns
+/// the DOM after the audit ran, as Chrome dumps it.
+pub async fn dump_document_dom(document: &Document, base_url: &str) -> anyhow::Result<String> {
+    let html = document_render::render_document_with(
+        document,
+        document_render::RenderOptions {
+            is_auditing: true,
+            asset_origin: Some(base_url.to_owned()),
+            ..document_render::RenderOptions::default()
+        },
+    );
+    dump_rendered_dom(&html, base_url, document.viewport()).await
 }
 
 /// Loads a rendered page in Chrome and returns the DOM after its
@@ -419,12 +464,13 @@ async fn run_chrome(
     anyhow::bail!("Chrome did not write a screenshot for {url}")
 }
 
-/// The `/designs/{id}/screens/{n}.png` and `/decks/{id}/slides/{n}.png`
-/// route table.
+/// The `/designs/{id}/screens/{n}.png`, `/decks/{id}/slides/{n}.png`,
+/// and `/documents/{id}/pages/{n}.png` route table.
 pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/designs/{id}/screens/{file}", get(get_screen_image))
         .route("/decks/{id}/slides/{file}", get(get_slide_image))
+        .route("/documents/{id}/pages/{file}", get(get_page_image))
 }
 
 /// The 1-based number in a `{n}.png` file name. `None` for any other
@@ -514,6 +560,43 @@ async fn get_slide_image(
     }
     let base_url = format!("http://{}", settings.address());
     match screenshot_slide(&deck, number - 1, &base_url).await {
+        Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Serves a PNG of one page. `file` is `{n}.png` with a 1-based `n`.
+async fn get_page_image(
+    State(documents): State<DocumentStore>,
+    State(settings): State<SettingsStore>,
+    Path((id, file)): Path<(String, String)>,
+) -> Response {
+    if !is_valid_document_id(&id) {
+        return api_error::invalid_document_id(&id);
+    }
+    let Some(number) = image_number(&file) else {
+        return bad_image_name("page", &file);
+    };
+    let document = match documents.load(&id).await {
+        Ok(Some(document)) => document,
+        Ok(None) => return api_error::document_not_found(&id),
+        Err(error) => return api_error::internal_error(&error),
+    };
+    if number > document.pages.len() {
+        return api_error::error_response(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "document `{id}` has no page {number}: use 1 to {}",
+                document.pages.len()
+            ),
+            Vec::new(),
+        );
+    }
+    if find_chrome().is_none() {
+        return chrome_missing_response("page images");
+    }
+    let base_url = format!("http://{}", settings.address());
+    match screenshot_page(&document, number - 1, &base_url).await {
         Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
         Err(error) => api_error::internal_error(&error),
     }

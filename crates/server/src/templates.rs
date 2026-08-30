@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::api_error;
 use crate::decks::{DeckStore, is_pending_slide};
 use crate::designs::{DesignStore, is_pending_screen};
+use crate::documents::{DocumentStore, is_pending_page};
 use crate::events::ChangeNotifier;
 
 /// How many screens one template keeps as layout examples. The title
@@ -102,8 +103,8 @@ struct DefaultRequest {
     is_default: bool,
 }
 
-/// Body of `POST /templates`. Exactly one of `design_id` and `deck_id`
-/// names the source.
+/// Body of `POST /templates`. Exactly one of `design_id`, `deck_id`, and
+/// `document_id` names the source.
 #[derive(Debug, Deserialize)]
 struct SaveRequest {
     /// The design to save the style of.
@@ -112,6 +113,9 @@ struct SaveRequest {
     /// The deck to save the style of.
     #[serde(default)]
     deck_id: Option<String>,
+    /// The document to save the style of.
+    #[serde(default)]
+    document_id: Option<String>,
     /// The name to show in the template list.
     name: String,
 }
@@ -123,15 +127,18 @@ enum TemplateSource {
     Design(String),
     /// The deck with this id.
     Deck(String),
+    /// The document with this id.
+    Document(String),
 }
 
 /// The one source a save request names, or the message when it names
-/// none or both.
+/// none or several.
 fn template_source(request: &SaveRequest) -> Result<TemplateSource, String> {
-    match (&request.design_id, &request.deck_id) {
-        (Some(design_id), None) => Ok(TemplateSource::Design(design_id.clone())),
-        (None, Some(deck_id)) => Ok(TemplateSource::Deck(deck_id.clone())),
-        _ => Err("name exactly one source: `design_id` or `deck_id`".to_owned()),
+    match (&request.design_id, &request.deck_id, &request.document_id) {
+        (Some(design_id), None, None) => Ok(TemplateSource::Design(design_id.clone())),
+        (None, Some(deck_id), None) => Ok(TemplateSource::Deck(deck_id.clone())),
+        (None, None, Some(document_id)) => Ok(TemplateSource::Document(document_id.clone())),
+        _ => Err("name exactly one source: `design_id`, `deck_id`, or `document_id`".to_owned()),
     }
 }
 
@@ -566,11 +573,44 @@ async fn deck_style(decks: &DeckStore, id: &str) -> Result<SourceStyle, Response
     })
 }
 
-/// Saves the style of one design or deck as a template.
+/// The style of a stored document: its theme, the paper canvas, and
+/// its first written pages as screens.
+async fn document_style(documents: &DocumentStore, id: &str) -> Result<SourceStyle, Response> {
+    let document = match documents.load(id).await {
+        Ok(Some(document)) => document,
+        Ok(None) => {
+            return Err(api_error::error_response(
+                StatusCode::NOT_FOUND,
+                &format!("no document `{id}`: run `GET /documents` for the list"),
+                Vec::new(),
+            ));
+        }
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    Ok(SourceStyle {
+        theme: document.theme,
+        viewport: document.paper.viewport(),
+        screens: document
+            .pages
+            .iter()
+            .filter(|page| !is_pending_page(page))
+            .take(TEMPLATE_SCREEN_LIMIT)
+            .map(|page| Screen {
+                name: String::new(),
+                html: page.html.clone(),
+                css: page.css.clone(),
+                notes: page.notes.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// Saves the style of one design, deck, or document as a template.
 async fn save_template(
     State(store): State<TemplateStore>,
     State(designs): State<DesignStore>,
     State(decks): State<DeckStore>,
+    State(documents): State<DocumentStore>,
     State(notifier): State<ChangeNotifier>,
     Json(request): Json<SaveRequest>,
 ) -> Response {
@@ -591,6 +631,7 @@ async fn save_template(
     let (source_id, style) = match &source {
         TemplateSource::Design(id) => (id.clone(), design_style(&designs, id).await),
         TemplateSource::Deck(id) => (id.clone(), deck_style(&decks, id).await),
+        TemplateSource::Document(id) => (id.clone(), document_style(&documents, id).await),
     };
     let style = match style {
         Ok(style) => style,
@@ -599,7 +640,9 @@ async fn save_template(
     if style.screens.is_empty() {
         return api_error::error_response(
             StatusCode::BAD_REQUEST,
-            &format!("`{source_id}` has no written screens or slides to save as a template"),
+            &format!(
+                "`{source_id}` has no written screens, slides, or pages to save as a template"
+            ),
             Vec::new(),
         );
     }
@@ -700,24 +743,53 @@ mod tests {
         let both = SaveRequest {
             design_id: Some("a".to_owned()),
             deck_id: Some("b".to_owned()),
+            document_id: None,
             name: "x".to_owned(),
         };
         assert!(template_source(&both).is_err());
         let none = SaveRequest {
             design_id: None,
             deck_id: None,
+            document_id: None,
             name: "x".to_owned(),
         };
         assert!(template_source(&none).is_err());
         let deck = SaveRequest {
             design_id: None,
             deck_id: Some("talk".to_owned()),
+            document_id: None,
             name: "x".to_owned(),
         };
         assert_eq!(
             template_source(&deck).unwrap(),
             TemplateSource::Deck("talk".to_owned())
         );
+        let document = SaveRequest {
+            design_id: None,
+            deck_id: None,
+            document_id: Some("report".to_owned()),
+            name: "x".to_owned(),
+        };
+        assert_eq!(
+            template_source(&document).unwrap(),
+            TemplateSource::Document("report".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_template_saves_from_a_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let documents = DocumentStore::new(directory.path().join("documents"));
+        documents
+            .save("report", &crate::test_support::sample_document())
+            .await
+            .unwrap();
+        let style = document_style(&documents, "report").await.ok().unwrap();
+        assert_eq!(style.viewport, design_model::A4_VIEWPORT);
+        assert_eq!(style.screens.len(), 3);
+        assert!(style.screens[0].name.is_empty());
+        assert!(style.screens[0].html.contains("Swift Design"));
+        assert!(document_style(&documents, "missing").await.is_err());
     }
 
     #[tokio::test]

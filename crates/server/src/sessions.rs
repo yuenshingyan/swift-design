@@ -101,9 +101,23 @@ pub struct RunOptions {
     /// How much goes on one slide, one of `SLIDE_DENSITIES`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slide_density: Option<String>,
-    /// How much a deck leans on data, one of `EVIDENCE_STYLES`.
+    /// How much a deck or a document leans on data, one of
+    /// `EVIDENCE_STYLES`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_style: Option<String>,
+    /// What kind of document to write, one of `DOCUMENT_KINDS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_kind: Option<String>,
+    /// The paper a document is laid out on, one of `PAPERS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper: Option<String>,
+    /// How much goes on one page, one of `SLIDE_DENSITIES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_density: Option<String>,
+    /// How many pages a document run writes. `None` leaves it to the
+    /// agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_count: Option<u32>,
     /// The axes whose value the planner suggested from the request, by
     /// option key. The card shows them as picked and marks them as
     /// suggested. A pick by the user removes the key.
@@ -125,6 +139,9 @@ impl RunOptions {
             "fidelity" => &self.fidelity,
             "slide_density" => &self.slide_density,
             "evidence_style" => &self.evidence_style,
+            "document_kind" => &self.document_kind,
+            "paper" => &self.paper,
+            "page_density" => &self.page_density,
             _ => return None,
         })
     }
@@ -141,6 +158,9 @@ impl RunOptions {
             "fidelity" => &mut self.fidelity,
             "slide_density" => &mut self.slide_density,
             "evidence_style" => &mut self.evidence_style,
+            "document_kind" => &mut self.document_kind,
+            "paper" => &mut self.paper,
+            "page_density" => &mut self.page_density,
             _ => return None,
         })
     }
@@ -205,6 +225,10 @@ impl Default for RunOptions {
             fidelity: None,
             slide_density: None,
             evidence_style: None,
+            document_kind: None,
+            paper: None,
+            page_density: None,
+            page_count: None,
             suggested: Vec::new(),
             variety: default_effort(),
             templates: Vec::new(),
@@ -503,10 +527,15 @@ pub struct SessionView {
     pub messages: Vec<ChatMessage>,
     /// The run records.
     pub runs: Vec<RunRecord>,
-    /// The designs that belong to this session. Empty for a deck session.
+    /// The designs that belong to this session. Empty unless the session
+    /// is a demo session.
     pub designs: Vec<crate::designs::DesignSummary>,
-    /// The decks that belong to this session. Empty for a demo session.
+    /// The decks that belong to this session. Empty unless the session
+    /// is a deck session.
     pub decks: Vec<crate::decks::DeckSummary>,
+    /// The documents that belong to this session. Empty unless the
+    /// session is a document session.
+    pub documents: Vec<crate::documents::DocumentSummary>,
 }
 
 /// What went wrong in a session operation.

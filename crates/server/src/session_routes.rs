@@ -11,9 +11,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use design_model::{
-    ArtifactKind, BriefQuestionSet, CUSTOM_ANSWER_LIMIT, DECK_SCENARIOS, QuestionAnswer,
-    WorkflowEvent, WorkflowState, app_axes, axis_by_key, is_custom_answer, is_deck_scenario,
-    validate_answers, validate_question_set,
+    ArtifactKind, BriefQuestionSet, CUSTOM_ANSWER_LIMIT, DECK_SCENARIOS, PAGE_COUNT_LIMIT,
+    QuestionAnswer, WorkflowEvent, WorkflowState, app_axes, axis_by_key, is_custom_answer,
+    is_deck_scenario, validate_answers, validate_question_set,
 };
 use serde::Deserialize;
 
@@ -22,6 +22,7 @@ use crate::api_error;
 use crate::candidates::{CANDIDATE_LIMIT, PLATFORM_LIMIT};
 use crate::decks::DeckStore;
 use crate::designs::{DesignStore, is_valid_design_id};
+use crate::documents::DocumentStore;
 use crate::edit_focus::referenced_indexes;
 use crate::events::ChangeNotifier;
 use crate::sessions::{
@@ -78,21 +79,30 @@ fn title_from_request(request: &str) -> String {
     line.chars().take(80).collect()
 }
 
-/// Prepares a stored brief for a reader: fills `answered_questions`
-/// when the brief has none, then drops the lines a reader has already
-/// read.
-///
-/// A brief written before the app recorded them kept the answers only
-/// as `question: answer` lines among the confirmed facts. The studio no
-/// longer shows those lines, so without this the answers would vanish
-/// from an old session. The session store still holds every question
-/// set and every answer, so the entries are rebuilt from there.
+/// The three artifact stores as one extractor, so a handler that reads
+/// or deletes a session's artifacts takes one argument for them.
+#[derive(Clone)]
+pub(crate) struct ArtifactStores {
+    designs: DesignStore,
+    decks: DeckStore,
+    documents: DocumentStore,
+}
+
+impl axum::extract::FromRef<crate::AppState> for ArtifactStores {
+    fn from_ref(state: &crate::AppState) -> ArtifactStores {
+        ArtifactStores {
+            designs: state.designs.clone(),
+            decks: state.decks.clone(),
+            documents: state.documents.clone(),
+        }
+    }
+}
+
 /// Builds the full session view. A demo session lists its designs, a
-/// deck session its decks.
+/// deck session its decks, a document session its documents.
 async fn build_view(
     sessions: &SessionStore,
-    designs: &DesignStore,
-    decks: &DeckStore,
+    stores: &ArtifactStores,
     session: Session,
 ) -> Result<SessionView, SessionError> {
     let id = session.id.clone();
@@ -101,38 +111,51 @@ async fn build_view(
     let messages = sessions.messages(&id).await?;
     let runs = sessions.runs(&id).await?;
     let open_question_set = open_question_set(&session, &answers);
-    let (session_designs, session_decks) = match session.artifact_kind {
-        ArtifactKind::Demo => (
-            designs
-                .list()
-                .await
-                .map_err(|error| SessionError::Io(error.to_string()))?
-                .into_iter()
-                .filter(|summary| session_id_of_artifact(&summary.id) == id)
-                .collect(),
-            Vec::new(),
-        ),
-        ArtifactKind::Deck => (
-            Vec::new(),
-            decks
-                .list()
-                .await
-                .map_err(|error| SessionError::Io(error.to_string()))?
-                .into_iter()
-                .filter(|summary| session_id_of_artifact(&summary.id) == id)
-                .collect(),
-        ),
-    };
-    Ok(SessionView {
+    let io = |error: anyhow::Error| SessionError::Io(error.to_string());
+    let mut view = SessionView {
         session,
         question_sets,
         open_question_set,
         answers,
         messages,
         runs,
-        designs: session_designs,
-        decks: session_decks,
-    })
+        designs: Vec::new(),
+        decks: Vec::new(),
+        documents: Vec::new(),
+    };
+    match view.session.artifact_kind {
+        ArtifactKind::Demo => {
+            view.designs = stores
+                .designs
+                .list()
+                .await
+                .map_err(io)?
+                .into_iter()
+                .filter(|summary| session_id_of_artifact(&summary.id) == id)
+                .collect();
+        }
+        ArtifactKind::Deck => {
+            view.decks = stores
+                .decks
+                .list()
+                .await
+                .map_err(io)?
+                .into_iter()
+                .filter(|summary| session_id_of_artifact(&summary.id) == id)
+                .collect();
+        }
+        ArtifactKind::Document => {
+            view.documents = stores
+                .documents
+                .list()
+                .await
+                .map_err(io)?
+                .into_iter()
+                .filter(|summary| session_id_of_artifact(&summary.id) == id)
+                .collect();
+        }
+    }
+    Ok(view)
 }
 
 /// The number of the latest question set when it is still unanswered.
@@ -152,7 +175,7 @@ struct CreateRequest {
     title: Option<String>,
     #[serde(default)]
     options: Option<RunOptions>,
-    /// `demo` (the default) or `deck`.
+    /// `demo` (the default), `deck`, or `document`.
     #[serde(default)]
     artifact_kind: Option<ArtifactKind>,
 }
@@ -238,8 +261,7 @@ async fn list_sessions(State(sessions): State<SessionStore>) -> Response {
 /// Returns one session view.
 async fn get_session(
     State(sessions): State<SessionStore>,
-    State(designs): State<DesignStore>,
-    State(decks): State<DeckStore>,
+    State(stores): State<ArtifactStores>,
     Path(id): Path<String>,
 ) -> Response {
     let session = match sessions.read(&id).await {
@@ -249,7 +271,7 @@ async fn get_session(
         }
         Err(error) => return session_error_response(&error),
     };
-    match build_view(&sessions, &designs, &decks, session).await {
+    match build_view(&sessions, &stores, session).await {
         Ok(view) => Json(view).into_response(),
         Err(error) => session_error_response(&error),
     }
@@ -258,8 +280,7 @@ async fn get_session(
 /// Deletes a session. The designs stay.
 async fn delete_session(
     State(sessions): State<SessionStore>,
-    State(designs): State<DesignStore>,
-    State(decks): State<DeckStore>,
+    State(stores): State<ArtifactStores>,
     State(runner): State<AgentRunner>,
     State(uploads): State<crate::uploads::UploadStore>,
     State(notifier): State<ChangeNotifier>,
@@ -279,7 +300,7 @@ async fn delete_session(
     }
     match sessions.delete(&id).await {
         Ok(_) => {
-            delete_session_artifacts(&designs, &decks, &id).await;
+            delete_session_artifacts(&stores, &id).await;
             // The session's source files go with it: nothing else reads
             // them.
             if let Err(error) = uploads.delete_scope(&id).await {
@@ -292,25 +313,32 @@ async fn delete_session(
     }
 }
 
-/// Deletes the artifacts of a deleted session: its designs and its
-/// decks, candidates included.
+/// Deletes the artifacts of a deleted session: its designs, its decks,
+/// and its documents, candidates included.
 ///
 /// A session id comes from the request text, so the same request makes
 /// the same id. Without this the next session with that request would
 /// open on the deleted session's candidates. A failure is logged and
 /// does not fail the delete: the session record is already gone.
-async fn delete_session_artifacts(designs: &DesignStore, decks: &DeckStore, id: &str) {
-    match designs.delete_session(id).await {
+async fn delete_session_artifacts(stores: &ArtifactStores, id: &str) {
+    match stores.designs.delete_session(id).await {
         Ok(count) if count > 0 => tracing::info!(session_id = %id, count, "designs deleted"),
         Ok(_) => {}
         Err(error) => {
             tracing::warn!(session_id = %id, %error, "deleting the session designs failed")
         }
     }
-    match decks.delete_session(id).await {
+    match stores.decks.delete_session(id).await {
         Ok(count) if count > 0 => tracing::info!(session_id = %id, count, "decks deleted"),
         Ok(_) => {}
         Err(error) => tracing::warn!(session_id = %id, %error, "deleting the session decks failed"),
+    }
+    match stores.documents.delete_session(id).await {
+        Ok(count) if count > 0 => tracing::info!(session_id = %id, count, "documents deleted"),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(session_id = %id, %error, "deleting the session documents failed")
+        }
     }
 }
 
@@ -361,6 +389,13 @@ fn option_problem(options: &RunOptions) -> Option<String> {
             "slide_count must be between 1 and {SLIDE_COUNT_LIMIT}, got {count}"
         ));
     }
+    if let Some(count) = options.page_count
+        && (count == 0 || count > PAGE_COUNT_LIMIT)
+    {
+        return Some(format!(
+            "page_count must be between 1 and {PAGE_COUNT_LIMIT}, got {count}"
+        ));
+    }
     if let Some(variations) = options.variations
         && (variations == 0 || variations > CANDIDATE_LIMIT)
     {
@@ -381,7 +416,7 @@ fn option_problem(options: &RunOptions) -> Option<String> {
     // The app owns every axis, but the lists cannot cover every answer,
     // so a typed answer is accepted beside them. Only the shape is
     // checked: the value goes into one prompt line.
-    for axis in app_axes(ArtifactKind::Demo).chain(app_axes(ArtifactKind::Deck)) {
+    for axis in ArtifactKind::ALL.into_iter().flat_map(app_axes) {
         if let Some(Some(value)) = options.axis(axis.key)
             && !axis.choices.iter().any(|(known, _)| known == value)
             && !is_custom_answer(value)
@@ -470,6 +505,7 @@ fn regenerate_problem(session: &Session, request: &MessageRequest) -> Option<Str
     let unit = match session.artifact_kind {
         design_model::ArtifactKind::Demo => "screen",
         design_model::ArtifactKind::Deck => "slide",
+        design_model::ArtifactKind::Document => "page",
     };
     if referenced_indexes(&request.content, unit).is_empty() {
         return Some(format!(

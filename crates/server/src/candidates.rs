@@ -2,10 +2,11 @@
 //!
 //! Agents write up to five candidates with ids `{base}-candidate-1` …
 //! `{base}-candidate-5`. A demo session writes designs, a deck session
-//! writes decks; the session's artifact kind says which store the
-//! chooser reads. The chooser page shows the candidates side by side;
-//! choosing one saves a copy as `{base}`. The candidates stay until the
-//! user deletes them, so the pick can change.
+//! writes decks, a document session writes documents; the session's
+//! artifact kind says which store the chooser reads. The chooser page
+//! shows the candidates side by side; choosing one saves a copy as
+//! `{base}`. The candidates stay until the user deletes them, so the
+//! pick can change.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -18,6 +19,7 @@ use serde::Deserialize;
 use crate::api_error;
 use crate::decks::DeckStore;
 use crate::designs::{DesignStore, is_valid_design_id};
+use crate::documents::DocumentStore;
 use crate::events::ChangeNotifier;
 use crate::sessions::SessionStore;
 
@@ -124,10 +126,28 @@ async fn deck_cards(store: &DeckStore, base: &str) -> anyhow::Result<Vec<Candida
         .collect())
 }
 
+/// The document candidates of `base` as cards, sorted by id.
+async fn document_cards(store: &DocumentStore, base: &str) -> anyhow::Result<Vec<CandidateCard>> {
+    let prefix = format!("{base}-candidate-");
+    Ok(store
+        .list()
+        .await?
+        .into_iter()
+        .filter(|summary| summary.id.starts_with(&prefix))
+        .map(|summary| CandidateCard {
+            preview_url: format!("/documents/{}/render", summary.id),
+            ratio: summary.paper.viewport().aspect_ratio_css(),
+            id: summary.id,
+            theme: summary.theme,
+        })
+        .collect())
+}
+
 /// Shows every candidate for `base` side by side with a choose button.
 async fn chooser(
     State(designs): State<DesignStore>,
     State(decks): State<DeckStore>,
+    State(documents): State<DocumentStore>,
     State(sessions): State<SessionStore>,
     Path(base): Path<String>,
 ) -> Response {
@@ -138,6 +158,7 @@ async fn chooser(
     let cards = match kind {
         ArtifactKind::Demo => design_cards(&designs, &base).await,
         ArtifactKind::Deck => deck_cards(&decks, &base).await,
+        ArtifactKind::Document => document_cards(&documents, &base).await,
     };
     let mut cards = match cards {
         Ok(cards) => cards,
@@ -162,6 +183,7 @@ async fn chooser(
 async fn choose(
     State(designs): State<DesignStore>,
     State(decks): State<DeckStore>,
+    State(documents): State<DocumentStore>,
     State(sessions): State<SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path(base): Path<String>,
@@ -181,6 +203,7 @@ async fn choose(
     let copied = match kind {
         ArtifactKind::Demo => copy_design(&designs, &request.id, &base).await,
         ArtifactKind::Deck => copy_deck(&decks, &request.id, &base).await,
+        ArtifactKind::Document => copy_document(&documents, &request.id, &base).await,
     };
     if let Err(response) = copied {
         return response;
@@ -231,11 +254,33 @@ pub(crate) async fn copy_deck(store: &DeckStore, id: &str, base: &str) -> Result
         .map_err(|error| api_error::internal_error(&error))
 }
 
+/// Copies the document `id` to `base`. The copy is agent-authored.
+pub(crate) async fn copy_document(
+    store: &DocumentStore,
+    id: &str,
+    base: &str,
+) -> Result<(), Response> {
+    let document = match store.load(id).await {
+        Ok(Some(document)) => document,
+        Ok(None) => return Err(api_error::document_not_found(id)),
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    store
+        .save(base, &document)
+        .await
+        .map_err(|error| api_error::internal_error(&error))?;
+    store
+        .clear_user_paths(base)
+        .await
+        .map_err(|error| api_error::internal_error(&error))
+}
+
 /// The word for one artifact of `kind`, for the page text.
 fn unit_name(kind: ArtifactKind) -> &'static str {
     match kind {
         ArtifactKind::Demo => "design",
         ArtifactKind::Deck => "deck",
+        ArtifactKind::Document => "document",
     }
 }
 
@@ -245,6 +290,7 @@ fn chosen_url(kind: ArtifactKind, base: &str) -> String {
     match kind {
         ArtifactKind::Demo => format!("/designs/{base}/render"),
         ArtifactKind::Deck => format!("/decks/{base}/render"),
+        ArtifactKind::Document => format!("/documents/{base}/render"),
     }
 }
 
@@ -328,14 +374,37 @@ mod tests {
 
     use super::{
         CandidateCard, candidate_id, candidate_number_of, chooser_page, chosen_url, deck_cards,
-        design_cards, next_candidate_number,
+        design_cards, document_cards, next_candidate_number,
     };
     use axum::http::StatusCode;
 
     use crate::decks::DeckStore;
     use crate::designs::DesignStore;
+    use crate::documents::DocumentStore;
     use crate::sessions::SessionStore;
-    use crate::test_support::{sample_deck, send, test_application};
+    use crate::test_support::{sample_deck, sample_document, send, test_application};
+
+    #[tokio::test]
+    async fn document_cards_carry_the_paper_ratio_and_the_document_url() {
+        let directory = tempfile::tempdir().unwrap();
+        let documents = DocumentStore::new(directory.path().join("documents"));
+        documents
+            .save("report-candidate-1", &sample_document())
+            .await
+            .unwrap();
+        let mut letter = sample_document();
+        letter.paper = design_model::Paper::Letter;
+        documents.save("report-candidate-2", &letter).await.unwrap();
+        let cards = document_cards(&documents, "report").await.unwrap();
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].preview_url, "/documents/report-candidate-1/render");
+        assert_eq!(cards[0].ratio, "794 / 1123");
+        assert_eq!(cards[1].ratio, "816 / 1056");
+        assert_eq!(
+            chosen_url(design_model::ArtifactKind::Document, "report"),
+            "/documents/report/render"
+        );
+    }
 
     #[tokio::test]
     async fn a_fork_takes_the_next_candidate_number_and_reads_as_agent_authored() {

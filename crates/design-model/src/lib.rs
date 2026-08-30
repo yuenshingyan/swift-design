@@ -4,11 +4,12 @@
 //! format that LLM agents write. `schemars` derives the JSON Schema from
 //! them; regenerate `schemas/` after any change here. This crate does no IO.
 //!
-//! There are two artifact kinds. A design is a theme, a viewport, and
+//! There are three artifact kinds. A design is a theme, a viewport, and
 //! screens, plus an optional page transition. A deck is a theme and
 //! slides on a fixed 1920 by 1080 px canvas, plus an optional page
-//! transition. A screen or a slide is one HTML fragment plus its own
-//! CSS. `markup` checks both.
+//! transition. A document is a theme, a paper, and pages on the px
+//! canvas of that paper. A screen, a slide, or a page is one HTML
+//! fragment plus its own CSS. `markup` checks all of them.
 //!
 //! The crate also holds the brief-first workflow types the server and
 //! the studio share: the `workflow` state machine, the `question`
@@ -18,7 +19,9 @@ pub mod artifact_kind;
 pub mod deck;
 pub mod deck_questions;
 pub mod design;
+pub mod document;
 pub mod markup;
+pub mod page;
 pub mod question;
 pub mod run_questions;
 pub mod screen;
@@ -34,6 +37,8 @@ pub use artifact_kind::ArtifactKind;
 pub use deck::{DECK_HEIGHT, DECK_VIEWPORT, DECK_WIDTH, Deck};
 pub use deck_questions::{DECK_SCENARIOS, DECK_VARIETY_LEVELS, is_deck_scenario};
 pub use design::Design;
+pub use document::{A4_VIEWPORT, Document, LETTER_VIEWPORT, PAGE_COUNT_LIMIT, Paper};
+pub use page::Page;
 pub use question::{
     AnswerError, AnsweredQuestion, BriefQuestion, BriefQuestionSet, QUESTIONS_PER_TURN_LIMIT,
     QuestionAnswer, QuestionKind, QuestionOption, QuestionSetError, validate_answers,
@@ -41,9 +46,9 @@ pub use question::{
 };
 pub use run_questions::{
     AUDIENCES, AppAxis, COLOR_MODES, CUSTOM_ANSWER_LIMIT, DATA_STATES, DECK_AXES, DEMO_AXES,
-    DEMO_SCOPES, EVIDENCE_STYLES, FIDELITIES, PRODUCT_KINDS, SHARED_AXES, SLIDE_DENSITIES, TONES,
-    app_axes, audience_label, axis_by_key, axis_label, demo_scope_label, is_custom_answer,
-    tone_label,
+    DEMO_SCOPES, DOCUMENT_AXES, DOCUMENT_KINDS, EVIDENCE_STYLES, FIDELITIES, PAPERS, PRODUCT_KINDS,
+    SHARED_AXES, SLIDE_DENSITIES, SPEECH_AXES, TONES, app_axes, audience_label, axis_by_key,
+    axis_label, demo_scope_label, is_custom_answer, tone_label,
 };
 pub use screen::Screen;
 pub use slide::Slide;
@@ -55,7 +60,9 @@ pub use workflow::{WorkflowError, WorkflowEvent, WorkflowState, transition};
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use crate::{Deck, Design, FontSet, Palette, Screen, Slide, Theme, Viewport};
+    use crate::{
+        Deck, Design, Document, FontSet, Page, Palette, Paper, Screen, Slide, Theme, Viewport,
+    };
 
     /// The theme every sample artifact uses.
     fn sample_theme() -> Theme {
@@ -87,6 +94,21 @@ pub(crate) mod test_support {
             }],
             outline: Vec::new(),
             transition: None,
+        }
+    }
+
+    /// Builds a small document that passes validation.
+    pub fn sample_document() -> Document {
+        Document {
+            title: "Sample".to_owned(),
+            theme: sample_theme(),
+            paper: Paper::A4,
+            pages: vec![Page {
+                html: "<h1 class='title'>Sample</h1>".to_owned(),
+                css: Some(".title { font-size: 40px; }".to_owned()),
+                notes: None,
+            }],
+            outline: Vec::new(),
         }
     }
 

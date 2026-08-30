@@ -1,5 +1,5 @@
-//! Swift Design server: serves the editor UI, design and deck files,
-//! and uploads.
+//! Swift Design server: serves the editor UI, design, deck, and
+//! document files, and uploads.
 
 mod agent_runs;
 mod api_error;
@@ -13,6 +13,12 @@ mod deck_polish;
 mod deck_render;
 mod decks;
 mod designs;
+mod document_generation;
+mod document_patch;
+mod document_polish;
+mod document_render;
+mod documents;
+mod docx;
 mod edit_focus;
 mod events;
 mod export;
@@ -51,12 +57,13 @@ use axum::extract::FromRef;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use design_model::{Deck, Design};
+use design_model::{Deck, Design, Document};
 use tracing_subscriber::EnvFilter;
 
 use crate::agent_runs::AgentRunner;
 use crate::decks::DeckStore;
 use crate::designs::DesignStore;
+use crate::documents::DocumentStore;
 use crate::events::ChangeNotifier;
 use crate::history::HistoryStore;
 use crate::sessions::SessionStore;
@@ -72,6 +79,8 @@ pub(crate) struct AppState {
     designs: DesignStore,
     /// Deck storage.
     decks: DeckStore,
+    /// Document storage.
+    documents: DocumentStore,
     /// Upload storage.
     uploads: UploadStore,
     /// Session storage.
@@ -97,6 +106,12 @@ impl FromRef<AppState> for DesignStore {
 impl FromRef<AppState> for DeckStore {
     fn from_ref(state: &AppState) -> DeckStore {
         state.decks.clone()
+    }
+}
+
+impl FromRef<AppState> for DocumentStore {
+    fn from_ref(state: &AppState) -> DocumentStore {
+        state.documents.clone()
     }
 }
 
@@ -167,11 +182,17 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("SWIFT_DESIGN_DECKS_DIR").unwrap_or_else(|_| "decks".to_owned());
     let deck_history_directory = std::env::var("SWIFT_DESIGN_DECK_HISTORY_DIR")
         .unwrap_or_else(|_| "deck-history".to_owned());
+    let documents_directory =
+        std::env::var("SWIFT_DESIGN_DOCUMENTS_DIR").unwrap_or_else(|_| "documents".to_owned());
+    let document_history_directory = std::env::var("SWIFT_DESIGN_DOCUMENT_HISTORY_DIR")
+        .unwrap_or_else(|_| "document-history".to_owned());
     let changes = ChangeNotifier::new();
     let designs = DesignStore::new(PathBuf::from(designs_directory))
         .with_history(HistoryStore::new(PathBuf::from(history_directory)));
     let decks = DeckStore::new(PathBuf::from(decks_directory))
         .with_history(HistoryStore::new(PathBuf::from(deck_history_directory)));
+    let documents = DocumentStore::new(PathBuf::from(documents_directory))
+        .with_history(HistoryStore::new(PathBuf::from(document_history_directory)));
     let sessions = SessionStore::new(PathBuf::from(sessions_directory));
     // A run dies with the process. Its session would wait for it forever.
     for session_id in sessions
@@ -193,11 +214,13 @@ async fn main() -> anyhow::Result<()> {
         changes.clone(),
     )
     .with_decks(decks.clone())
+    .with_documents(documents.clone())
     .with_templates(templates.clone())
     .with_uploads(uploads.clone());
     let state = AppState {
         designs,
         decks,
+        documents,
         uploads,
         sessions,
         settings,
@@ -219,6 +242,7 @@ fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/designs/render", post(render_design))
         .route("/decks/render", post(render_deck))
+        .route("/documents/render", post(render_document))
         .merge(agent_runs::routes())
         .merge(candidates::routes())
         .merge(events::routes())
@@ -226,6 +250,7 @@ fn router(state: AppState) -> Router {
         .merge(instructions::routes())
         .merge(designs::routes())
         .merge(decks::routes())
+        .merge(documents::routes())
         .merge(presenter::routes())
         .merge(projects::routes())
         .merge(export::routes())
@@ -261,6 +286,16 @@ async fn render_deck(Json(deck): Json<Deck>) -> Response {
     api_error::deck_validation_failed(&errors)
 }
 
+/// Renders a posted document to HTML, or reports every validation
+/// error.
+async fn render_document(Json(document): Json<Document>) -> Response {
+    let errors = document.validate();
+    if errors.is_empty() {
+        return Html(document_render::render_document(&document, false)).into_response();
+    }
+    api_error::document_validation_failed(&errors)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -271,10 +306,197 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::test_support::{
-        SAMPLE_DECK, SAMPLE_DESIGN, application_with_command, invalid_sample_design,
-        open_generating_deck_session, open_generating_session, send, send_upload, send_user_put,
-        test_application,
+        SAMPLE_DECK, SAMPLE_DESIGN, SAMPLE_DOCUMENT, application_with_command,
+        invalid_sample_design, open_generating_deck_session, open_generating_document_session,
+        open_generating_session, send, send_upload, send_user_put, test_application,
     };
+
+    #[tokio::test]
+    async fn a_document_session_lists_its_documents_and_chooses_from_the_document_store() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_document_session(&application, "report").await;
+        let (status, body) = send(application.clone(), "GET", "/sessions/report", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(view["session"]["artifact_kind"], "document");
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/documents/report-candidate-1",
+            Some(SAMPLE_DOCUMENT),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, body) = send(application.clone(), "GET", "/sessions/report", None).await;
+        let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(view["documents"].as_array().unwrap().len(), 1);
+        assert_eq!(view["documents"][0]["paper"], "a4");
+        assert_eq!(view["decks"].as_array().unwrap().len(), 0);
+        assert_eq!(view["designs"].as_array().unwrap().len(), 0);
+        let (status, body) = send(application.clone(), "GET", "/candidates/report", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Choose this document"));
+        assert!(body.contains("/documents/report-candidate-1/render"));
+        let (status, _) = send(
+            application.clone(),
+            "POST",
+            "/candidates/report/choose",
+            Some(r#"{"id":"report-candidate-1"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(application.clone(), "GET", "/documents/report", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(application, "GET", "/decks/report", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn renders_a_valid_document_to_html() {
+        let directory = TempDir::new().unwrap();
+        let (status, body) = send(
+            test_application(&directory),
+            "POST",
+            "/documents/render",
+            Some(SAMPLE_DOCUMENT),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.starts_with("<!doctype html>"));
+        assert!(body.contains("data-swift-design-width=\"794\""));
+        let (status, body) = send(
+            test_application(&directory),
+            "POST",
+            "/documents/render",
+            Some(r##"{"title":"","theme":{"name":"x","colors":{"background":"#000000","text":"#ffffff","accent":"#ff0000","muted":"#888888"},"fonts":{"heading":"Inter","body":"Inter","mono":"Inter"}},"pages":[]}"##),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("document failed validation"));
+        assert!(body.contains("document has no pages"));
+    }
+
+    #[tokio::test]
+    async fn saving_then_fetching_a_document_round_trips() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "report").await;
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/documents/report-candidate-1",
+            Some(SAMPLE_DOCUMENT),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, body) = send(
+            application.clone(),
+            "GET",
+            "/documents/report-candidate-1",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let document: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(document["pages"].as_array().unwrap().len(), 3);
+        let (status, body) = send(application.clone(), "GET", "/documents", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"page_count\":3"));
+        // The document is not a deck.
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            "/decks/report-candidate-1",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, body) = send(
+            application.clone(),
+            "GET",
+            "/documents/report-candidate-1/render?page=2",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("data-swift-design-screen=\"1\""));
+        let (status, _) = send(
+            application,
+            "GET",
+            "/documents/report-candidate-1/render?page=9",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn exporting_a_document_returns_an_html_download() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "report").await;
+        send(
+            application.clone(),
+            "PUT",
+            "/documents/report",
+            Some(SAMPLE_DOCUMENT),
+        )
+        .await;
+        let request = Request::builder()
+            .method("GET")
+            .uri("/documents/report/export")
+            .body(Body::empty())
+            .unwrap();
+        let response = application.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename=\"report.html\""
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            String::from_utf8(bytes.to_vec())
+                .unwrap()
+                .contains("<h1>Swift Design</h1>")
+        );
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            "/documents/report/pages/cover.png",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            "/documents/report/pages/9.png",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/documents/report/export.docx")
+            .body(Body::empty())
+            .unwrap();
+        let response = application.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename=\"report.docx\""
+        );
+        assert!(
+            response.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .contains("wordprocessingml")
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        // A ZIP starts with `PK`.
+        assert_eq!(&bytes[..2], b"PK");
+    }
 
     #[tokio::test]
     async fn a_deck_session_lists_its_decks_and_chooses_from_the_deck_store() {
@@ -982,6 +1204,7 @@ mod tests {
         for (path, key) in [
             ("/schemas/design", "screens"),
             ("/schemas/deck", "slides"),
+            ("/schemas/document", "pages"),
             ("/schemas/question-set", "can_proceed_with_assumptions"),
         ] {
             let (status, body) = send(test_application(&directory), "GET", path, None).await;

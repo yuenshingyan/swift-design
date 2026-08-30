@@ -51,6 +51,35 @@ pub fn invalid_deck_id(id: &str) -> Response {
     )
 }
 
+/// 422 with one detail line per document validation error.
+pub fn document_validation_failed(errors: &[ValidationError]) -> Response {
+    let details: Vec<String> = errors.iter().map(ToString::to_string).collect();
+    tracing::info!(error_count = details.len(), "rejected invalid document");
+    error_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "document failed validation",
+        details,
+    )
+}
+
+/// 404 for a document id with no file behind it.
+pub fn document_not_found(id: &str) -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        &format!("no document with id `{id}`"),
+        Vec::new(),
+    )
+}
+
+/// 400 for a document id that is not kebab-case.
+pub fn invalid_document_id(id: &str) -> Response {
+    error_response(
+        StatusCode::BAD_REQUEST,
+        &format!("invalid document id `{id}`: use lowercase letters, digits, and hyphens"),
+        Vec::new(),
+    )
+}
+
 /// 404 for a design id with no file behind it.
 pub fn design_not_found(id: &str) -> Response {
     error_response(

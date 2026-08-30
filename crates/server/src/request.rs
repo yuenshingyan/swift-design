@@ -13,7 +13,7 @@ use crate::sessions::RunOptions;
 pub(crate) struct SessionRequest {
     /// The user's request, in their words.
     pub(crate) request: String,
-    /// `demo` or `deck`.
+    /// `demo`, `deck`, or `document`.
     pub(crate) kind: ArtifactKind,
     /// Every answered question so far, oldest first.
     pub(crate) answers: Vec<AnsweredQuestion>,
@@ -73,6 +73,24 @@ pub(crate) fn request_input(request: &SessionRequest) -> String {
             }
             if let Some(count) = request.options.slide_count {
                 input.push_str(&format!("Slide count the user asked for: {count}\n"));
+            }
+        }
+        ArtifactKind::Document => {
+            // The paper axis prints its label below; the canvas line
+            // gives the model the px size to lay out for.
+            let paper = request
+                .options
+                .paper
+                .as_deref()
+                .and_then(design_model::Paper::from_name)
+                .unwrap_or_default();
+            let viewport = paper.viewport();
+            input.push_str(&format!(
+                "Canvas: {} by {} px per page\n",
+                viewport.width, viewport.height
+            ));
+            if let Some(count) = request.options.page_count {
+                input.push_str(&format!("Page count the user asked for: {count}\n"));
             }
         }
     }
@@ -180,6 +198,27 @@ mod tests {
         assert!(input.contains("Scenario: Training"));
         assert!(input.contains("Slide count the user asked for: 8"));
         assert!(!input.contains("Canvases"));
+    }
+
+    #[test]
+    fn a_document_input_names_the_paper_canvas_and_the_page_count() {
+        let mut document = request(ArtifactKind::Document);
+        let input = request_input(&document);
+        assert!(input.contains("Kind: Document"));
+        assert!(input.contains("Canvas: 794 by 1123 px per page"));
+        assert!(!input.contains("Page count"));
+        document.options.paper = Some("letter".to_owned());
+        document.options.page_count = Some(6);
+        document.options.document_kind = Some("memo".to_owned());
+        document.options.page_density = Some("detailed".to_owned());
+        let input = request_input(&document);
+        assert!(input.contains("Canvas: 816 by 1056 px per page"));
+        assert!(input.contains("Paper: US Letter"));
+        assert!(input.contains("Page count the user asked for: 6"));
+        assert!(input.contains("Document kind: Memo or brief"));
+        assert!(input.contains("Page density: Detailed, document-style"));
+        assert!(!input.contains("Canvases"));
+        assert!(!input.contains("Slide"));
     }
 
     #[test]

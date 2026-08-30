@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Document",
+  "description": "A complete document: one theme applied to an ordered list of pages\non one paper.",
+  "type": "object",
+  "properties": {
+    "outline": {
+      "description": "The page titles of the complete document, in order. A preview\ndocument lists more titles than it has pages: the app continues\nit from this list later. Leave it empty when the document is\ncomplete.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "pages": {
+      "description": "Pages in reading order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Page"
+      }
+    },
+    "paper": {
+      "description": "The paper every page is laid out on. Absent means A4.",
+      "$ref": "#/$defs/Paper",
+      "default": "a4"
+    },
+    "theme": {
+      "description": "Visual identity applied to every page.",
+      "$ref": "#/$defs/Theme"
+    },
+    "title": {
+      "description": "Document title, shown on the first page and in the editor.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "theme",
+    "pages"
+  ],
+  "$defs": {
+    "FontSet": {
+      "description": "Default CSS font family names.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "Family for every other text element that sets no font.",
+          "type": "string"
+        },
+        "heading": {
+          "description": "Family for text elements with role `title` or `heading`.",
+          "type": "string"
+        },
+        "mono": {
+          "description": "Family for code elements.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "heading",
+        "body",
+        "mono"
+      ]
+    },
+    "Page": {
+      "description": "One page: an HTML fragment for the document's paper, CSS for that\nfragment, and author notes.",
+      "type": "object",
+      "properties": {
+        "css": {
+          "description": "CSS for this page only. The server scopes every selector to\nthis page. Use plain selectors such as `.title` or `h1`. Use the\ntheme through `var(--background)`, `var(--text)`, `var(--accent)`,\n`var(--muted)`, `var(--heading-font)`, `var(--body-font)`,\n`var(--mono-font)`. No `@import`, no viewport units, no `<`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "html": {
+          "description": "The page as one HTML fragment. The canvas is the document's\n`paper` in px: 794 by 1123 for A4, 816 by 1056 for Letter. Use\npx units. Allowed: headings, text, lists, tables, `<img>` with\n`src=\"/uploads/{name}\"`, inline `<svg>`, `<pre><code>`,\n`<blockquote>`, `<a>`. Not allowed: `<script>`, `<style>`,\n`<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, `<form>`,\n`<button>`, `<input>`, media, comments, `on*` attributes,\n`javascript:` and `data:` URLs, external images. Close every tag.",
+          "type": "string"
+        },
+        "notes": {
+          "description": "Author notes: intent, sources, or handoff remarks. Never rendered\non the page and never exported.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "html"
+      ]
+    },
+    "Palette": {
+      "description": "Default colors as `#rrggbb` hex strings.",
+      "type": "object",
+      "properties": {
+        "accent": {
+          "description": "Color for highlights, shapes, and chart series that set no color.",
+          "type": "string"
+        },
+        "background": {
+          "description": "Screen background color when a screen sets no background.",
+          "type": "string"
+        },
+        "muted": {
+          "description": "Secondary color for captions, rules, and table stripes.",
+          "type": "string"
+        },
+        "text": {
+          "description": "Text color when an element sets no color.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "background",
+        "text",
+        "accent",
+        "muted"
+      ]
+    },
+    "Paper": {
+      "description": "The paper a document is laid out on.",
+      "oneOf": [
+        {
+          "description": "A4: 794 by 1123 px.",
+          "type": "string",
+          "const": "a4"
+        },
+        {
+          "description": "US Letter: 816 by 1056 px.",
+          "type": "string",
+          "const": "letter"
+        }
+      ]
+    },
+    "Theme": {
+      "description": "Default colors and fonts that elements inherit when they omit their\nown.",
+      "type": "object",
+      "properties": {
+        "colors": {
+          "description": "Default colors.",
+          "$ref": "#/$defs/Palette"
+        },
+        "fonts": {
+          "description": "Default font families.",
+          "$ref": "#/$defs/FontSet"
+        },
+        "name": {
+          "description": "Theme name shown in the editor.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "colors",
+        "fonts"
+      ]
+    }
+  }
+}

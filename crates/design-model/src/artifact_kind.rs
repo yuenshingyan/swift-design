@@ -3,13 +3,14 @@
 //! A session builds one kind of artifact. A `demo` is a software demo
 //! such as a landing page or a set of app screens, laid out on a device
 //! viewport. A `deck` is a slide presentation on a 1920 by 1080 px
-//! canvas. The two kinds have separate types, stores, routes, and
-//! editors; the brief-first workflow is the same for both.
+//! canvas. A `document` is a paged document, such as a report or a
+//! memo, on A4 or Letter paper. The kinds have separate types, stores,
+//! routes, and editors; the brief-first workflow is the same for all.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// What a session builds: a software demo or a deck.
+/// What a session builds: a software demo, a deck, or a document.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
@@ -20,17 +21,25 @@ pub enum ArtifactKind {
     /// A slide presentation on a 1920 by 1080 px canvas. Written as a
     /// deck.
     Deck,
+    /// A paged document on A4 or Letter paper: a report, a memo, a
+    /// proposal, a letter, or a guide. Written as a document.
+    Document,
 }
 
 impl ArtifactKind {
     /// Every kind, in the order the UI shows them.
-    pub const ALL: [ArtifactKind; 2] = [ArtifactKind::Demo, ArtifactKind::Deck];
+    pub const ALL: [ArtifactKind; 3] = [
+        ArtifactKind::Demo,
+        ArtifactKind::Deck,
+        ArtifactKind::Document,
+    ];
 
     /// The snake_case name used in JSON.
     pub fn as_str(self) -> &'static str {
         match self {
             ArtifactKind::Demo => "demo",
             ArtifactKind::Deck => "deck",
+            ArtifactKind::Document => "document",
         }
     }
 
@@ -39,6 +48,7 @@ impl ArtifactKind {
         match self {
             ArtifactKind::Demo => "Software demo",
             ArtifactKind::Deck => "Deck",
+            ArtifactKind::Document => "Document",
         }
     }
 
@@ -75,11 +85,16 @@ mod tests {
         assert!(serde_json::from_str::<ArtifactKind>("\"poster\"").is_err());
         assert_eq!(ArtifactKind::from_name("poster"), None);
         assert_eq!(ArtifactKind::from_name("deck"), Some(ArtifactKind::Deck));
+        assert_eq!(
+            ArtifactKind::from_name("document"),
+            Some(ArtifactKind::Document)
+        );
     }
 
     #[test]
     fn labels_are_readable() {
         assert_eq!(ArtifactKind::Demo.label(), "Software demo");
         assert_eq!(ArtifactKind::Deck.label(), "Deck");
+        assert_eq!(ArtifactKind::Document.label(), "Document");
     }
 }

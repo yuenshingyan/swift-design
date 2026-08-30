@@ -13,6 +13,12 @@
 //! `GET /decks/{id}/export.pdf` prints the deck with the user's Chrome,
 //! one slide per page. `GET /decks/{id}/export.pptx` builds a
 //! PowerPoint file from the measured slides; see `pptx.rs`.
+//!
+//! Documents export under `/documents/{id}/export`, and
+//! `GET /documents/{id}/export.pdf` prints the document with the user's
+//! Chrome, one page per sheet of its paper. `GET
+//! /documents/{id}/export.docx` builds a Word file from the pages' HTML;
+//! see `docx.rs`. It needs no Chrome.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -26,12 +32,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use design_model::{DECK_VIEWPORT, Deck, Design};
+use design_model::{DECK_VIEWPORT, Deck, Design, Document};
 
 use crate::api_error;
 use crate::deck_render;
 use crate::decks::{DeckStore, is_valid_deck_id};
 use crate::designs::{DesignStore, is_valid_design_id};
+use crate::document_render;
+use crate::documents::{DocumentStore, is_valid_document_id};
+use crate::docx;
 use crate::pptx;
 use crate::render;
 use crate::screenshots;
@@ -42,13 +51,17 @@ use crate::uploads::{UploadStore, content_type_of, is_stored_name};
 const PPTX_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 
-/// The `/designs/{id}/export` and `/decks/{id}/export` route table.
+/// The `/designs/{id}/export`, `/decks/{id}/export`, and
+/// `/documents/{id}/export` route table.
 pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/designs/{id}/export", get(export_design))
         .route("/decks/{id}/export", get(export_deck))
         .route("/decks/{id}/export.pdf", get(export_deck_pdf))
         .route("/decks/{id}/export.pptx", get(export_deck_pptx))
+        .route("/documents/{id}/export", get(export_document))
+        .route("/documents/{id}/export.pdf", get(export_document_pdf))
+        .route("/documents/{id}/export.docx", get(export_document_docx))
 }
 
 /// The `Content-Disposition` value that names the download `{id}.{extension}`.
@@ -382,6 +395,115 @@ async fn build_pptx_response(
     }
 }
 
+/// Loads a stored document for an export: 400, 404, or 422 as a
+/// response when the id, the file, or the document is not usable.
+async fn load_document_for_export(
+    documents: &DocumentStore,
+    id: &str,
+) -> Result<Document, Response> {
+    if !is_valid_document_id(id) {
+        return Err(api_error::invalid_document_id(id));
+    }
+    let document = match documents.load(id).await {
+        Ok(Some(document)) => document,
+        Ok(None) => return Err(api_error::document_not_found(id)),
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    let errors = document.validate();
+    if !errors.is_empty() {
+        return Err(api_error::document_validation_failed(&errors));
+    }
+    Ok(document)
+}
+
+/// Renders a stored document with uploaded images and theme fonts
+/// inlined and returns it as a file download.
+async fn export_document(
+    State(documents): State<DocumentStore>,
+    State(uploads): State<UploadStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let mut document = match load_document_for_export(&documents, &id).await {
+        Ok(document) => document,
+        Err(response) => return response,
+    };
+    if let Err(error) = inline_uploaded_page_images(&mut document, &uploads).await {
+        return api_error::internal_error(&error);
+    }
+    let html = inline_google_fonts(
+        document_render::render_document(&document, false),
+        fetch_as_browser,
+    )
+    .await;
+    tracing::info!(%id, size_bytes = html.len(), "document exported");
+    file_download(&id, "html", "text/html; charset=utf-8", html.into_bytes())
+}
+
+/// Prints a stored document to a PDF with the user's Chrome and returns
+/// it as a file download. 503 when no Chrome is installed.
+async fn export_document_pdf(
+    State(documents): State<DocumentStore>,
+    State(uploads): State<UploadStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let document = match load_document_for_export(&documents, &id).await {
+        Ok(document) => document,
+        Err(response) => return response,
+    };
+    build_document_pdf_response(&id, document, &uploads, screenshots::find_chrome()).await
+}
+
+/// Builds a Word file from a stored document and returns it as a file
+/// download. Needs no Chrome.
+async fn export_document_docx(
+    State(documents): State<DocumentStore>,
+    State(uploads): State<UploadStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let document = match load_document_for_export(&documents, &id).await {
+        Ok(document) => document,
+        Err(response) => return response,
+    };
+    match docx::export_document(&document, &uploads).await {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), "document exported as docx");
+            file_download(&id, "docx", docx::DOCX_CONTENT_TYPE, bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Inlines uploaded images, renders the document print page, and
+/// prints it with `chrome`. `chrome` is a parameter so the no-Chrome
+/// path is testable.
+async fn build_document_pdf_response(
+    id: &str,
+    mut document: Document,
+    uploads: &UploadStore,
+    chrome: Option<PathBuf>,
+) -> Response {
+    let Some(chrome) = chrome else {
+        return screenshots::chrome_missing_response("PDF exports");
+    };
+    if let Err(error) = inline_uploaded_page_images(&mut document, uploads).await {
+        return api_error::internal_error(&error);
+    }
+    let html = document_render::render_document_with(
+        &document,
+        document_render::RenderOptions {
+            is_print: true,
+            ..document_render::RenderOptions::default()
+        },
+    );
+    match screenshots::print_html_to_pdf(&chrome, &html, document.viewport()).await {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), "document exported as pdf");
+            file_download(id, "pdf", "application/pdf", bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
 /// Replaces every `/uploads/{name}` reference in screen html and css
 /// with a `data:` URI: `<img src>`, `href`, inline `style` backgrounds,
 /// and `url()` in the screen CSS. Names that are missing or unsafe stay
@@ -426,6 +548,31 @@ async fn inline_uploaded_slide_images(
         slide.html = replace_upload_references(&slide.html, &data_uris);
         if let Some(css) = &slide.css {
             slide.css = Some(replace_upload_references(css, &data_uris));
+        }
+    }
+    Ok(())
+}
+
+/// The document twin of `inline_uploaded_images`: rewrites page html
+/// and css.
+async fn inline_uploaded_page_images(
+    document: &mut Document,
+    uploads: &UploadStore,
+) -> anyhow::Result<()> {
+    let texts: Vec<&str> = document
+        .pages
+        .iter()
+        .flat_map(|page| [Some(page.html.as_str()), page.css.as_deref()])
+        .flatten()
+        .collect();
+    let data_uris = collect_data_uris(&texts, uploads).await?;
+    if data_uris.is_empty() {
+        return Ok(());
+    }
+    for page in &mut document.pages {
+        page.html = replace_upload_references(&page.html, &data_uris);
+        if let Some(css) = &page.css {
+            page.css = Some(replace_upload_references(css, &data_uris));
         }
     }
     Ok(())
@@ -553,13 +700,45 @@ mod tests {
 
     use crate::export::{
         FONT_LINK_PREFIX, FontLink, attachment_disposition, base64_encode, build_deck_pdf_response,
-        build_pptx_response, google_fonts_link, inline_font_urls, inline_google_fonts,
-        inline_uploaded_images, inline_uploaded_slide_images, upload_references,
+        build_document_pdf_response, build_pptx_response, google_fonts_link, inline_font_urls,
+        inline_google_fonts, inline_uploaded_images, inline_uploaded_page_images,
+        inline_uploaded_slide_images, upload_references,
     };
     use crate::pptx::ExportSources;
     use crate::render;
-    use crate::test_support::sample_deck;
+    use crate::test_support::{sample_deck, sample_document};
     use crate::uploads::UploadStore;
+
+    #[tokio::test]
+    async fn document_pdf_export_without_chrome_is_503() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = UploadStore::new(directory.path().to_path_buf());
+        let response = build_document_pdf_response("report", sample_document(), &store, None).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn inlines_uploaded_images_in_pages() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = UploadStore::new(directory.path().to_path_buf());
+        store.save("report", "chart.png", b"PNGDATA").await.unwrap();
+        let mut document = sample_document();
+        document.pages[0].html = "<img src='/uploads/chart.png'>".to_owned();
+        document.pages[0].css = Some(".a { background: url('/uploads/chart.png'); }".to_owned());
+        inline_uploaded_page_images(&mut document, &store)
+            .await
+            .unwrap();
+        let expected = format!("data:image/png;base64,{}", base64_encode(b"PNGDATA"));
+        assert!(document.pages[0].html.contains(&expected));
+        assert!(
+            document.pages[0]
+                .css
+                .as_deref()
+                .unwrap()
+                .contains(&expected)
+        );
+        assert!(!document.pages[0].html.contains("/uploads/"));
+    }
 
     const STYLESHEET_URL: &str =
         "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap";

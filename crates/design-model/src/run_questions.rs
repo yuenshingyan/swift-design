@@ -1,6 +1,7 @@
-//! The app's own questions: how the colors read for both kinds, how
-//! much of a demo to build and what it shows, and who a deck is for
-//! and what tone it takes.
+//! The app's own questions: how the colors read for every kind, how
+//! much of a demo to build and what it shows, who a deck or a document
+//! is for and what tone it takes, and what a document is and what paper
+//! it takes.
 //!
 //! These recur in every session with the same answers, so the app asks
 //! them from a fixed list instead of letting the agent invent options
@@ -88,13 +89,28 @@ pub const SLIDE_DENSITIES: [(&str, &str); 3] = [
     ("detailed", "Detailed, document-style"),
 ];
 
-/// How much a deck leans on data, as (value, label). It decides how
-/// many slides carry a chart.
+/// How much a deck or a document leans on data, as (value, label). It
+/// decides how many slides or pages carry a chart or a table.
 pub const EVIDENCE_STYLES: [(&str, &str); 3] = [
     ("narrative", "Mostly narrative"),
     ("some_charts", "A few key charts"),
     ("data_heavy", "Data-heavy throughout"),
 ];
+
+/// What kind of document to write, as (value, label). It decides the
+/// page vocabulary: a memo and a guide share no furniture.
+pub const DOCUMENT_KINDS: [(&str, &str); 6] = [
+    ("report", "Report"),
+    ("memo", "Memo or brief"),
+    ("proposal", "Proposal"),
+    ("one_pager", "One-pager"),
+    ("letter", "Letter"),
+    ("guide", "Guide or manual"),
+];
+
+/// The paper a document is laid out on, as (value, label). The values
+/// are the `paper` names in the document JSON.
+pub const PAPERS: [(&str, &str); 2] = [("a4", "A4"), ("letter", "US Letter")];
 
 /// How much of a demo to build, as (value, label). A deck says its size
 /// with the slide count instead.
@@ -157,7 +173,7 @@ pub struct AppAxis {
     pub choices: &'static [(&'static str, &'static str)],
 }
 
-/// Every app-owned axis both kinds ask.
+/// Every app-owned axis every kind asks.
 pub const SHARED_AXES: [AppAxis; 1] = [AppAxis {
     key: "color_mode",
     name: "Color mode",
@@ -188,12 +204,13 @@ pub const DEMO_AXES: [AppAxis; 4] = [
     },
 ];
 
-/// Every app-owned axis only a deck asks.
+/// Every app-owned axis a deck and a document ask, and a demo does not.
 ///
-/// The audience and the tone live here: a deck speaks to a room, and
-/// its copy changes with who sits in it. A demo's screens show a
-/// product, and the request already says what it is.
-pub const DECK_AXES: [AppAxis; 4] = [
+/// The audience, the tone, and the evidence live here: a deck speaks to
+/// a room and a document to a reader, and the copy changes with who
+/// reads it. A demo's screens show a product, and the request already
+/// says what it is.
+pub const SPEECH_AXES: [AppAxis; 3] = [
     AppAxis {
         key: "audience",
         name: "Audience",
@@ -205,14 +222,35 @@ pub const DECK_AXES: [AppAxis; 4] = [
         choices: &TONES,
     },
     AppAxis {
-        key: "slide_density",
-        name: "Slide density",
-        choices: &SLIDE_DENSITIES,
-    },
-    AppAxis {
         key: "evidence_style",
         name: "Evidence",
         choices: &EVIDENCE_STYLES,
+    },
+];
+
+/// Every app-owned axis only a deck asks.
+pub const DECK_AXES: [AppAxis; 1] = [AppAxis {
+    key: "slide_density",
+    name: "Slide density",
+    choices: &SLIDE_DENSITIES,
+}];
+
+/// Every app-owned axis only a document asks.
+pub const DOCUMENT_AXES: [AppAxis; 3] = [
+    AppAxis {
+        key: "document_kind",
+        name: "Document kind",
+        choices: &DOCUMENT_KINDS,
+    },
+    AppAxis {
+        key: "paper",
+        name: "Paper",
+        choices: &PAPERS,
+    },
+    AppAxis {
+        key: "page_density",
+        name: "Page density",
+        choices: &SLIDE_DENSITIES,
     },
 ];
 
@@ -221,16 +259,19 @@ fn every_axis() -> impl Iterator<Item = &'static AppAxis> {
     SHARED_AXES
         .iter()
         .chain(DEMO_AXES.iter())
+        .chain(SPEECH_AXES.iter())
         .chain(DECK_AXES.iter())
+        .chain(DOCUMENT_AXES.iter())
 }
 
 /// The app-owned axes `kind` asks, shared ones first.
 pub fn app_axes(kind: ArtifactKind) -> impl Iterator<Item = &'static AppAxis> {
-    let own: &'static [AppAxis] = match kind {
-        ArtifactKind::Demo => &DEMO_AXES,
-        ArtifactKind::Deck => &DECK_AXES,
+    let (spoken, own): (&'static [AppAxis], &'static [AppAxis]) = match kind {
+        ArtifactKind::Demo => (&[], &DEMO_AXES),
+        ArtifactKind::Deck => (&SPEECH_AXES, &DECK_AXES),
+        ArtifactKind::Document => (&SPEECH_AXES, &DOCUMENT_AXES),
     };
-    SHARED_AXES.iter().chain(own.iter())
+    SHARED_AXES.iter().chain(spoken.iter()).chain(own.iter())
 }
 
 /// The axis whose option is `key`, when there is one.
@@ -301,10 +342,32 @@ mod tests {
                 "Color mode",
                 "Audience",
                 "Tone",
-                "Slide density",
-                "Evidence"
+                "Evidence",
+                "Slide density"
             ]
         );
+        let document: Vec<&str> = app_axes(ArtifactKind::Document)
+            .map(|axis| axis.name)
+            .collect();
+        assert_eq!(
+            document,
+            [
+                "Color mode",
+                "Audience",
+                "Tone",
+                "Evidence",
+                "Document kind",
+                "Paper",
+                "Page density"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_paper_values_are_the_paper_names() {
+        for (value, _) in PAPERS {
+            assert!(crate::Paper::from_name(value).is_some(), "{value}");
+        }
     }
 
     #[test]
@@ -365,13 +428,17 @@ mod tests {
             &FIDELITIES[..],
             &SLIDE_DENSITIES[..],
             &EVIDENCE_STYLES[..],
+            &DOCUMENT_KINDS[..],
+            &PAPERS[..],
         ];
         for choices in banks {
             let values: Vec<&str> = choices.iter().map(|(value, _)| *value).collect();
             for value in &values {
                 assert!(!value.is_empty());
                 assert!(
-                    value.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                    value
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
                     "{value}"
                 );
                 assert_eq!(values.iter().filter(|other| *other == value).count(), 1);
