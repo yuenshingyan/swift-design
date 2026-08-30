@@ -120,8 +120,9 @@ pub(crate) const LAYOUT_SCRIPT: &str = r##"(() => {
 })();
 "##;
 
-/// Moves between screens with ArrowLeft/ArrowRight and PageUp/PageDown.
-/// A design with no transition scrolls. A design with one stacks its frames
+/// Moves between screens with ArrowLeft/ArrowRight and PageUp/PageDown,
+/// and opens screen N on a click on a link to `#screen-N` (counted from
+/// 1). A design with no transition scrolls. A design with one stacks its frames
 /// and swaps the `data-swift-design-state` attribute, which the transition
 /// CSS animates. On a single-screen page inside the editor, asks the
 /// editor instead. A page that follows a presenter (`isFollowing`)
@@ -188,6 +189,24 @@ if (effect && !isFollowing) {
     step(amount > 0 ? 1 : -1);
   }, { passive: true });
 }
+// A link to `#screen-N` opens screen N, counted from 1, as the button of
+// a flow. A single-screen page inside the editor asks the editor to open
+// it. The editing script stops the click before it gets here, so a link
+// only selects in edit mode.
+document.addEventListener('click', (event) => {
+  const link = event.target && event.target.closest ? event.target.closest('a[href]') : null;
+  if (!link) { return; }
+  const match = /^#screen-(\d+)$/.exec(link.getAttribute('href') || '');
+  if (!match) { return; }
+  event.preventDefault();
+  const target = Number(match[1]) - 1;
+  if (frames.length <= 1 && window.parent !== window) {
+    parent.postMessage({ type: 'swift-design-navigate', target }, window.location.origin);
+    return;
+  }
+  const current = effect ? shown : scrollIndex();
+  show(target, target >= current ? 1 : -1);
+});
 "##;
 
 /// In-place editing for the editor preview. Loaded only with
@@ -488,6 +507,8 @@ document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
     };
   });
   root.addEventListener('click', (event) => {
+    // A click on a link selects it. The page never leaves in edit mode.
+    if (event.target.closest && event.target.closest('a[href]')) { event.preventDefault(); }
     if (isClickSuppressed) { isClickSuppressed = false; event.stopPropagation(); return; }
     if (event.target === root) { select(null); post({ type: 'swift-design-select', screen, path: null }); return; }
     event.stopPropagation();
@@ -1006,12 +1027,23 @@ mod tests {
 
     use crate::export::base64_encode;
     use crate::render::{
-        FIT_SCRIPT, MAX_TRANSITION_MS, RenderOptions, css_safe, escape_html, render_design,
-        render_design_with,
+        EDITING_SCRIPT, FIT_SCRIPT, MAX_TRANSITION_MS, NAVIGATION_SCRIPT, RenderOptions, css_safe,
+        escape_html, render_design, render_design_with,
     };
 
     fn sample_design() -> Design {
         serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap()
+    }
+
+    #[test]
+    fn a_screen_link_opens_the_screen_in_play_mode_and_only_selects_in_edit_mode() {
+        assert!(NAVIGATION_SCRIPT.contains("/^#screen-(\\d+)$/"));
+        assert!(NAVIGATION_SCRIPT.contains("type: 'swift-design-navigate', target"));
+        assert!(EDITING_SCRIPT.contains("closest('a[href]')) { event.preventDefault(); }"));
+        // The frame ids are the link targets, so a full page scrolls to
+        // them by itself.
+        let html = render_design(&sample_design(), false);
+        assert!(html.contains("id=\"screen-2\""));
     }
 
     #[test]
