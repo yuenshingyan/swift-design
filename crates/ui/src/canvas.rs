@@ -589,9 +589,17 @@ fn CandidateCard(
             on_page.call((id.clone(), stepped_screen(current, delta, count)));
         })
     };
+    // A click opens the card. A command-click selects it, like a
+    // finder row; the footer selects on a plain click.
     let open = {
         let id = id.clone();
-        move |_| on_open.call((kind, id.clone()))
+        move |event: MouseEvent| {
+            if event.modifiers().meta() || event.modifiers().ctrl() {
+                on_select.call(id.clone());
+            } else {
+                on_open.call((kind, id.clone()));
+            }
+        }
     };
     let arrow = move |delta: i32| {
         move |event: MouseEvent| {
@@ -631,22 +639,6 @@ fn CandidateCard(
                         tabindex: "-1",
                     }
                 }
-                button {
-                    class: if is_selected { "card-select ticked" } else { "card-select" },
-                    title: "Select this candidate",
-                    "aria-pressed": "{is_selected}",
-                    tabindex: "-1",
-                    onclick: {
-                        let id = id.clone();
-                        move |event: MouseEvent| {
-                            event.stop_propagation();
-                            on_select.call(id.clone());
-                        }
-                    },
-                    if is_selected {
-                        span { dangerous_inner_html: icons::CHECK }
-                    }
-                }
                 if has_pages {
                     button {
                         class: "card-arrow left",
@@ -665,7 +657,6 @@ fn CandidateCard(
                         "›"
                     }
                 }
-                span { class: "card-count", "{current}/{count}" }
                 div { class: "card-pills",
                     if is_chosen {
                         span { class: "chosen-pill",
@@ -707,10 +698,29 @@ fn CandidateCard(
                     }
                 }
             }
-            div { class: "card-footer",
+            // The footer is the selection control: a click on it ticks
+            // the card, and the border and the name show the tick.
+            div {
+                class: "card-footer",
+                title: if is_selected { "Selected · click to deselect" } else { "Click to select" },
+                "aria-pressed": "{is_selected}",
+                onclick: {
+                    let id = id.clone();
+                    move |event: MouseEvent| {
+                        event.stop_propagation();
+                        on_select.call(id.clone());
+                    }
+                },
                 div { class: "card-name",
+                    if is_selected {
+                        span {
+                            class: "card-tick",
+                            dangerous_inner_html: icons::CHECK,
+                        }
+                    }
                     span { class: "card-label", "{candidate_label(&id)}" }
                 }
+                span { class: "card-count", "{current}/{count}" }
             }
         }
     }
