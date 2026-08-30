@@ -11,10 +11,12 @@ pub struct Slide {
     /// The slide as one HTML fragment. The canvas is 1920 by 1080 px;
     /// use px units. Allowed: headings, text, lists, tables, `<img>`
     /// with `src="/uploads/{name}"`, inline `<svg>`, `<pre><code>`,
-    /// `<blockquote>`, `<a>`. Not allowed: `<script>`, `<style>`,
-    /// `<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, forms,
-    /// media, comments, `on*` attributes, `javascript:` and `data:`
-    /// URLs, external images. Close every tag.
+    /// `<blockquote>`, `<a>`, `<details>`, `<label>`, `<input>` with
+    /// type `checkbox` or `radio`. Not allowed: `<script>`, `<style>`,
+    /// `<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, `<form>`,
+    /// `<button>`, other input types, media, comments, `on*`
+    /// attributes, `javascript:` and `data:` URLs, external images.
+    /// Close every tag.
     pub html: String,
     /// CSS for this slide only. The server scopes every selector to
     /// this slide. Use plain selectors such as `.title` or `h1`. Use the
