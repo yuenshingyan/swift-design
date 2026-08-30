@@ -557,10 +557,14 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .selection-clear { padding: 0.3rem 0.75rem; border: 1px solid var(--hairline);
   border-radius: var(--r-button); background: var(--raised); color: var(--ink-2);
   font-family: var(--mono); font-size: 0.72rem; }
-.selection-merge { padding: 0.3rem 0.75rem; border: 1px solid var(--teal-line);
+.selection-finish, .selection-fork, .selection-merge { display: inline-flex; align-items: center;
+  gap: 0.35rem; padding: 0.3rem 0.75rem; border: 1px solid var(--teal-line);
   border-radius: var(--r-button); background: var(--raised); color: var(--teal);
   font-family: var(--mono); font-size: 0.72rem; }
-.selection-merge:hover:not(:disabled) { background: var(--teal-tint); border-color: var(--teal); }
+.selection-finish span { display: flex; }
+.selection-finish:hover:not(:disabled), .selection-fork:hover:not(:disabled), .selection-merge:hover:not(:disabled) { background: var(--teal-tint); border-color: var(--teal); }
+.selection-finish:disabled, .selection-finish:disabled:hover,
+.selection-fork:disabled, .selection-fork:disabled:hover,
 .selection-merge:disabled, .selection-merge:disabled:hover { background: var(--raised);
   border-color: var(--line); color: var(--muted); }
 .card-pill { display: inline-flex;
@@ -571,37 +575,15 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .card-count { position: absolute; top: 0.5rem; right: 0.5rem; z-index: 2; padding: 0.15rem 0.45rem;
   border-radius: 999px; border: 1px solid var(--hairline); background: rgba(255,255,255,.96);
   color: var(--ink-2); font-family: var(--mono); font-size: 0.66rem; box-shadow: var(--sh-control); }
-.card-finish { flex: none; display: inline-flex; align-items: center; gap: 0.3rem;
-  padding: 0.15rem 0.6rem; white-space: nowrap; border: 1px solid var(--teal); border-radius: 999px;
-  background: var(--teal); color: #FFFFFF; font-family: var(--mono); font-size: 0.68rem;
-  font-weight: 500; box-shadow: none; }
-.card-finish:hover:not(:disabled) { background: var(--teal-hover); border-color: var(--teal-hover); }
-.card-finish span { display: flex; }
 .card-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; z-index: 3;
   background: rgba(255,255,255,.18); }
 .card-progress-fill { height: 100%; background: var(--teal); transition: width 0.4s ease; }
 .card-progress.indeterminate .card-progress-fill { width: 35%; animation: finish-slide 1.4s ease-in-out infinite; }
 @keyframes finish-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }
-.card-finish.finishing { background: transparent; color: var(--teal); cursor: default; opacity: 1; }
-.finish-spinner { width: 0.7rem; height: 0.7rem; border-radius: 50%; border: 2px solid rgba(14, 110, 99, 0.25);
-  border-top-color: var(--teal); animation: finish-spin 0.9s linear infinite; }
-@keyframes finish-spin { to { transform: rotate(360deg); } }
 .card-footer { display: flex; align-items: center; gap: 0.5rem;
   min-height: 1.75rem; padding: 0.5rem 0.625rem; }
 .card-name { flex: 1 1 auto; display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
-/* A phone card is narrow: Finish is an icon. */
 .canvas-card.phone .card-footer { padding: 0.375rem 0.5rem; min-height: 0; gap: 0.375rem; }
-.canvas-card.phone .card-finish { padding: 0.3rem; }
-.canvas-card.phone .card-finish .finish-text { display: none; }
-.card-fork { flex: none; display: inline-flex; align-items: center; gap: 0.3rem;
-  padding: 0.15rem 0.6rem; white-space: nowrap; border: 1px solid var(--hairline);
-  border-radius: 999px; background: var(--raised); color: var(--ink-2);
-  font-family: var(--mono); font-size: 0.68rem; font-weight: 500; box-shadow: none; }
-.card-fork:hover:not(:disabled) { border-color: var(--teal); color: var(--teal); }
-.card-fork:disabled { opacity: 0.45; cursor: default; }
-.card-fork span { display: flex; }
-.canvas-card.phone .card-fork { padding: 0.3rem; }
-.canvas-card.phone .card-fork .fork-text { display: none; }
 .chosen-pill { flex: none; display: inline-flex; align-items: center; gap: 0.3rem;
   padding: 0.2rem 0.6rem; border: 1px solid var(--teal-line); border-radius: 999px;
   background: var(--teal-tint); color: var(--teal); font-family: var(--mono); font-size: 0.68rem;
