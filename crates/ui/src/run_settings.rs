@@ -1,15 +1,17 @@
 //! The run settings the app asks for instead of the agent: the canvas
 //! for a demo, the scenario, the length, the candidate count, and the
-//! variety for a deck, the paper and the length for a document, and
-//! the number of variations. Each has a closed set of answers, so a
-//! chip settles it in one click.
+//! variety for a deck, the paper and the length for a document, the
+//! platform, the format, and the length for a social, and the number
+//! of variations. Each has a closed set of answers, so a chip settles
+//! it in one click.
 
 use std::collections::HashMap;
 
 use design_model::{
     AUDIENCES, AnsweredQuestion, ArtifactKind, COLOR_MODES, CUSTOM_ANSWER_LIMIT, DATA_STATES,
     DECK_SCENARIOS, DECK_VARIETY_LEVELS, DEMO_SCOPES, DOCUMENT_KINDS, EVIDENCE_STYLES, FIDELITIES,
-    PAGE_COUNT_LIMIT, PAPERS, PRODUCT_KINDS, SLIDE_DENSITIES, TONES, Viewport, WorkflowState,
+    FORMATS, FRAME_COUNT_LIMIT, PAGE_COUNT_LIMIT, PAPERS, PLATFORMS, POST_GOALS, PRODUCT_KINDS,
+    SLIDE_DENSITIES, TONES, Viewport, WorkflowState,
 };
 use dioxus::prelude::*;
 
@@ -138,6 +140,25 @@ pub(crate) fn page_count_options() -> Vec<(String, String)> {
             "1 page".to_owned()
         } else {
             format!("{count} pages")
+        };
+        options.push((count.to_string(), label));
+    }
+    options
+}
+
+/// The frame counts the app offers, as (brief value, label). The empty
+/// value leaves the length to the agent. One frame is a single post;
+/// more are a carousel.
+pub(crate) fn frame_count_options() -> Vec<(String, String)> {
+    let mut options = vec![(String::new(), "The agent decides".to_owned())];
+    for count in [1, 3, 5, 7, 10] {
+        if count > FRAME_COUNT_LIMIT {
+            break;
+        }
+        let label = if count == 1 {
+            "1 frame".to_owned()
+        } else {
+            format!("{count} frames")
         };
         options.push((count.to_string(), label));
     }
@@ -277,6 +298,38 @@ fn axes_for(kind: ArtifactKind) -> Vec<Axis> {
                 choices: &SLIDE_DENSITIES,
             },
         ],
+        // A social speaks to a feed, so it asks the audience and the
+        // tone like a deck. Its own axes name the platform, the
+        // format, and the goal of the post. The colors, the evidence,
+        // the length, the candidates, and the variety sit on
+        // `SocialQuestions`.
+        ArtifactKind::Social => vec![
+            Axis {
+                key: "audience",
+                label: "Who is it for?",
+                choices: &AUDIENCES,
+            },
+            Axis {
+                key: "tone",
+                label: "What tone should it have?",
+                choices: &TONES,
+            },
+            Axis {
+                key: "platform",
+                label: "What platform is it for?",
+                choices: &PLATFORMS,
+            },
+            Axis {
+                key: "format",
+                label: "What format is it?",
+                choices: &FORMATS,
+            },
+            Axis {
+                key: "post_goal",
+                label: "What is the post for?",
+                choices: &POST_GOALS,
+            },
+        ],
     }
 }
 
@@ -374,6 +427,36 @@ pub(crate) fn app_answers(
                 &fixed_choices(&EVIDENCE_STYLES),
             ));
         }
+        ArtifactKind::Social => {
+            entries.push(recorded(
+                "How should the colors read?",
+                options.color_mode.as_deref(),
+                &fixed_choices(&COLOR_MODES),
+            ));
+            entries.push(recorded(
+                "How different should the candidates be?",
+                Some(&options.variety),
+                &variety_choices(),
+            ));
+            entries.push(recorded(
+                "How many frames should it have?",
+                options
+                    .frame_count
+                    .map(|count| count.to_string())
+                    .as_deref(),
+                &frame_count_options(),
+            ));
+            entries.push(recorded(
+                "How many candidates should I write?",
+                options.variations.map(|count| count.to_string()).as_deref(),
+                &candidate_choices(),
+            ));
+            entries.push(recorded(
+                "How much does it lean on data?",
+                options.evidence_style.as_deref(),
+                &fixed_choices(&EVIDENCE_STYLES),
+            ));
+        }
     }
     entries
 }
@@ -427,6 +510,9 @@ fn axis_value(options: &api::SessionOptions, key: &str) -> Option<String> {
         "document_kind" => options.document_kind.clone(),
         "paper" => options.paper.clone(),
         "page_density" => options.page_density.clone(),
+        "platform" => options.platform.clone(),
+        "format" => options.format.clone(),
+        "post_goal" => options.post_goal.clone(),
         _ => None,
     }
 }
@@ -451,21 +537,25 @@ fn with_axis(options: &api::SessionOptions, key: &str, value: String) -> api::Se
         "document_kind" => next.document_kind = picked,
         "paper" => next.paper = picked,
         "page_density" => next.page_density = picked,
+        "platform" => next.platform = picked,
+        "format" => next.format = picked,
+        "post_goal" => next.post_goal = picked,
         _ => {}
     }
     next
 }
 
 /// The options after one pick on a setup card. `key` is an axis key, or
-/// `scenario`, `slides`, `pages`, `candidates`, or `variety`. An empty
-/// value is the judgment choice: it clears the field, or sets the
-/// server default where the field has no blank state.
+/// `scenario`, `slides`, `pages`, `frames`, `candidates`, or `variety`.
+/// An empty value is the judgment choice: it clears the field, or sets
+/// the server default where the field has no blank state.
 fn with_pick(options: &api::SessionOptions, key: &str, value: &str) -> api::SessionOptions {
     let mut next = options.clone();
     match key {
         "scenario" => next.scenario = (!value.is_empty()).then(|| value.to_owned()),
         "slides" => next.slide_count = value.parse().ok(),
         "pages" => next.page_count = value.parse().ok(),
+        "frames" => next.frame_count = value.parse().ok(),
         "candidates" => next.variations = value.parse().ok(),
         "variety" => {
             next.variety = if value.is_empty() {
@@ -619,8 +709,8 @@ pub(crate) fn RunSettings(
 }
 
 /// The canvas control: which devices a demo is drawn for, how many
-/// slides a deck has, or how many pages a document has. All write a
-/// user brief revision.
+/// slides a deck has, how many pages a document has, or how many
+/// frames a social has. All write a user brief revision.
 ///
 /// A demo run writes one design per canvas, so this is a multiple pick.
 #[component]
@@ -642,6 +732,13 @@ pub(crate) fn CanvasPicker(
             return rsx! {
                 div { class: "document-questions",
                     DocumentQuestions { session_id, options, on_error }
+                }
+            };
+        }
+        ArtifactKind::Social => {
+            return rsx! {
+                div { class: "social-questions",
+                    SocialQuestions { session_id, options, on_error }
                 }
             };
         }
@@ -852,6 +949,70 @@ pub(crate) fn DocumentQuestions(
             current: shown("pages"),
             choices: page_count_options(),
             on_pick: move |value: String| pick.call(("pages".to_owned(), value)),
+        }
+        ChoiceCard {
+            label: "How many candidates should I write?",
+            current: shown("candidates"),
+            choices: candidate_choices(),
+            on_pick: move |value: String| pick.call(("candidates".to_owned(), value)),
+        }
+        ChoiceCard {
+            label: "How much does it lean on data?",
+            current: evidence,
+            choices: fixed_choices(&EVIDENCE_STYLES),
+            is_suggested: is_evidence_suggested,
+            allows_custom: true,
+            on_pick: move |value: String| pick.call(("evidence_style".to_owned(), value)),
+        }
+    }
+}
+
+/// The app's own social questions: the colors, the variety, the
+/// length in frames, the candidate count, and the evidence. Each is a
+/// card of chips next to the agent's questions, in the same grid, like
+/// `DocumentQuestions`. A card starts blank: nothing is chosen until
+/// the user picks a chip or `Use your best judgment`.
+#[component]
+pub(crate) fn SocialQuestions(
+    session_id: String,
+    options: api::SessionOptions,
+    on_error: EventHandler<String>,
+) -> Element {
+    let (picks, pick) = use_setup_picks(session_id, options.clone(), on_error);
+    let shown = |key: &str| picks().get(key).cloned();
+    // A suggestion shows on the card as picked, so the user sees what
+    // the planner read from the request.
+    let suggested = |key: &str, value: Option<String>| {
+        value.filter(|_| is_still_suggested(&options, &picks(), key))
+    };
+    let colors =
+        shown("color_mode").or_else(|| suggested("color_mode", options.color_mode.clone()));
+    let evidence = shown("evidence_style")
+        .or_else(|| suggested("evidence_style", options.evidence_style.clone()));
+    let is_colors_suggested = suggested("color_mode", options.color_mode.clone()).is_some();
+    let is_evidence_suggested =
+        suggested("evidence_style", options.evidence_style.clone()).is_some();
+    rsx! {
+        ChoiceCard {
+            label: "How should the colors read?",
+            current: colors,
+            choices: fixed_choices(&COLOR_MODES),
+            is_wide: true,
+            is_suggested: is_colors_suggested,
+            allows_custom: true,
+            on_pick: move |value: String| pick.call(("color_mode".to_owned(), value)),
+        }
+        ChoiceCard {
+            label: "How different should the candidates be?",
+            current: shown("variety"),
+            choices: variety_choices(),
+            on_pick: move |value: String| pick.call(("variety".to_owned(), value)),
+        }
+        ChoiceCard {
+            label: "How many frames should it have?",
+            current: shown("frames"),
+            choices: frame_count_options(),
+            on_pick: move |value: String| pick.call(("frames".to_owned(), value)),
         }
         ChoiceCard {
             label: "How many candidates should I write?",
@@ -1081,6 +1242,66 @@ mod tests {
     }
 
     #[test]
+    fn a_social_record_names_its_platform_format_and_length() {
+        let options = api::SessionOptions {
+            platform: Some("linkedin".to_owned()),
+            format: Some("square".to_owned()),
+            post_goal: Some("recruit".to_owned()),
+            frame_count: Some(5),
+            tone: Some("playful".to_owned()),
+            ..Default::default()
+        };
+        let entries = app_answers(ArtifactKind::Social, &options);
+        let row = |question: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.question == question)
+                .cloned()
+        };
+        let platform = row("What platform is it for?").expect("platform row");
+        assert_eq!(platform.answer, "LinkedIn");
+        let format = row("What format is it?").expect("format row");
+        assert_eq!(format.answer, "Square, 1:1");
+        let goal = row("What is the post for?").expect("goal row");
+        assert_eq!(goal.answer, "Recruit or invite");
+        let length = row("How many frames should it have?").expect("length row");
+        assert_eq!(length.answer, "5 frames");
+        let tone = row("What tone should it have?").expect("tone row");
+        assert!(!tone.is_assumed);
+        assert!(row("What paper is it for?").is_none());
+        assert!(row("What scenario is the deck for?").is_none());
+        assert!(row("Canvas").is_none());
+        let next = with_axis(&options, "format", "story".to_owned());
+        assert_eq!(axis_value(&next, "format").as_deref(), Some("story"));
+        assert_eq!(next.format.as_deref(), Some("story"));
+        let cleared = with_axis(&next, "platform", String::new());
+        assert_eq!(axis_value(&cleared, "platform"), None);
+        assert_eq!(
+            axis_value(
+                &with_axis(&options, "post_goal", "educate".to_owned()),
+                "post_goal"
+            )
+            .as_deref(),
+            Some("educate")
+        );
+    }
+
+    #[test]
+    fn the_frame_count_options_stay_under_the_limit() {
+        let options = frame_count_options();
+        assert_eq!(options[0].1, "The agent decides");
+        assert_eq!(options[1], ("1".to_owned(), "1 frame".to_owned()));
+        assert!(options.iter().any(|(_, label)| label == "10 frames"));
+        for (value, _) in options.iter().skip(1) {
+            let count = value.parse::<u32>().ok();
+            assert!(
+                count.is_some_and(|count| (1..=FRAME_COUNT_LIMIT).contains(&count)),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
     fn a_demo_record_has_no_audience_and_no_tone() {
         let options = api::SessionOptions {
             audience: Some("newcomers".to_owned()),
@@ -1254,6 +1475,8 @@ mod tests {
         assert_eq!(with_pick(&options, "slides", "").slide_count, None);
         assert_eq!(with_pick(&options, "slides", "8").slide_count, Some(8));
         assert_eq!(with_pick(&options, "pages", "3").page_count, Some(3));
+        assert_eq!(with_pick(&options, "frames", "7").frame_count, Some(7));
+        assert_eq!(with_pick(&options, "frames", "").frame_count, None);
         assert_eq!(with_pick(&options, "candidates", "2").variations, Some(2));
         assert_eq!(with_pick(&options, "scenario", "").scenario, None);
         // Any other key is an axis.
