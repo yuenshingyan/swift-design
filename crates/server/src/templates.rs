@@ -25,6 +25,7 @@ use crate::decks::{DeckStore, is_pending_slide};
 use crate::designs::{DesignStore, is_pending_screen};
 use crate::documents::{DocumentStore, is_pending_page};
 use crate::events::ChangeNotifier;
+use crate::socials::{SocialStore, is_pending_frame};
 
 /// How many screens one template keeps as layout examples. The title
 /// screen plus a few body screens show the style; more would only make the
@@ -103,8 +104,8 @@ struct DefaultRequest {
     is_default: bool,
 }
 
-/// Body of `POST /templates`. Exactly one of `design_id`, `deck_id`, and
-/// `document_id` names the source.
+/// Body of `POST /templates`. Exactly one of `design_id`, `deck_id`,
+/// `document_id`, and `social_id` names the source.
 #[derive(Debug, Deserialize)]
 struct SaveRequest {
     /// The design to save the style of.
@@ -116,6 +117,9 @@ struct SaveRequest {
     /// The document to save the style of.
     #[serde(default)]
     document_id: Option<String>,
+    /// The social to save the style of.
+    #[serde(default)]
+    social_id: Option<String>,
     /// The name to show in the template list.
     name: String,
 }
@@ -129,16 +133,38 @@ enum TemplateSource {
     Deck(String),
     /// The document with this id.
     Document(String),
+    /// The social with this id.
+    Social(String),
 }
 
 /// The one source a save request names, or the message when it names
 /// none or several.
 fn template_source(request: &SaveRequest) -> Result<TemplateSource, String> {
-    match (&request.design_id, &request.deck_id, &request.document_id) {
-        (Some(design_id), None, None) => Ok(TemplateSource::Design(design_id.clone())),
-        (None, Some(deck_id), None) => Ok(TemplateSource::Deck(deck_id.clone())),
-        (None, None, Some(document_id)) => Ok(TemplateSource::Document(document_id.clone())),
-        _ => Err("name exactly one source: `design_id`, `deck_id`, or `document_id`".to_owned()),
+    let named = [
+        request
+            .design_id
+            .as_ref()
+            .map(|id| TemplateSource::Design(id.clone())),
+        request
+            .deck_id
+            .as_ref()
+            .map(|id| TemplateSource::Deck(id.clone())),
+        request
+            .document_id
+            .as_ref()
+            .map(|id| TemplateSource::Document(id.clone())),
+        request
+            .social_id
+            .as_ref()
+            .map(|id| TemplateSource::Social(id.clone())),
+    ];
+    let mut sources = named.into_iter().flatten();
+    match (sources.next(), sources.next()) {
+        (Some(source), None) => Ok(source),
+        _ => Err(
+            "name exactly one source: `design_id`, `deck_id`, `document_id`, or `social_id`"
+                .to_owned(),
+        ),
     }
 }
 
@@ -605,12 +631,46 @@ async fn document_style(documents: &DocumentStore, id: &str) -> Result<SourceSty
     })
 }
 
-/// Saves the style of one design, deck, or document as a template.
+/// The style of a stored social: its theme, the format canvas, and
+/// its first written frames as screens.
+async fn social_style(socials: &SocialStore, id: &str) -> Result<SourceStyle, Response> {
+    let social = match socials.load(id).await {
+        Ok(Some(social)) => social,
+        Ok(None) => {
+            return Err(api_error::error_response(
+                StatusCode::NOT_FOUND,
+                &format!("no social `{id}`: run `GET /socials` for the list"),
+                Vec::new(),
+            ));
+        }
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    Ok(SourceStyle {
+        theme: social.theme,
+        viewport: social.format.viewport(),
+        screens: social
+            .frames
+            .iter()
+            .filter(|frame| !is_pending_frame(frame))
+            .take(TEMPLATE_SCREEN_LIMIT)
+            .map(|frame| Screen {
+                name: String::new(),
+                html: frame.html.clone(),
+                css: frame.css.clone(),
+                notes: frame.notes.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// Saves the style of one design, deck, document, or social as a
+/// template.
 async fn save_template(
     State(store): State<TemplateStore>,
     State(designs): State<DesignStore>,
     State(decks): State<DeckStore>,
     State(documents): State<DocumentStore>,
+    State(socials): State<SocialStore>,
     State(notifier): State<ChangeNotifier>,
     Json(request): Json<SaveRequest>,
 ) -> Response {
@@ -632,6 +692,7 @@ async fn save_template(
         TemplateSource::Design(id) => (id.clone(), design_style(&designs, id).await),
         TemplateSource::Deck(id) => (id.clone(), deck_style(&decks, id).await),
         TemplateSource::Document(id) => (id.clone(), document_style(&documents, id).await),
+        TemplateSource::Social(id) => (id.clone(), social_style(&socials, id).await),
     };
     let style = match style {
         Ok(style) => style,
@@ -641,7 +702,7 @@ async fn save_template(
         return api_error::error_response(
             StatusCode::BAD_REQUEST,
             &format!(
-                "`{source_id}` has no written screens, slides, or pages to save as a template"
+                "`{source_id}` has no written screens, slides, pages, or frames to save as a template"
             ),
             Vec::new(),
         );
@@ -744,6 +805,7 @@ mod tests {
             design_id: Some("a".to_owned()),
             deck_id: Some("b".to_owned()),
             document_id: None,
+            social_id: None,
             name: "x".to_owned(),
         };
         assert!(template_source(&both).is_err());
@@ -751,6 +813,7 @@ mod tests {
             design_id: None,
             deck_id: None,
             document_id: None,
+            social_id: None,
             name: "x".to_owned(),
         };
         assert!(template_source(&none).is_err());
@@ -758,6 +821,7 @@ mod tests {
             design_id: None,
             deck_id: Some("talk".to_owned()),
             document_id: None,
+            social_id: None,
             name: "x".to_owned(),
         };
         assert_eq!(
@@ -768,12 +832,48 @@ mod tests {
             design_id: None,
             deck_id: None,
             document_id: Some("report".to_owned()),
+            social_id: None,
             name: "x".to_owned(),
         };
         assert_eq!(
             template_source(&document).unwrap(),
             TemplateSource::Document("report".to_owned())
         );
+        let social = SaveRequest {
+            design_id: None,
+            deck_id: None,
+            document_id: None,
+            social_id: Some("launch".to_owned()),
+            name: "x".to_owned(),
+        };
+        assert_eq!(
+            template_source(&social).unwrap(),
+            TemplateSource::Social("launch".to_owned())
+        );
+        let document_and_social = SaveRequest {
+            design_id: None,
+            deck_id: None,
+            document_id: Some("report".to_owned()),
+            social_id: Some("launch".to_owned()),
+            name: "x".to_owned(),
+        };
+        assert!(template_source(&document_and_social).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_template_saves_from_a_social() {
+        let directory = tempfile::tempdir().unwrap();
+        let socials = SocialStore::new(directory.path().join("socials"));
+        socials
+            .save("launch", &crate::test_support::sample_social())
+            .await
+            .unwrap();
+        let style = social_style(&socials, "launch").await.ok().unwrap();
+        assert_eq!(style.viewport, design_model::PORTRAIT_VIEWPORT);
+        assert_eq!(style.screens.len(), 3);
+        assert!(style.screens[0].name.is_empty());
+        assert!(style.screens[0].html.contains("One harness"));
+        assert!(social_style(&socials, "missing").await.is_err());
     }
 
     #[tokio::test]
