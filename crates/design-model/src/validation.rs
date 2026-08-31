@@ -1,17 +1,18 @@
 //! Semantic checks that JSON Schema alone cannot express.
 //!
-//! Every error names the screen, slide, or page index and the field, so
-//! an agent can fix the artifact from the message alone. HTML and CSS
-//! are checked by `markup`, which rejects unsafe and malformed markup.
-//! The design, the deck, and the document share one error type and the
-//! same checks; only the field paths differ.
+//! Every error names the screen, slide, page, or frame index and the
+//! field, so an agent can fix the artifact from the message alone.
+//! HTML and CSS are checked by `markup`, which rejects unsafe and
+//! malformed markup. The design, the deck, the document, and the
+//! social share one error type and the same checks; only the field
+//! paths differ.
 
 use crate::markup::{SCREEN_CSS_LIMIT, SCREEN_HTML_LIMIT, css_problems, html_problems};
 use crate::transition::{MAX_TRANSITION_MS, Transition};
 use crate::viewport::{MAX_VIEWPORT_SIDE, MIN_VIEWPORT_SIDE};
-use crate::{Deck, Design, Document, Page, Screen, Slide, Theme};
+use crate::{Deck, Design, Document, Frame, Page, Screen, Slide, Social, Theme};
 
-/// A single problem found in a design, a deck, or a document.
+/// A single problem found in a design, a deck, a document, or a social.
 ///
 /// Messages address the agent that wrote the artifact: they state what
 /// is wrong and how to fix it.
@@ -35,6 +36,12 @@ pub enum ValidationError {
     /// The document has no pages.
     #[error("document has no pages: add at least one entry to `pages`")]
     NoPages,
+    /// The social `title` field is empty.
+    #[error("social title is empty: set a non-empty `title`")]
+    EmptySocialTitle,
+    /// The social has no frames.
+    #[error("social has no frames: add at least one entry to `frames`")]
+    NoFrames,
     /// A theme color is not a `#rrggbb` hex string.
     #[error("theme.colors.{field} has value `{value}`: use the form #rrggbb")]
     InvalidThemeColor {
@@ -59,6 +66,12 @@ pub enum ValidationError {
     #[error("pages[{index}].html is empty: write the page as an HTML fragment")]
     EmptyPage {
         /// Zero-based page index.
+        index: usize,
+    },
+    /// A frame's `html` is blank.
+    #[error("frames[{index}].html is empty: write the frame as an HTML fragment")]
+    EmptyFrame {
+        /// Zero-based frame index.
         index: usize,
     },
     /// A screen's or slide's `html` or `css` is longer than the limit.
@@ -183,6 +196,28 @@ impl Document {
     }
 }
 
+impl Social {
+    /// Checks the social and returns every problem found, not only the
+    /// first.
+    ///
+    /// Agents fix socials from these messages, so an empty result means
+    /// the social is ready to render.
+    pub fn validate(&self) -> Vec<ValidationError> {
+        let mut errors = Vec::new();
+        if self.title.trim().is_empty() {
+            errors.push(ValidationError::EmptySocialTitle);
+        }
+        if self.frames.is_empty() {
+            errors.push(ValidationError::NoFrames);
+        }
+        theme_problems(&self.theme, &mut errors);
+        for (index, frame) in self.frames.iter().enumerate() {
+            validate_frame(frame, index, &mut errors);
+        }
+        errors
+    }
+}
+
 /// Adds one error per theme color that is not `#rrggbb`.
 fn theme_problems(theme: &Theme, errors: &mut Vec<ValidationError>) {
     let colors = &theme.colors;
@@ -266,8 +301,27 @@ fn validate_page(page: &Page, index: usize, errors: &mut Vec<ValidationError>) {
     );
 }
 
+/// Checks one frame's html and css.
+fn validate_frame(frame: &Frame, index: usize, errors: &mut Vec<ValidationError>) {
+    if frame.html.trim().is_empty() {
+        errors.push(ValidationError::EmptyFrame { index });
+        css_fragment_problems(
+            &format!("frames[{index}].css"),
+            frame.css.as_deref(),
+            errors,
+        );
+        return;
+    }
+    fragment_problems(
+        &format!("frames[{index}]"),
+        &frame.html,
+        frame.css.as_deref(),
+        errors,
+    );
+}
+
 /// Checks a non-empty html fragment and its css. `path_base` is the
-/// field path of the screen, slide, or page, like `screens[2]`.
+/// field path of the screen, slide, page, or frame, like `screens[2]`.
 fn fragment_problems(
     path_base: &str,
     html: &str,
@@ -325,11 +379,59 @@ fn is_hex_color(value: &str) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use crate::test_support::{sample_deck, sample_design, sample_document};
+    use crate::test_support::{sample_deck, sample_design, sample_document, sample_social};
     use crate::transition::MAX_TRANSITION_MS;
     use crate::validation::ValidationError;
     use crate::viewport::{MAX_VIEWPORT_SIDE, MIN_VIEWPORT_SIDE};
-    use crate::{Page, Screen, Slide, Transition, Viewport};
+    use crate::{Frame, Page, Screen, Slide, Transition, Viewport};
+
+    #[test]
+    fn a_valid_social_has_no_errors() {
+        assert_eq!(sample_social().validate(), Vec::new());
+    }
+
+    #[test]
+    fn reports_every_social_error_at_once() {
+        let mut social = sample_social();
+        social.title = String::new();
+        social.theme.colors.accent = "blue".to_owned();
+        social.frames.clear();
+        let errors = social.validate();
+        assert_eq!(errors.len(), 3);
+        assert!(errors.contains(&ValidationError::EmptySocialTitle));
+        assert!(errors.contains(&ValidationError::NoFrames));
+        assert!(errors[0].to_string().starts_with("social title is empty"));
+    }
+
+    #[test]
+    fn social_frames_use_frame_paths_in_messages() {
+        let mut social = sample_social();
+        social.frames.push(Frame {
+            html: "   ".to_owned(),
+            css: None,
+            notes: None,
+        });
+        social.frames.push(Frame {
+            html: "<div><script>x</script>".to_owned(),
+            css: Some("@import url(x); .a { width: 10vw }".to_owned()),
+            notes: None,
+        });
+        let errors = social.validate();
+        let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        assert!(errors.contains(&ValidationError::EmptyFrame { index: 1 }));
+        assert!(messages[0].starts_with("frames[1].html is empty"));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.starts_with("frames[2].html: contains <script>"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.starts_with("frames[2].css: contains `@import`"))
+        );
+        assert!(!messages.iter().any(|message| message.contains("pages[")));
+    }
 
     #[test]
     fn accepts_a_valid_design() {
