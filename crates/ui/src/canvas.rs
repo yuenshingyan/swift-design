@@ -1,16 +1,16 @@
-//! The candidate canvas: the designs, decks, or documents a generation
-//! run writes, each in a live preview iframe, plus placeholder cards
-//! for ids the run reports before they reach disk.
+//! The candidate canvas: the designs, decks, documents, or socials a
+//! generation run writes, each in a live preview iframe, plus
+//! placeholder cards for ids the run reports before they reach disk.
 //!
 //! Every card shares one stage height. The frame width follows the
 //! canvas ratio, so a desktop card is wide, a deck card wider, a
 //! document page tall, and a phone card is a small device inside a
-//! bezel. Only a demo's portrait canvas gets the bezel: a page is
-//! portrait too, and it is paper, not a phone.
+//! bezel. Only a demo's portrait canvas gets the bezel: a page and a
+//! portrait social frame are portrait too, and neither is a phone.
 
 use std::collections::{HashMap, HashSet};
 
-use design_model::{A4_VIEWPORT, ArtifactKind, DECK_VIEWPORT, LETTER_VIEWPORT, Viewport};
+use design_model::{A4_VIEWPORT, ArtifactKind, DECK_VIEWPORT, Format, LETTER_VIEWPORT, Viewport};
 use dioxus::prelude::*;
 
 use crate::api;
@@ -31,17 +31,18 @@ const CARD_GAP_REM: f64 = 1.0;
 /// below a phone frame, in rem.
 const BEZEL_INSET_REM: f64 = 1.5;
 
-/// One card on the canvas: a design, a deck, or a document candidate.
+/// One card on the canvas: a design, a deck, a document, or a social
+/// candidate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CanvasCard {
-    /// The design, deck, or document id.
+    /// The design, deck, document, or social id.
     pub id: String,
     /// The artifact's own title, as the model named it. The footer
     /// shows it after the candidate number.
     pub title: String,
     /// Which store the card comes from.
     pub kind: ArtifactKind,
-    /// How many screens, slides, or pages are written.
+    /// How many screens, slides, pages, or frames are written.
     pub count: usize,
     /// How many titles the outline plans. 0 without an outline.
     pub outline_count: usize,
@@ -75,12 +76,15 @@ impl CanvasCard {
             ArtifactKind::Document => {
                 format!("/documents/{}/render?v={revision}&page={current}", self.id)
             }
+            ArtifactKind::Social => {
+                format!("/socials/{}/render?v={revision}&frame={current}", self.id)
+            }
         }
     }
 
     /// True when the preview sits in a phone bezel: a demo on a
-    /// portrait canvas. A document page is portrait too, but it is
-    /// paper.
+    /// portrait canvas. A document page and a portrait social frame
+    /// are portrait too, but neither is a phone.
     pub fn is_bezelled(&self) -> bool {
         self.kind == ArtifactKind::Demo && is_portrait_canvas(self.viewport)
     }
@@ -156,6 +160,29 @@ pub(crate) fn cards_from_documents(
     mine
 }
 
+/// The social cards that belong to `session_id`, chosen social first.
+pub(crate) fn cards_from_socials(
+    socials: &[api::SocialSummary],
+    session_id: &str,
+    chosen: Option<&str>,
+) -> Vec<CanvasCard> {
+    let mut mine: Vec<CanvasCard> = socials
+        .iter()
+        .filter(|summary| crate::settings::artifact_project(&summary.id) == session_id)
+        .map(|summary| CanvasCard {
+            id: summary.id.clone(),
+            title: summary.title.clone(),
+            kind: ArtifactKind::Social,
+            count: summary.frame_count,
+            outline_count: summary.outline_count,
+            ratio: summary.aspect_ratio(),
+            viewport: summary.viewport(),
+        })
+        .collect();
+    mine.sort_by_key(|card| Some(card.id.as_str()) != chosen);
+    mine
+}
+
 /// The card name from its id: `Candidate 2` from `talk-candidate-2`, or
 /// `Candidate` when the id has no number.
 pub(crate) fn candidate_label(id: &str) -> String {
@@ -180,13 +207,19 @@ pub(crate) fn candidate_number(id: &str) -> &str {
 }
 
 /// The name of one canvas, for a tab: `Desktop`, `Tablet`, `Phone`,
-/// `Deck`, `A4`, or `Letter`.
+/// `Deck`, `A4`, `Letter`, or a social format such as `Square`.
 pub(crate) fn canvas_name(viewport: Viewport) -> &'static str {
     if viewport == A4_VIEWPORT {
         return "A4";
     }
     if viewport == LETTER_VIEWPORT {
         return "Letter";
+    }
+    if let Some(format) = Format::ALL
+        .into_iter()
+        .find(|format| format.viewport() == viewport)
+    {
+        return format.label();
     }
     match (viewport.width, viewport.height) {
         (390, 844) => "Phone",
@@ -419,6 +452,7 @@ pub(crate) fn CandidateCanvas(
                     ArtifactKind::Demo => api::delete_design(&id).await,
                     ArtifactKind::Deck => api::delete_deck(&id).await,
                     ArtifactKind::Document => api::delete_document(&id).await,
+                    ArtifactKind::Social => api::delete_social(&id).await,
                 };
                 if let Err(message) = deleted {
                     on_error.call(message);
@@ -864,7 +898,9 @@ mod tests {
         assert_eq!(key_step(&Key::Enter), None);
         assert_eq!(key_step(&Key::ArrowUp), None);
     }
-    use crate::api::{DeckSummary, DesignSummary};
+    use design_model::{LANDSCAPE_VIEWPORT, PORTRAIT_VIEWPORT, SQUARE_VIEWPORT, STORY_VIEWPORT};
+
+    use crate::api::{DeckSummary, DesignSummary, SocialSummary};
 
     fn phone() -> Viewport {
         Viewport {
@@ -937,6 +973,10 @@ mod tests {
         assert_eq!(canvas_name(DECK_VIEWPORT), "Deck");
         assert_eq!(canvas_name(A4_VIEWPORT), "A4");
         assert_eq!(canvas_name(LETTER_VIEWPORT), "Letter");
+        assert_eq!(canvas_name(SQUARE_VIEWPORT), "Square");
+        assert_eq!(canvas_name(PORTRAIT_VIEWPORT), "Portrait");
+        assert_eq!(canvas_name(STORY_VIEWPORT), "Story");
+        assert_eq!(canvas_name(LANDSCAPE_VIEWPORT), "Landscape");
         assert_eq!(canvas_size(Viewport::default()), "1440 × 900");
         assert_eq!(canvas_size(DECK_VIEWPORT), "1920 × 1080");
     }
@@ -965,6 +1005,63 @@ mod tests {
             page_card.preview_url(3, 2),
             "/documents/app-candidate-1/render?v=3&page=2"
         );
+        let frame_card = CanvasCard {
+            kind: ArtifactKind::Social,
+            ratio: PORTRAIT_VIEWPORT.aspect_ratio_css(),
+            viewport: PORTRAIT_VIEWPORT,
+            ..phone_card
+        };
+        assert!(is_portrait_canvas(PORTRAIT_VIEWPORT));
+        assert!(!frame_card.is_bezelled());
+        assert_eq!(
+            frame_card.preview_url(3, 2),
+            "/socials/app-candidate-1/render?v=3&frame=2"
+        );
+    }
+
+    #[test]
+    fn social_cards_take_their_canvas_from_the_format() {
+        let socials = vec![
+            SocialSummary {
+                id: "post-candidate-1".to_owned(),
+                title: "Launch".to_owned(),
+                theme: "slate".to_owned(),
+                format: Format::Landscape,
+                frame_count: 1,
+                outline_count: 0,
+                pending_count: 0,
+            },
+            SocialSummary {
+                id: "post-candidate-2".to_owned(),
+                title: "Story".to_owned(),
+                theme: "slate".to_owned(),
+                format: Format::Story,
+                frame_count: 2,
+                outline_count: 4,
+                pending_count: 0,
+            },
+            SocialSummary {
+                id: "other-candidate-1".to_owned(),
+                title: "Elsewhere".to_owned(),
+                theme: "slate".to_owned(),
+                format: Format::Square,
+                frame_count: 1,
+                outline_count: 0,
+                pending_count: 0,
+            },
+        ];
+        let cards = cards_from_socials(&socials, "post", Some("post-candidate-2"));
+        assert_eq!(cards.len(), 2);
+        // The chosen social comes first.
+        assert_eq!(cards[0].id, "post-candidate-2");
+        assert_eq!(cards[0].kind, ArtifactKind::Social);
+        assert_eq!(cards[0].viewport, STORY_VIEWPORT);
+        assert_eq!(cards[0].count, 2);
+        assert_eq!(cards[0].remaining_count(), 2);
+        assert!(cards[0].is_preview());
+        assert_eq!(cards[1].viewport, LANDSCAPE_VIEWPORT);
+        assert_eq!(cards[1].ratio, "1200 / 630");
+        assert!(!cards[1].is_bezelled());
     }
 
     #[test]
