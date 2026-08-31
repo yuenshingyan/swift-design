@@ -197,7 +197,7 @@ pub(crate) fn email_count_options() -> Vec<(String, String)> {
             break;
         }
         let label = if count == 1 {
-            "1 email".to_owned()
+            "A single email".to_owned()
         } else {
             format!("{count} emails")
         };
@@ -598,7 +598,7 @@ pub(crate) fn app_answers(
                 &variety_choices(),
             ));
             entries.push(recorded(
-                "How many emails should it have?",
+                "How many emails are in the sequence?",
                 options
                     .email_count
                     .map(|count| count.to_string())
@@ -1323,7 +1323,7 @@ pub(crate) fn MailingQuestions(
             on_pick: move |value: String| pick.call(("variety".to_owned(), value)),
         }
         ChoiceCard {
-            label: "How many emails should it have?",
+            label: "How many emails are in the sequence?",
             current: shown("emails"),
             choices: email_count_options(),
             on_pick: move |value: String| pick.call(("emails".to_owned(), value)),
@@ -1671,7 +1671,7 @@ mod tests {
         assert_eq!(kind.answer, "Newsletter");
         let format = row("What canvas is it laid out on?").expect("format row");
         assert_eq!(format.answer, "Long, a full read");
-        let length = row("How many emails should it have?").expect("length row");
+        let length = row("How many emails are in the sequence?").expect("length row");
         assert_eq!(length.answer, "3 emails");
         let tone = row("What tone should it have?").expect("tone row");
         assert!(!tone.is_assumed);
@@ -1688,7 +1688,7 @@ mod tests {
     fn the_email_count_options_stay_under_the_limit() {
         let options = email_count_options();
         assert_eq!(options[0].1, "The agent decides");
-        assert_eq!(options[1], ("1".to_owned(), "1 email".to_owned()));
+        assert_eq!(options[1], ("1".to_owned(), "A single email".to_owned()));
         assert!(options.iter().any(|(_, label)| label == "5 emails"));
         for (value, _) in options.iter().skip(1) {
             let count = value.parse::<u32>().ok();
