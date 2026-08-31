@@ -1,0 +1,31 @@
+{
+  "title": "Swift Design launch flyer",
+  "theme": {
+    "name": "signal",
+    "colors": {
+      "background": "#f8fafc",
+      "text": "#0f172a",
+      "accent": "#0284c7",
+      "muted": "#64748b"
+    },
+    "fonts": {
+      "heading": "Inter",
+      "body": "Inter",
+      "mono": "JetBrains Mono"
+    }
+  },
+  "size": "a4",
+  "orientation": "portrait",
+  "sheets": [
+    {
+      "html": "<div class='s1-sheet'><p class='s1-kicker'>Swift Design</p><h1>One harness. Five kinds.</h1><p class='s1-lead'>Demos, decks, documents, socials, and now print pieces, from one chat.</p><p class='s1-turn'>Turn over for the workflow</p></div>",
+      "css": ".s1-sheet { height: 100%; padding: 96px 72px; display: flex; flex-direction: column; justify-content: center; gap: 28px; } .s1-kicker { font-size: 20px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); } h1 { font-size: 64px; font-weight: 800; line-height: 1.05; } .s1-lead { font-size: 28px; line-height: 1.4; color: var(--muted); } .s1-turn { margin-top: 48px; font-size: 20px; color: var(--accent); }",
+      "notes": "Front of the flyer. Stock: 300 gsm matte."
+    },
+    {
+      "html": "<div class='s2-sheet'><h2>Ask, then print</h2><ol><li>Describe the piece.</li><li>Answer three short questions.</li><li>Pick a candidate.</li><li>Export the PDF for the print shop.</li></ol><p class='s2-cta'>Try it at swift.design</p></div>",
+      "css": ".s2-sheet { height: 100%; padding: 96px 72px; display: flex; flex-direction: column; gap: 40px; } h2 { font-size: 48px; font-weight: 800; line-height: 1.1; } ol { padding-left: 40px; display: grid; gap: 20px; font-size: 28px; line-height: 1.35; } li::marker { color: var(--accent); font-weight: 700; } .s2-cta { margin-top: auto; font-size: 24px; color: var(--muted); }",
+      "notes": "Back of the flyer."
+    }
+  ]
+}

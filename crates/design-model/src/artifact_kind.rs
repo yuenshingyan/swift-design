@@ -5,14 +5,15 @@
 //! viewport. A `deck` is a slide presentation on a 1920 by 1080 px
 //! canvas. A `document` is a paged document, such as a report or a
 //! memo, on A4 or Letter paper. A `social` is a post or a carousel on
-//! a social canvas. The kinds have separate types, stores, routes, and
+//! a social canvas. A `print` is a poster or a flyer on a paper-size
+//! canvas. The kinds have separate types, stores, routes, and
 //! editors; the brief-first workflow is the same for all.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// What a session builds: a software demo, a deck, a document, or a
-/// social.
+/// What a session builds: a software demo, a deck, a document, a
+/// social, or a print.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
@@ -29,15 +30,19 @@ pub enum ArtifactKind {
     /// A social post or a carousel on a square, portrait, story, or
     /// landscape canvas. Written as a social.
     Social,
+    /// A poster, a flyer, or a similar print piece on an A5 to A3,
+    /// Letter, or Tabloid canvas. Written as a print.
+    Print,
 }
 
 impl ArtifactKind {
     /// Every kind, in the order the UI shows them.
-    pub const ALL: [ArtifactKind; 4] = [
+    pub const ALL: [ArtifactKind; 5] = [
         ArtifactKind::Demo,
         ArtifactKind::Deck,
         ArtifactKind::Document,
         ArtifactKind::Social,
+        ArtifactKind::Print,
     ];
 
     /// The snake_case name used in JSON.
@@ -47,6 +52,7 @@ impl ArtifactKind {
             ArtifactKind::Deck => "deck",
             ArtifactKind::Document => "document",
             ArtifactKind::Social => "social",
+            ArtifactKind::Print => "print",
         }
     }
 
@@ -57,6 +63,7 @@ impl ArtifactKind {
             ArtifactKind::Deck => "Deck",
             ArtifactKind::Document => "Document",
             ArtifactKind::Social => "Social post",
+            ArtifactKind::Print => "Print piece",
         }
     }
 
@@ -90,8 +97,8 @@ mod tests {
 
     #[test]
     fn unknown_kinds_are_rejected() {
-        assert!(serde_json::from_str::<ArtifactKind>("\"poster\"").is_err());
-        assert_eq!(ArtifactKind::from_name("poster"), None);
+        assert!(serde_json::from_str::<ArtifactKind>("\"banner\"").is_err());
+        assert_eq!(ArtifactKind::from_name("banner"), None);
         assert_eq!(ArtifactKind::from_name("deck"), Some(ArtifactKind::Deck));
         assert_eq!(
             ArtifactKind::from_name("document"),
@@ -101,6 +108,7 @@ mod tests {
             ArtifactKind::from_name("social"),
             Some(ArtifactKind::Social)
         );
+        assert_eq!(ArtifactKind::from_name("print"), Some(ArtifactKind::Print));
     }
 
     #[test]
@@ -109,5 +117,6 @@ mod tests {
         assert_eq!(ArtifactKind::Deck.label(), "Deck");
         assert_eq!(ArtifactKind::Document.label(), "Document");
         assert_eq!(ArtifactKind::Social.label(), "Social post");
+        assert_eq!(ArtifactKind::Print.label(), "Print piece");
     }
 }

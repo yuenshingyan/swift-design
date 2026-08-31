@@ -1,18 +1,20 @@
 //! Semantic checks that JSON Schema alone cannot express.
 //!
-//! Every error names the screen, slide, page, or frame index and the
-//! field, so an agent can fix the artifact from the message alone.
-//! HTML and CSS are checked by `markup`, which rejects unsafe and
-//! malformed markup. The design, the deck, the document, and the
-//! social share one error type and the same checks; only the field
-//! paths differ.
+//! Every error names the screen, slide, page, frame, or sheet index
+//! and the field, so an agent can fix the artifact from the message
+//! alone. HTML and CSS are checked by `markup`, which rejects unsafe
+//! and malformed markup. The design, the deck, the document, the
+//! social, and the print share one error type and the same checks;
+//! only the field paths differ.
 
 use crate::markup::{SCREEN_CSS_LIMIT, SCREEN_HTML_LIMIT, css_problems, html_problems};
+use crate::print::SHEET_COUNT_LIMIT;
 use crate::transition::{MAX_TRANSITION_MS, Transition};
 use crate::viewport::{MAX_VIEWPORT_SIDE, MIN_VIEWPORT_SIDE};
-use crate::{Deck, Design, Document, Frame, Page, Screen, Slide, Social, Theme};
+use crate::{Deck, Design, Document, Frame, Page, Print, Screen, Sheet, Slide, Social, Theme};
 
-/// A single problem found in a design, a deck, a document, or a social.
+/// A single problem found in a design, a deck, a document, a social,
+/// or a print.
 ///
 /// Messages address the agent that wrote the artifact: they state what
 /// is wrong and how to fix it.
@@ -42,6 +44,20 @@ pub enum ValidationError {
     /// The social has no frames.
     #[error("social has no frames: add at least one entry to `frames`")]
     NoFrames,
+    /// The print `title` field is empty.
+    #[error("print title is empty: set a non-empty `title`")]
+    EmptyPrintTitle,
+    /// The print has no sheets.
+    #[error("print has no sheets: add at least one entry to `sheets`")]
+    NoSheets,
+    /// The print has more sheets than the limit.
+    #[error("print has {count} sheets: use at most {limit}")]
+    TooManySheets {
+        /// The rejected sheet count.
+        count: usize,
+        /// The allowed maximum.
+        limit: usize,
+    },
     /// A theme color is not a `#rrggbb` hex string.
     #[error("theme.colors.{field} has value `{value}`: use the form #rrggbb")]
     InvalidThemeColor {
@@ -72,6 +88,12 @@ pub enum ValidationError {
     #[error("frames[{index}].html is empty: write the frame as an HTML fragment")]
     EmptyFrame {
         /// Zero-based frame index.
+        index: usize,
+    },
+    /// A sheet's `html` is blank.
+    #[error("sheets[{index}].html is empty: write the sheet as an HTML fragment")]
+    EmptySheet {
+        /// Zero-based sheet index.
         index: usize,
     },
     /// A screen's or slide's `html` or `css` is longer than the limit.
@@ -218,6 +240,34 @@ impl Social {
     }
 }
 
+impl Print {
+    /// Checks the print and returns every problem found, not only the
+    /// first.
+    ///
+    /// Agents fix prints from these messages, so an empty result means
+    /// the print is ready to render.
+    pub fn validate(&self) -> Vec<ValidationError> {
+        let mut errors = Vec::new();
+        if self.title.trim().is_empty() {
+            errors.push(ValidationError::EmptyPrintTitle);
+        }
+        if self.sheets.is_empty() {
+            errors.push(ValidationError::NoSheets);
+        }
+        if self.sheets.len() > SHEET_COUNT_LIMIT as usize {
+            errors.push(ValidationError::TooManySheets {
+                count: self.sheets.len(),
+                limit: SHEET_COUNT_LIMIT as usize,
+            });
+        }
+        theme_problems(&self.theme, &mut errors);
+        for (index, sheet) in self.sheets.iter().enumerate() {
+            validate_sheet(sheet, index, &mut errors);
+        }
+        errors
+    }
+}
+
 /// Adds one error per theme color that is not `#rrggbb`.
 fn theme_problems(theme: &Theme, errors: &mut Vec<ValidationError>) {
     let colors = &theme.colors;
@@ -320,8 +370,28 @@ fn validate_frame(frame: &Frame, index: usize, errors: &mut Vec<ValidationError>
     );
 }
 
+/// Checks one sheet's html and css.
+fn validate_sheet(sheet: &Sheet, index: usize, errors: &mut Vec<ValidationError>) {
+    if sheet.html.trim().is_empty() {
+        errors.push(ValidationError::EmptySheet { index });
+        css_fragment_problems(
+            &format!("sheets[{index}].css"),
+            sheet.css.as_deref(),
+            errors,
+        );
+        return;
+    }
+    fragment_problems(
+        &format!("sheets[{index}]"),
+        &sheet.html,
+        sheet.css.as_deref(),
+        errors,
+    );
+}
+
 /// Checks a non-empty html fragment and its css. `path_base` is the
-/// field path of the screen, slide, page, or frame, like `screens[2]`.
+/// field path of the screen, slide, page, frame, or sheet, like
+/// `screens[2]`.
 fn fragment_problems(
     path_base: &str,
     html: &str,
@@ -379,11 +449,13 @@ fn is_hex_color(value: &str) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use crate::test_support::{sample_deck, sample_design, sample_document, sample_social};
+    use crate::test_support::{
+        sample_deck, sample_design, sample_document, sample_print, sample_social,
+    };
     use crate::transition::MAX_TRANSITION_MS;
     use crate::validation::ValidationError;
     use crate::viewport::{MAX_VIEWPORT_SIDE, MIN_VIEWPORT_SIDE};
-    use crate::{Frame, Page, Screen, Slide, Transition, Viewport};
+    use crate::{Frame, Page, SHEET_COUNT_LIMIT, Screen, Sheet, Slide, Transition, Viewport};
 
     #[test]
     fn a_valid_social_has_no_errors() {
@@ -431,6 +503,70 @@ mod tests {
                 .any(|message| message.starts_with("frames[2].css: contains `@import`"))
         );
         assert!(!messages.iter().any(|message| message.contains("pages[")));
+    }
+
+    #[test]
+    fn a_valid_print_has_no_errors() {
+        assert_eq!(sample_print().validate(), Vec::new());
+    }
+
+    #[test]
+    fn reports_every_print_error_at_once() {
+        let mut print = sample_print();
+        print.title = String::new();
+        print.theme.colors.accent = "blue".to_owned();
+        print.sheets.clear();
+        let errors = print.validate();
+        assert_eq!(errors.len(), 3);
+        assert!(errors.contains(&ValidationError::EmptyPrintTitle));
+        assert!(errors.contains(&ValidationError::NoSheets));
+        assert!(errors[0].to_string().starts_with("print title is empty"));
+    }
+
+    #[test]
+    fn a_print_past_the_sheet_limit_is_rejected() {
+        let mut print = sample_print();
+        let sheet = print.sheets[0].clone();
+        while print.sheets.len() <= SHEET_COUNT_LIMIT as usize {
+            print.sheets.push(sheet.clone());
+        }
+        let errors = print.validate();
+        assert!(errors.contains(&ValidationError::TooManySheets {
+            count: SHEET_COUNT_LIMIT as usize + 1,
+            limit: SHEET_COUNT_LIMIT as usize,
+        }));
+        print.sheets.truncate(SHEET_COUNT_LIMIT as usize);
+        assert_eq!(print.validate(), Vec::new());
+    }
+
+    #[test]
+    fn print_sheets_use_sheet_paths_in_messages() {
+        let mut print = sample_print();
+        print.sheets.push(Sheet {
+            html: "   ".to_owned(),
+            css: None,
+            notes: None,
+        });
+        print.sheets.push(Sheet {
+            html: "<div><script>x</script>".to_owned(),
+            css: Some("@import url(x); .a { width: 10vw }".to_owned()),
+            notes: None,
+        });
+        let errors = print.validate();
+        let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        assert!(errors.contains(&ValidationError::EmptySheet { index: 1 }));
+        assert!(messages[0].starts_with("sheets[1].html is empty"));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.starts_with("sheets[2].html: contains <script>"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.starts_with("sheets[2].css: contains `@import`"))
+        );
+        assert!(!messages.iter().any(|message| message.contains("frames[")));
     }
 
     #[test]

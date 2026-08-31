@@ -1,8 +1,8 @@
 //! The app's own questions: how the colors read for every kind, how
 //! much of a demo to build and what it shows, who a deck, a document,
-//! or a social is for and what tone it takes, what a document is and
-//! what paper it takes, and where a social is posted and on what
-//! canvas.
+//! a social, or a print is for and what tone it takes, what a document
+//! is and what paper it takes, where a social is posted and on what
+//! canvas, and what a print is and on what paper size and orientation.
 //!
 //! These recur in every session with the same answers, so the app asks
 //! them from a fixed list instead of letting the agent invent options
@@ -141,6 +141,31 @@ pub const POST_GOALS: [(&str, &str); 4] = [
     ("promote", "Promote an offer"),
     ("recruit", "Recruit or invite"),
 ];
+
+/// What kind of print piece to lay out, as (value, label). It decides
+/// the sheet vocabulary: a poster and a menu share no furniture.
+pub const PRINT_KINDS: [(&str, &str); 6] = [
+    ("poster", "Poster"),
+    ("flyer", "Flyer"),
+    ("menu", "Menu"),
+    ("program", "Program"),
+    ("certificate", "Certificate"),
+    ("sign", "Sign"),
+];
+
+/// The paper size a print is laid out on, as (value, label). The
+/// values are the `size` names in the print JSON.
+pub const PRINT_SIZES: [(&str, &str); 5] = [
+    ("a5", "A5"),
+    ("a4", "A4"),
+    ("a3", "A3"),
+    ("letter", "US Letter"),
+    ("tabloid", "Tabloid"),
+];
+
+/// How a print's sheets are turned, as (value, label). The values are
+/// the `orientation` names in the print JSON.
+pub const ORIENTATIONS: [(&str, &str); 2] = [("portrait", "Portrait"), ("landscape", "Landscape")];
 
 /// How much of a demo to build, as (value, label). A deck says its size
 /// with the slide count instead.
@@ -303,6 +328,25 @@ pub const SOCIAL_AXES: [AppAxis; 3] = [
     },
 ];
 
+/// Every app-owned axis only a print asks.
+pub const PRINT_AXES: [AppAxis; 3] = [
+    AppAxis {
+        key: "print_kind",
+        name: "Print kind",
+        choices: &PRINT_KINDS,
+    },
+    AppAxis {
+        key: "print_size",
+        name: "Print size",
+        choices: &PRINT_SIZES,
+    },
+    AppAxis {
+        key: "orientation",
+        name: "Orientation",
+        choices: &ORIENTATIONS,
+    },
+];
+
 /// Every app-owned axis of every kind.
 fn every_axis() -> impl Iterator<Item = &'static AppAxis> {
     SHARED_AXES
@@ -312,6 +356,7 @@ fn every_axis() -> impl Iterator<Item = &'static AppAxis> {
         .chain(DECK_AXES.iter())
         .chain(DOCUMENT_AXES.iter())
         .chain(SOCIAL_AXES.iter())
+        .chain(PRINT_AXES.iter())
 }
 
 /// The app-owned axes `kind` asks, shared ones first.
@@ -321,6 +366,7 @@ pub fn app_axes(kind: ArtifactKind) -> impl Iterator<Item = &'static AppAxis> {
         ArtifactKind::Deck => (&SPEECH_AXES, &DECK_AXES),
         ArtifactKind::Document => (&SPEECH_AXES, &DOCUMENT_AXES),
         ArtifactKind::Social => (&SPEECH_AXES, &SOCIAL_AXES),
+        ArtifactKind::Print => (&SPEECH_AXES, &PRINT_AXES),
     };
     SHARED_AXES.iter().chain(spoken.iter()).chain(own.iter())
 }
@@ -427,6 +473,21 @@ mod tests {
                 "Post goal"
             ]
         );
+        let print: Vec<&str> = app_axes(ArtifactKind::Print)
+            .map(|axis| axis.name)
+            .collect();
+        assert_eq!(
+            print,
+            [
+                "Color mode",
+                "Audience",
+                "Tone",
+                "Evidence",
+                "Print kind",
+                "Print size",
+                "Orientation"
+            ]
+        );
     }
 
     #[test]
@@ -442,6 +503,22 @@ mod tests {
             assert!(crate::Format::from_name(value).is_some(), "{value}");
         }
         assert_eq!(FORMATS.len(), crate::Format::ALL.len());
+    }
+
+    #[test]
+    fn the_print_size_values_are_the_print_size_names() {
+        for (value, _) in PRINT_SIZES {
+            assert!(crate::PrintSize::from_name(value).is_some(), "{value}");
+        }
+        assert_eq!(PRINT_SIZES.len(), crate::PrintSize::ALL.len());
+    }
+
+    #[test]
+    fn the_orientation_values_are_the_orientation_names() {
+        for (value, _) in ORIENTATIONS {
+            assert!(crate::Orientation::from_name(value).is_some(), "{value}");
+        }
+        assert_eq!(ORIENTATIONS.len(), crate::Orientation::ALL.len());
     }
 
     #[test]
@@ -507,6 +584,9 @@ mod tests {
             &PLATFORMS[..],
             &FORMATS[..],
             &POST_GOALS[..],
+            &PRINT_KINDS[..],
+            &PRINT_SIZES[..],
+            &ORIENTATIONS[..],
         ];
         for choices in banks {
             let values: Vec<&str> = choices.iter().map(|(value, _)| *value).collect();
