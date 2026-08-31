@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 use crate::api;
 use crate::canvas::{
     CandidateCanvas, candidate_label, cards_from_decks, cards_from_designs, cards_from_documents,
-    queued_finishes,
+    cards_from_socials, queued_finishes,
 };
 use crate::chat::{mention_at, recall_prompt, remove_mention, watch_caret};
 use crate::chat_controls::{ModelChip, SendButton, with_effort};
@@ -20,11 +20,13 @@ use crate::question_card::{
 };
 use crate::revert::{revert_artifact, turn_start};
 use crate::run_settings::{
-    DeckQuestions, DocumentQuestions, RunSettings, SharedQuestions, app_answers,
+    DeckQuestions, DocumentQuestions, RunSettings, SharedQuestions, SocialQuestions, app_answers,
 };
 use crate::settings::{SettingsPanel, pause_briefly};
 use crate::status::{RunStatusCard, working_label};
-use design_model::{ArtifactKind, DECK_VIEWPORT, Paper, QuestionAnswer, Viewport, WorkflowState};
+use design_model::{
+    ArtifactKind, DECK_VIEWPORT, Format, Paper, QuestionAnswer, Viewport, WorkflowState,
+};
 
 /// The status line for the session's current state.
 pub(crate) fn progress_label(state: WorkflowState, run: Option<&api::AgentRun>) -> String {
@@ -61,6 +63,8 @@ pub(crate) fn generation_step(log_tail: &str) -> Option<&'static str> {
         Some("Writing slides")
     } else if lower.contains("page") {
         Some("Writing pages")
+    } else if lower.contains("frame") {
+        Some("Writing frames")
     } else if lower.contains("candidate") || lower.contains("screen") || lower.contains("writ") {
         Some("Writing screens")
     } else {
@@ -81,12 +85,14 @@ pub(crate) fn SessionWorkspace(
     on_open_design: EventHandler<String>,
     on_open_deck: EventHandler<String>,
     on_open_document: EventHandler<String>,
+    on_open_social: EventHandler<String>,
     on_home: EventHandler<()>,
 ) -> Element {
     let mut view = use_signal(|| Option::<api::SessionView>::None);
     let mut designs = use_signal(Vec::<api::DesignSummary>::new);
     let mut decks = use_signal(Vec::<api::DeckSummary>::new);
     let mut documents = use_signal(Vec::<api::DocumentSummary>::new);
+    let mut socials = use_signal(Vec::<api::SocialSummary>::new);
     let mut run = use_signal(|| Option::<api::AgentRun>::None);
     let mut settings = use_signal(|| Option::<api::SettingsView>::None);
     let is_configuring = use_signal(|| false);
@@ -124,6 +130,9 @@ pub(crate) fn SessionWorkspace(
                     }
                     if let Ok(list) = api::fetch_document_list().await {
                         documents.set(list);
+                    }
+                    if let Ok(list) = api::fetch_social_list().await {
+                        socials.set(list);
                     }
                     if let Ok(fetched) = api::fetch_agent_run().await {
                         run.set(Some(fetched));
@@ -189,10 +198,13 @@ pub(crate) fn SessionWorkspace(
         ArtifactKind::Document => {
             cards_from_documents(&documents(), &session_id, session.chosen_design.as_deref())
         }
+        ArtifactKind::Social => {
+            cards_from_socials(&socials(), &session_id, session.chosen_design.as_deref())
+        }
     };
     // A placeholder before the first card takes the kind's canvas: the
-    // paper the options name for a document, the deck canvas, or the
-    // desktop.
+    // paper the options name for a document, the format they name for
+    // a social, the deck canvas, or the desktop.
     let blank_viewport = match session.artifact_kind {
         ArtifactKind::Demo => Viewport::default(),
         ArtifactKind::Deck => DECK_VIEWPORT,
@@ -201,6 +213,13 @@ pub(crate) fn SessionWorkspace(
             .paper
             .as_deref()
             .and_then(Paper::from_name)
+            .unwrap_or_default()
+            .viewport(),
+        ArtifactKind::Social => session
+            .options
+            .format
+            .as_deref()
+            .and_then(Format::from_name)
             .unwrap_or_default()
             .viewport(),
     };
@@ -651,6 +670,13 @@ pub(crate) fn SessionWorkspace(
                                         on_error: move |message| error.set(Some(message)),
                                     }
                                 }
+                                if session.artifact_kind == ArtifactKind::Social {
+                                    SocialQuestions {
+                                        session_id: session_id.clone(),
+                                        options: session.options.clone(),
+                                        on_error: move |message| error.set(Some(message)),
+                                    }
+                                }
                             }),
                             // A demo's run settings belong with the
                             // app's cards: the card is open on the
@@ -692,6 +718,7 @@ pub(crate) fn SessionWorkspace(
                             ArtifactKind::Demo => on_open_design.call(id),
                             ArtifactKind::Deck => on_open_deck.call(id),
                             ArtifactKind::Document => on_open_document.call(id),
+                            ArtifactKind::Social => on_open_social.call(id),
                         },
                         on_continue: {
                             let session_id = session_id.clone();
@@ -713,6 +740,7 @@ pub(crate) fn SessionWorkspace(
                                     ArtifactKind::Demo => api::fork_design(&artifact_id).await,
                                     ArtifactKind::Deck => api::fork_deck(&artifact_id).await,
                                     ArtifactKind::Document => api::fork_document(&artifact_id).await,
+                                    ArtifactKind::Social => api::fork_social(&artifact_id).await,
                                 };
                                 if let Err(message) = forked {
                                     error.set(Some(message));
@@ -974,6 +1002,7 @@ mod tests {
         );
         assert_eq!(generation_step("writing slide 4"), Some("Writing slides"));
         assert_eq!(generation_step("writing page 4"), Some("Writing pages"));
+        assert_eq!(generation_step("writing frame 4"), Some("Writing frames"));
         assert_eq!(generation_step("something else"), None);
     }
 
