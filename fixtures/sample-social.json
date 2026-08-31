@@ -1,0 +1,34 @@
+{
+  "title": "Swift Design launch carousel",
+  "theme": {
+    "name": "signal",
+    "colors": {
+      "background": "#0f172a",
+      "text": "#f8fafc",
+      "accent": "#38bdf8",
+      "muted": "#94a3b8"
+    },
+    "fonts": {
+      "heading": "Inter",
+      "body": "Inter",
+      "mono": "JetBrains Mono"
+    }
+  },
+  "format": "portrait",
+  "frames": [
+    {
+      "html": "<div class='f1-frame'><p class='f1-kicker'>New in Swift Design</p><h1>One harness. Four kinds.</h1><p class='f1-lead'>Demos, decks, documents, and now social posts, from one chat.</p><p class='f1-swipe'>Swipe &rarr;</p></div>",
+      "css": ".f1-frame { height: 100%; padding: 120px 96px; display: flex; flex-direction: column; justify-content: center; gap: 32px; } .f1-kicker { font-size: 28px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); } h1 { font-size: 96px; font-weight: 800; line-height: 1.05; } .f1-lead { font-size: 40px; line-height: 1.35; color: var(--muted); } .f1-swipe { margin-top: 64px; font-size: 32px; color: var(--accent); }",
+      "notes": "Caption: Swift Design now writes social posts. Ask, pick, edit, export."
+    },
+    {
+      "html": "<div class='f2-frame'><h2>Ask, then write</h2><ol><li>Describe the post.</li><li>Answer three short questions.</li><li>Pick a candidate.</li><li>Edit it from the chat.</li></ol></div>",
+      "css": ".f2-frame { height: 100%; padding: 120px 96px; display: flex; flex-direction: column; gap: 48px; } h2 { font-size: 72px; font-weight: 800; line-height: 1.1; } ol { padding-left: 56px; display: grid; gap: 28px; font-size: 40px; line-height: 1.3; } li::marker { color: var(--accent); font-weight: 700; }"
+    },
+    {
+      "html": "<div class='f3-frame'><h2>Export where you post</h2><div class='f3-grid'><div class='f3-card'><p class='f3-big'>PNG</p><p>One image per frame</p></div><div class='f3-card'><p class='f3-big'>PDF</p><p>A LinkedIn carousel</p></div></div><p class='f3-cta'>Try it at swift.design</p></div>",
+      "css": ".f3-frame { height: 100%; padding: 120px 96px; display: flex; flex-direction: column; gap: 56px; } h2 { font-size: 72px; font-weight: 800; line-height: 1.1; } .f3-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; } .f3-card { padding: 40px; border: 3px solid var(--accent); border-radius: 24px; font-size: 30px; line-height: 1.3; display: grid; gap: 12px; } .f3-big { font-size: 64px; font-weight: 800; color: var(--accent); } .f3-cta { margin-top: auto; font-size: 36px; color: var(--muted); }",
+      "notes": "Caption: link in the comments."
+    }
+  ]
+}
