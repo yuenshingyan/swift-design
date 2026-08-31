@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Print",
+  "description": "A complete print: one theme applied to an ordered list of sheets on\none size and orientation.",
+  "type": "object",
+  "properties": {
+    "orientation": {
+      "description": "How every sheet is turned. Absent means portrait.",
+      "$ref": "#/$defs/Orientation",
+      "default": "portrait"
+    },
+    "outline": {
+      "description": "The sheet titles of the complete print, in order. A preview\nprint lists more titles than it has sheets: the app continues\nit from this list later. Leave it empty when the print is\ncomplete.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "sheets": {
+      "description": "Sheets in reading order. One sheet is a poster; two sheets are\nthe front and back of a flyer.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Sheet"
+      }
+    },
+    "size": {
+      "description": "The paper size every sheet is laid out on. Absent means A4.",
+      "$ref": "#/$defs/PrintSize",
+      "default": "a4"
+    },
+    "theme": {
+      "description": "Visual identity applied to every sheet.",
+      "$ref": "#/$defs/Theme"
+    },
+    "title": {
+      "description": "Print title, shown in the editor. Not rendered on a sheet.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "theme",
+    "sheets"
+  ],
+  "$defs": {
+    "FontSet": {
+      "description": "Default CSS font family names.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "Family for every other text element that sets no font.",
+          "type": "string"
+        },
+        "heading": {
+          "description": "Family for text elements with role `title` or `heading`.",
+          "type": "string"
+        },
+        "mono": {
+          "description": "Family for code elements.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "heading",
+        "body",
+        "mono"
+      ]
+    },
+    "Orientation": {
+      "description": "How the sheet is turned. Landscape swaps the width and the height\nof the size.",
+      "oneOf": [
+        {
+          "description": "The short edge is the width.",
+          "type": "string",
+          "const": "portrait"
+        },
+        {
+          "description": "The long edge is the width.",
+          "type": "string",
+          "const": "landscape"
+        }
+      ]
+    },
+    "Palette": {
+      "description": "Default colors as `#rrggbb` hex strings.",
+      "type": "object",
+      "properties": {
+        "accent": {
+          "description": "Color for highlights, shapes, and chart series that set no color.",
+          "type": "string"
+        },
+        "background": {
+          "description": "Screen background color when a screen sets no background.",
+          "type": "string"
+        },
+        "muted": {
+          "description": "Secondary color for captions, rules, and table stripes.",
+          "type": "string"
+        },
+        "text": {
+          "description": "Text color when an element sets no color.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "background",
+        "text",
+        "accent",
+        "muted"
+      ]
+    },
+    "PrintSize": {
+      "description": "The paper size a print is laid out on.",
+      "oneOf": [
+        {
+          "description": "A5: 559 by 794 px, portrait.",
+          "type": "string",
+          "const": "a5"
+        },
+        {
+          "description": "A4: 794 by 1123 px, portrait.",
+          "type": "string",
+          "const": "a4"
+        },
+        {
+          "description": "A3: 1123 by 1587 px, portrait.",
+          "type": "string",
+          "const": "a3"
+        },
+        {
+          "description": "US Letter: 816 by 1056 px, portrait.",
+          "type": "string",
+          "const": "letter"
+        },
+        {
+          "description": "Tabloid: 1056 by 1632 px, portrait.",
+          "type": "string",
+          "const": "tabloid"
+        }
+      ]
+    },
+    "Sheet": {
+      "description": "One sheet: an HTML fragment for the print's size, CSS for that\nfragment, and author notes.",
+      "type": "object",
+      "properties": {
+        "css": {
+          "description": "CSS for this sheet only. The server scopes every selector to\nthis sheet. Use plain selectors such as `.title` or `h1`. Use the\ntheme through `var(--background)`, `var(--text)`, `var(--accent)`,\n`var(--muted)`, `var(--heading-font)`, `var(--body-font)`,\n`var(--mono-font)`. No `@import`, no viewport units, no `<`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "html": {
+          "description": "The sheet as one HTML fragment. The canvas is the print's `size`\nin px, rotated by its `orientation`: 559 by 794 for A5, 794 by\n1123 for A4, 1123 by 1587 for A3, 816 by 1056 for Letter, 1056\nby 1632 for Tabloid. Use px units. Allowed: headings, text,\nlists, tables, `<img>` with `src=\"/uploads/{name}\"`, inline\n`<svg>`, `<pre><code>`, `<blockquote>`, `<a>`. Not allowed:\n`<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`,\n`<link>`, `<meta>`, `<form>`, `<button>`, `<input>`, media,\ncomments, `on*` attributes, `javascript:` and `data:` URLs,\nexternal images. Close every tag.",
+          "type": "string"
+        },
+        "notes": {
+          "description": "Author notes: print instructions such as paper stock or bleed,\nintent, or handoff remarks. Never rendered on the sheet and\nnever exported.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "html"
+      ]
+    },
+    "Theme": {
+      "description": "Default colors and fonts that elements inherit when they omit their\nown.",
+      "type": "object",
+      "properties": {
+        "colors": {
+          "description": "Default colors.",
+          "$ref": "#/$defs/Palette"
+        },
+        "fonts": {
+          "description": "Default font families.",
+          "$ref": "#/$defs/FontSet"
+        },
+        "name": {
+          "description": "Theme name shown in the editor.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "colors",
+        "fonts"
+      ]
+    }
+  }
+}

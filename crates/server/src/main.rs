@@ -34,6 +34,11 @@ mod planner;
 mod polish;
 mod pptx;
 mod presenter;
+mod print_generation;
+mod print_patch;
+mod print_polish;
+mod print_render;
+mod prints;
 mod projects;
 mod provenance;
 mod render;
@@ -62,7 +67,7 @@ use axum::extract::FromRef;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use design_model::{Deck, Design, Document, Social};
+use design_model::{Deck, Design, Document, Print, Social};
 use tracing_subscriber::EnvFilter;
 
 use crate::agent_runs::AgentRunner;
@@ -71,6 +76,7 @@ use crate::designs::DesignStore;
 use crate::documents::DocumentStore;
 use crate::events::ChangeNotifier;
 use crate::history::HistoryStore;
+use crate::prints::PrintStore;
 use crate::sessions::SessionStore;
 use crate::settings::SettingsStore;
 use crate::socials::SocialStore;
@@ -89,6 +95,8 @@ pub(crate) struct AppState {
     documents: DocumentStore,
     /// Social storage.
     socials: SocialStore,
+    /// Print storage.
+    prints: PrintStore,
     /// Upload storage.
     uploads: UploadStore,
     /// Session storage.
@@ -126,6 +134,12 @@ impl FromRef<AppState> for DocumentStore {
 impl FromRef<AppState> for SocialStore {
     fn from_ref(state: &AppState) -> SocialStore {
         state.socials.clone()
+    }
+}
+
+impl FromRef<AppState> for PrintStore {
+    fn from_ref(state: &AppState) -> PrintStore {
+        state.prints.clone()
     }
 }
 
@@ -204,6 +218,10 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("SWIFT_DESIGN_SOCIALS_DIR").unwrap_or_else(|_| "socials".to_owned());
     let social_history_directory = std::env::var("SWIFT_DESIGN_SOCIAL_HISTORY_DIR")
         .unwrap_or_else(|_| "social-history".to_owned());
+    let prints_directory =
+        std::env::var("SWIFT_DESIGN_PRINTS_DIR").unwrap_or_else(|_| "prints".to_owned());
+    let print_history_directory = std::env::var("SWIFT_DESIGN_PRINT_HISTORY_DIR")
+        .unwrap_or_else(|_| "print-history".to_owned());
     let changes = ChangeNotifier::new();
     let designs = DesignStore::new(PathBuf::from(designs_directory))
         .with_history(HistoryStore::new(PathBuf::from(history_directory)));
@@ -213,6 +231,8 @@ async fn main() -> anyhow::Result<()> {
         .with_history(HistoryStore::new(PathBuf::from(document_history_directory)));
     let socials = SocialStore::new(PathBuf::from(socials_directory))
         .with_history(HistoryStore::new(PathBuf::from(social_history_directory)));
+    let prints = PrintStore::new(PathBuf::from(prints_directory))
+        .with_history(HistoryStore::new(PathBuf::from(print_history_directory)));
     let sessions = SessionStore::new(PathBuf::from(sessions_directory));
     // A run dies with the process. Its session would wait for it forever.
     for session_id in sessions
@@ -236,6 +256,7 @@ async fn main() -> anyhow::Result<()> {
     .with_decks(decks.clone())
     .with_documents(documents.clone())
     .with_socials(socials.clone())
+    .with_prints(prints.clone())
     .with_templates(templates.clone())
     .with_uploads(uploads.clone());
     let state = AppState {
@@ -243,6 +264,7 @@ async fn main() -> anyhow::Result<()> {
         decks,
         documents,
         socials,
+        prints,
         uploads,
         sessions,
         settings,
@@ -266,6 +288,7 @@ fn router(state: AppState) -> Router {
         .route("/decks/render", post(render_deck))
         .route("/documents/render", post(render_document))
         .route("/socials/render", post(render_social))
+        .route("/prints/render", post(render_print))
         .merge(agent_runs::routes())
         .merge(candidates::routes())
         .merge(events::routes())
@@ -275,6 +298,7 @@ fn router(state: AppState) -> Router {
         .merge(decks::routes())
         .merge(documents::routes())
         .merge(socials::routes())
+        .merge(prints::routes())
         .merge(presenter::routes())
         .merge(projects::routes())
         .merge(export::routes())
@@ -329,6 +353,15 @@ async fn render_social(Json(social): Json<Social>) -> Response {
     api_error::social_validation_failed(&errors)
 }
 
+/// Renders a posted print to HTML, or reports every validation error.
+async fn render_print(Json(print): Json<Print>) -> Response {
+    let errors = print.validate();
+    if errors.is_empty() {
+        return Html(print_render::render_print(&print, false)).into_response();
+    }
+    api_error::print_validation_failed(&errors)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -339,11 +372,165 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::test_support::{
-        SAMPLE_DECK, SAMPLE_DESIGN, SAMPLE_DOCUMENT, SAMPLE_SOCIAL, application_with_command,
-        invalid_sample_design, open_generating_deck_session, open_generating_document_session,
-        open_generating_session, open_generating_social_session, send, send_upload, send_user_put,
-        test_application,
+        SAMPLE_DECK, SAMPLE_DESIGN, SAMPLE_DOCUMENT, SAMPLE_PRINT, SAMPLE_SOCIAL,
+        application_with_command, invalid_sample_design, open_generating_deck_session,
+        open_generating_document_session, open_generating_print_session, open_generating_session,
+        open_generating_social_session, send, send_upload, send_user_put, test_application,
     };
+
+    #[tokio::test]
+    async fn a_print_session_lists_its_prints_and_chooses_from_the_print_store() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_print_session(&application, "poster").await;
+        let (status, body) = send(application.clone(), "GET", "/sessions/poster", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(view["session"]["artifact_kind"], "print");
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/prints/poster-candidate-1",
+            Some(SAMPLE_PRINT),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, body) = send(application.clone(), "GET", "/sessions/poster", None).await;
+        let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(view["prints"].as_array().unwrap().len(), 1);
+        assert_eq!(view["prints"][0]["size"], "a4");
+        assert_eq!(view["prints"][0]["orientation"], "portrait");
+        assert_eq!(view["prints"][0]["sheet_count"], 2);
+        assert_eq!(view["socials"].as_array().unwrap().len(), 0);
+        assert_eq!(view["designs"].as_array().unwrap().len(), 0);
+        let (status, body) = send(application.clone(), "GET", "/candidates/poster", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Choose this print piece"));
+        assert!(body.contains("/prints/poster-candidate-1/render"));
+        let (status, _) = send(
+            application.clone(),
+            "POST",
+            "/candidates/poster/choose",
+            Some(r#"{"id":"poster-candidate-1"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(application.clone(), "GET", "/prints/poster", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(application, "GET", "/socials/poster", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn renders_a_valid_print_to_html() {
+        let directory = TempDir::new().unwrap();
+        let (status, body) = send(
+            test_application(&directory),
+            "POST",
+            "/prints/render",
+            Some(SAMPLE_PRINT),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.starts_with("<!doctype html>"));
+        assert!(body.contains("data-swift-design-width=\"794\""));
+        assert!(body.contains("data-swift-design-height=\"1123\""));
+        let (status, body) = send(
+            test_application(&directory),
+            "POST",
+            "/prints/render",
+            Some(r##"{"title":"","theme":{"name":"x","colors":{"background":"#000000","text":"#ffffff","accent":"#ff0000","muted":"#888888"},"fonts":{"heading":"Inter","body":"Inter","mono":"Inter"}},"sheets":[]}"##),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("print failed validation"));
+        assert!(body.contains("print has no sheets"));
+    }
+
+    #[tokio::test]
+    async fn saving_then_fetching_a_print_round_trips() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "poster").await;
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/prints/poster-candidate-1",
+            Some(SAMPLE_PRINT),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, body) = send(
+            application.clone(),
+            "GET",
+            "/prints/poster-candidate-1",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let print: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(print["sheets"].as_array().unwrap().len(), 2);
+        let (status, body) = send(application.clone(), "GET", "/prints", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"sheet_count\":2"));
+        // The print is not a social.
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            "/socials/poster-candidate-1",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, body) = send(
+            application.clone(),
+            "GET",
+            "/prints/poster-candidate-1/render?sheet=2",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("data-swift-design-screen=\"1\""));
+        let (status, _) = send(
+            application,
+            "GET",
+            "/prints/poster-candidate-1/render?sheet=9",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn exporting_a_print_returns_an_html_download() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "poster").await;
+        send(
+            application.clone(),
+            "PUT",
+            "/prints/poster",
+            Some(SAMPLE_PRINT),
+        )
+        .await;
+        let request = Request::builder()
+            .method("GET")
+            .uri("/prints/poster/export")
+            .body(Body::empty())
+            .unwrap();
+        let response = application.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename=\"poster.html\""
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            String::from_utf8(bytes.to_vec())
+                .unwrap()
+                .contains("<h1>One harness. Five kinds.</h1>")
+        );
+    }
 
     #[tokio::test]
     async fn a_social_session_lists_its_socials_and_chooses_from_the_social_store() {
