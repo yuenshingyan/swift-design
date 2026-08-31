@@ -1,6 +1,6 @@
 # Swift Design
 
-A design harness. You describe what you need, the agent asks a few questions in the chat, writes candidates, and edits them from the chat: a software demo, a slide deck, a paged document, or a social post.
+A design harness. You describe what you need, the agent asks a few questions in the chat, writes candidates, and edits them from the chat: a software demo, a slide deck, a paged document, a social post, or a print piece.
 
 ## Why
 
@@ -18,7 +18,7 @@ request → questions in the chat → candidates → chat edits
 
 The questions are short choices with `Use your best judgment` on each, and you can skip them all with **Skip the questions and generate**. There is no brief to approve.
 
-## Four artifact kinds
+## Five artifact kinds
 
 Describe what you need and press **Create**. The app then asks which kind to
 build, in a modal over the home page. The kind is fixed for the session; start a
@@ -30,15 +30,16 @@ new session to build another kind.
 | `deck` | A slide presentation | a deck with `slides` and no `viewport` | 1920×1080 | `/decks/{id}` |
 | `document` | A paged document: a report, a memo, a proposal, a letter, a guide | a document with `paper` and `pages` | the paper: A4 (794×1123) by default, or Letter (816×1056) | `/documents/{id}` |
 | `social` | A social post or a carousel for Instagram, LinkedIn, X, or Facebook | a social with `format` and `frames` | the format: portrait (1080×1350) by default, square (1080×1080), story (1080×1920), or landscape (1200×630) | `/socials/{id}` |
+| `print` | A print piece: a poster, a flyer, a menu, a program, a certificate, a sign | a print with `size`, `orientation`, and `sheets` | the size: A4 (794×1123) by default, A5 (559×794), A3 (1123×1587), Letter (816×1056), or Tabloid (1056×1632); landscape swaps width and height | `/prints/{id}` |
 
-Every kind shares the theme, the HTML and CSS rules, the workflow, the templates, and the uploads. Decks add a presenter view, an audience window that follows it, and a PPTX export. The deck JSON, routes, presenter, and PPTX come from Swift Deck, which is now part of this project. Documents add a PDF export, one sheet per page, and a DOCX export: a flowing Word file built from the page HTML, with the theme's fonts and colors as its styles. Socials add a PDF export, one sheet per frame (the file a LinkedIn carousel takes), and a zip of one PNG per frame (the files an Instagram carousel takes).
+Every kind shares the theme, the HTML and CSS rules, the workflow, the templates, and the uploads. Decks add a presenter view, an audience window that follows it, and a PPTX export. The deck JSON, routes, presenter, and PPTX come from Swift Deck, which is now part of this project. Documents add a PDF export, one sheet per page, and a DOCX export: a flowing Word file built from the page HTML, with the theme's fonts and colors as its styles. Socials add a PDF export, one sheet per frame (the file a LinkedIn carousel takes), and a zip of one PNG per frame (the files an Instagram carousel takes). Prints add a PDF export, one PDF page per sheet (the file a print shop takes), and a zip of one PNG per sheet.
 
 ## Core principles
 
 - Ask only choices that change the result, with 2 to 4 short options each.
 - Ask at most three questions per turn, and no more once five are answered.
 - Never require an answer: every question has `Use your best judgment`, and the whole set can be skipped.
-- The app asks its own closed questions itself, from fixed lists: how the colors read for every kind; the canvas, how much to build, the product kind, the screen state, the fidelity (finished or wireframe), and the number of variations for a demo; the audience, the tone, the scenario, the length, the slide density, how much it leans on data, the candidates, and the variety for a deck; the audience, the tone, the kind of document, the paper, the page density, how much it leans on data, the length in pages, the candidates, and the variety for a document; the audience, the tone, how much it leans on data, the platform, the format, what the post is for, the length in frames, the candidates, and the variety for a social. Their wording and options are the same in every session. The questions the request already answers come pre-selected, marked `suggested`, and one press accepts them.
+- The app asks its own closed questions itself, from fixed lists: how the colors read for every kind; the canvas, how much to build, the product kind, the screen state, the fidelity (finished or wireframe), and the number of variations for a demo; the audience, the tone, the scenario, the length, the slide density, how much it leans on data, the candidates, and the variety for a deck; the audience, the tone, the kind of document, the paper, the page density, how much it leans on data, the length in pages, the candidates, and the variety for a document; the audience, the tone, how much it leans on data, the platform, the format, what the post is for, the length in frames, the candidates, and the variety for a social; the audience, the tone, how much it leans on data, the kind of print piece, the paper size, the orientation, the length in sheets, the candidates, and the variety for a print. Their wording and options are the same in every session. The questions the request already answers come pre-selected, marked `suggested`, and one press accepts them.
 - The agent asks 0 to 3 more, only what the request raises and the fixed list does not cover, such as which features a demo must show. Asking nothing is a normal turn.
 - After the candidates exist, the chat edits: a message with a candidate open changes that candidate, a message without one writes new candidates.
 
@@ -135,7 +136,7 @@ Nothing lets a screen spill off the canvas. Every page measures the content and,
 
 Two loops tighten a candidate. The **fix-round loop** feeds validation errors back until the JSON is valid. The **polish loop** renders the candidate in Chrome, measures it (contrast, line length, overflow, overlap), screenshots every screen, and sends the findings and the images back for a patch. It repeats until the page measures clean, or a round fixes nothing, or the effort's ceiling runs out: 1 round on `low`, 3 on `medium`, 5 on `high`. The version that measured best is the one kept, so a round that makes the page worse is discarded. The run log says which of the three ended it.
 
-Designs, decks, documents, and socials are four pipelines behind one workflow: separate types, stores, routes, renderers, prompts, and editors, with the shared helpers (history, provenance, CSS scoping, fonts, Chrome, the fix-round loop, the model client) used by all. See `CLAUDE.md` for the rules.
+Designs, decks, documents, socials, and prints are five pipelines behind one workflow: separate types, stores, routes, renderers, prompts, and editors, with the shared helpers (history, provenance, CSS scoping, fonts, Chrome, the fix-round loop, the model client) used by all. See `CLAUDE.md` for the rules.
 
 ## Run it
 
@@ -149,19 +150,21 @@ cargo run -p server
 
 Open `http://127.0.0.1:3000`, pick a model in the studio settings, and describe
 what you need. Pressing **Create** asks whether to build a software demo, a
-deck, a document, or a social post. The agent runs on your own model account.
+deck, a document, a social post, or a print piece. The agent runs on your own model account.
 
 The design editor has two modes on a tab pair: **Play** (the default) and **Edit**. In
 Edit a click selects a node. In Play a click acts as it would for a user:
 a link to `#screen-3` opens screen 3, a `<details>` menu opens, and a
 checkbox or radio toggle flips. A demo carries no script. Flows are links
 between screens, and widgets are CSS states. The deck editor, the
-document editor, and the social editor have the same pair as **Read** (the
-default) and **Edit**: Read shows the slide, the page, or the frame as a
-reader sees it, with no selection outlines. The document editor's
-properties sheet also switches the paper between A4 and Letter; the social
-editor's switches the format between square, portrait, story, and
-landscape.
+document editor, the social editor, and the print editor have the same
+pair as **Read** (the default) and **Edit**: Read shows the slide, the
+page, the frame, or the sheet as a reader sees it, with no selection
+outlines. The document editor's properties sheet also switches the paper
+between A4 and Letter; the social editor's switches the format between
+square, portrait, story, and landscape; the print editor's switches the
+size between A5, A4, A3, Letter, and Tabloid, and the orientation between
+portrait and landscape.
 
 In Edit, a click also puts a reference to the node in the chat, so "make
 this bigger" names the exact element. To send several notes as one turn,
@@ -190,14 +193,20 @@ the file a LinkedIn carousel takes) and **PNG** (a zip with one PNG per
 frame, through Chrome: the files an Instagram carousel takes) next to the
 HTML export. The frame notes hold the caption to post with the frame.
 
+For a print, the editor adds **PDF** (one PDF page per sheet, through
+Chrome: the file a print shop takes) and **PNG** (a zip with one PNG per
+sheet, through Chrome) next to the HTML export. The sheet notes hold print
+instructions such as the paper stock or the bleed.
+
 ## Agent routes
 
 External agents read `GET /instructions` and the schemas at
-`GET /schemas/{design,deck,document,social,question-set}`. A demo session
+`GET /schemas/{design,deck,document,social,print,question-set}`. A demo session
 writes to `PUT /designs/{session}-candidate-N`; a deck session writes to
 `PUT /decks/{session}-candidate-N`; a document session writes to
 `PUT /documents/{session}-candidate-N`; a social session writes to
-`PUT /socials/{session}-candidate-N`. The run environment carries
+`PUT /socials/{session}-candidate-N`; a print session writes to
+`PUT /prints/{session}-candidate-N`. The run environment carries
 `SWIFT_DESIGN_SESSION_ID`, `SWIFT_DESIGN_RUN_MODE`, and
 `SWIFT_DESIGN_ARTIFACT_KIND`.
 
@@ -214,6 +223,8 @@ Document-only routes: `GET /documents/{id}/pages/{n}.png`,
 
 Social-only routes: `GET /socials/{id}/frames/{n}.png`,
 `GET /socials/{id}/export.pdf`, `GET /socials/{id}/export.zip`.
+Print-only routes: `GET /prints/{id}/sheets/{n}.png`,
+`GET /prints/{id}/export.pdf`, `GET /prints/{id}/export.zip`.
 
 ## Checks
 
@@ -240,6 +251,8 @@ cargo run -p server --bin generate_schema && git diff --exit-code schemas/
 | `SWIFT_DESIGN_DOCUMENT_HISTORY_DIR` | `document-history` | Document save snapshots |
 | `SWIFT_DESIGN_SOCIALS_DIR` | `socials` | Social JSON files |
 | `SWIFT_DESIGN_SOCIAL_HISTORY_DIR` | `social-history` | Social save snapshots |
+| `SWIFT_DESIGN_PRINTS_DIR` | `prints` | Print JSON files |
+| `SWIFT_DESIGN_PRINT_HISTORY_DIR` | `print-history` | Print save snapshots |
 | `SWIFT_DESIGN_SETTINGS_PATH` | `data/settings.json` | Provider, model, credential |
 | `SWIFT_DESIGN_UI_DIR` | `target/dx/ui/release/web/public` | Built WASM bundle |
 | `SWIFT_DESIGN_AGENT_COMMAND` | unset | External agent CLI; overrides the built-in engine |
@@ -250,10 +263,10 @@ cargo run -p server --bin generate_schema && git diff --exit-code schemas/
 
 ```
 crates/
-  design-model/  # serde + schemars types: design, deck, document, social, question, workflow. No IO.
+  design-model/  # serde + schemars types: design, deck, document, social, print, question, workflow. No IO.
   server/        # axum: sessions, engines, validation, render, presenter, exports, static hosting.
-  ui/            # Dioxus studio (WASM): session workspace, design, deck, document, and social editors.
-fixtures/        # sample-design.json, sample-deck.json, sample-document.json, and sample-social.json
+  ui/            # Dioxus studio (WASM): session workspace, design, deck, document, social, and print editors.
+fixtures/        # sample-design.json, sample-deck.json, sample-document.json, sample-social.json, and sample-print.json
 schemas/         # generated copies of the served JSON Schemas
 ```
 
