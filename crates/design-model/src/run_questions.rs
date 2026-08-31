@@ -1,7 +1,8 @@
 //! The app's own questions: how the colors read for every kind, how
-//! much of a demo to build and what it shows, who a deck or a document
-//! is for and what tone it takes, and what a document is and what paper
-//! it takes.
+//! much of a demo to build and what it shows, who a deck, a document,
+//! or a social is for and what tone it takes, what a document is and
+//! what paper it takes, and where a social is posted and on what
+//! canvas.
 //!
 //! These recur in every session with the same answers, so the app asks
 //! them from a fixed list instead of letting the agent invent options
@@ -111,6 +112,35 @@ pub const DOCUMENT_KINDS: [(&str, &str); 6] = [
 /// The paper a document is laid out on, as (value, label). The values
 /// are the `paper` names in the document JSON.
 pub const PAPERS: [(&str, &str); 2] = [("a4", "A4"), ("letter", "US Letter")];
+
+/// The platform a social is posted on, as (value, label). It decides
+/// the voice and the furniture: a LinkedIn carousel and an Instagram
+/// story share no conventions.
+pub const PLATFORMS: [(&str, &str); 4] = [
+    ("instagram", "Instagram"),
+    ("linkedin", "LinkedIn"),
+    ("x", "X"),
+    ("facebook", "Facebook"),
+];
+
+/// The canvas a social is laid out on, as (value, label). The values
+/// are the `format` names in the social JSON.
+pub const FORMATS: [(&str, &str); 4] = [
+    ("square", "Square, 1:1"),
+    ("portrait", "Portrait, 4:5"),
+    ("story", "Story, 9:16"),
+    ("landscape", "Landscape, 1.91:1"),
+];
+
+/// What a social is for, as (value, label). It decides the shape of
+/// the copy: an announcement leads with the news, a lesson with the
+/// claim.
+pub const POST_GOALS: [(&str, &str); 4] = [
+    ("announce", "Announce something"),
+    ("educate", "Teach or explain"),
+    ("promote", "Promote an offer"),
+    ("recruit", "Recruit or invite"),
+];
 
 /// How much of a demo to build, as (value, label). A deck says its size
 /// with the slide count instead.
@@ -254,6 +284,25 @@ pub const DOCUMENT_AXES: [AppAxis; 3] = [
     },
 ];
 
+/// Every app-owned axis only a social asks.
+pub const SOCIAL_AXES: [AppAxis; 3] = [
+    AppAxis {
+        key: "platform",
+        name: "Platform",
+        choices: &PLATFORMS,
+    },
+    AppAxis {
+        key: "format",
+        name: "Format",
+        choices: &FORMATS,
+    },
+    AppAxis {
+        key: "post_goal",
+        name: "Post goal",
+        choices: &POST_GOALS,
+    },
+];
+
 /// Every app-owned axis of every kind.
 fn every_axis() -> impl Iterator<Item = &'static AppAxis> {
     SHARED_AXES
@@ -262,6 +311,7 @@ fn every_axis() -> impl Iterator<Item = &'static AppAxis> {
         .chain(SPEECH_AXES.iter())
         .chain(DECK_AXES.iter())
         .chain(DOCUMENT_AXES.iter())
+        .chain(SOCIAL_AXES.iter())
 }
 
 /// The app-owned axes `kind` asks, shared ones first.
@@ -270,6 +320,7 @@ pub fn app_axes(kind: ArtifactKind) -> impl Iterator<Item = &'static AppAxis> {
         ArtifactKind::Demo => (&[], &DEMO_AXES),
         ArtifactKind::Deck => (&SPEECH_AXES, &DECK_AXES),
         ArtifactKind::Document => (&SPEECH_AXES, &DOCUMENT_AXES),
+        ArtifactKind::Social => (&SPEECH_AXES, &SOCIAL_AXES),
     };
     SHARED_AXES.iter().chain(spoken.iter()).chain(own.iter())
 }
@@ -361,6 +412,21 @@ mod tests {
                 "Page density"
             ]
         );
+        let social: Vec<&str> = app_axes(ArtifactKind::Social)
+            .map(|axis| axis.name)
+            .collect();
+        assert_eq!(
+            social,
+            [
+                "Color mode",
+                "Audience",
+                "Tone",
+                "Evidence",
+                "Platform",
+                "Format",
+                "Post goal"
+            ]
+        );
     }
 
     #[test]
@@ -368,6 +434,14 @@ mod tests {
         for (value, _) in PAPERS {
             assert!(crate::Paper::from_name(value).is_some(), "{value}");
         }
+    }
+
+    #[test]
+    fn the_format_values_are_the_format_names() {
+        for (value, _) in FORMATS {
+            assert!(crate::Format::from_name(value).is_some(), "{value}");
+        }
+        assert_eq!(FORMATS.len(), crate::Format::ALL.len());
     }
 
     #[test]
@@ -430,6 +504,9 @@ mod tests {
             &EVIDENCE_STYLES[..],
             &DOCUMENT_KINDS[..],
             &PAPERS[..],
+            &PLATFORMS[..],
+            &FORMATS[..],
+            &POST_GOALS[..],
         ];
         for choices in banks {
             let values: Vec<&str> = choices.iter().map(|(value, _)| *value).collect();
