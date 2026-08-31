@@ -87,7 +87,7 @@ fn email_document(email: &Email, theme: &Theme, mailing_title: &str) -> EmailHtm
          border=\"0\" bgcolor=\"{background}\"><tr><td align=\"center\">\n\
          <!--[if mso]><table role=\"presentation\" width=\"600\" cellpadding=\"0\" \
          cellspacing=\"0\" border=\"0\"><tr><td><![endif]-->\n\
-         <div style=\"width:600px;max-width:100%;margin:0 auto;font-size:16px;line-height:1.3;\">\n\
+         <div style=\"width:100%;max-width:600px;margin:0 auto;font-size:16px;line-height:1.3;\">\n\
          {body}\
          </div>\n\
          <!--[if mso]></td></tr></table><![endif]-->\n\
@@ -1251,7 +1251,7 @@ mod tests {
                 file.html
                     .contains("<!--[if mso]><table role=\"presentation\" width=\"600\"")
             );
-            assert!(file.html.contains("width:600px;max-width:100%"));
+            assert!(file.html.contains("width:100%;max-width:600px"));
             assert!(file.html.contains("font-size:16px;line-height:1.3"));
             assert!(file.html.contains("@media (max-width:620px)"));
             assert!(!file.html.contains("var("));
