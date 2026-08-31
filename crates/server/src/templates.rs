@@ -25,6 +25,7 @@ use crate::decks::{DeckStore, is_pending_slide};
 use crate::designs::{DesignStore, is_pending_screen};
 use crate::documents::{DocumentStore, is_pending_page};
 use crate::events::ChangeNotifier;
+use crate::prints::{PrintStore, is_pending_sheet};
 use crate::socials::{SocialStore, is_pending_frame};
 
 /// How many screens one template keeps as layout examples. The title
@@ -120,6 +121,9 @@ struct SaveRequest {
     /// The social to save the style of.
     #[serde(default)]
     social_id: Option<String>,
+    /// The print to save the style of.
+    #[serde(default)]
+    print_id: Option<String>,
     /// The name to show in the template list.
     name: String,
 }
@@ -135,6 +139,8 @@ enum TemplateSource {
     Document(String),
     /// The social with this id.
     Social(String),
+    /// The print with this id.
+    Print(String),
 }
 
 /// The one source a save request names, or the message when it names
@@ -157,12 +163,17 @@ fn template_source(request: &SaveRequest) -> Result<TemplateSource, String> {
             .social_id
             .as_ref()
             .map(|id| TemplateSource::Social(id.clone())),
+        request
+            .print_id
+            .as_ref()
+            .map(|id| TemplateSource::Print(id.clone())),
     ];
     let mut sources = named.into_iter().flatten();
     match (sources.next(), sources.next()) {
         (Some(source), None) => Ok(source),
         _ => Err(
-            "name exactly one source: `design_id`, `deck_id`, `document_id`, or `social_id`"
+            "name exactly one source: `design_id`, `deck_id`, `document_id`, `social_id`, or \
+             `print_id`"
                 .to_owned(),
         ),
     }
@@ -663,14 +674,44 @@ async fn social_style(socials: &SocialStore, id: &str) -> Result<SourceStyle, Re
     })
 }
 
-/// Saves the style of one design, deck, document, or social as a
-/// template.
+/// The style of a stored print: its theme, the sheet canvas, and its
+/// first written sheets as screens.
+async fn print_style(prints: &PrintStore, id: &str) -> Result<SourceStyle, Response> {
+    let print = match prints.load(id).await {
+        Ok(Some(print)) => print,
+        Ok(None) => {
+            return Err(api_error::error_response(
+                StatusCode::NOT_FOUND,
+                &format!("no print `{id}`: run `GET /prints` for the list"),
+                Vec::new(),
+            ));
+        }
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    let viewport = print.viewport();
+    Ok(SourceStyle {
+        theme: print.theme,
+        viewport,
+        screens: print
+            .sheets
+            .iter()
+            .filter(|sheet| !is_pending_sheet(sheet))
+            .take(TEMPLATE_SCREEN_LIMIT)
+            .map(|sheet| Screen {
+                name: String::new(),
+                html: sheet.html.clone(),
+                css: sheet.css.clone(),
+                notes: sheet.notes.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// Saves the style of one design, deck, document, social, or print as
+/// a template.
 async fn save_template(
     State(store): State<TemplateStore>,
-    State(designs): State<DesignStore>,
-    State(decks): State<DeckStore>,
-    State(documents): State<DocumentStore>,
-    State(socials): State<SocialStore>,
+    State(stores): State<crate::session_routes::ArtifactStores>,
     State(notifier): State<ChangeNotifier>,
     Json(request): Json<SaveRequest>,
 ) -> Response {
@@ -689,10 +730,11 @@ async fn save_template(
         }
     };
     let (source_id, style) = match &source {
-        TemplateSource::Design(id) => (id.clone(), design_style(&designs, id).await),
-        TemplateSource::Deck(id) => (id.clone(), deck_style(&decks, id).await),
-        TemplateSource::Document(id) => (id.clone(), document_style(&documents, id).await),
-        TemplateSource::Social(id) => (id.clone(), social_style(&socials, id).await),
+        TemplateSource::Design(id) => (id.clone(), design_style(&stores.designs, id).await),
+        TemplateSource::Deck(id) => (id.clone(), deck_style(&stores.decks, id).await),
+        TemplateSource::Document(id) => (id.clone(), document_style(&stores.documents, id).await),
+        TemplateSource::Social(id) => (id.clone(), social_style(&stores.socials, id).await),
+        TemplateSource::Print(id) => (id.clone(), print_style(&stores.prints, id).await),
     };
     let style = match style {
         Ok(style) => style,
@@ -702,7 +744,8 @@ async fn save_template(
         return api_error::error_response(
             StatusCode::BAD_REQUEST,
             &format!(
-                "`{source_id}` has no written screens, slides, pages, or frames to save as a template"
+                "`{source_id}` has no written screens, slides, pages, frames, or sheets to save \
+                 as a template"
             ),
             Vec::new(),
         );
@@ -806,6 +849,7 @@ mod tests {
             deck_id: Some("b".to_owned()),
             document_id: None,
             social_id: None,
+            print_id: None,
             name: "x".to_owned(),
         };
         assert!(template_source(&both).is_err());
@@ -814,6 +858,7 @@ mod tests {
             deck_id: None,
             document_id: None,
             social_id: None,
+            print_id: None,
             name: "x".to_owned(),
         };
         assert!(template_source(&none).is_err());
@@ -822,6 +867,7 @@ mod tests {
             deck_id: Some("talk".to_owned()),
             document_id: None,
             social_id: None,
+            print_id: None,
             name: "x".to_owned(),
         };
         assert_eq!(
@@ -833,6 +879,7 @@ mod tests {
             deck_id: None,
             document_id: Some("report".to_owned()),
             social_id: None,
+            print_id: None,
             name: "x".to_owned(),
         };
         assert_eq!(
@@ -844,6 +891,7 @@ mod tests {
             deck_id: None,
             document_id: None,
             social_id: Some("launch".to_owned()),
+            print_id: None,
             name: "x".to_owned(),
         };
         assert_eq!(
@@ -855,6 +903,7 @@ mod tests {
             deck_id: None,
             document_id: Some("report".to_owned()),
             social_id: Some("launch".to_owned()),
+            print_id: None,
             name: "x".to_owned(),
         };
         assert!(template_source(&document_and_social).is_err());

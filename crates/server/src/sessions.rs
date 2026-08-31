@@ -131,6 +131,19 @@ pub struct RunOptions {
     /// agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_count: Option<u32>,
+    /// What kind of print piece to lay out, one of `PRINT_KINDS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub print_kind: Option<String>,
+    /// The paper size a print is laid out on, one of `PRINT_SIZES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub print_size: Option<String>,
+    /// How a print's sheets are turned, one of `ORIENTATIONS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orientation: Option<String>,
+    /// How many sheets a print run writes. `None` leaves it to the
+    /// agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_count: Option<u32>,
     /// The axes whose value the planner suggested from the request, by
     /// option key. The card shows them as picked and marks them as
     /// suggested. A pick by the user removes the key.
@@ -158,6 +171,9 @@ impl RunOptions {
             "platform" => &self.platform,
             "format" => &self.format,
             "post_goal" => &self.post_goal,
+            "print_kind" => &self.print_kind,
+            "print_size" => &self.print_size,
+            "orientation" => &self.orientation,
             _ => return None,
         })
     }
@@ -180,6 +196,9 @@ impl RunOptions {
             "platform" => &mut self.platform,
             "format" => &mut self.format,
             "post_goal" => &mut self.post_goal,
+            "print_kind" => &mut self.print_kind,
+            "print_size" => &mut self.print_size,
+            "orientation" => &mut self.orientation,
             _ => return None,
         })
     }
@@ -252,6 +271,10 @@ impl Default for RunOptions {
             format: None,
             post_goal: None,
             frame_count: None,
+            print_kind: None,
+            print_size: None,
+            orientation: None,
+            sheet_count: None,
             suggested: Vec::new(),
             variety: default_effort(),
             templates: Vec::new(),
@@ -562,6 +585,9 @@ pub struct SessionView {
     /// The socials that belong to this session. Empty unless the
     /// session is a social session.
     pub socials: Vec<crate::socials::SocialSummary>,
+    /// The prints that belong to this session. Empty unless the
+    /// session is a print session.
+    pub prints: Vec<crate::prints::PrintSummary>,
 }
 
 /// What went wrong in a session operation.

@@ -12,8 +12,8 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use design_model::{
     ArtifactKind, BriefQuestionSet, CUSTOM_ANSWER_LIMIT, DECK_SCENARIOS, FRAME_COUNT_LIMIT,
-    PAGE_COUNT_LIMIT, QuestionAnswer, WorkflowEvent, WorkflowState, app_axes, axis_by_key,
-    is_custom_answer, is_deck_scenario, validate_answers, validate_question_set,
+    PAGE_COUNT_LIMIT, QuestionAnswer, SHEET_COUNT_LIMIT, WorkflowEvent, WorkflowState, app_axes,
+    axis_by_key, is_custom_answer, is_deck_scenario, validate_answers, validate_question_set,
 };
 use serde::Deserialize;
 
@@ -25,6 +25,7 @@ use crate::designs::{DesignStore, is_valid_design_id};
 use crate::documents::DocumentStore;
 use crate::edit_focus::referenced_indexes;
 use crate::events::ChangeNotifier;
+use crate::prints::PrintStore;
 use crate::sessions::{
     AnswerRecord, ChatMessage, NewSession, RunOptions, Session, SessionError, SessionStore,
     SessionSummary, SessionView, is_valid_session_id, new_session_id, session_id_of_artifact,
@@ -80,7 +81,7 @@ fn title_from_request(request: &str) -> String {
     line.chars().take(80).collect()
 }
 
-/// The four artifact stores as one extractor, so a handler that reads
+/// The five artifact stores as one extractor, so a handler that reads
 /// or deletes a session's artifacts takes one argument for them.
 #[derive(Clone)]
 pub(crate) struct ArtifactStores {
@@ -88,6 +89,7 @@ pub(crate) struct ArtifactStores {
     pub(crate) decks: DeckStore,
     pub(crate) documents: DocumentStore,
     pub(crate) socials: SocialStore,
+    pub(crate) prints: PrintStore,
 }
 
 impl axum::extract::FromRef<crate::AppState> for ArtifactStores {
@@ -97,6 +99,7 @@ impl axum::extract::FromRef<crate::AppState> for ArtifactStores {
             decks: state.decks.clone(),
             documents: state.documents.clone(),
             socials: state.socials.clone(),
+            prints: state.prints.clone(),
         }
     }
 }
@@ -126,6 +129,7 @@ async fn build_view(
         decks: Vec::new(),
         documents: Vec::new(),
         socials: Vec::new(),
+        prints: Vec::new(),
     };
     match view.session.artifact_kind {
         ArtifactKind::Demo => {
@@ -161,6 +165,16 @@ async fn build_view(
         ArtifactKind::Social => {
             view.socials = stores
                 .socials
+                .list()
+                .await
+                .map_err(io)?
+                .into_iter()
+                .filter(|summary| session_id_of_artifact(&summary.id) == id)
+                .collect();
+        }
+        ArtifactKind::Print => {
+            view.prints = stores
+                .prints
                 .list()
                 .await
                 .map_err(io)?
@@ -361,6 +375,13 @@ async fn delete_session_artifacts(stores: &ArtifactStores, id: &str) {
             tracing::warn!(session_id = %id, %error, "deleting the session socials failed")
         }
     }
+    match stores.prints.delete_session(id).await {
+        Ok(count) if count > 0 => tracing::info!(session_id = %id, count, "prints deleted"),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(session_id = %id, %error, "deleting the session prints failed")
+        }
+    }
 }
 
 /// Reads a session or turns the miss into a response.
@@ -422,6 +443,13 @@ fn option_problem(options: &RunOptions) -> Option<String> {
     {
         return Some(format!(
             "frame_count must be between 1 and {FRAME_COUNT_LIMIT}, got {count}"
+        ));
+    }
+    if let Some(count) = options.sheet_count
+        && (count == 0 || count > SHEET_COUNT_LIMIT)
+    {
+        return Some(format!(
+            "sheet_count must be between 1 and {SHEET_COUNT_LIMIT}, got {count}"
         ));
     }
     if let Some(variations) = options.variations
@@ -535,6 +563,7 @@ fn regenerate_problem(session: &Session, request: &MessageRequest) -> Option<Str
         design_model::ArtifactKind::Deck => "slide",
         design_model::ArtifactKind::Document => "page",
         design_model::ArtifactKind::Social => "frame",
+        design_model::ArtifactKind::Print => "sheet",
     };
     if referenced_indexes(&request.content, unit).is_empty() {
         return Some(format!(

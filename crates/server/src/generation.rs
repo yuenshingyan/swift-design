@@ -193,6 +193,8 @@ pub struct GenerationEngine {
     /// The social store, for social sessions. `None` refuses social
     /// runs.
     pub(crate) socials: Option<crate::socials::SocialStore>,
+    /// The print store, for print sessions. `None` refuses print runs.
+    pub(crate) prints: Option<crate::prints::PrintStore>,
     pub(crate) sessions: SessionStore,
     address: String,
     pub(crate) notifier: ChangeNotifier,
@@ -359,6 +361,7 @@ impl GenerationEngine {
             decks: None,
             documents: None,
             socials: None,
+            prints: None,
             sessions,
             address,
             notifier,
@@ -384,6 +387,12 @@ impl GenerationEngine {
     /// Lets the engine write socials, for social sessions.
     pub fn with_socials(mut self, socials: crate::socials::SocialStore) -> Self {
         self.socials = Some(socials);
+        self
+    }
+
+    /// Lets the engine write prints, for print sessions.
+    pub fn with_prints(mut self, prints: crate::prints::PrintStore) -> Self {
+        self.prints = Some(prints);
         self
     }
 
@@ -702,6 +711,9 @@ impl GenerationEngine {
             design_model::ArtifactKind::Social => {
                 self.continue_social_requests(&context.session_id).await?
             }
+            design_model::ArtifactKind::Print => {
+                self.continue_print_requests(&context.session_id).await?
+            }
         };
         Ok((!continues.is_empty()).then_some(GenerationTask::Continue(continues)))
     }
@@ -896,6 +908,18 @@ impl GenerationEngine {
                     .unwrap_or(0),
                 None => 0,
             },
+            design_model::ArtifactKind::Print => match &self.prints {
+                Some(prints) => prints
+                    .list()
+                    .await
+                    .map(|rows| {
+                        rows.iter()
+                            .filter(|row| session_id_of_artifact(&row.id) == session_id)
+                            .count()
+                    })
+                    .unwrap_or(0),
+                None => 0,
+            },
         }
     }
 
@@ -938,6 +962,9 @@ impl GenerationEngine {
         }
         if context.request.kind == design_model::ArtifactKind::Social {
             return self.execute_social(client, context, task, log).await;
+        }
+        if context.request.kind == design_model::ArtifactKind::Print {
+            return self.execute_print(client, context, task, log).await;
         }
         match task {
             GenerationTask::Candidates => self.generate_candidates(client, context, log).await,
@@ -1576,6 +1603,11 @@ impl GenerationEngine {
                 design_model::ArtifactKind::Social => {
                     engine
                         .continue_social(&client, &context, &id, &attachments, &share, &log)
+                        .await
+                }
+                design_model::ArtifactKind::Print => {
+                    engine
+                        .continue_print(&client, &context, &id, &attachments, &share, &log)
                         .await
                 }
             };
@@ -2805,6 +2837,12 @@ impl Validated for design_model::Document {
 }
 
 impl Validated for design_model::Social {
+    fn problems(&self) -> Vec<design_model::ValidationError> {
+        self.validate()
+    }
+}
+
+impl Validated for design_model::Print {
     fn problems(&self) -> Vec<design_model::ValidationError> {
         self.validate()
     }

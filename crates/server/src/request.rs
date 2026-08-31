@@ -111,6 +111,31 @@ pub(crate) fn request_input(request: &SessionRequest) -> String {
                 input.push_str(&format!("Frame count the user asked for: {count}\n"));
             }
         }
+        ArtifactKind::Print => {
+            // The size and orientation axes print their labels below;
+            // the canvas line gives the model the px size to lay out
+            // for.
+            let size = request
+                .options
+                .print_size
+                .as_deref()
+                .and_then(design_model::PrintSize::from_name)
+                .unwrap_or_default();
+            let orientation = request
+                .options
+                .orientation
+                .as_deref()
+                .and_then(design_model::Orientation::from_name)
+                .unwrap_or_default();
+            let viewport = orientation.apply(size.viewport());
+            input.push_str(&format!(
+                "Canvas: {} by {} px per sheet\n",
+                viewport.width, viewport.height
+            ));
+            if let Some(count) = request.options.sheet_count {
+                input.push_str(&format!("Sheet count the user asked for: {count}\n"));
+            }
+        }
     }
     // The app's own answers, which recur in every session. An axis
     // the user has not picked is absent, so the agent decides it. A
