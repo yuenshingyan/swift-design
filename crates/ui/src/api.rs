@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 
 use design_model::{
-    ArtifactKind, BriefQuestionSet, DECK_VIEWPORT, Deck, Design, Document, Format, Orientation,
-    Paper, Print, PrintSize, QuestionAnswer, Social, WorkflowState,
+    ArtifactKind, BriefQuestionSet, DECK_VIEWPORT, Deck, Design, Document, EmailFormat, Format,
+    Mailing, Orientation, Paper, Print, PrintSize, QuestionAnswer, Social, WorkflowState,
 };
 use gloo_net::http::{Request, RequestBuilder, Response};
 use serde::{Deserialize, Serialize};
@@ -254,6 +254,16 @@ pub struct SessionOptions {
     /// agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sheet_count: Option<u32>,
+    /// What kind of email to write, one of `EMAIL_KINDS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_kind: Option<String>,
+    /// The canvas an email is laid out on, one of `EMAIL_FORMATS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_format: Option<String>,
+    /// How many emails a mailing run writes. `None` leaves it to the
+    /// agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_count: Option<u32>,
     /// The axes the planner filled from the request, by option key.
     /// The card marks them as suggested until the user picks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -292,6 +302,9 @@ impl Default for SessionOptions {
             print_size: None,
             orientation: None,
             sheet_count: None,
+            email_kind: None,
+            email_format: None,
+            email_count: None,
             suggested: Vec::new(),
         }
     }
@@ -345,6 +358,10 @@ pub struct SessionView {
     /// session is a print session.
     #[serde(default)]
     pub prints: Vec<PrintSummary>,
+    /// The mailings that belong to this session. Empty unless the
+    /// session is a mailing session.
+    #[serde(default)]
+    pub mailings: Vec<MailingSummary>,
 }
 
 /// Body of `POST /sessions`.
@@ -352,7 +369,7 @@ pub struct SessionView {
 pub struct CreateSessionRequest<'value> {
     /// The user's request.
     pub request: &'value str,
-    /// `demo`, `deck`, `document`, `social`, or `print`.
+    /// `demo`, `deck`, `document`, `social`, `print`, or `mailing`.
     pub artifact_kind: &'value str,
     /// How hard to work.
     pub options: CreateOptions<'value>,
@@ -700,6 +717,18 @@ pub async fn fork_social(id: &str) -> Result<String, String> {
 pub async fn fork_print(id: &str) -> Result<String, String> {
     let request = built(Request::post(&format!("/prints/{id}/fork")))?;
     let response = send_checked(request, "POST /prints/fork").await?;
+    response
+        .json::<ForkResponse>()
+        .await
+        .map(|fork| fork.id)
+        .map_err(|error| error.to_string())
+}
+
+/// Copies one mailing candidate under the next free number of its
+/// session. Returns the new id.
+pub async fn fork_mailing(id: &str) -> Result<String, String> {
+    let request = built(Request::post(&format!("/mailings/{id}/fork")))?;
+    let response = send_checked(request, "POST /mailings/fork").await?;
     response
         .json::<ForkResponse>()
         .await
@@ -1175,6 +1204,115 @@ pub async fn restore_print_history(id: &str, stamp: &str) -> Result<(), String> 
     .await
 }
 
+// -- Mailings ------------------------------------------------------------
+
+/// One row of `GET /mailings`, mirrored from the server.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct MailingSummary {
+    /// Mailing id used in `/mailings/{id}` routes.
+    pub id: String,
+    /// Mailing title.
+    pub title: String,
+    /// Theme name.
+    pub theme: String,
+    /// The format the emails are laid out on.
+    #[serde(default)]
+    pub format: EmailFormat,
+    /// Number of emails.
+    pub email_count: usize,
+    /// Number of titles in the planned outline.
+    #[serde(default)]
+    pub outline_count: usize,
+    /// Number of placeholder emails a run left behind.
+    #[serde(default)]
+    pub pending_count: usize,
+}
+
+impl MailingSummary {
+    /// True when the mailing is a preview that waits for its emails.
+    pub fn is_preview(&self) -> bool {
+        self.outline_count > self.email_count
+    }
+
+    /// True when the mailing still owes emails.
+    pub fn is_unfinished(&self) -> bool {
+        self.is_preview() || self.pending_count > 0
+    }
+
+    /// The px canvas of every email.
+    pub fn viewport(&self) -> design_model::Viewport {
+        self.format.viewport()
+    }
+
+    /// The CSS aspect-ratio of the mailing's canvas.
+    pub fn aspect_ratio(&self) -> String {
+        self.viewport().aspect_ratio_css()
+    }
+}
+
+/// Fetches the mailing listing.
+pub async fn fetch_mailing_list() -> Result<Vec<MailingSummary>, String> {
+    get_json("/mailings").await
+}
+
+/// Fetches one mailing.
+pub async fn fetch_mailing(id: &str) -> Result<Mailing, String> {
+    get_json(&format!("/mailings/{id}")).await
+}
+
+/// Saves one mailing as a user edit. `Err` carries one message per
+/// problem, so the editor can show every validation error at once.
+pub async fn save_mailing(id: &str, mailing: &Mailing) -> Result<(), Vec<String>> {
+    let response = Request::put(&format!("/mailings/{id}"))
+        .header("x-swift-design-author", "user")
+        .json(mailing)
+        .map_err(|error| vec![error.to_string()])?
+        .send()
+        .await
+        .map_err(|error| vec![error.to_string()])?;
+    if response.ok() {
+        return Ok(());
+    }
+    let status = response.status();
+    match response.json::<ErrorEnvelope>().await {
+        Ok(envelope) if !envelope.error.details.is_empty() => Err(envelope.error.details),
+        Ok(envelope) => Err(vec![envelope.error.message]),
+        Err(_) => Err(vec![format!(
+            "PUT /mailings/{id} failed with status {status}"
+        )]),
+    }
+}
+
+/// Deletes one mailing.
+pub async fn delete_mailing(id: &str) -> Result<(), String> {
+    send_empty(
+        Request::delete(&format!("/mailings/{id}")),
+        "DELETE /mailings",
+    )
+    .await
+}
+
+/// Fetches the field paths the user changed in this mailing.
+pub async fn fetch_mailing_user_paths(id: &str) -> Result<Vec<String>, String> {
+    get_json::<AuthorsResponse>(&format!("/mailings/{id}/authors"))
+        .await
+        .map(|authors| authors.user_paths)
+}
+
+/// Fetches the saved snapshots of one mailing.
+pub async fn fetch_mailing_history(id: &str) -> Result<Vec<HistorySnapshot>, String> {
+    get_json(&format!("/mailings/{id}/history")).await
+}
+
+/// Writes one snapshot back as the current mailing.
+pub async fn restore_mailing_history(id: &str, stamp: &str) -> Result<(), String> {
+    send_empty(
+        Request::post(&format!("/mailings/{id}/history/{stamp}/restore")),
+        "restore",
+    )
+    .await
+}
+
 // -- Templates -----------------------------------------------------------
 
 /// One row of `GET /templates`.
@@ -1256,6 +1394,8 @@ struct SaveTemplateRequest<'value> {
     social_id: Option<&'value str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     print_id: Option<&'value str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mailing_id: Option<&'value str>,
     name: &'value str,
 }
 
@@ -1272,6 +1412,7 @@ pub async fn save_template(design_id: &str, name: &str) -> Result<TemplateSummar
         document_id: None,
         social_id: None,
         print_id: None,
+        mailing_id: None,
         name,
     })
     .await
@@ -1285,6 +1426,7 @@ pub async fn save_deck_template(deck_id: &str, name: &str) -> Result<TemplateSum
         document_id: None,
         social_id: None,
         print_id: None,
+        mailing_id: None,
         name,
     })
     .await
@@ -1301,6 +1443,7 @@ pub async fn save_document_template(
         document_id: Some(document_id),
         social_id: None,
         print_id: None,
+        mailing_id: None,
         name,
     })
     .await
@@ -1314,6 +1457,7 @@ pub async fn save_social_template(social_id: &str, name: &str) -> Result<Templat
         document_id: None,
         social_id: Some(social_id),
         print_id: None,
+        mailing_id: None,
         name,
     })
     .await
@@ -1327,6 +1471,24 @@ pub async fn save_print_template(print_id: &str, name: &str) -> Result<TemplateS
         document_id: None,
         social_id: None,
         print_id: Some(print_id),
+        mailing_id: None,
+        name,
+    })
+    .await
+}
+
+/// Saves the style of one mailing as a template.
+pub async fn save_mailing_template(
+    mailing_id: &str,
+    name: &str,
+) -> Result<TemplateSummary, String> {
+    save_template_from(SaveTemplateRequest {
+        design_id: None,
+        deck_id: None,
+        document_id: None,
+        social_id: None,
+        print_id: None,
+        mailing_id: Some(mailing_id),
         name,
     })
     .await
