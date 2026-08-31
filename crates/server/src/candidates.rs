@@ -21,7 +21,9 @@ use crate::decks::DeckStore;
 use crate::designs::{DesignStore, is_valid_design_id};
 use crate::documents::DocumentStore;
 use crate::events::ChangeNotifier;
+use crate::session_routes::ArtifactStores;
 use crate::sessions::SessionStore;
+use crate::socials::SocialStore;
 
 /// Most variations one base id may have. Keeps generation cost bounded.
 pub const CANDIDATE_LIMIT: usize = 5;
@@ -143,11 +145,26 @@ async fn document_cards(store: &DocumentStore, base: &str) -> anyhow::Result<Vec
         .collect())
 }
 
+/// The social candidates of `base` as cards, sorted by id.
+async fn social_cards(store: &SocialStore, base: &str) -> anyhow::Result<Vec<CandidateCard>> {
+    let prefix = format!("{base}-candidate-");
+    Ok(store
+        .list()
+        .await?
+        .into_iter()
+        .filter(|summary| summary.id.starts_with(&prefix))
+        .map(|summary| CandidateCard {
+            preview_url: format!("/socials/{}/render", summary.id),
+            ratio: summary.format.viewport().aspect_ratio_css(),
+            id: summary.id,
+            theme: summary.theme,
+        })
+        .collect())
+}
+
 /// Shows every candidate for `base` side by side with a choose button.
 async fn chooser(
-    State(designs): State<DesignStore>,
-    State(decks): State<DeckStore>,
-    State(documents): State<DocumentStore>,
+    State(stores): State<ArtifactStores>,
     State(sessions): State<SessionStore>,
     Path(base): Path<String>,
 ) -> Response {
@@ -156,9 +173,10 @@ async fn chooser(
     }
     let kind = session_kind(&sessions, &base).await;
     let cards = match kind {
-        ArtifactKind::Demo => design_cards(&designs, &base).await,
-        ArtifactKind::Deck => deck_cards(&decks, &base).await,
-        ArtifactKind::Document => document_cards(&documents, &base).await,
+        ArtifactKind::Demo => design_cards(&stores.designs, &base).await,
+        ArtifactKind::Deck => deck_cards(&stores.decks, &base).await,
+        ArtifactKind::Document => document_cards(&stores.documents, &base).await,
+        ArtifactKind::Social => social_cards(&stores.socials, &base).await,
     };
     let mut cards = match cards {
         Ok(cards) => cards,
@@ -181,9 +199,7 @@ async fn chooser(
 /// Saves a copy of the chosen candidate as `base`. The candidates
 /// stay, so the user can come back and pick another.
 async fn choose(
-    State(designs): State<DesignStore>,
-    State(decks): State<DeckStore>,
-    State(documents): State<DocumentStore>,
+    State(stores): State<ArtifactStores>,
     State(sessions): State<SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path(base): Path<String>,
@@ -201,9 +217,10 @@ async fn choose(
     }
     let kind = session_kind(&sessions, &base).await;
     let copied = match kind {
-        ArtifactKind::Demo => copy_design(&designs, &request.id, &base).await,
-        ArtifactKind::Deck => copy_deck(&decks, &request.id, &base).await,
-        ArtifactKind::Document => copy_document(&documents, &request.id, &base).await,
+        ArtifactKind::Demo => copy_design(&stores.designs, &request.id, &base).await,
+        ArtifactKind::Deck => copy_deck(&stores.decks, &request.id, &base).await,
+        ArtifactKind::Document => copy_document(&stores.documents, &request.id, &base).await,
+        ArtifactKind::Social => copy_social(&stores.socials, &request.id, &base).await,
     };
     if let Err(response) = copied {
         return response;
@@ -275,12 +292,30 @@ pub(crate) async fn copy_document(
         .map_err(|error| api_error::internal_error(&error))
 }
 
+/// Copies the social `id` to `base`. The copy is agent-authored.
+pub(crate) async fn copy_social(store: &SocialStore, id: &str, base: &str) -> Result<(), Response> {
+    let social = match store.load(id).await {
+        Ok(Some(social)) => social,
+        Ok(None) => return Err(api_error::social_not_found(id)),
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    store
+        .save(base, &social)
+        .await
+        .map_err(|error| api_error::internal_error(&error))?;
+    store
+        .clear_user_paths(base)
+        .await
+        .map_err(|error| api_error::internal_error(&error))
+}
+
 /// The word for one artifact of `kind`, for the page text.
 fn unit_name(kind: ArtifactKind) -> &'static str {
     match kind {
         ArtifactKind::Demo => "design",
         ArtifactKind::Deck => "deck",
         ArtifactKind::Document => "document",
+        ArtifactKind::Social => "social post",
     }
 }
 
@@ -291,6 +326,7 @@ fn chosen_url(kind: ArtifactKind, base: &str) -> String {
         ArtifactKind::Demo => format!("/designs/{base}/render"),
         ArtifactKind::Deck => format!("/decks/{base}/render"),
         ArtifactKind::Document => format!("/documents/{base}/render"),
+        ArtifactKind::Social => format!("/socials/{base}/render"),
     }
 }
 
@@ -374,7 +410,7 @@ mod tests {
 
     use super::{
         CandidateCard, candidate_id, candidate_number_of, chooser_page, chosen_url, deck_cards,
-        design_cards, document_cards, next_candidate_number,
+        design_cards, document_cards, next_candidate_number, social_cards,
     };
     use axum::http::StatusCode;
 
@@ -382,7 +418,32 @@ mod tests {
     use crate::designs::DesignStore;
     use crate::documents::DocumentStore;
     use crate::sessions::SessionStore;
-    use crate::test_support::{sample_deck, sample_document, send, test_application};
+    use crate::socials::SocialStore;
+    use crate::test_support::{
+        sample_deck, sample_document, sample_social, send, test_application,
+    };
+
+    #[tokio::test]
+    async fn social_cards_carry_the_format_ratio_and_the_social_url() {
+        let directory = tempfile::tempdir().unwrap();
+        let socials = SocialStore::new(directory.path().join("socials"));
+        socials
+            .save("launch-candidate-1", &sample_social())
+            .await
+            .unwrap();
+        let mut story = sample_social();
+        story.format = design_model::Format::Story;
+        socials.save("launch-candidate-2", &story).await.unwrap();
+        let cards = social_cards(&socials, "launch").await.unwrap();
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].preview_url, "/socials/launch-candidate-1/render");
+        assert_eq!(cards[0].ratio, "1080 / 1350");
+        assert_eq!(cards[1].ratio, "1080 / 1920");
+        assert_eq!(
+            chosen_url(design_model::ArtifactKind::Social, "launch"),
+            "/socials/launch/render"
+        );
+    }
 
     #[tokio::test]
     async fn document_cards_carry_the_paper_ratio_and_the_document_url() {
