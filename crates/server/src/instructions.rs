@@ -7,16 +7,19 @@
 //! agent interface. Instruction strings follow Simplified Technical
 //! English.
 //!
-//! There are three artifact kinds. A demo session writes designs
+//! There are four artifact kinds. A demo session writes designs
 //! (screens on a device viewport). A deck session writes decks (slides
 //! on a 1920 by 1080 px canvas). A document session writes documents
-//! (pages on A4 or Letter paper). Each kind has its own rule list.
+//! (pages on A4 or Letter paper). A social session writes socials
+//! (frames on a square, portrait, story, or landscape canvas). Each
+//! kind has its own rule list.
 
 use axum::routing::get;
 use axum::{Json, Router};
-use design_model::{Deck, Design, Document, QUESTIONS_PER_TURN_LIMIT};
+use design_model::{Deck, Design, Document, QUESTIONS_PER_TURN_LIMIT, Social};
 
-/// Rules every screen, slide, and page follow. Shared by every kind.
+/// Rules every screen, slide, page, and frame follow. Shared by every
+/// kind.
 const SHARED_RULES: [&str; 6] = [
     "The server scopes your CSS to the screen, slide, or page. Write plain selectors such as `.title` or `h1`. Do not write `html`, `body`, or `:root` selectors. Do not use `@import`. `@media`, `@keyframes`, and `@font-face` are allowed.",
     "Use the theme through CSS variables: `--background`, `--text`, `--accent`, `--muted`, `--heading-font`, `--body-font`, `--mono-font`. Write other colors as #rrggbb.",
@@ -83,10 +86,30 @@ pub const DOCUMENT_RULES: &[&str] = &[
     "A document has no `transition` field.",
 ];
 
-/// Chart rules for data screens, slides, and pages. Simplified Technical
-/// English.
+/// Social content rules, shared by the agent instructions and the
+/// built-in generation engine. Simplified Technical English.
+pub const SOCIAL_RULES: &[&str] = &[
+    "A frame is one HTML fragment in `html` and one CSS block in `css`. One frame is a single post. Two or more frames are a carousel, in swipe order.",
+    "Design each frame for the px canvas of the social's `format`: 1080 by 1080 px for `square`, 1080 by 1350 px for `portrait` (the default), 1080 by 1920 px for `story`, 1200 by 630 px for `landscape`. A social has no `viewport` field. Use px units. Do not use vw, vh, vmin, vmax, or container units.",
+    "Lay out with flex, grid, or absolute positioning. The frame root is position: relative, the format size, overflow: hidden. Do not add an outer box of your own with a fixed height and overflow: hidden. Such a box hides overflow from the fit.",
+    SHARED_RULES[0],
+    SHARED_RULES[1],
+    SHARED_RULES[2],
+    SHARED_RULES[3],
+    SHARED_RULES[4],
+    "Give every id and @keyframes name a prefix unique to the frame, such as `f3-`.",
+    "Font sizes for a phone screen: titles 72 to 120px, body 36 to 48px, captions 28 to 32px. Keep all text inside the frame with margins of at least 96px. Give boxes enough height for every line. Put at most 25 words on one frame. A frame is read on a phone in two seconds.",
+    SHARED_RULES[5],
+    "The first frame is the hook: one claim in large type that stops the scroll. The last frame of a carousel is the call to action. Put the caption to post with the frame, hashtags included, in `notes`. The renderer does not show notes on the frame.",
+    "Keep the branding the same on every frame: the same fonts, the same palette, the same corner mark or logo position, so the carousel reads as one post.",
+    "A frame is a picture in a feed, not a page that is clicked. Do not write links between frames, `<details>`, `<input>`, or any control. Write a web address as plain text.",
+    "A social has no `transition` field.",
+];
+
+/// Chart rules for data screens, slides, pages, and frames. Simplified
+/// Technical English.
 pub const CHART_RULES: &[&str] = &[
-    "Draw a chart as inline SVG in the screen, slide, or page html.",
+    "Draw a chart as inline SVG in the screen, slide, page, or frame html.",
     "Do not load a chart library.",
     "Do not write a `<script>` element.",
     "Give the SVG a `viewBox` attribute. Do not set a fixed pixel width on the SVG.",
@@ -122,12 +145,18 @@ pub fn routes() -> Router<crate::AppState> {
         .route("/schemas/design", get(get_design_schema))
         .route("/schemas/deck", get(get_deck_schema))
         .route("/schemas/document", get(get_document_schema))
+        .route("/schemas/social", get(get_social_schema))
         .route("/schemas/question-set", get(get_question_set_schema))
 }
 
 /// Returns the document JSON Schema, generated from the document types.
 async fn get_document_schema() -> Json<schemars::Schema> {
     Json(schemars::schema_for!(Document))
+}
+
+/// Returns the social JSON Schema, generated from the social types.
+async fn get_social_schema() -> Json<schemars::Schema> {
+    Json(schemars::schema_for!(Social))
 }
 
 /// Returns the design JSON Schema, generated from the design types.
@@ -154,20 +183,22 @@ async fn get_instructions() -> Json<serde_json::Value> {
 /// The build steps, in order. One instruction per sentence.
 fn steps() -> Vec<String> {
     vec![
-        "GET /schemas/design, GET /schemas/deck, GET /schemas/document, and GET /schemas/question-set. Read the JSON Schemas.".to_owned(),
-        "GET /sessions/{id}. Read the request, the artifact_kind, the options, the state, the messages, the question sets, and the answers. The artifact_kind is `demo`, `deck`, or `document`. A demo session writes designs. A deck session writes decks. A document session writes documents. There is no brief: the request and the answers are the input.".to_owned(),
+        "GET /schemas/design, GET /schemas/deck, GET /schemas/document, GET /schemas/social, and GET /schemas/question-set. Read the JSON Schemas.".to_owned(),
+        "GET /sessions/{id}. Read the request, the artifact_kind, the options, the state, the messages, the question sets, and the answers. The artifact_kind is `demo`, `deck`, `document`, or `social`. A demo session writes designs. A deck session writes decks. A document session writes documents. A social session writes socials. There is no brief: the request and the answers are the input.".to_owned(),
         format!("Plan the turn. When you need a choice from the user, PUT /sessions/{{id}}/question-set with a BriefQuestionSet: at most {limit} questions, each with 2 to 4 short options and allow_other true, none required, can_proceed_with_assumptions true. Use single_select when the options rule each other out. Use multi_select when the user can pick more than one at once. The app adds a skip choice. Write every option from the request and the source files, in their words. An option that would fit any other project is wrong. Name the real thing the option builds. The session moves to clarifying. Then stop. After {answered} answered questions about one request, do not ask more about it. A later request for a change starts fresh: ask when the change is unclear.", limit = QUESTIONS_PER_TURN_LIMIT, answered = crate::planner::ANSWERED_QUESTION_LIMIT),
-        "The app asks the user for these, not you: the artifact kind, how the colors read, the number of variations; for a demo how much to build, what kind of product it is, what state the screens show, and the canvases; for a deck the audience, the tone, the scenario, the number of slides, how much goes on a slide, how much it leans on data, and how different the candidates are; for a document the audience, the tone, how much it leans on data, what kind of document it is, the paper, how much goes on a page, the number of pages, and how different the candidates are. Never ask about them, and never ask about them in other words. Ask only what this request raises and that list does not cover, such as the features to show or the data on a screen. Ask nothing when the request and the source files already say enough. Read them from the session options and follow them. A demo with several platforms wants one design per canvas: write one file per canvas, each with that canvas in `viewport`.".to_owned(),
+        "The app asks the user for these, not you: the artifact kind, how the colors read, the number of variations; for a demo how much to build, what kind of product it is, what state the screens show, and the canvases; for a deck the audience, the tone, the scenario, the number of slides, how much goes on a slide, how much it leans on data, and how different the candidates are; for a document the audience, the tone, how much it leans on data, what kind of document it is, the paper, how much goes on a page, the number of pages, and how different the candidates are; for a social the audience, the tone, how much it leans on data, the platform, the format, what the post is for, the number of frames, and how different the candidates are. Never ask about them, and never ask about them in other words. Ask only what this request raises and that list does not cover, such as the features to show or the data on a screen. Ask nothing when the request and the source files already say enough. Read them from the session options and follow them. A demo with several platforms wants one design per canvas: write one file per canvas, each with that canvas in `viewport`.".to_owned(),
         "When you know enough, write. First POST /sessions/{id}/generate: the session moves to generating and accepts artifact writes; in any other state the server answers 409. Demo session: write the design as JSON that conforms to GET /schemas/design. PUT it to /designs/{id}-candidate-1. Use the session id as the base. Number a later run after the candidates the session has: with candidates 1 to 3 present, write candidate 4. The browser shows the candidates.".to_owned(),
         "Deck session: write the deck as JSON that conforms to GET /schemas/deck. The deck has `slides`, not `screens`, and no `viewport`. PUT it to /decks/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
         "Document session: write the document as JSON that conforms to GET /schemas/document. The document has `pages` and `paper`, and no `viewport`. Set `paper` to the paper in the session options: `a4` or `letter`. PUT it to /documents/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
+        "Social session: write the social as JSON that conforms to GET /schemas/social. The social has `frames` and `format`, and no `viewport`. Set `format` to the format in the session options: `square`, `portrait`, `story`, or `landscape`. PUT it to /socials/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
         "A 422 response lists every problem in error.details. Fix each one. PUT again.".to_owned(),
-        "When the user asks for a change in the chat while an artifact is open, edit that artifact and PUT it again. When no artifact is open, write new candidates. A message that pins two or more candidates and asks to combine parts of them is a merge: write one new candidate under the next free number, and take each part from the candidate the user names for it. A message with is_regenerate true names units like `[screen 2]`, `[slide 2]`, or `[page 2]`: write those units anew, without their old markup, and keep the rest. POST /designs/{id}/fork, POST /decks/{id}/fork, or POST /documents/{id}/fork copies a candidate to the next free number; the user presses Fork for that, you do not.".to_owned(),
+        "When the user asks for a change in the chat while an artifact is open, edit that artifact and PUT it again. When no artifact is open, write new candidates. A message that pins two or more candidates and asks to combine parts of them is a merge: write one new candidate under the next free number, and take each part from the candidate the user names for it. A message with is_regenerate true names units like `[screen 2]`, `[slide 2]`, `[page 2]`, or `[frame 2]`: write those units anew, without their old markup, and keep the rest. POST /designs/{id}/fork, POST /decks/{id}/fork, POST /documents/{id}/fork, or POST /socials/{id}/fork copies a candidate to the next free number; the user presses Fork for that, you do not.".to_owned(),
         "GET /uploads?session={id} lists the source files of that session. Each row has name, size_bytes, content_type, and is_image. GET /uploads/{name} returns the file. Use an image row as `<img src='/uploads/{name}'>`. A file belongs to one session: never read another session's files.".to_owned(),
         "After you save a design, look at it: GET /designs/{id}/screens/{n}.png returns a PNG of screen n, 1-based. It needs Chrome or Chromium and answers 503 without one. Review every screen for overlap, overflow, empty space, and weak contrast. Fix what you see and PUT the design again. GET /designs/{id}/export returns the design as one HTML file. A design has no PDF export.".to_owned(),
         "After you save a deck, look at it: GET /decks/{id}/slides/{n}.png returns a PNG of slide n, 1-based. Review every slide the same way and PUT the deck again. GET /decks/{id}/export returns the deck as one HTML file. GET /decks/{id}/export.pdf returns it as a PDF, one page per slide. GET /decks/{id}/export.pptx returns it as a PowerPoint file. GET /decks/{id}/present is the presenter view with the notes.".to_owned(),
         "After you save a document, look at it: GET /documents/{id}/pages/{n}.png returns a PNG of page n, 1-based. Review every page the same way and PUT the document again. GET /documents/{id}/export returns the document as one HTML file. GET /documents/{id}/export.pdf returns it as a PDF, one sheet per page. GET /documents/{id}/export.docx returns it as a Word file.".to_owned(),
-        "When the design, the deck, or the document is written, POST /sessions/{id}/complete, or exit with code 0. The session moves to reviewing.".to_owned(),
+        "After you save a social, look at it: GET /socials/{id}/frames/{n}.png returns a PNG of frame n, 1-based. Review every frame the same way and PUT the social again. GET /socials/{id}/export returns the social as one HTML file. GET /socials/{id}/export.pdf returns it as a PDF, one sheet per frame, the file a LinkedIn carousel takes. GET /socials/{id}/export.zip returns one PNG per frame in a zip, the files an Instagram carousel takes.".to_owned(),
+        "When the design, the deck, the document, or the social is written, POST /sessions/{id}/complete, or exit with code 0. The session moves to reviewing.".to_owned(),
         "GET /events returns {\"revision\": n}. The revision increases when data changes. To wait for a change in one run, call GET /events?after={revision}&wait=25 in a loop. Each call returns within the wait time, so loop; do not treat a timeout as an error.".to_owned(),
     ]
 }
@@ -180,6 +211,7 @@ fn routes_map() -> serde_json::Value {
         ("schema_design", "GET /schemas/design"),
         ("schema_deck", "GET /schemas/deck"),
         ("schema_document", "GET /schemas/document"),
+        ("schema_social", "GET /schemas/social"),
         ("schema_question_set", "GET /schemas/question-set"),
         ("session", "GET /sessions/{id}"),
         ("question_set", "PUT /sessions/{id}/question-set"),
@@ -209,9 +241,17 @@ fn routes_map() -> serde_json::Value {
         ("export_document_html", "GET /documents/{id}/export"),
         ("export_document_pdf", "GET /documents/{id}/export.pdf"),
         ("export_docx", "GET /documents/{id}/export.docx"),
+        ("save_social", "PUT /socials/{id}"),
+        ("check_social", "POST /socials/render"),
+        ("render_social", "GET /socials/{id}/render"),
+        ("frame_image", "GET /socials/{id}/frames/{n}.png"),
+        ("export_social_html", "GET /socials/{id}/export"),
+        ("export_social_pdf", "GET /socials/{id}/export.pdf"),
+        ("export_social_zip", "GET /socials/{id}/export.zip"),
         ("fork_design", "POST /designs/{id}/fork"),
         ("fork_deck", "POST /decks/{id}/fork"),
         ("fork_document", "POST /documents/{id}/fork"),
+        ("fork_social", "POST /socials/{id}/fork"),
         ("chooser", "GET /candidates/{base}"),
         ("templates", "GET /templates"),
         ("template", "GET /templates/{id}"),
@@ -235,27 +275,32 @@ fn instructions() -> serde_json::Value {
     let example_document: serde_json::Value =
         serde_json::from_str(include_str!("../../../fixtures/sample-document.json"))
             .unwrap_or_default();
+    let example_social: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/sample-social.json"))
+            .unwrap_or_default();
     serde_json::json!({
-        "purpose": "Turn a request into HTML designs, decks, or documents: ask a few questions in the chat, write candidates, then edit them from the chat. Swift Design keeps the workflow state, validates, renders, and lets the user edit. Swift Design makes no LLM API calls.",
-        "session": "The run works on one session. Its id is in the SWIFT_DESIGN_SESSION_ID environment variable. The mode is in SWIFT_DESIGN_RUN_MODE: generation. The artifact kind is in SWIFT_DESIGN_ARTIFACT_KIND: demo, deck, or document. GET /sessions/{id} returns the state, the artifact_kind, the options, the question sets, the answers, and the messages.",
+        "purpose": "Turn a request into HTML designs, decks, documents, or social posts: ask a few questions in the chat, write candidates, then edit them from the chat. Swift Design keeps the workflow state, validates, renders, and lets the user edit. Swift Design makes no LLM API calls.",
+        "session": "The run works on one session. Its id is in the SWIFT_DESIGN_SESSION_ID environment variable. The mode is in SWIFT_DESIGN_RUN_MODE: generation. The artifact kind is in SWIFT_DESIGN_ARTIFACT_KIND: demo, deck, document, or social. GET /sessions/{id} returns the state, the artifact_kind, the options, the question sets, the answers, and the messages.",
         "kinds": {
             "demo": "A software demo: a landing page, app screens, or a similar layout on a device viewport. Written as a design with `screens` and a `viewport`. Saved under /designs.",
             "deck": "A slide presentation on a 1920 by 1080 px canvas. Written as a deck with `slides` and no `viewport`. Saved under /decks.",
             "document": "A paged document on A4 or Letter paper: a report, a memo, a proposal, a letter, or a guide. Written as a document with `pages` and `paper`, and no `viewport`. Saved under /documents.",
+            "social": "A social post or a carousel on a square, portrait, story, or landscape canvas, for Instagram, LinkedIn, X, or Facebook. Written as a social with `frames` and `format`, and no `viewport`. Saved under /socials.",
         },
         "steps": steps(),
         "demo_rules": DEMO_RULES,
         "deck_rules": DECK_RULES,
         "document_rules": DOCUMENT_RULES,
+        "social_rules": SOCIAL_RULES,
         "charts": {
             "rules": CHART_RULES,
             "example": CHART_EXAMPLE,
         },
         "conventions": {
-            "canvas": "a design's `viewport` in px (default 1440 by 900); a deck's fixed 1920 by 1080; a document's `paper`: 794 by 1123 for a4, 816 by 1056 for letter. Use px units. The server scales the canvas to any frame.",
+            "canvas": "a design's `viewport` in px (default 1440 by 900); a deck's fixed 1920 by 1080; a document's `paper`: 794 by 1123 for a4, 816 by 1056 for letter; a social's `format`: 1080 by 1080 for square, 1080 by 1350 for portrait, 1080 by 1920 for story, 1200 by 630 for landscape. Use px units. The server scales the canvas to any frame.",
             "css_variables": ["--background", "--text", "--accent", "--muted", "--heading-font", "--body-font", "--mono-font"],
             "base_styles": "32px body text in the body font and text color; headings in the heading font with margin 0; paragraphs and lists margin 0; images block and max-width 100%",
-            "node_reference": "[screen N, node a/b/c <tag.class>: text] for a design; [slide N, node a/b/c <tag.class>: text] for a deck; [page N, node a/b/c <tag.class>: text] for a document",
+            "node_reference": "[screen N, node a/b/c <tag.class>: text] for a design; [slide N, node a/b/c <tag.class>: text] for a deck; [page N, node a/b/c <tag.class>: text] for a document; [frame N, node a/b/c <tag.class>: text] for a social",
             "upload_reference": "[upload name]",
             "comment_lines": "A message may carry several comments, one per line, each `<node or page reference>: <note>`. Apply every line in one edit.",
         },
@@ -267,22 +312,66 @@ fn instructions() -> serde_json::Value {
             "POST /decks/render": "the deck JSON; returns the rendered HTML, or every validation error",
             "PUT /documents/{id}": "the document JSON",
             "POST /documents/render": "the document JSON; returns the rendered HTML, or every validation error",
+            "PUT /socials/{id}": "the social JSON",
+            "POST /socials/render": "the social JSON; returns the rendered HTML, or every validation error",
         },
         "routes": routes_map(),
         "example_design": example_design,
         "example_deck": example_deck,
         "example_document": example_document,
+        "example_social": example_social,
     })
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use design_model::{Deck, Design, Document};
+    use design_model::{Deck, Design, Document, Social};
 
     use crate::instructions::{
-        CHART_EXAMPLE, DECK_RULES, DEMO_RULES, DOCUMENT_RULES, instructions,
+        CHART_EXAMPLE, DECK_RULES, DEMO_RULES, DOCUMENT_RULES, SOCIAL_RULES, instructions,
     };
+
+    #[test]
+    fn instructions_carry_social_rules_routes_and_the_example() {
+        let payload = instructions();
+        assert_eq!(
+            payload["social_rules"].as_array().unwrap().len(),
+            SOCIAL_RULES.len()
+        );
+        let social = payload["social_rules"].to_string();
+        assert!(social.contains("1080 by 1350 px"));
+        assert!(social.contains("`format`"));
+        assert!(social.contains("titles 72 to 120px"));
+        assert!(social.contains("The first frame is the hook"));
+        assert!(social.contains("Do not write links between frames"));
+        assert!(!social.contains("#screen-"));
+        assert!(!social.contains("/decks/"));
+        assert_eq!(payload["routes"]["schema_social"], "GET /schemas/social");
+        assert_eq!(payload["routes"]["save_social"], "PUT /socials/{id}");
+        assert_eq!(
+            payload["routes"]["frame_image"],
+            "GET /socials/{id}/frames/{n}.png"
+        );
+        assert_eq!(
+            payload["routes"]["export_social_zip"],
+            "GET /socials/{id}/export.zip"
+        );
+        assert_eq!(payload["routes"]["fork_social"], "POST /socials/{id}/fork");
+        assert!(
+            payload["kinds"]["social"]
+                .as_str()
+                .unwrap()
+                .contains("`frames`")
+        );
+        let text = payload.to_string();
+        assert!(text.contains("PUT it to /socials/{id}-candidate-1"));
+        assert!(text.contains("demo, deck, document, or social"));
+        assert!(text.contains("`[frame 2]`"));
+        let example: Social = serde_json::from_value(payload["example_social"].clone()).unwrap();
+        assert_eq!(example.validate(), Vec::new());
+        assert!(payload["example_social"].get("viewport").is_none());
+    }
 
     #[test]
     fn instructions_carry_document_rules_routes_and_the_example() {
@@ -323,7 +412,7 @@ mod tests {
         );
         let text = payload.to_string();
         assert!(text.contains("PUT it to /documents/{id}-candidate-1"));
-        assert!(text.contains("demo, deck, or document"));
+        assert!(text.contains("demo, deck, document, or social"));
         assert!(text.contains("`[page 2]`"));
         let example: Document =
             serde_json::from_value(payload["example_document"].clone()).unwrap();
@@ -446,7 +535,9 @@ mod tests {
     fn instructions_describe_charts() {
         let payload = instructions();
         let text = payload.to_string();
-        assert!(text.contains("Draw a chart as inline SVG in the screen, slide, or page html."));
+        assert!(
+            text.contains("Draw a chart as inline SVG in the screen, slide, page, or frame html.")
+        );
         assert!(text.contains("Do not load a chart library."));
         assert!(text.contains("Do not write a `<script>` element."));
         assert!(text.contains("Give the SVG a `viewBox` attribute."));
