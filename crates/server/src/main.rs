@@ -537,6 +537,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_email_serves_as_email_client_html() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "launch").await;
+        send(
+            application.clone(),
+            "PUT",
+            "/mailings/launch",
+            Some(SAMPLE_MAILING),
+        )
+        .await;
+        let (status, body) = send(
+            application.clone(),
+            "GET",
+            "/mailings/launch/emails/2.html",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.starts_with("<!DOCTYPE html>"));
+        assert!(body.contains("<!--[if mso]>"));
+        assert!(!body.contains("var("));
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            "/mailings/launch/emails/9.html",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn exporting_a_mailing_returns_an_email_html_zip() {
         let directory = TempDir::new().unwrap();
         let application = test_application(&directory);

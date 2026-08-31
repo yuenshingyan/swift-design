@@ -46,8 +46,8 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::header;
-use axum::response::{IntoResponse, Response};
+use axum::http::{StatusCode, header};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -1001,6 +1001,37 @@ async fn export_mailing_email_zip(
         }
         Err(error) => api_error::internal_error(&error),
     }
+}
+
+/// Serves email `number` (1-based) of a stored mailing as one
+/// email-client HTML page: the same file the email zip packs. The
+/// copy button and direct links use it.
+pub(crate) async fn email_client_html(
+    mailings: &MailingStore,
+    uploads: &UploadStore,
+    id: &str,
+    number: usize,
+) -> Response {
+    let mut mailing = match load_mailing_for_export(mailings, id).await {
+        Ok(mailing) => mailing,
+        Err(response) => return response,
+    };
+    if number == 0 || number > mailing.emails.len() {
+        return api_error::error_response(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "mailing `{id}` has no email {number}: use 1 to {}",
+                mailing.emails.len()
+            ),
+            Vec::new(),
+        );
+    }
+    if let Err(error) = inline_uploaded_email_images(&mut mailing, uploads).await {
+        return api_error::internal_error(&error);
+    }
+    let mut files = email_html::export_mailing_emails(&mailing);
+    let file = files.remove(number - 1);
+    Html(file.html).into_response()
 }
 
 /// One zip with `{id}-email-{n}.html` per email, 1-based, in order,

@@ -610,6 +610,14 @@ fn image_number(file: &str) -> Option<usize> {
         .filter(|number| *number >= 1)
 }
 
+/// The 1-based number in a `{n}.html` file name. `None` for any other
+/// name.
+fn email_client_number(file: &str) -> Option<usize> {
+    file.strip_suffix(".html")
+        .and_then(|stem| stem.parse::<usize>().ok())
+        .filter(|number| *number >= 1)
+}
+
 /// The 404 for an image file name that is not `{n}.png`. `unit` is
 /// `screen` or `slide`.
 fn bad_image_name(unit: &str, file: &str) -> Response {
@@ -808,11 +816,17 @@ async fn get_sheet_image(
 /// Serves a PNG of one email. `file` is `{n}.png` with a 1-based `n`.
 async fn get_email_image(
     State(mailings): State<MailingStore>,
+    State(uploads): State<crate::uploads::UploadStore>,
     State(settings): State<SettingsStore>,
     Path((id, file)): Path<(String, String)>,
 ) -> Response {
     if !is_valid_mailing_id(&id) {
         return api_error::invalid_mailing_id(&id);
+    }
+    // `{n}.html` on the same route serves the email-client HTML the
+    // email zip packs: the copy button fetches it.
+    if let Some(number) = email_client_number(&file) {
+        return crate::export::email_client_html(&mailings, &uploads, &id, number).await;
     }
     let Some(number) = image_number(&file) else {
         return bad_image_name("email", &file);

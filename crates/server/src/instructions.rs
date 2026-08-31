@@ -324,6 +324,7 @@ fn routes_map() -> serde_json::Value {
         ("check_mailing", "POST /mailings/render"),
         ("render_mailing", "GET /mailings/{id}/render"),
         ("email_image", "GET /mailings/{id}/emails/{n}.png"),
+        ("email_client_html", "GET /mailings/{id}/emails/{n}.html"),
         ("export_mailing_html", "GET /mailings/{id}/export"),
         ("export_mailing_pdf", "GET /mailings/{id}/export.pdf"),
         ("export_mailing_zip", "GET /mailings/{id}/export.zip"),
@@ -548,6 +549,10 @@ mod tests {
         assert_eq!(
             payload["routes"]["export_mailing_email_zip"],
             "GET /mailings/{id}/export.email.zip"
+        );
+        assert_eq!(
+            payload["routes"]["email_client_html"],
+            "GET /mailings/{id}/emails/{n}.html"
         );
         assert_eq!(
             payload["routes"]["fork_mailing"],
