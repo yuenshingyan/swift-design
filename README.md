@@ -33,7 +33,7 @@ new session to build another kind.
 | `print` | A print piece: a poster, a flyer, a menu, a program, a certificate, a sign | a print with `size`, `orientation`, and `sheets` | the size: A4 (794×1123) by default, A5 (559×794), A3 (1123×1587), Letter (816×1056), or Tabloid (1056×1632); landscape swaps width and height | `/prints/{id}` |
 | `mailing` | An email or an email sequence: a newsletter, an announcement, a promotion, a welcome email, a digest, an invitation | a mailing with `format` and `emails` | the format, 600 px wide: standard (600×1200) by default, short (600×800), or long (600×1800) | `/mailings/{id}` |
 
-Every kind shares the theme, the HTML and CSS rules, the workflow, the templates, and the uploads. Decks add a presenter view, an audience window that follows it, and a PPTX export. The deck JSON, routes, presenter, and PPTX come from Swift Deck, which is now part of this project. Documents add a PDF export, one sheet per page, and a DOCX export: a flowing Word file built from the page HTML, with the theme's fonts and colors as its styles. Socials add a PDF export, one sheet per frame (the file a LinkedIn carousel takes), and a zip of one PNG per frame (the files an Instagram carousel takes). Prints add a PDF export, one PDF page per sheet (the file a print shop takes), and a zip of one PNG per sheet. Mailings add a PDF export, one PDF page per email, and a zip of one PNG per email.
+Every kind shares the theme, the HTML and CSS rules, the workflow, the templates, and the uploads. Decks add a presenter view, an audience window that follows it, and a PPTX export. The deck JSON, routes, presenter, and PPTX come from Swift Deck, which is now part of this project. Documents add a PDF export, one sheet per page, and a DOCX export: a flowing Word file built from the page HTML, with the theme's fonts and colors as its styles. Socials add a PDF export, one sheet per frame (the file a LinkedIn carousel takes), and a zip of one PNG per frame (the files an Instagram carousel takes). Prints add a PDF export, one PDF page per sheet (the file a print shop takes), and a zip of one PNG per sheet. Mailings add a PDF export, one PDF page per email, a zip of one PNG per email, and a zip of one email-client HTML file per email.
 
 ## Core principles
 
@@ -201,10 +201,17 @@ Chrome: the file a print shop takes) and **PNG** (a zip with one PNG per
 sheet, through Chrome) next to the HTML export. The sheet notes hold print
 instructions such as the paper stock or the bleed.
 
-For a mailing, the editor adds **PDF** (one PDF page per email, through
-Chrome) and **PNG** (a zip with one PNG per email, through Chrome) next
-to the HTML export. The email notes hold the subject line and the
-preheader text, as a `Subject:` line and a `Preheader:` line.
+For a mailing, the editor adds **Email** (a zip with one email-client
+HTML file per email plus a subjects file; no Chrome needed), **PDF**
+(one PDF page per email, through Chrome), and **PNG** (a zip with one
+PNG per email, through Chrome) next to the HTML export. The Email files
+carry inlined styles, a 600 px table shell, and Outlook ghost tables,
+so they survive real email clients; the export has no fit script, so an
+email flows taller than its canvas instead of shrinking. Uploaded
+images are embedded as `data:` URIs, which Gmail blocks: rehost images
+at a public URL for Gmail. The email notes hold the subject line and
+the preheader text, as a `Subject:` line and a `Preheader:` line; the
+export writes them into a subjects file and the hidden preview text.
 
 ## Agent routes
 
@@ -236,7 +243,8 @@ Print-only routes: `GET /prints/{id}/sheets/{n}.png`,
 `GET /prints/{id}/export.pdf`, `GET /prints/{id}/export.zip`.
 
 Mailing-only routes: `GET /mailings/{id}/emails/{n}.png`,
-`GET /mailings/{id}/export.pdf`, `GET /mailings/{id}/export.zip`.
+`GET /mailings/{id}/export.pdf`, `GET /mailings/{id}/export.zip`,
+`GET /mailings/{id}/export.email.zip`.
 
 ## Checks
 
