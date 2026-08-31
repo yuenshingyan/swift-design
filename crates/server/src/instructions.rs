@@ -260,7 +260,7 @@ fn steps() -> Vec<String> {
         "After you save a document, look at it: GET /documents/{id}/pages/{n}.png returns a PNG of page n, 1-based. Review every page the same way and PUT the document again. GET /documents/{id}/export returns the document as one HTML file. GET /documents/{id}/export.pdf returns it as a PDF, one sheet per page. GET /documents/{id}/export.docx returns it as a Word file.".to_owned(),
         "After you save a social, look at it: GET /socials/{id}/frames/{n}.png returns a PNG of frame n, 1-based. Review every frame the same way and PUT the social again. GET /socials/{id}/export returns the social as one HTML file. GET /socials/{id}/export.pdf returns it as a PDF, one sheet per frame, the file a LinkedIn carousel takes. GET /socials/{id}/export.zip returns one PNG per frame in a zip, the files an Instagram carousel takes.".to_owned(),
         "After you save a print, look at it: GET /prints/{id}/sheets/{n}.png returns a PNG of sheet n, 1-based. Review every sheet the same way and PUT the print again. GET /prints/{id}/export returns the print as one HTML file. GET /prints/{id}/export.pdf returns it as a PDF, one PDF page per sheet, the file a print shop takes. GET /prints/{id}/export.zip returns one PNG per sheet in a zip.".to_owned(),
-        "After you save a mailing, look at it: GET /mailings/{id}/emails/{n}.png returns a PNG of email n, 1-based. Review every email the same way and PUT the mailing again. GET /mailings/{id}/export returns the mailing as one HTML file. GET /mailings/{id}/export.pdf returns it as a PDF, one PDF page per email. GET /mailings/{id}/export.zip returns one PNG per email in a zip.".to_owned(),
+        "After you save a mailing, look at it: GET /mailings/{id}/emails/{n}.png returns a PNG of email n, 1-based. Review every email the same way and PUT the mailing again. GET /mailings/{id}/export returns the mailing as one HTML file. GET /mailings/{id}/export.pdf returns it as a PDF, one PDF page per email. GET /mailings/{id}/export.zip returns one PNG per email in a zip. GET /mailings/{id}/export.email.zip returns one email-client HTML file per email in a zip: inlined styles, a 600 px table shell, and Outlook support. Send that file from your email service.".to_owned(),
         "When the design, the deck, the document, the social, the print, or the mailing is written, POST /sessions/{id}/complete, or exit with code 0. The session moves to reviewing.".to_owned(),
         "GET /events returns {\"revision\": n}. The revision increases when data changes. To wait for a change in one run, call GET /events?after={revision}&wait=25 in a loop. Each call returns within the wait time, so loop; do not treat a timeout as an error.".to_owned(),
     ]
@@ -327,6 +327,10 @@ fn routes_map() -> serde_json::Value {
         ("export_mailing_html", "GET /mailings/{id}/export"),
         ("export_mailing_pdf", "GET /mailings/{id}/export.pdf"),
         ("export_mailing_zip", "GET /mailings/{id}/export.zip"),
+        (
+            "export_mailing_email_zip",
+            "GET /mailings/{id}/export.email.zip",
+        ),
         ("fork_design", "POST /designs/{id}/fork"),
         ("fork_deck", "POST /decks/{id}/fork"),
         ("fork_document", "POST /documents/{id}/fork"),
@@ -540,6 +544,10 @@ mod tests {
         assert_eq!(
             payload["routes"]["export_mailing_zip"],
             "GET /mailings/{id}/export.zip"
+        );
+        assert_eq!(
+            payload["routes"]["export_mailing_email_zip"],
+            "GET /mailings/{id}/export.email.zip"
         );
         assert_eq!(
             payload["routes"]["fork_mailing"],

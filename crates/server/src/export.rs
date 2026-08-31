@@ -34,7 +34,9 @@
 //! Mailings export under `/mailings/{id}/export`, and
 //! `GET /mailings/{id}/export.pdf` prints the mailing with the user's
 //! Chrome, one email per PDF page. `GET /mailings/{id}/export.zip`
-//! packs one PNG per email.
+//! packs one PNG per email. `GET /mailings/{id}/export.email.zip`
+//! packs one email-client HTML file per email, built by `email_html`
+//! with no Chrome, plus a subjects file.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -60,6 +62,7 @@ use crate::designs::{DesignStore, is_valid_design_id};
 use crate::document_render;
 use crate::documents::{DocumentStore, is_valid_document_id};
 use crate::docx;
+use crate::email_html;
 use crate::mailing_render;
 use crate::mailings::{MailingStore, is_valid_mailing_id};
 use crate::pptx;
@@ -97,6 +100,10 @@ pub fn routes() -> Router<crate::AppState> {
         .route("/mailings/{id}/export", get(export_mailing))
         .route("/mailings/{id}/export.pdf", get(export_mailing_pdf))
         .route("/mailings/{id}/export.zip", get(export_mailing_zip))
+        .route(
+            "/mailings/{id}/export.email.zip",
+            get(export_mailing_email_zip),
+        )
 }
 
 /// The `Content-Disposition` value that names the download `{id}.{extension}`.
@@ -970,6 +977,55 @@ async fn build_mailing_zip_response(
         }
         Err(error) => api_error::internal_error(&error),
     }
+}
+
+/// Builds one email-client HTML file per email and packs them into a
+/// zip with the subjects file. Needs no Chrome.
+async fn export_mailing_email_zip(
+    State(mailings): State<MailingStore>,
+    State(uploads): State<UploadStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let mut mailing = match load_mailing_for_export(&mailings, &id).await {
+        Ok(mailing) => mailing,
+        Err(response) => return response,
+    };
+    if let Err(error) = inline_uploaded_email_images(&mut mailing, &uploads).await {
+        return api_error::internal_error(&error);
+    }
+    let files = email_html::export_mailing_emails(&mailing);
+    match pack_email_html_files(&id, &files) {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), email_count = files.len(), "mailing exported as email html zip");
+            file_download(&id, "email.zip", "application/zip", bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// One zip with `{id}-email-{n}.html` per email, 1-based, in order,
+/// plus `{id}-subjects.txt` with the subject and preheader lines.
+fn pack_email_html_files(id: &str, files: &[email_html::EmailHtmlFile]) -> anyhow::Result<Vec<u8>> {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default();
+    let mut subjects = String::new();
+    for (index, file) in files.iter().enumerate() {
+        writer.start_file(format!("{id}-email-{}.html", index + 1), options)?;
+        writer.write_all(file.html.as_bytes())?;
+        subjects.push_str(&format!(
+            "Email {}
+Subject: {}
+Preheader: {}
+
+",
+            index + 1,
+            file.subject.as_deref().unwrap_or(""),
+            file.preheader.as_deref().unwrap_or("")
+        ));
+    }
+    writer.start_file(format!("{id}-subjects.txt"), options)?;
+    writer.write_all(subjects.as_bytes())?;
+    Ok(writer.finish()?.into_inner())
 }
 
 /// One zip with `{id}-email-{n}.png` per image, 1-based, in order. A

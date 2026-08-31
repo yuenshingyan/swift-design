@@ -20,6 +20,7 @@ mod document_render;
 mod documents;
 mod docx;
 mod edit_focus;
+mod email_html;
 mod events;
 mod export;
 mod files;
@@ -533,6 +534,53 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn exporting_a_mailing_returns_an_email_html_zip() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "launch").await;
+        send(
+            application.clone(),
+            "PUT",
+            "/mailings/launch",
+            Some(SAMPLE_MAILING),
+        )
+        .await;
+        let request = Request::builder()
+            .method("GET")
+            .uri("/mailings/launch/export.email.zip")
+            .body(Body::empty())
+            .unwrap();
+        let response = application.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename=\"launch.email.zip\""
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|index| archive.by_index(index).unwrap().name().to_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "launch-email-1.html",
+                "launch-email-2.html",
+                "launch-subjects.txt"
+            ]
+        );
+        let mut first = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("launch-email-1.html").unwrap(),
+            &mut first,
+        )
+        .unwrap();
+        assert!(first.contains("<!--[if mso]>"));
+        assert!(first.contains("<h1 style="));
+        assert!(!first.contains("var("));
     }
 
     #[tokio::test]

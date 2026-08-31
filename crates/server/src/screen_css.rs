@@ -154,7 +154,7 @@ fn is_dropped_at_rule(prelude: &str) -> bool {
 }
 
 /// Index of the first `{` or `;` outside strings and parentheses.
-fn find_prelude_end(css: &str) -> Option<usize> {
+pub(crate) fn find_prelude_end(css: &str) -> Option<usize> {
     let mut quote: Option<char> = None;
     let mut parentheses = 0usize;
     for (index, character) in css.char_indices() {
@@ -178,7 +178,7 @@ fn find_prelude_end(css: &str) -> Option<usize> {
 
 /// Length of the block body starting right after `{`: the index of the
 /// matching `}`.
-fn find_block_end(css: &str) -> Option<usize> {
+pub(crate) fn find_block_end(css: &str) -> Option<usize> {
     let mut quote: Option<char> = None;
     let mut depth = 0usize;
     for (index, character) in css.char_indices() {
@@ -205,7 +205,7 @@ fn find_block_end(css: &str) -> Option<usize> {
 }
 
 /// Splits on `separator` outside strings, parentheses, and brackets.
-fn split_top_level(text: &str, separator: char) -> Vec<&str> {
+pub(crate) fn split_top_level(text: &str, separator: char) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut quote: Option<char> = None;
     let mut depth = 0usize;
@@ -234,7 +234,7 @@ fn split_top_level(text: &str, separator: char) -> Vec<&str> {
 }
 
 /// Removes `/* ... */` comments.
-fn strip_comments(css: &str) -> String {
+pub(crate) fn strip_comments(css: &str) -> String {
     let mut result = String::with_capacity(css.len());
     let mut rest = css;
     while let Some(start) = rest.find("/*") {
