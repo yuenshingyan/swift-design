@@ -11,9 +11,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use design_model::{
-    ArtifactKind, BriefQuestionSet, CUSTOM_ANSWER_LIMIT, DECK_SCENARIOS, PAGE_COUNT_LIMIT,
-    QuestionAnswer, WorkflowEvent, WorkflowState, app_axes, axis_by_key, is_custom_answer,
-    is_deck_scenario, validate_answers, validate_question_set,
+    ArtifactKind, BriefQuestionSet, CUSTOM_ANSWER_LIMIT, DECK_SCENARIOS, FRAME_COUNT_LIMIT,
+    PAGE_COUNT_LIMIT, QuestionAnswer, WorkflowEvent, WorkflowState, app_axes, axis_by_key,
+    is_custom_answer, is_deck_scenario, validate_answers, validate_question_set,
 };
 use serde::Deserialize;
 
@@ -29,6 +29,7 @@ use crate::sessions::{
     AnswerRecord, ChatMessage, NewSession, RunOptions, Session, SessionError, SessionStore,
     SessionSummary, SessionView, is_valid_session_id, new_session_id, session_id_of_artifact,
 };
+use crate::socials::SocialStore;
 
 /// Most slides a deck run may be asked for. Past this the run costs
 /// more than a user waits for.
@@ -79,13 +80,14 @@ fn title_from_request(request: &str) -> String {
     line.chars().take(80).collect()
 }
 
-/// The three artifact stores as one extractor, so a handler that reads
+/// The four artifact stores as one extractor, so a handler that reads
 /// or deletes a session's artifacts takes one argument for them.
 #[derive(Clone)]
 pub(crate) struct ArtifactStores {
-    designs: DesignStore,
-    decks: DeckStore,
-    documents: DocumentStore,
+    pub(crate) designs: DesignStore,
+    pub(crate) decks: DeckStore,
+    pub(crate) documents: DocumentStore,
+    pub(crate) socials: SocialStore,
 }
 
 impl axum::extract::FromRef<crate::AppState> for ArtifactStores {
@@ -94,6 +96,7 @@ impl axum::extract::FromRef<crate::AppState> for ArtifactStores {
             designs: state.designs.clone(),
             decks: state.decks.clone(),
             documents: state.documents.clone(),
+            socials: state.socials.clone(),
         }
     }
 }
@@ -122,6 +125,7 @@ async fn build_view(
         designs: Vec::new(),
         decks: Vec::new(),
         documents: Vec::new(),
+        socials: Vec::new(),
     };
     match view.session.artifact_kind {
         ArtifactKind::Demo => {
@@ -147,6 +151,16 @@ async fn build_view(
         ArtifactKind::Document => {
             view.documents = stores
                 .documents
+                .list()
+                .await
+                .map_err(io)?
+                .into_iter()
+                .filter(|summary| session_id_of_artifact(&summary.id) == id)
+                .collect();
+        }
+        ArtifactKind::Social => {
+            view.socials = stores
+                .socials
                 .list()
                 .await
                 .map_err(io)?
@@ -340,6 +354,13 @@ async fn delete_session_artifacts(stores: &ArtifactStores, id: &str) {
             tracing::warn!(session_id = %id, %error, "deleting the session documents failed")
         }
     }
+    match stores.socials.delete_session(id).await {
+        Ok(count) if count > 0 => tracing::info!(session_id = %id, count, "socials deleted"),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(session_id = %id, %error, "deleting the session socials failed")
+        }
+    }
 }
 
 /// Reads a session or turns the miss into a response.
@@ -394,6 +415,13 @@ fn option_problem(options: &RunOptions) -> Option<String> {
     {
         return Some(format!(
             "page_count must be between 1 and {PAGE_COUNT_LIMIT}, got {count}"
+        ));
+    }
+    if let Some(count) = options.frame_count
+        && (count == 0 || count > FRAME_COUNT_LIMIT)
+    {
+        return Some(format!(
+            "frame_count must be between 1 and {FRAME_COUNT_LIMIT}, got {count}"
         ));
     }
     if let Some(variations) = options.variations
@@ -506,6 +534,7 @@ fn regenerate_problem(session: &Session, request: &MessageRequest) -> Option<Str
         design_model::ArtifactKind::Demo => "screen",
         design_model::ArtifactKind::Deck => "slide",
         design_model::ArtifactKind::Document => "page",
+        design_model::ArtifactKind::Social => "frame",
     };
     if referenced_indexes(&request.content, unit).is_empty() {
         return Some(format!(
