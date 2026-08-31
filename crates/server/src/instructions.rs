@@ -134,14 +134,16 @@ pub const PRINT_RULES: &[&str] = &[
 pub const MAILING_RULES: &[&str] = &[
     "An email is one HTML fragment in `html` and one CSS block in `css`. One email is a single send. Two or more emails are a sequence, in send order.",
     "Design each email for the px canvas of the mailing's `format`: 600 by 800 px for `short`, 600 by 1200 px for `standard` (the default), 600 by 1800 px for `long`. A mailing has no `viewport` field. Use px units. Do not use vw, vh, vmin, vmax, or container units.",
-    "Lay out in one column. An email client is 600 px wide on a desktop and narrower on a phone. Do not place two blocks of body text side by side. The email root is position: relative, the canvas size, overflow: hidden. Do not add an outer box of your own with a fixed height and overflow: hidden. Such a box hides overflow from the fit.",
+    "Lay out in one column by default. An email client is 600 px wide on a desktop and narrower on a phone. Stack the blocks and space them with padding and margin. Do not use flex, grid, gap, float, or position: absolute: email clients ignore them. border-radius and box-shadow are safe: a client that ignores them shows a plain box. The email root is position: relative, height: 100%, overflow: hidden. Do not set a px height on the root and do not add an outer box of your own with a fixed height and overflow: hidden. Such a box hides overflow from the fit, and the email export lets the email flow taller than the canvas.",
+    "To place blocks side by side, write this exact pattern: a `<div class='columns'>` parent with two or three `<div class='column'>` children, no whitespace between the tags. Give `.columns` an explicit px width. Give each `.column` display: inline-block, vertical-align: top, and an explicit px width; the column widths sum to the `.columns` width. The email export compiles this pattern to table cells for Outlook and stacks the columns on a phone. Do not nest one `columns` div inside another.",
+    "Write simple selectors: `tag`, `.class`, `tag.class`, descendant, and child. The email export inlines them into style attributes. A `:hover` rule, a pseudo-element rule, or a `@media` rule stays in a style block and reaches only some clients.",
     SHARED_RULES[0],
     SHARED_RULES[1],
-    SHARED_RULES[2],
+    "The server loads the theme fonts from Google Fonts. Base styles: headings use the heading font with margin 0, paragraphs and lists have margin 0, images are block and max-width 100%. The studio default text size is 32px and the email export default is 16px: set an explicit px font-size on every element that shows text.",
     SHARED_RULES[3],
     SHARED_RULES[4],
-    "Give every id and @keyframes name a prefix unique to the email, such as `e3-`.",
-    "Size type for the inbox: titles 28 to 40px, headings 22 to 26px, body 16 to 18px, captions 12 to 14px. Give boxes enough height for every line.",
+    "Give every id a prefix unique to the email, such as `e3-`. Do not write `@keyframes`, `animation`, or `transition` rules: an email client does not run them and the email export drops them.",
+    "Size type for the inbox: titles 28 to 40px, headings 22 to 26px, body 16 to 18px, captions 12 to 14px. Set the size in px on the element's own rule, not only on a parent. Give boxes enough height for every line.",
     "Write a call to action as a styled `<a>` link: a solid accent background, padding of at least 14px by 28px, and rounded corners.",
     SHARED_RULES[5],
     "The first email is the one the reader opens first. Lead with the hook: one claim and one call to action near the top. Put the subject line and the preheader text in `notes`, as a `Subject:` line and a `Preheader:` line. The renderer does not show notes on the email.",
@@ -522,6 +524,8 @@ mod tests {
         assert!(mailing.contains("600 by 1200 px"));
         assert!(mailing.contains("`format`"));
         assert!(mailing.contains("one column"));
+        assert!(mailing.contains("Do not use flex"));
+        assert!(mailing.contains("inline-block"));
         assert!(mailing.contains("Subject:"));
         assert!(mailing.contains("unsubscribe"));
         assert!(mailing.contains("Do not write links between emails"));
