@@ -8,8 +8,11 @@
 //! with Outlook ghost tables around the `columns` pattern. Rules the
 //! inliner cannot place on an element (`:hover`, pseudo-elements,
 //! `@media`) stay in a `<style>` block that only some clients read.
-//! `@keyframes`, `animation`, and `transition` are dropped. The export
-//! has no fit script: an email sized past its canvas flows taller.
+//! `@keyframes`, `animation`, and `transition` are dropped. Flex and
+//! grid containers downgrade to stacked blocks with their `gap` as
+//! child margins, so an email from before the email-safe rules stays
+//! readable. The export has no fit script: an email sized past its
+//! canvas flows taller.
 //! Images arrive as `data:` URIs, which Gmail blocks; rehost images at
 //! a public URL for Gmail. No CSS or HTML crate: the walk is the same
 //! string scan `docx.rs` and `office.rs` use.
@@ -54,9 +57,11 @@ fn email_document(email: &Email, theme: &Theme, mailing_title: &str) -> EmailHtm
     }
     all_rules.append(&mut rules);
     let tree = parse_fragment(&email.html);
-    let styles: Vec<String> = (0..tree.len())
-        .map(|index| merged_style(&tree, index, &all_rules, theme))
+    let mut properties: Vec<Vec<(String, String)>> = (0..tree.len())
+        .map(|index| merged_properties(&tree, index, &all_rules, theme))
         .collect();
+    downgrade_layout(&tree, &mut properties);
+    let styles: Vec<String> = properties.into_iter().map(joined_style).collect();
     let body = serialize(&tree, &styles);
     let title = subject.clone().unwrap_or_else(|| mailing_title.to_owned());
     let background = css_safe(&theme.colors.background);
@@ -866,14 +871,19 @@ fn base_rules(theme: &Theme) -> Vec<StyleRule> {
     rules
 }
 
-/// The merged inline style of one element: box-sizing, the root
-/// extras, the base and author rules by specificity then order, then
-/// the element's own style attribute. Later declarations win per
-/// property; `!important` declarations win last.
-fn merged_style(tree: &[Element], element: usize, rules: &[StyleRule], theme: &Theme) -> String {
+/// The merged properties of one element: box-sizing, the root extras,
+/// the base and author rules by specificity then order, then the
+/// element's own style attribute. Later declarations win per property;
+/// `!important` declarations win last.
+fn merged_properties(
+    tree: &[Element],
+    element: usize,
+    rules: &[StyleRule],
+    theme: &Theme,
+) -> Vec<(String, String)> {
     let node = &tree[element];
     if node.tag.is_empty() {
-        return String::new();
+        return Vec::new();
     }
     let mut matched: Vec<&StyleRule> = rules
         .iter()
@@ -941,9 +951,122 @@ fn merged_style(tree: &[Element], element: usize, rules: &[StyleRule], theme: &T
     }
     properties
         .into_iter()
-        .map(|(property, value, _)| format!("{property}:{value}"))
+        .map(|(property, value, _)| (property, value))
+        .collect()
+}
+
+/// One style attribute value from merged properties.
+fn joined_style(properties: Vec<(String, String)>) -> String {
+    properties
+        .into_iter()
+        .map(|(property, value)| format!("{property}:{value}"))
         .collect::<Vec<String>>()
         .join(";")
+}
+
+/// The container properties a flex or grid downgrade removes.
+const CONTAINER_LAYOUT_PROPERTIES: [&str; 15] = [
+    "flex-direction",
+    "flex-wrap",
+    "flex-flow",
+    "align-items",
+    "align-content",
+    "justify-content",
+    "justify-items",
+    "place-items",
+    "place-content",
+    "grid-template-columns",
+    "grid-template-rows",
+    "grid-auto-flow",
+    "grid-auto-rows",
+    "grid-auto-columns",
+    "grid-template-areas",
+];
+
+/// The child properties a flex or grid downgrade removes.
+const CHILD_LAYOUT_PROPERTIES: [&str; 7] = [
+    "flex",
+    "flex-grow",
+    "flex-shrink",
+    "flex-basis",
+    "align-self",
+    "justify-self",
+    "order",
+];
+
+/// Downgrades flex and grid containers to stacked blocks, the way the
+/// mobile media query stacks columns. Emails written under the current
+/// rules carry no flex or grid; this keeps emails from before the
+/// email-safe rules readable: the layout properties go, and the
+/// container's `gap` becomes a bottom margin on every child but the
+/// last.
+fn downgrade_layout(tree: &[Element], properties: &mut [Vec<(String, String)>]) {
+    for element in 0..tree.len() {
+        let display = properties[element]
+            .iter()
+            .find(|(property, _)| property == "display")
+            .map(|(_, value)| value.to_ascii_lowercase());
+        let is_layout_container = matches!(
+            display.as_deref(),
+            Some("flex" | "inline-flex" | "grid" | "inline-grid")
+        );
+        if !is_layout_container {
+            continue;
+        }
+        let gap = gap_px(&properties[element]);
+        properties[element].retain(|(property, _)| {
+            property != "display"
+                && property != "gap"
+                && property != "row-gap"
+                && property != "column-gap"
+                && !CONTAINER_LAYOUT_PROPERTIES.contains(&property.as_str())
+        });
+        let children: Vec<usize> = tree[element]
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                Node::Element(index) => Some(*index),
+                _ => None,
+            })
+            .collect();
+        for (position, child) in children.iter().enumerate() {
+            properties[*child]
+                .retain(|(property, _)| !CHILD_LAYOUT_PROPERTIES.contains(&property.as_str()));
+            // An `auto` margin only pushes inside flex; in a block flow
+            // it reads as 0 and is noise.
+            properties[*child].retain(|(property, value)| {
+                !(property.starts_with("margin") && value.eq_ignore_ascii_case("auto"))
+            });
+            // Only an explicit bottom margin blocks the gap: appended
+            // after a `margin` shorthand, `margin-bottom` wins the
+            // bottom side, which is how the gap spaced the children.
+            let has_bottom_margin = properties[*child]
+                .iter()
+                .any(|(property, _)| property == "margin-bottom");
+            if position + 1 < children.len()
+                && !has_bottom_margin
+                && let Some(gap) = gap
+            {
+                properties[*child].push(("margin-bottom".to_owned(), format!("{gap}px")));
+            }
+        }
+    }
+}
+
+/// The row gap of a container in whole px, from `gap` or `row-gap`.
+fn gap_px(properties: &[(String, String)]) -> Option<u32> {
+    let value = properties
+        .iter()
+        .find(|(property, _)| property == "row-gap")
+        .or_else(|| properties.iter().find(|(property, _)| property == "gap"))
+        .map(|(_, value)| value.clone())?;
+    let first = value.split_whitespace().next()?.to_owned();
+    first
+        .strip_suffix("px")?
+        .trim()
+        .parse::<f32>()
+        .ok()
+        .map(|gap| gap as u32)
 }
 
 /// True for a top-level element of the fragment.
@@ -1070,9 +1193,11 @@ mod tests {
         }
         all_rules.append(&mut rules);
         let tree = parse_fragment(html);
-        let styles: Vec<String> = (0..tree.len())
-            .map(|index| merged_style(&tree, index, &all_rules, &theme()))
+        let mut properties: Vec<Vec<(String, String)>> = (0..tree.len())
+            .map(|index| merged_properties(&tree, index, &all_rules, &theme()))
             .collect();
+        downgrade_layout(&tree, &mut properties);
+        let styles: Vec<String> = properties.into_iter().map(joined_style).collect();
         serialize(&tree, &styles)
     }
 
@@ -1265,6 +1390,38 @@ mod tests {
                 .html
                 .contains("<!--[if mso]><td width=\"260\"")
         );
+    }
+
+    #[test]
+    fn flex_and_grid_containers_downgrade_to_stacked_blocks() {
+        let output = inline(
+            "<div class='hero'><p>A</p><p>B</p><p>C</p></div>",
+            ".hero { display: flex; flex-direction: row; gap: 24px; align-items: center; justify-content: space-between; }",
+        );
+        assert!(!output.contains("display:flex"));
+        assert!(!output.contains("flex-direction"));
+        assert!(!output.contains("justify-content"));
+        assert!(!output.contains("gap:"));
+        assert_eq!(output.matches("margin-bottom:24px").count(), 2);
+        let output = inline(
+            "<div class='steps'><p>A</p><p>B</p></div>",
+            ".steps { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; } p { flex: 1; align-self: end; }",
+        );
+        assert!(!output.contains("display:grid"));
+        assert!(!output.contains("grid-template-columns"));
+        assert!(!output.contains("align-self"));
+        assert!(output.contains("margin-bottom:16px"));
+    }
+
+    #[test]
+    fn a_downgraded_child_keeps_its_own_margin_and_loses_auto_margins() {
+        let output = inline(
+            "<div class='hero'><p class='a'>A</p><p class='b'>B</p><p>C</p></div>",
+            ".hero { display: flex; gap: 24px } .a { margin-bottom: 4px } .b { margin-top: auto }",
+        );
+        assert!(output.contains("margin-bottom:4px"));
+        assert!(!output.contains("margin-bottom:4px;margin-bottom"));
+        assert!(!output.contains("margin-top:auto"));
     }
 
     #[test]
