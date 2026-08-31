@@ -118,6 +118,19 @@ pub struct RunOptions {
     /// agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_count: Option<u32>,
+    /// The platform a social is posted on, one of `PLATFORMS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// The canvas a social is laid out on, one of `FORMATS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// What a social is for, one of `POST_GOALS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_goal: Option<String>,
+    /// How many frames a social run writes. `None` leaves it to the
+    /// agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_count: Option<u32>,
     /// The axes whose value the planner suggested from the request, by
     /// option key. The card shows them as picked and marks them as
     /// suggested. A pick by the user removes the key.
@@ -142,6 +155,9 @@ impl RunOptions {
             "document_kind" => &self.document_kind,
             "paper" => &self.paper,
             "page_density" => &self.page_density,
+            "platform" => &self.platform,
+            "format" => &self.format,
+            "post_goal" => &self.post_goal,
             _ => return None,
         })
     }
@@ -161,6 +177,9 @@ impl RunOptions {
             "document_kind" => &mut self.document_kind,
             "paper" => &mut self.paper,
             "page_density" => &mut self.page_density,
+            "platform" => &mut self.platform,
+            "format" => &mut self.format,
+            "post_goal" => &mut self.post_goal,
             _ => return None,
         })
     }
@@ -229,6 +248,10 @@ impl Default for RunOptions {
             paper: None,
             page_density: None,
             page_count: None,
+            platform: None,
+            format: None,
+            post_goal: None,
+            frame_count: None,
             suggested: Vec::new(),
             variety: default_effort(),
             templates: Vec::new(),
@@ -536,6 +559,9 @@ pub struct SessionView {
     /// The documents that belong to this session. Empty unless the
     /// session is a document session.
     pub documents: Vec<crate::documents::DocumentSummary>,
+    /// The socials that belong to this session. Empty unless the
+    /// session is a social session.
+    pub socials: Vec<crate::socials::SocialSummary>,
 }
 
 /// What went wrong in a session operation.
