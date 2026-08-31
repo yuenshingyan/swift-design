@@ -19,9 +19,16 @@
 //! Chrome, one page per sheet of its paper. `GET
 //! /documents/{id}/export.docx` builds a Word file from the pages' HTML;
 //! see `docx.rs`. It needs no Chrome.
+//!
+//! Socials export under `/socials/{id}/export`, and
+//! `GET /socials/{id}/export.pdf` prints the social with the user's
+//! Chrome, one frame per sheet: the file a LinkedIn carousel takes.
+//! `GET /socials/{id}/export.zip` packs one PNG per frame, the files an
+//! Instagram carousel takes.
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::io::{Cursor, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -32,7 +39,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use design_model::{DECK_VIEWPORT, Deck, Design, Document};
+use design_model::{DECK_VIEWPORT, Deck, Design, Document, Social};
+use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, ZipWriter};
 
 use crate::api_error;
 use crate::deck_render;
@@ -45,14 +54,16 @@ use crate::pptx;
 use crate::render;
 use crate::screenshots;
 use crate::settings::SettingsStore;
+use crate::social_render;
+use crate::socials::{SocialStore, is_valid_social_id};
 use crate::uploads::{UploadStore, content_type_of, is_stored_name};
 
 /// The content type of a `.pptx` download.
 const PPTX_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 
-/// The `/designs/{id}/export`, `/decks/{id}/export`, and
-/// `/documents/{id}/export` route table.
+/// The `/designs/{id}/export`, `/decks/{id}/export`,
+/// `/documents/{id}/export`, and `/socials/{id}/export` route table.
 pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/designs/{id}/export", get(export_design))
@@ -62,6 +73,9 @@ pub fn routes() -> Router<crate::AppState> {
         .route("/documents/{id}/export", get(export_document))
         .route("/documents/{id}/export.pdf", get(export_document_pdf))
         .route("/documents/{id}/export.docx", get(export_document_docx))
+        .route("/socials/{id}/export", get(export_social))
+        .route("/socials/{id}/export.pdf", get(export_social_pdf))
+        .route("/socials/{id}/export.zip", get(export_social_zip))
 }
 
 /// The `Content-Disposition` value that names the download `{id}.{extension}`.
@@ -504,6 +518,147 @@ async fn build_document_pdf_response(
     }
 }
 
+/// Loads a stored social for an export: 400, 404, or 422 as a response
+/// when the id, the file, or the social is not usable.
+async fn load_social_for_export(socials: &SocialStore, id: &str) -> Result<Social, Response> {
+    if !is_valid_social_id(id) {
+        return Err(api_error::invalid_social_id(id));
+    }
+    let social = match socials.load(id).await {
+        Ok(Some(social)) => social,
+        Ok(None) => return Err(api_error::social_not_found(id)),
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    let errors = social.validate();
+    if !errors.is_empty() {
+        return Err(api_error::social_validation_failed(&errors));
+    }
+    Ok(social)
+}
+
+/// Renders a stored social with uploaded images and theme fonts inlined
+/// and returns it as a file download.
+async fn export_social(
+    State(socials): State<SocialStore>,
+    State(uploads): State<UploadStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let mut social = match load_social_for_export(&socials, &id).await {
+        Ok(social) => social,
+        Err(response) => return response,
+    };
+    if let Err(error) = inline_uploaded_frame_images(&mut social, &uploads).await {
+        return api_error::internal_error(&error);
+    }
+    let html = inline_google_fonts(
+        social_render::render_social(&social, false),
+        fetch_as_browser,
+    )
+    .await;
+    tracing::info!(%id, size_bytes = html.len(), "social exported");
+    file_download(&id, "html", "text/html; charset=utf-8", html.into_bytes())
+}
+
+/// Prints a stored social to a PDF with the user's Chrome, one frame
+/// per sheet, and returns it as a file download. 503 when no Chrome is
+/// installed.
+async fn export_social_pdf(
+    State(socials): State<SocialStore>,
+    State(uploads): State<UploadStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let social = match load_social_for_export(&socials, &id).await {
+        Ok(social) => social,
+        Err(response) => return response,
+    };
+    build_social_pdf_response(&id, social, &uploads, screenshots::find_chrome()).await
+}
+
+/// Packs one PNG per frame of a stored social into a zip and returns
+/// it as a file download. 503 when no Chrome is installed.
+async fn export_social_zip(
+    State(socials): State<SocialStore>,
+    State(settings): State<SettingsStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let social = match load_social_for_export(&socials, &id).await {
+        Ok(social) => social,
+        Err(response) => return response,
+    };
+    let base_url = format!("http://{}", settings.address());
+    build_social_zip_response(&id, &social, &base_url, screenshots::find_chrome()).await
+}
+
+/// Inlines uploaded images, renders the social print page, and prints
+/// it with `chrome`. `chrome` is a parameter so the no-Chrome path is
+/// testable.
+async fn build_social_pdf_response(
+    id: &str,
+    mut social: Social,
+    uploads: &UploadStore,
+    chrome: Option<PathBuf>,
+) -> Response {
+    let Some(chrome) = chrome else {
+        return screenshots::chrome_missing_response("PDF exports");
+    };
+    if let Err(error) = inline_uploaded_frame_images(&mut social, uploads).await {
+        return api_error::internal_error(&error);
+    }
+    let html = social_render::render_social_with(
+        &social,
+        social_render::RenderOptions {
+            is_print: true,
+            ..social_render::RenderOptions::default()
+        },
+    );
+    match screenshots::print_html_to_pdf(&chrome, &html, social.viewport()).await {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), "social exported as pdf");
+            file_download(id, "pdf", "application/pdf", bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Screenshots every frame and packs the PNGs. `chrome` is a parameter
+/// so the no-Chrome path is testable.
+async fn build_social_zip_response(
+    id: &str,
+    social: &Social,
+    base_url: &str,
+    chrome: Option<PathBuf>,
+) -> Response {
+    if chrome.is_none() {
+        return screenshots::chrome_missing_response("PNG exports");
+    }
+    let mut images = Vec::with_capacity(social.frames.len());
+    for index in 0..social.frames.len() {
+        match screenshots::screenshot_frame(social, index, base_url).await {
+            Ok(bytes) => images.push(bytes),
+            Err(error) => return api_error::internal_error(&error),
+        }
+    }
+    match pack_frame_images(id, &images) {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), frame_count = images.len(), "social exported as png zip");
+            file_download(id, "zip", "application/zip", bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// One zip with `{id}-frame-{n}.png` per image, 1-based, in order. A
+/// PNG is compressed already, so the entries are stored as they are.
+fn pack_frame_images(id: &str, images: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    for (index, image) in images.iter().enumerate() {
+        writer.start_file(format!("{id}-frame-{}.png", index + 1), options)?;
+        writer.write_all(image)?;
+    }
+    Ok(writer.finish()?.into_inner())
+}
+
 /// Replaces every `/uploads/{name}` reference in screen html and css
 /// with a `data:` URI: `<img src>`, `href`, inline `style` backgrounds,
 /// and `url()` in the screen CSS. Names that are missing or unsafe stay
@@ -573,6 +728,31 @@ async fn inline_uploaded_page_images(
         page.html = replace_upload_references(&page.html, &data_uris);
         if let Some(css) = &page.css {
             page.css = Some(replace_upload_references(css, &data_uris));
+        }
+    }
+    Ok(())
+}
+
+/// The social twin of `inline_uploaded_images`: rewrites frame html and
+/// css.
+async fn inline_uploaded_frame_images(
+    social: &mut Social,
+    uploads: &UploadStore,
+) -> anyhow::Result<()> {
+    let texts: Vec<&str> = social
+        .frames
+        .iter()
+        .flat_map(|frame| [Some(frame.html.as_str()), frame.css.as_deref()])
+        .flatten()
+        .collect();
+    let data_uris = collect_data_uris(&texts, uploads).await?;
+    if data_uris.is_empty() {
+        return Ok(());
+    }
+    for frame in &mut social.frames {
+        frame.html = replace_upload_references(&frame.html, &data_uris);
+        if let Some(css) = &frame.css {
+            frame.css = Some(replace_upload_references(css, &data_uris));
         }
     }
     Ok(())
@@ -700,14 +880,57 @@ mod tests {
 
     use crate::export::{
         FONT_LINK_PREFIX, FontLink, attachment_disposition, base64_encode, build_deck_pdf_response,
-        build_document_pdf_response, build_pptx_response, google_fonts_link, inline_font_urls,
-        inline_google_fonts, inline_uploaded_images, inline_uploaded_page_images,
-        inline_uploaded_slide_images, upload_references,
+        build_document_pdf_response, build_pptx_response, build_social_pdf_response,
+        build_social_zip_response, google_fonts_link, inline_font_urls, inline_google_fonts,
+        inline_uploaded_frame_images, inline_uploaded_images, inline_uploaded_page_images,
+        inline_uploaded_slide_images, pack_frame_images, upload_references,
     };
     use crate::pptx::ExportSources;
     use crate::render;
-    use crate::test_support::{sample_deck, sample_document};
+    use crate::test_support::{sample_deck, sample_document, sample_social};
     use crate::uploads::UploadStore;
+
+    #[tokio::test]
+    async fn social_exports_without_chrome_are_503() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = UploadStore::new(directory.path().to_path_buf());
+        let response = build_social_pdf_response("launch", sample_social(), &store, None).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let response =
+            build_social_zip_response("launch", &sample_social(), "http://127.0.0.1:3000", None)
+                .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn frame_images_pack_as_numbered_pngs() {
+        let bytes = pack_frame_images("launch", &[b"PNG1".to_vec(), b"PNG2".to_vec()]).unwrap();
+        assert_eq!(&bytes[..2], b"PK");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(archive.len(), 2);
+        assert_eq!(archive.by_index(0).unwrap().name(), "launch-frame-1.png");
+        assert_eq!(archive.by_index(1).unwrap().name(), "launch-frame-2.png");
+        let mut content = Vec::new();
+        std::io::Read::read_to_end(&mut archive.by_index(1).unwrap(), &mut content).unwrap();
+        assert_eq!(content, b"PNG2");
+    }
+
+    #[tokio::test]
+    async fn inlines_uploaded_images_in_frames() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = UploadStore::new(directory.path().to_path_buf());
+        store.save("launch", "logo.png", b"PNGDATA").await.unwrap();
+        let mut social = sample_social();
+        social.frames[0].html = "<img src='/uploads/logo.png'>".to_owned();
+        social.frames[0].css = Some(".a { background: url('/uploads/logo.png'); }".to_owned());
+        inline_uploaded_frame_images(&mut social, &store)
+            .await
+            .unwrap();
+        let expected = format!("data:image/png;base64,{}", base64_encode(b"PNGDATA"));
+        assert!(social.frames[0].html.contains(&expected));
+        assert!(social.frames[0].css.as_deref().unwrap().contains(&expected));
+        assert!(!social.frames[0].html.contains("/uploads/"));
+    }
 
     #[tokio::test]
     async fn document_pdf_export_without_chrome_is_503() {
