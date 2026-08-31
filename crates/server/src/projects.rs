@@ -1,5 +1,5 @@
-//! Projects: the id prefix that groups a chosen design, deck, or
-//! document and its candidates. Renaming a project moves every
+//! Projects: the id prefix that groups a chosen design, deck, document,
+//! or social and its candidates. Renaming a project moves every
 //! artifact in it.
 
 use axum::extract::{Path, State};
@@ -11,10 +11,9 @@ use design_model::WorkflowState;
 use serde::Deserialize;
 
 use crate::api_error;
-use crate::decks::DeckStore;
-use crate::designs::{DesignStore, is_valid_design_id};
-use crate::documents::DocumentStore;
+use crate::designs::is_valid_design_id;
 use crate::events::ChangeNotifier;
+use crate::session_routes::ArtifactStores;
 use crate::sessions::SessionStore;
 
 /// Body of `POST /projects/{name}/rename`.
@@ -39,17 +38,21 @@ fn renamed_id(id: &str, old: &str, new: &str) -> String {
     format!("{new}{}", &id[old.len()..])
 }
 
-/// Moves every design, deck, and document of the project to the new
-/// name and renames the session that owns it.
+/// Moves every design, deck, document, and social of the project to
+/// the new name and renames the session that owns it.
 async fn rename_project(
-    State(designs): State<DesignStore>,
-    State(decks): State<DeckStore>,
-    State(documents): State<DocumentStore>,
+    State(stores): State<ArtifactStores>,
     State(sessions): State<SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path(old): Path<String>,
     Json(request): Json<RenameRequest>,
 ) -> Response {
+    let ArtifactStores {
+        designs,
+        decks,
+        documents,
+        socials,
+    } = &stores;
     let new = request.name.trim().to_owned();
     if !is_valid_design_id(&old) {
         return api_error::invalid_design_id(&old);
@@ -87,10 +90,15 @@ async fn rename_project(
         Ok(summaries) => summaries.into_iter().map(|document| document.id).collect(),
         Err(error) => return api_error::internal_error(&error),
     };
+    let social_ids: Vec<String> = match socials.list().await {
+        Ok(summaries) => summaries.into_iter().map(|social| social.id).collect(),
+        Err(error) => return api_error::internal_error(&error),
+    };
     let ids = ProjectIds {
         designs: &design_ids,
         decks: &deck_ids,
         documents: &document_ids,
+        socials: &social_ids,
     };
     let members = match project_members(&ids, &old, &new) {
         Ok(members) => members,
@@ -111,6 +119,11 @@ async fn rename_project(
             return api_error::internal_error(&error);
         }
     }
+    for id in &members.socials {
+        if let Err(error) = socials.rename(id, &renamed_id(id, &old, &new)).await {
+            return api_error::internal_error(&error);
+        }
+    }
     if let Err(error) = sessions.rename(&old, &new).await {
         return api_error::internal_error(&anyhow::anyhow!(error.to_string()));
     }
@@ -118,7 +131,10 @@ async fn rename_project(
     tracing::info!(
         %old,
         %new,
-        moved = members.designs.len() + members.decks.len() + members.documents.len(),
+        moved = members.designs.len()
+            + members.decks.len()
+            + members.documents.len()
+            + members.socials.len(),
         "project renamed"
     );
     Json(serde_json::json!({ "name": new })).into_response()
@@ -129,6 +145,7 @@ struct ProjectIds<'ids> {
     designs: &'ids [String],
     decks: &'ids [String],
     documents: &'ids [String],
+    socials: &'ids [String],
 }
 
 /// The ids that move with a project, by store.
@@ -137,11 +154,12 @@ struct ProjectMembers {
     designs: Vec<String>,
     decks: Vec<String>,
     documents: Vec<String>,
+    socials: Vec<String>,
 }
 
-/// The design, deck, and document ids that move with the project
-/// `old`. Fails with a status and a message when `new` is taken by any
-/// store, or when `old` has no members.
+/// The design, deck, document, and social ids that move with the
+/// project `old`. Fails with a status and a message when `new` is
+/// taken by any store, or when `old` has no members.
 fn project_members(
     ids: &ProjectIds<'_>,
     old: &str,
@@ -152,6 +170,7 @@ fn project_members(
         .iter()
         .chain(ids.decks)
         .chain(ids.documents)
+        .chain(ids.socials)
         .any(|id| is_in_project(id, new));
     if is_taken {
         return Err((
@@ -169,11 +188,16 @@ fn project_members(
         designs: members(ids.designs),
         decks: members(ids.decks),
         documents: members(ids.documents),
+        socials: members(ids.socials),
     };
-    if found.designs.is_empty() && found.decks.is_empty() && found.documents.is_empty() {
+    if found.designs.is_empty()
+        && found.decks.is_empty()
+        && found.documents.is_empty()
+        && found.socials.is_empty()
+    {
         return Err((
             StatusCode::NOT_FOUND,
-            format!("project `{old}` has no designs, decks, or documents"),
+            format!("project `{old}` has no designs, decks, documents, or socials"),
         ));
     }
     Ok(found)
@@ -189,17 +213,21 @@ mod tests {
         let designs = vec!["talk-candidate-1".to_owned(), "other".to_owned()];
         let decks = vec!["talk".to_owned(), "talk-candidate-2".to_owned()];
         let documents = vec!["talk-candidate-3".to_owned(), "memo".to_owned()];
+        let socials = vec!["talk-candidate-4".to_owned(), "launch".to_owned()];
         let ids = ProjectIds {
             designs: &designs,
             decks: &decks,
             documents: &documents,
+            socials: &socials,
         };
         let members = project_members(&ids, "talk", "pitch").unwrap();
         assert_eq!(members.designs, ["talk-candidate-1"]);
         assert_eq!(members.decks, ["talk", "talk-candidate-2"]);
         assert_eq!(members.documents, ["talk-candidate-3"]);
+        assert_eq!(members.socials, ["talk-candidate-4"]);
         assert!(project_members(&ids, "talk", "other").is_err());
         assert!(project_members(&ids, "talk", "memo").is_err());
+        assert!(project_members(&ids, "talk", "launch").is_err());
         assert!(project_members(&ids, "missing", "pitch").is_err());
     }
 
