@@ -26,8 +26,7 @@ fn template_button_label(saved: usize, chosen: usize) -> String {
 
 /// The composer placeholder. It names every kind, because the user
 /// picks the kind after they send the request, not before.
-const COMPOSER_PLACEHOLDER: &str =
-    "A landing page for my finance app, a ten-slide pitch deck, or a two-page memo…";
+const COMPOSER_PLACEHOLDER: &str = "A landing page for my finance app, a ten-slide pitch deck, a two-page memo, or a launch carousel…";
 
 /// What one kind is for, under its name in the picker.
 fn kind_detail(kind: ArtifactKind) -> &'static str {
@@ -36,6 +35,9 @@ fn kind_detail(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Deck => "Slides on a 1920 by 1080 px canvas, with a presenter view.",
         ArtifactKind::Document => {
             "A report, a memo, a proposal, or a guide on A4 or Letter pages, with PDF and DOCX exports."
+        }
+        ArtifactKind::Social => {
+            "A post or a carousel on a square, portrait, story, or landscape canvas, with PDF and PNG exports."
         }
     }
 }
@@ -618,6 +620,7 @@ mod tests {
         assert!(COMPOSER_PLACEHOLDER.contains("landing page"));
         assert!(COMPOSER_PLACEHOLDER.contains("deck"));
         assert!(COMPOSER_PLACEHOLDER.contains("memo"));
+        assert!(COMPOSER_PLACEHOLDER.contains("carousel"));
     }
 
     #[test]
@@ -625,6 +628,7 @@ mod tests {
         assert!(kind_detail(ArtifactKind::Demo).contains("device canvas"));
         assert!(kind_detail(ArtifactKind::Deck).contains("1920 by 1080"));
         assert!(kind_detail(ArtifactKind::Document).contains("A4 or Letter"));
+        assert!(kind_detail(ArtifactKind::Social).contains("carousel"));
         for choice in ArtifactKind::ALL {
             assert!(!kind_detail(choice).is_empty());
         }
