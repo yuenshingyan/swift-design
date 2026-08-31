@@ -13,7 +13,7 @@ use crate::sessions::RunOptions;
 pub(crate) struct SessionRequest {
     /// The user's request, in their words.
     pub(crate) request: String,
-    /// `demo`, `deck`, or `document`.
+    /// `demo`, `deck`, `document`, or `social`.
     pub(crate) kind: ArtifactKind,
     /// Every answered question so far, oldest first.
     pub(crate) answers: Vec<AnsweredQuestion>,
@@ -91,6 +91,24 @@ pub(crate) fn request_input(request: &SessionRequest) -> String {
             ));
             if let Some(count) = request.options.page_count {
                 input.push_str(&format!("Page count the user asked for: {count}\n"));
+            }
+        }
+        ArtifactKind::Social => {
+            // The format axis prints its label below; the canvas line
+            // gives the model the px size to lay out for.
+            let format = request
+                .options
+                .format
+                .as_deref()
+                .and_then(design_model::Format::from_name)
+                .unwrap_or_default();
+            let viewport = format.viewport();
+            input.push_str(&format!(
+                "Canvas: {} by {} px per frame\n",
+                viewport.width, viewport.height
+            ));
+            if let Some(count) = request.options.frame_count {
+                input.push_str(&format!("Frame count the user asked for: {count}\n"));
             }
         }
     }
@@ -219,6 +237,27 @@ mod tests {
         assert!(input.contains("Page density: Detailed, document-style"));
         assert!(!input.contains("Canvases"));
         assert!(!input.contains("Slide"));
+    }
+
+    #[test]
+    fn a_social_input_names_the_format_canvas_and_the_frame_count() {
+        let mut social = request(ArtifactKind::Social);
+        let input = request_input(&social);
+        assert!(input.contains("Kind: Social post"));
+        assert!(input.contains("Canvas: 1080 by 1350 px per frame"));
+        assert!(!input.contains("Frame count"));
+        social.options.format = Some("story".to_owned());
+        social.options.frame_count = Some(5);
+        social.options.platform = Some("linkedin".to_owned());
+        social.options.post_goal = Some("educate".to_owned());
+        let input = request_input(&social);
+        assert!(input.contains("Canvas: 1080 by 1920 px per frame"));
+        assert!(input.contains("Format: Story, 9:16"));
+        assert!(input.contains("Frame count the user asked for: 5"));
+        assert!(input.contains("Platform: LinkedIn"));
+        assert!(input.contains("Post goal: Teach or explain"));
+        assert!(!input.contains("Canvases"));
+        assert!(!input.contains("Page"));
     }
 
     #[test]
