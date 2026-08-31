@@ -30,6 +30,11 @@
 //! `GET /prints/{id}/export.pdf` prints the print with the user's
 //! Chrome, one sheet per PDF page: the file a print shop takes.
 //! `GET /prints/{id}/export.zip` packs one PNG per sheet.
+//!
+//! Mailings export under `/mailings/{id}/export`, and
+//! `GET /mailings/{id}/export.pdf` prints the mailing with the user's
+//! Chrome, one email per PDF page. `GET /mailings/{id}/export.zip`
+//! packs one PNG per email.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -44,7 +49,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use design_model::{DECK_VIEWPORT, Deck, Design, Document, Print, Social};
+use design_model::{DECK_VIEWPORT, Deck, Design, Document, Mailing, Print, Social};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
@@ -55,6 +60,8 @@ use crate::designs::{DesignStore, is_valid_design_id};
 use crate::document_render;
 use crate::documents::{DocumentStore, is_valid_document_id};
 use crate::docx;
+use crate::mailing_render;
+use crate::mailings::{MailingStore, is_valid_mailing_id};
 use crate::pptx;
 use crate::print_render;
 use crate::prints::{PrintStore, is_valid_print_id};
@@ -70,8 +77,8 @@ const PPTX_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 
 /// The `/designs/{id}/export`, `/decks/{id}/export`,
-/// `/documents/{id}/export`, `/socials/{id}/export`, and
-/// `/prints/{id}/export` route table.
+/// `/documents/{id}/export`, `/socials/{id}/export`,
+/// `/prints/{id}/export`, and `/mailings/{id}/export` route table.
 pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/designs/{id}/export", get(export_design))
@@ -87,6 +94,9 @@ pub fn routes() -> Router<crate::AppState> {
         .route("/prints/{id}/export", get(export_print))
         .route("/prints/{id}/export.pdf", get(export_print_pdf))
         .route("/prints/{id}/export.zip", get(export_print_zip))
+        .route("/mailings/{id}/export", get(export_mailing))
+        .route("/mailings/{id}/export.pdf", get(export_mailing_pdf))
+        .route("/mailings/{id}/export.zip", get(export_mailing_zip))
 }
 
 /// The `Content-Disposition` value that names the download `{id}.{extension}`.
@@ -828,6 +838,172 @@ async fn inline_uploaded_sheet_images(
         sheet.html = replace_upload_references(&sheet.html, &data_uris);
         if let Some(css) = &sheet.css {
             sheet.css = Some(replace_upload_references(css, &data_uris));
+        }
+    }
+    Ok(())
+}
+
+/// Loads a stored mailing for an export: 400, 404, or 422 as a
+/// response when the id, the file, or the mailing is not usable.
+async fn load_mailing_for_export(mailings: &MailingStore, id: &str) -> Result<Mailing, Response> {
+    if !is_valid_mailing_id(id) {
+        return Err(api_error::invalid_mailing_id(id));
+    }
+    let mailing = match mailings.load(id).await {
+        Ok(Some(mailing)) => mailing,
+        Ok(None) => return Err(api_error::mailing_not_found(id)),
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    let errors = mailing.validate();
+    if !errors.is_empty() {
+        return Err(api_error::mailing_validation_failed(&errors));
+    }
+    Ok(mailing)
+}
+
+/// Renders a stored mailing with uploaded images and theme fonts
+/// inlined and returns it as a file download.
+async fn export_mailing(
+    State(mailings): State<MailingStore>,
+    State(uploads): State<UploadStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let mut mailing = match load_mailing_for_export(&mailings, &id).await {
+        Ok(mailing) => mailing,
+        Err(response) => return response,
+    };
+    if let Err(error) = inline_uploaded_email_images(&mut mailing, &uploads).await {
+        return api_error::internal_error(&error);
+    }
+    let html = inline_google_fonts(
+        mailing_render::render_mailing(&mailing, false),
+        fetch_as_browser,
+    )
+    .await;
+    tracing::info!(%id, size_bytes = html.len(), "mailing exported");
+    file_download(&id, "html", "text/html; charset=utf-8", html.into_bytes())
+}
+
+/// Prints a stored mailing to a PDF with the user's Chrome, one email
+/// per PDF page, and returns it as a file download. 503 when no
+/// Chrome is installed.
+async fn export_mailing_pdf(
+    State(mailings): State<MailingStore>,
+    State(uploads): State<UploadStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let mailing = match load_mailing_for_export(&mailings, &id).await {
+        Ok(mailing) => mailing,
+        Err(response) => return response,
+    };
+    build_mailing_pdf_response(&id, mailing, &uploads, screenshots::find_chrome()).await
+}
+
+/// Packs one PNG per email of a stored mailing into a zip and returns
+/// it as a file download. 503 when no Chrome is installed.
+async fn export_mailing_zip(
+    State(mailings): State<MailingStore>,
+    State(settings): State<SettingsStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let mailing = match load_mailing_for_export(&mailings, &id).await {
+        Ok(mailing) => mailing,
+        Err(response) => return response,
+    };
+    let base_url = format!("http://{}", settings.address());
+    build_mailing_zip_response(&id, &mailing, &base_url, screenshots::find_chrome()).await
+}
+
+/// Inlines uploaded images, renders the mailing's print page, and
+/// prints it with `chrome`. `chrome` is a parameter so the no-Chrome
+/// path is testable.
+async fn build_mailing_pdf_response(
+    id: &str,
+    mut mailing: Mailing,
+    uploads: &UploadStore,
+    chrome: Option<PathBuf>,
+) -> Response {
+    let Some(chrome) = chrome else {
+        return screenshots::chrome_missing_response("PDF exports");
+    };
+    if let Err(error) = inline_uploaded_email_images(&mut mailing, uploads).await {
+        return api_error::internal_error(&error);
+    }
+    let html = mailing_render::render_mailing_with(
+        &mailing,
+        mailing_render::RenderOptions {
+            is_print: true,
+            ..mailing_render::RenderOptions::default()
+        },
+    );
+    match screenshots::print_html_to_pdf(&chrome, &html, mailing.viewport()).await {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), "mailing exported as pdf");
+            file_download(id, "pdf", "application/pdf", bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Screenshots every email and packs the PNGs. `chrome` is a
+/// parameter so the no-Chrome path is testable.
+async fn build_mailing_zip_response(
+    id: &str,
+    mailing: &Mailing,
+    base_url: &str,
+    chrome: Option<PathBuf>,
+) -> Response {
+    if chrome.is_none() {
+        return screenshots::chrome_missing_response("PNG exports");
+    }
+    let mut images = Vec::with_capacity(mailing.emails.len());
+    for index in 0..mailing.emails.len() {
+        match screenshots::screenshot_email(mailing, index, base_url).await {
+            Ok(bytes) => images.push(bytes),
+            Err(error) => return api_error::internal_error(&error),
+        }
+    }
+    match pack_email_images(id, &images) {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), email_count = images.len(), "mailing exported as png zip");
+            file_download(id, "zip", "application/zip", bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// One zip with `{id}-email-{n}.png` per image, 1-based, in order. A
+/// PNG is compressed already, so the entries are stored as they are.
+fn pack_email_images(id: &str, images: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    for (index, image) in images.iter().enumerate() {
+        writer.start_file(format!("{id}-email-{}.png", index + 1), options)?;
+        writer.write_all(image)?;
+    }
+    Ok(writer.finish()?.into_inner())
+}
+
+/// The mailing twin of `inline_uploaded_images`: rewrites email html
+/// and css.
+async fn inline_uploaded_email_images(
+    mailing: &mut Mailing,
+    uploads: &UploadStore,
+) -> anyhow::Result<()> {
+    let texts: Vec<&str> = mailing
+        .emails
+        .iter()
+        .flat_map(|email| [Some(email.html.as_str()), email.css.as_deref()])
+        .flatten()
+        .collect();
+    let data_uris = collect_data_uris(&texts, uploads).await?;
+    if data_uris.is_empty() {
+        return Ok(());
+    }
+    for email in &mut mailing.emails {
+        email.html = replace_upload_references(&email.html, &data_uris);
+        if let Some(css) = &email.css {
+            email.css = Some(replace_upload_references(css, &data_uris));
         }
     }
     Ok(())

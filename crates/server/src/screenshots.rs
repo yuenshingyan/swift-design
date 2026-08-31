@@ -1,5 +1,5 @@
-//! Screen, slide, page, frame, and sheet screenshots: how a model sees its own
-//! work.
+//! Screen, slide, page, frame, sheet, and email screenshots: how a
+//! model sees its own work.
 //!
 //! The server renders one screen, slide, page, or frame to HTML and
 //! asks an installed Chrome or Chromium to draw it as a PNG. No browser
@@ -19,7 +19,7 @@ use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use design_model::{DECK_VIEWPORT, Deck, Design, Document, Print, Social, Viewport};
+use design_model::{DECK_VIEWPORT, Deck, Design, Document, Mailing, Print, Social, Viewport};
 
 use crate::api_error;
 use crate::deck_render;
@@ -27,6 +27,8 @@ use crate::decks::{DeckStore, is_valid_deck_id};
 use crate::designs::{DesignStore, is_valid_design_id};
 use crate::document_render;
 use crate::documents::{DocumentStore, is_valid_document_id};
+use crate::mailing_render;
+use crate::mailings::{MailingStore, is_valid_mailing_id};
 use crate::print_render;
 use crate::prints::{PrintStore, is_valid_print_id};
 use crate::render::{RenderOptions, render_design_with};
@@ -317,6 +319,48 @@ pub async fn dump_print_dom(print: &Print, base_url: &str) -> anyhow::Result<Str
     dump_rendered_dom(&html, base_url, print.viewport()).await
 }
 
+/// Renders email `index` (zero-based) of `mailing` to a PNG.
+/// `base_url` resolves relative image paths like `/uploads/…`.
+pub async fn screenshot_email(
+    mailing: &Mailing,
+    index: usize,
+    base_url: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let chrome = find_chrome().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
+        )
+    })?;
+    let html = mailing_render::render_mailing_with(
+        mailing,
+        mailing_render::RenderOptions {
+            only_email: Some(index),
+            asset_origin: Some(base_url.to_owned()),
+            ..mailing_render::RenderOptions::default()
+        },
+    );
+    screenshot_html(
+        &chrome,
+        &with_base_href(&html, base_url),
+        mailing.viewport(),
+    )
+    .await
+}
+
+/// Renders the whole mailing with the layout audit script and returns
+/// the DOM after the audit ran, as Chrome dumps it.
+pub async fn dump_mailing_dom(mailing: &Mailing, base_url: &str) -> anyhow::Result<String> {
+    let html = mailing_render::render_mailing_with(
+        mailing,
+        mailing_render::RenderOptions {
+            is_auditing: true,
+            asset_origin: Some(base_url.to_owned()),
+            ..mailing_render::RenderOptions::default()
+        },
+    );
+    dump_rendered_dom(&html, base_url, mailing.viewport()).await
+}
+
 /// Loads a rendered page in Chrome and returns the DOM after its
 /// scripts ran. `base_url` resolves relative image paths; `viewport`
 /// sizes the window.
@@ -546,7 +590,8 @@ async fn run_chrome(
 
 /// The `/designs/{id}/screens/{n}.png`, `/decks/{id}/slides/{n}.png`,
 /// `/documents/{id}/pages/{n}.png`, `/socials/{id}/frames/{n}.png`,
-/// and `/prints/{id}/sheets/{n}.png` route table.
+/// `/prints/{id}/sheets/{n}.png`, and `/mailings/{id}/emails/{n}.png`
+/// route table.
 pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/designs/{id}/screens/{file}", get(get_screen_image))
@@ -554,6 +599,7 @@ pub fn routes() -> Router<crate::AppState> {
         .route("/documents/{id}/pages/{file}", get(get_page_image))
         .route("/socials/{id}/frames/{file}", get(get_frame_image))
         .route("/prints/{id}/sheets/{file}", get(get_sheet_image))
+        .route("/mailings/{id}/emails/{file}", get(get_email_image))
 }
 
 /// The 1-based number in a `{n}.png` file name. `None` for any other
@@ -754,6 +800,43 @@ async fn get_sheet_image(
     }
     let base_url = format!("http://{}", settings.address());
     match screenshot_sheet(&print, number - 1, &base_url).await {
+        Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Serves a PNG of one email. `file` is `{n}.png` with a 1-based `n`.
+async fn get_email_image(
+    State(mailings): State<MailingStore>,
+    State(settings): State<SettingsStore>,
+    Path((id, file)): Path<(String, String)>,
+) -> Response {
+    if !is_valid_mailing_id(&id) {
+        return api_error::invalid_mailing_id(&id);
+    }
+    let Some(number) = image_number(&file) else {
+        return bad_image_name("email", &file);
+    };
+    let mailing = match mailings.load(&id).await {
+        Ok(Some(mailing)) => mailing,
+        Ok(None) => return api_error::mailing_not_found(&id),
+        Err(error) => return api_error::internal_error(&error),
+    };
+    if number > mailing.emails.len() {
+        return api_error::error_response(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "mailing `{id}` has no email {number}: use 1 to {}",
+                mailing.emails.len()
+            ),
+            Vec::new(),
+        );
+    }
+    if find_chrome().is_none() {
+        return chrome_missing_response("email images");
+    }
+    let base_url = format!("http://{}", settings.address());
+    match screenshot_email(&mailing, number - 1, &base_url).await {
         Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
         Err(error) => api_error::internal_error(&error),
     }
