@@ -66,6 +66,27 @@ impl MailingPreviewMode {
     }
 }
 
+/// Fetches a URL and puts the response on the clipboard as rich text
+/// and as plain source, inside one user gesture. The promise-valued
+/// `ClipboardItem` keeps the gesture alive through the fetch, so
+/// Safari accepts the write too. Sends back `ok` or the error text.
+const COPY_EMAIL_TO_CLIPBOARD: &str = "\
+const url = await dioxus.recv();
+try {
+  const text = fetch(url).then((response) => {
+    if (!response.ok) { throw new Error('fetch failed with status ' + response.status); }
+    return response.text();
+  });
+  const item = new ClipboardItem({
+    'text/html': text.then((html) => new Blob([html], { type: 'text/html' })),
+    'text/plain': text.then((html) => new Blob([html], { type: 'text/plain' })),
+  });
+  await navigator.clipboard.write([item]);
+  dioxus.send('ok');
+} catch (error) {
+  dioxus.send(String(error));
+}";
+
 /// Loads one mailing, then hands it to the editor.
 #[component]
 pub fn MailingEditor(mailing_id: String, on_back: EventHandler<()>) -> Element {
@@ -379,6 +400,39 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                             "Properties"
                         }
                         span { class: "divider" }
+                        button {
+                            title: "Copy this email for pasting into a compose window or an HTML template box",
+                            onclick: {
+                                let mailing_id = mailing_id.clone();
+                                move |_| {
+                                    let url = format!("/mailings/{mailing_id}/emails/{}.html", selected() + 1);
+                                    let number = selected() + 1;
+                                    let mut channel = document::eval(COPY_EMAIL_TO_CLIPBOARD); // The clipboard write must start inside
+                                    let _ = channel.send(url);
+                                    spawn(async move {
+                                        match channel.recv::<String>().await {
+                                            Ok(result) if result == "ok" => {
+                                                messages
+                                                    .set(
+                                                        vec![
+                                                            format!(
+                                                                "Copied email {number}. Paste it into a compose window; an HTML template box takes the source.",
+                                                            ),
+                                                        ],
+                                                    );
+                                            }
+                                            Ok(error) => {
+                                                messages.set(vec![format!("Copy failed: {error}")]);
+                                            }
+                                            Err(error) => {
+                                                messages.set(vec![format!("Copy failed: {error:?}")]);
+                                            }
+                                        }
+                                    });
+                                }
+                            },
+                            "Copy"
+                        }
                         MailingExportGroup {
                             mailing_id: mailing_id.clone(),
                             can_export_with_chrome,
