@@ -205,6 +205,10 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
             "You plan documents with the user: reports, memos, proposals, letters, and guides on A4 or Letter pages.",
             "how the colors read, the audience, the tone, how much the document leans on data, what kind of document it is, the paper, how much goes on a page, the document length in pages, the number of candidates, and how different the candidates are",
         ),
+        ArtifactKind::Social => (
+            "You plan social posts and carousels with the user, for Instagram, LinkedIn, X, and Facebook.",
+            "how the colors read, the audience, the tone, how much the post leans on data, the platform, the format, what the post is for, the number of frames, the number of candidates, and how different the candidates are",
+        ),
     };
     // The example in the JSON names a real axis of this kind, so the
     // model copies a shape it can use.
@@ -276,6 +280,15 @@ pub(crate) fn planner_input(
                 "Length in pages: {}\nCandidates requested: {candidates}\nVariety: {}\n",
                 options
                     .page_count
+                    .map_or("not chosen yet".to_owned(), |count| count.to_string()),
+                options.variety
+            ));
+        }
+        ArtifactKind::Social => {
+            input.push_str(&format!(
+                "Length in frames: {}\nCandidates requested: {candidates}\nVariety: {}\n",
+                options
+                    .frame_count
                     .map_or("not chosen yet".to_owned(), |count| count.to_string()),
                 options.variety
             ));
