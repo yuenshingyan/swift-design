@@ -201,7 +201,10 @@ Chrome: the file a print shop takes) and **PNG** (a zip with one PNG per
 sheet, through Chrome) next to the HTML export. The sheet notes hold print
 instructions such as the paper stock or the bleed.
 
-For a mailing, the editor adds **Email** (a zip with one email-client
+For a mailing, the editor adds **Copy** (one click puts the open email
+on the clipboard as rich text: paste it straight into a Gmail or
+Outlook compose window, or into an email service's HTML template box,
+which takes the source), **Email** (a zip with one email-client
 HTML file per email plus a subjects file; no Chrome needed), **PDF**
 (one PDF page per email, through Chrome), and **PNG** (a zip with one
 PNG per email, through Chrome) next to the HTML export. The Email files
@@ -243,8 +246,8 @@ Print-only routes: `GET /prints/{id}/sheets/{n}.png`,
 `GET /prints/{id}/export.pdf`, `GET /prints/{id}/export.zip`.
 
 Mailing-only routes: `GET /mailings/{id}/emails/{n}.png`,
-`GET /mailings/{id}/export.pdf`, `GET /mailings/{id}/export.zip`,
-`GET /mailings/{id}/export.email.zip`.
+`GET /mailings/{id}/emails/{n}.html`, `GET /mailings/{id}/export.pdf`,
+`GET /mailings/{id}/export.zip`, `GET /mailings/{id}/export.email.zip`.
 
 ## Checks
 

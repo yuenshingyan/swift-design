@@ -171,7 +171,7 @@ Designs, decks, documents, socials, prints, and mailings are separate pipelines 
 - Document-only routes: `/documents/{id}/pages/{n}.png`, `/documents/{id}/export.pdf`, `/documents/{id}/export.docx`.
 - Social-only routes: `/socials/{id}/frames/{n}.png`, `/socials/{id}/export.pdf`, `/socials/{id}/export.zip`.
 - Print-only routes: `/prints/{id}/sheets/{n}.png`, `/prints/{id}/export.pdf`, `/prints/{id}/export.zip`.
-- Mailing-only routes: `/mailings/{id}/emails/{n}.png`, `/mailings/{id}/export.pdf`, `/mailings/{id}/export.zip`, `/mailings/{id}/export.email.zip`.
+- Mailing-only routes: `/mailings/{id}/emails/{n}.png`, `/mailings/{id}/emails/{n}.html`, `/mailings/{id}/export.pdf`, `/mailings/{id}/export.zip`, `/mailings/{id}/export.email.zip`.
 - JSON fields: `snake_case` (serde default). Do not rename to camelCase.
 - Success responses return the payload directly. Errors return `{ "error": { "message": "...", "details": [...] } }`.
 - Timestamps: RFC 3339 strings.
