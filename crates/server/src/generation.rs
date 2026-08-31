@@ -190,6 +190,9 @@ pub struct GenerationEngine {
     /// The document store, for document sessions. `None` refuses
     /// document runs.
     pub(crate) documents: Option<crate::documents::DocumentStore>,
+    /// The social store, for social sessions. `None` refuses social
+    /// runs.
+    pub(crate) socials: Option<crate::socials::SocialStore>,
     pub(crate) sessions: SessionStore,
     address: String,
     pub(crate) notifier: ChangeNotifier,
@@ -355,6 +358,7 @@ impl GenerationEngine {
             designs,
             decks: None,
             documents: None,
+            socials: None,
             sessions,
             address,
             notifier,
@@ -374,6 +378,12 @@ impl GenerationEngine {
     /// Lets the engine write documents, for document sessions.
     pub fn with_documents(mut self, documents: crate::documents::DocumentStore) -> Self {
         self.documents = Some(documents);
+        self
+    }
+
+    /// Lets the engine write socials, for social sessions.
+    pub fn with_socials(mut self, socials: crate::socials::SocialStore) -> Self {
+        self.socials = Some(socials);
         self
     }
 
@@ -689,6 +699,9 @@ impl GenerationEngine {
             design_model::ArtifactKind::Document => {
                 self.continue_document_requests(&context.session_id).await?
             }
+            design_model::ArtifactKind::Social => {
+                self.continue_social_requests(&context.session_id).await?
+            }
         };
         Ok((!continues.is_empty()).then_some(GenerationTask::Continue(continues)))
     }
@@ -871,6 +884,18 @@ impl GenerationEngine {
                     .unwrap_or(0),
                 None => 0,
             },
+            design_model::ArtifactKind::Social => match &self.socials {
+                Some(socials) => socials
+                    .list()
+                    .await
+                    .map(|rows| {
+                        rows.iter()
+                            .filter(|row| session_id_of_artifact(&row.id) == session_id)
+                            .count()
+                    })
+                    .unwrap_or(0),
+                None => 0,
+            },
         }
     }
 
@@ -910,6 +935,9 @@ impl GenerationEngine {
         }
         if context.request.kind == design_model::ArtifactKind::Document {
             return self.execute_document(client, context, task, log).await;
+        }
+        if context.request.kind == design_model::ArtifactKind::Social {
+            return self.execute_social(client, context, task, log).await;
         }
         match task {
             GenerationTask::Candidates => self.generate_candidates(client, context, log).await,
@@ -1543,6 +1571,11 @@ impl GenerationEngine {
                 design_model::ArtifactKind::Document => {
                     engine
                         .continue_document(&client, &context, &id, &attachments, &share, &log)
+                        .await
+                }
+                design_model::ArtifactKind::Social => {
+                    engine
+                        .continue_social(&client, &context, &id, &attachments, &share, &log)
                         .await
                 }
             };
@@ -2766,6 +2799,12 @@ impl Validated for design_model::Deck {
 }
 
 impl Validated for design_model::Document {
+    fn problems(&self) -> Vec<design_model::ValidationError> {
+        self.validate()
+    }
+}
+
+impl Validated for design_model::Social {
     fn problems(&self) -> Vec<design_model::ValidationError> {
         self.validate()
     }
