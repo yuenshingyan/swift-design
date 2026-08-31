@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 
 use design_model::{
-    ArtifactKind, BriefQuestionSet, DECK_VIEWPORT, Deck, Design, Document, Paper, QuestionAnswer,
-    WorkflowState,
+    ArtifactKind, BriefQuestionSet, DECK_VIEWPORT, Deck, Design, Document, Format, Paper,
+    QuestionAnswer, Social, WorkflowState,
 };
 use gloo_net::http::{Request, RequestBuilder, Response};
 use serde::{Deserialize, Serialize};
@@ -228,6 +228,19 @@ pub struct SessionOptions {
     /// agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_count: Option<u32>,
+    /// The platform a social is posted on, one of `PLATFORMS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// The canvas a social is laid out on, one of `FORMATS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// What a social is for, one of `POST_GOALS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_goal: Option<String>,
+    /// How many frames a social run writes. `None` leaves it to the
+    /// agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_count: Option<u32>,
     /// The axes the planner filled from the request, by option key.
     /// The card marks them as suggested until the user picks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -258,6 +271,10 @@ impl Default for SessionOptions {
             paper: None,
             page_density: None,
             page_count: None,
+            platform: None,
+            format: None,
+            post_goal: None,
+            frame_count: None,
             suggested: Vec::new(),
         }
     }
@@ -303,6 +320,10 @@ pub struct SessionView {
     /// session is a document session.
     #[serde(default)]
     pub documents: Vec<DocumentSummary>,
+    /// The socials that belong to this session. Empty unless the
+    /// session is a social session.
+    #[serde(default)]
+    pub socials: Vec<SocialSummary>,
 }
 
 /// Body of `POST /sessions`.
@@ -310,7 +331,7 @@ pub struct SessionView {
 pub struct CreateSessionRequest<'value> {
     /// The user's request.
     pub request: &'value str,
-    /// `demo`, `deck`, or `document`.
+    /// `demo`, `deck`, `document`, or `social`.
     pub artifact_kind: &'value str,
     /// How hard to work.
     pub options: CreateOptions<'value>,
@@ -641,6 +662,18 @@ pub async fn fork_document(id: &str) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Copies one social candidate under the next free number of its
+/// session. Returns the new id.
+pub async fn fork_social(id: &str) -> Result<String, String> {
+    let request = built(Request::post(&format!("/socials/{id}/fork")))?;
+    let response = send_checked(request, "POST /socials/fork").await?;
+    response
+        .json::<ForkResponse>()
+        .await
+        .map(|fork| fork.id)
+        .map_err(|error| error.to_string())
+}
+
 /// Response of `GET /designs/{id}/authors`.
 #[derive(Debug, Deserialize)]
 struct AuthorsResponse {
@@ -891,6 +924,115 @@ pub async fn restore_document_history(id: &str, stamp: &str) -> Result<(), Strin
     .await
 }
 
+// -- Socials -------------------------------------------------------------
+
+/// One row of `GET /socials`, mirrored from the server.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct SocialSummary {
+    /// Social id used in `/socials/{id}` routes.
+    pub id: String,
+    /// Social title.
+    pub title: String,
+    /// Theme name.
+    pub theme: String,
+    /// The format the frames are laid out on.
+    #[serde(default)]
+    pub format: Format,
+    /// Number of frames.
+    pub frame_count: usize,
+    /// Number of titles in the planned outline.
+    #[serde(default)]
+    pub outline_count: usize,
+    /// Number of placeholder frames a run left behind.
+    #[serde(default)]
+    pub pending_count: usize,
+}
+
+impl SocialSummary {
+    /// True when the social is a preview that waits for its frames.
+    pub fn is_preview(&self) -> bool {
+        self.outline_count > self.frame_count
+    }
+
+    /// True when the social still owes frames.
+    pub fn is_unfinished(&self) -> bool {
+        self.is_preview() || self.pending_count > 0
+    }
+
+    /// The px canvas of every frame.
+    pub fn viewport(&self) -> design_model::Viewport {
+        self.format.viewport()
+    }
+
+    /// The CSS aspect-ratio of the social's format.
+    pub fn aspect_ratio(&self) -> String {
+        self.viewport().aspect_ratio_css()
+    }
+}
+
+/// Fetches the social listing.
+pub async fn fetch_social_list() -> Result<Vec<SocialSummary>, String> {
+    get_json("/socials").await
+}
+
+/// Fetches one social.
+pub async fn fetch_social(id: &str) -> Result<Social, String> {
+    get_json(&format!("/socials/{id}")).await
+}
+
+/// Saves one social as a user edit. `Err` carries one message per
+/// problem, so the editor can show every validation error at once.
+pub async fn save_social(id: &str, social: &Social) -> Result<(), Vec<String>> {
+    let response = Request::put(&format!("/socials/{id}"))
+        .header("x-swift-design-author", "user")
+        .json(social)
+        .map_err(|error| vec![error.to_string()])?
+        .send()
+        .await
+        .map_err(|error| vec![error.to_string()])?;
+    if response.ok() {
+        return Ok(());
+    }
+    let status = response.status();
+    match response.json::<ErrorEnvelope>().await {
+        Ok(envelope) if !envelope.error.details.is_empty() => Err(envelope.error.details),
+        Ok(envelope) => Err(vec![envelope.error.message]),
+        Err(_) => Err(vec![format!(
+            "PUT /socials/{id} failed with status {status}"
+        )]),
+    }
+}
+
+/// Deletes one social.
+pub async fn delete_social(id: &str) -> Result<(), String> {
+    send_empty(
+        Request::delete(&format!("/socials/{id}")),
+        "DELETE /socials",
+    )
+    .await
+}
+
+/// Fetches the field paths the user changed in this social.
+pub async fn fetch_social_user_paths(id: &str) -> Result<Vec<String>, String> {
+    get_json::<AuthorsResponse>(&format!("/socials/{id}/authors"))
+        .await
+        .map(|authors| authors.user_paths)
+}
+
+/// Fetches the saved snapshots of one social.
+pub async fn fetch_social_history(id: &str) -> Result<Vec<HistorySnapshot>, String> {
+    get_json(&format!("/socials/{id}/history")).await
+}
+
+/// Writes one snapshot back as the current social.
+pub async fn restore_social_history(id: &str, stamp: &str) -> Result<(), String> {
+    send_empty(
+        Request::post(&format!("/socials/{id}/history/{stamp}/restore")),
+        "restore",
+    )
+    .await
+}
+
 // -- Templates -----------------------------------------------------------
 
 /// One row of `GET /templates`.
@@ -968,6 +1110,8 @@ struct SaveTemplateRequest<'value> {
     deck_id: Option<&'value str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     document_id: Option<&'value str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    social_id: Option<&'value str>,
     name: &'value str,
 }
 
@@ -982,6 +1126,7 @@ pub async fn save_template(design_id: &str, name: &str) -> Result<TemplateSummar
         design_id: Some(design_id),
         deck_id: None,
         document_id: None,
+        social_id: None,
         name,
     })
     .await
@@ -993,6 +1138,7 @@ pub async fn save_deck_template(deck_id: &str, name: &str) -> Result<TemplateSum
         design_id: None,
         deck_id: Some(deck_id),
         document_id: None,
+        social_id: None,
         name,
     })
     .await
@@ -1007,6 +1153,19 @@ pub async fn save_document_template(
         design_id: None,
         deck_id: None,
         document_id: Some(document_id),
+        social_id: None,
+        name,
+    })
+    .await
+}
+
+/// Saves the style of one social as a template.
+pub async fn save_social_template(social_id: &str, name: &str) -> Result<TemplateSummary, String> {
+    save_template_from(SaveTemplateRequest {
+        design_id: None,
+        deck_id: None,
+        document_id: None,
+        social_id: Some(social_id),
         name,
     })
     .await
@@ -1291,7 +1450,41 @@ pub async fn complete_login(code: &str, model: Option<&str>) -> Result<(), Strin
 
 #[cfg(test)]
 mod tests {
-    use crate::api::{SessionOptions, VARIATION_LIMIT};
+    use design_model::{Format, STORY_VIEWPORT};
+
+    use crate::api::{SessionOptions, SocialSummary, VARIATION_LIMIT};
+
+    #[test]
+    fn a_social_summary_takes_its_canvas_from_the_format() {
+        let summary = SocialSummary {
+            id: "post-candidate-1".to_owned(),
+            title: "Launch".to_owned(),
+            theme: "slate".to_owned(),
+            format: Format::Story,
+            frame_count: 2,
+            outline_count: 3,
+            pending_count: 0,
+        };
+        assert_eq!(summary.viewport(), STORY_VIEWPORT);
+        assert_eq!(summary.aspect_ratio(), "1080 / 1920");
+        assert!(summary.is_preview());
+        assert!(summary.is_unfinished());
+        let finished = SocialSummary {
+            outline_count: 2,
+            ..summary
+        };
+        assert!(!finished.is_preview());
+        assert!(!finished.is_unfinished());
+    }
+
+    #[test]
+    fn the_social_options_start_blank() {
+        let options = SessionOptions::default();
+        assert_eq!(options.platform, None);
+        assert_eq!(options.format, None);
+        assert_eq!(options.post_goal, None);
+        assert_eq!(options.frame_count, None);
+    }
 
     #[test]
     fn the_variation_count_defaults_to_two_and_stays_inside_the_limit() {
