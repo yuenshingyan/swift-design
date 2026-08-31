@@ -39,6 +39,9 @@ fn kind_detail(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Social => {
             "A post or a carousel on a square, portrait, story, or landscape canvas, with PDF and PNG exports."
         }
+        ArtifactKind::Print => {
+            "A poster, a flyer, a menu, or a sign on an A5 to A3, Letter, or Tabloid canvas, with PDF and PNG exports."
+        }
     }
 }
 

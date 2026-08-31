@@ -10,7 +10,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use design_model::{A4_VIEWPORT, ArtifactKind, DECK_VIEWPORT, Format, LETTER_VIEWPORT, Viewport};
+use design_model::{
+    A4_VIEWPORT, ArtifactKind, DECK_VIEWPORT, Format, LETTER_VIEWPORT, Orientation, PrintSize,
+    Viewport,
+};
 use dioxus::prelude::*;
 
 use crate::api;
@@ -78,6 +81,9 @@ impl CanvasCard {
             }
             ArtifactKind::Social => {
                 format!("/socials/{}/render?v={revision}&frame={current}", self.id)
+            }
+            ArtifactKind::Print => {
+                format!("/prints/{}/render?v={revision}&sheet={current}", self.id)
             }
         }
     }
@@ -183,6 +189,29 @@ pub(crate) fn cards_from_socials(
     mine
 }
 
+/// The print cards that belong to `session_id`, chosen print first.
+pub(crate) fn cards_from_prints(
+    prints: &[api::PrintSummary],
+    session_id: &str,
+    chosen: Option<&str>,
+) -> Vec<CanvasCard> {
+    let mut mine: Vec<CanvasCard> = prints
+        .iter()
+        .filter(|summary| crate::settings::artifact_project(&summary.id) == session_id)
+        .map(|summary| CanvasCard {
+            id: summary.id.clone(),
+            title: summary.title.clone(),
+            kind: ArtifactKind::Print,
+            count: summary.sheet_count,
+            outline_count: summary.outline_count,
+            ratio: summary.aspect_ratio(),
+            viewport: summary.viewport(),
+        })
+        .collect();
+    mine.sort_by_key(|card| Some(card.id.as_str()) != chosen);
+    mine
+}
+
 /// The card name from its id: `Candidate 2` from `talk-candidate-2`, or
 /// `Candidate` when the id has no number.
 pub(crate) fn candidate_label(id: &str) -> String {
@@ -207,7 +236,8 @@ pub(crate) fn candidate_number(id: &str) -> &str {
 }
 
 /// The name of one canvas, for a tab: `Desktop`, `Tablet`, `Phone`,
-/// `Deck`, `A4`, `Letter`, or a social format such as `Square`.
+/// `Deck`, `A4`, `Letter`, a social format such as `Square`, or a
+/// print size such as `A3` or `A4 landscape`.
 pub(crate) fn canvas_name(viewport: Viewport) -> &'static str {
     if viewport == A4_VIEWPORT {
         return "A4";
@@ -220,6 +250,28 @@ pub(crate) fn canvas_name(viewport: Viewport) -> &'static str {
         .find(|format| format.viewport() == viewport)
     {
         return format.label();
+    }
+    // Print A4 and Letter portrait matched the document papers above,
+    // so only the other sizes and the landscape rotations land here.
+    // `canvas_name` returns a static str, so the rotated names are
+    // literal arms.
+    if let Some(size) = PrintSize::ALL
+        .into_iter()
+        .find(|size| size.viewport() == viewport)
+    {
+        return size.label();
+    }
+    if let Some(size) = PrintSize::ALL
+        .into_iter()
+        .find(|size| Orientation::Landscape.apply(size.viewport()) == viewport)
+    {
+        return match size {
+            PrintSize::A5 => "A5 landscape",
+            PrintSize::A4 => "A4 landscape",
+            PrintSize::A3 => "A3 landscape",
+            PrintSize::Letter => "Letter landscape",
+            PrintSize::Tabloid => "Tabloid landscape",
+        };
     }
     match (viewport.width, viewport.height) {
         (390, 844) => "Phone",
@@ -453,6 +505,7 @@ pub(crate) fn CandidateCanvas(
                     ArtifactKind::Deck => api::delete_deck(&id).await,
                     ArtifactKind::Document => api::delete_document(&id).await,
                     ArtifactKind::Social => api::delete_social(&id).await,
+                    ArtifactKind::Print => api::delete_print(&id).await,
                 };
                 if let Err(message) = deleted {
                     on_error.call(message);
@@ -977,6 +1030,17 @@ mod tests {
         assert_eq!(canvas_name(PORTRAIT_VIEWPORT), "Portrait");
         assert_eq!(canvas_name(STORY_VIEWPORT), "Story");
         assert_eq!(canvas_name(LANDSCAPE_VIEWPORT), "Landscape");
+        assert_eq!(canvas_name(design_model::A3_VIEWPORT), "A3");
+        assert_eq!(canvas_name(design_model::A5_VIEWPORT), "A5");
+        assert_eq!(canvas_name(design_model::TABLOID_VIEWPORT), "Tabloid");
+        assert_eq!(
+            canvas_name(Orientation::Landscape.apply(design_model::A3_VIEWPORT)),
+            "A3 landscape"
+        );
+        assert_eq!(
+            canvas_name(Orientation::Landscape.apply(A4_VIEWPORT)),
+            "A4 landscape"
+        );
         assert_eq!(canvas_size(Viewport::default()), "1440 × 900");
         assert_eq!(canvas_size(DECK_VIEWPORT), "1920 × 1080");
     }

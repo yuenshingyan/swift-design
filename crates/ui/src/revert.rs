@@ -40,6 +40,7 @@ pub(crate) async fn revert_artifact(
         ArtifactKind::Deck => api::fetch_deck_history(id).await?,
         ArtifactKind::Document => api::fetch_document_history(id).await?,
         ArtifactKind::Social => api::fetch_social_history(id).await?,
+        ArtifactKind::Print => api::fetch_print_history(id).await?,
     };
     match snapshot_since(&history, since) {
         Some(stamp) => {
@@ -48,6 +49,7 @@ pub(crate) async fn revert_artifact(
                 ArtifactKind::Deck => api::restore_deck_history(id, &stamp).await?,
                 ArtifactKind::Document => api::restore_document_history(id, &stamp).await?,
                 ArtifactKind::Social => api::restore_social_history(id, &stamp).await?,
+                ArtifactKind::Print => api::restore_print_history(id, &stamp).await?,
             }
             Ok("restored")
         }
@@ -58,6 +60,7 @@ pub(crate) async fn revert_artifact(
                 ArtifactKind::Deck => api::delete_deck(id).await?,
                 ArtifactKind::Document => api::delete_document(id).await?,
                 ArtifactKind::Social => api::delete_social(id).await?,
+                ArtifactKind::Print => api::delete_print(id).await?,
             }
             Ok("deleted")
         }

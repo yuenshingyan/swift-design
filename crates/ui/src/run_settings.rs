@@ -1,8 +1,9 @@
 //! The run settings the app asks for instead of the agent: the canvas
 //! for a demo, the scenario, the length, the candidate count, and the
 //! variety for a deck, the paper and the length for a document, the
-//! platform, the format, and the length for a social, and the number
-//! of variations. Each has a closed set of answers, so a chip settles
+//! platform, the format, and the length for a social, the print kind,
+//! the size, the orientation, and the length for a print, and the
+//! number of variations. Each has a closed set of answers, so a chip settles
 //! it in one click.
 
 use std::collections::HashMap;
@@ -10,8 +11,9 @@ use std::collections::HashMap;
 use design_model::{
     AUDIENCES, AnsweredQuestion, ArtifactKind, COLOR_MODES, CUSTOM_ANSWER_LIMIT, DATA_STATES,
     DECK_SCENARIOS, DECK_VARIETY_LEVELS, DEMO_SCOPES, DOCUMENT_KINDS, EVIDENCE_STYLES, FIDELITIES,
-    FORMATS, FRAME_COUNT_LIMIT, PAGE_COUNT_LIMIT, PAPERS, PLATFORMS, POST_GOALS, PRODUCT_KINDS,
-    SLIDE_DENSITIES, TONES, Viewport, WorkflowState,
+    FORMATS, FRAME_COUNT_LIMIT, ORIENTATIONS, PAGE_COUNT_LIMIT, PAPERS, PLATFORMS, POST_GOALS,
+    PRINT_KINDS, PRINT_SIZES, PRODUCT_KINDS, SHEET_COUNT_LIMIT, SLIDE_DENSITIES, TONES, Viewport,
+    WorkflowState,
 };
 use dioxus::prelude::*;
 
@@ -159,6 +161,25 @@ pub(crate) fn frame_count_options() -> Vec<(String, String)> {
             "1 frame".to_owned()
         } else {
             format!("{count} frames")
+        };
+        options.push((count.to_string(), label));
+    }
+    options
+}
+
+/// The sheet counts the app offers, as (brief value, label). The empty
+/// value leaves the length to the agent. One sheet is a poster; two
+/// are the front and the back of a flyer.
+pub(crate) fn sheet_count_options() -> Vec<(String, String)> {
+    let mut options = vec![(String::new(), "The agent decides".to_owned())];
+    for count in [1, 2, 3, 4] {
+        if count > SHEET_COUNT_LIMIT {
+            break;
+        }
+        let label = if count == 1 {
+            "1 sheet".to_owned()
+        } else {
+            format!("{count} sheets")
         };
         options.push((count.to_string(), label));
     }
@@ -330,6 +351,38 @@ fn axes_for(kind: ArtifactKind) -> Vec<Axis> {
                 choices: &POST_GOALS,
             },
         ],
+        // A print speaks to a reader, so it asks the audience and the
+        // tone like a document. Its own axes name the print kind, the
+        // paper size, and the orientation. The colors, the evidence,
+        // the length, the candidates, and the variety sit on
+        // `PrintQuestions`.
+        ArtifactKind::Print => vec![
+            Axis {
+                key: "audience",
+                label: "Who is it for?",
+                choices: &AUDIENCES,
+            },
+            Axis {
+                key: "tone",
+                label: "What tone should it have?",
+                choices: &TONES,
+            },
+            Axis {
+                key: "print_kind",
+                label: "What kind of print piece is it?",
+                choices: &PRINT_KINDS,
+            },
+            Axis {
+                key: "print_size",
+                label: "What paper size is it for?",
+                choices: &PRINT_SIZES,
+            },
+            Axis {
+                key: "orientation",
+                label: "How is it turned?",
+                choices: &ORIENTATIONS,
+            },
+        ],
     }
 }
 
@@ -457,6 +510,36 @@ pub(crate) fn app_answers(
                 &fixed_choices(&EVIDENCE_STYLES),
             ));
         }
+        ArtifactKind::Print => {
+            entries.push(recorded(
+                "How should the colors read?",
+                options.color_mode.as_deref(),
+                &fixed_choices(&COLOR_MODES),
+            ));
+            entries.push(recorded(
+                "How different should the candidates be?",
+                Some(&options.variety),
+                &variety_choices(),
+            ));
+            entries.push(recorded(
+                "How many sheets should it have?",
+                options
+                    .sheet_count
+                    .map(|count| count.to_string())
+                    .as_deref(),
+                &sheet_count_options(),
+            ));
+            entries.push(recorded(
+                "How many candidates should I write?",
+                options.variations.map(|count| count.to_string()).as_deref(),
+                &candidate_choices(),
+            ));
+            entries.push(recorded(
+                "How much does it lean on data?",
+                options.evidence_style.as_deref(),
+                &fixed_choices(&EVIDENCE_STYLES),
+            ));
+        }
     }
     entries
 }
@@ -513,6 +596,9 @@ fn axis_value(options: &api::SessionOptions, key: &str) -> Option<String> {
         "platform" => options.platform.clone(),
         "format" => options.format.clone(),
         "post_goal" => options.post_goal.clone(),
+        "print_kind" => options.print_kind.clone(),
+        "print_size" => options.print_size.clone(),
+        "orientation" => options.orientation.clone(),
         _ => None,
     }
 }
@@ -540,13 +626,17 @@ fn with_axis(options: &api::SessionOptions, key: &str, value: String) -> api::Se
         "platform" => next.platform = picked,
         "format" => next.format = picked,
         "post_goal" => next.post_goal = picked,
+        "print_kind" => next.print_kind = picked,
+        "print_size" => next.print_size = picked,
+        "orientation" => next.orientation = picked,
         _ => {}
     }
     next
 }
 
 /// The options after one pick on a setup card. `key` is an axis key, or
-/// `scenario`, `slides`, `pages`, `frames`, `candidates`, or `variety`.
+/// `scenario`, `slides`, `pages`, `frames`, `sheets`, `candidates`, or
+/// `variety`.
 /// An empty value is the judgment choice: it clears the field, or sets
 /// the server default where the field has no blank state.
 fn with_pick(options: &api::SessionOptions, key: &str, value: &str) -> api::SessionOptions {
@@ -556,6 +646,7 @@ fn with_pick(options: &api::SessionOptions, key: &str, value: &str) -> api::Sess
         "slides" => next.slide_count = value.parse().ok(),
         "pages" => next.page_count = value.parse().ok(),
         "frames" => next.frame_count = value.parse().ok(),
+        "sheets" => next.sheet_count = value.parse().ok(),
         "candidates" => next.variations = value.parse().ok(),
         "variety" => {
             next.variety = if value.is_empty() {
@@ -739,6 +830,13 @@ pub(crate) fn CanvasPicker(
             return rsx! {
                 div { class: "social-questions",
                     SocialQuestions { session_id, options, on_error }
+                }
+            };
+        }
+        ArtifactKind::Print => {
+            return rsx! {
+                div { class: "print-questions",
+                    PrintQuestions { session_id, options, on_error }
                 }
             };
         }
@@ -1031,6 +1129,70 @@ pub(crate) fn SocialQuestions(
     }
 }
 
+/// The app's own print questions: the colors, the variety, the length
+/// in sheets, the candidate count, and the evidence. Each is a card of
+/// chips next to the agent's questions, in the same grid, like
+/// `SocialQuestions`. A card starts blank: nothing is chosen until the
+/// user picks a chip or `Use your best judgment`.
+#[component]
+pub(crate) fn PrintQuestions(
+    session_id: String,
+    options: api::SessionOptions,
+    on_error: EventHandler<String>,
+) -> Element {
+    let (picks, pick) = use_setup_picks(session_id, options.clone(), on_error);
+    let shown = |key: &str| picks().get(key).cloned();
+    // A suggestion shows on the card as picked, so the user sees what
+    // the planner read from the request.
+    let suggested = |key: &str, value: Option<String>| {
+        value.filter(|_| is_still_suggested(&options, &picks(), key))
+    };
+    let colors =
+        shown("color_mode").or_else(|| suggested("color_mode", options.color_mode.clone()));
+    let evidence = shown("evidence_style")
+        .or_else(|| suggested("evidence_style", options.evidence_style.clone()));
+    let is_colors_suggested = suggested("color_mode", options.color_mode.clone()).is_some();
+    let is_evidence_suggested =
+        suggested("evidence_style", options.evidence_style.clone()).is_some();
+    rsx! {
+        ChoiceCard {
+            label: "How should the colors read?",
+            current: colors,
+            choices: fixed_choices(&COLOR_MODES),
+            is_wide: true,
+            is_suggested: is_colors_suggested,
+            allows_custom: true,
+            on_pick: move |value: String| pick.call(("color_mode".to_owned(), value)),
+        }
+        ChoiceCard {
+            label: "How different should the candidates be?",
+            current: shown("variety"),
+            choices: variety_choices(),
+            on_pick: move |value: String| pick.call(("variety".to_owned(), value)),
+        }
+        ChoiceCard {
+            label: "How many sheets should it have?",
+            current: shown("sheets"),
+            choices: sheet_count_options(),
+            on_pick: move |value: String| pick.call(("sheets".to_owned(), value)),
+        }
+        ChoiceCard {
+            label: "How many candidates should I write?",
+            current: shown("candidates"),
+            choices: candidate_choices(),
+            on_pick: move |value: String| pick.call(("candidates".to_owned(), value)),
+        }
+        ChoiceCard {
+            label: "How much does it lean on data?",
+            current: evidence,
+            choices: fixed_choices(&EVIDENCE_STYLES),
+            is_suggested: is_evidence_suggested,
+            allows_custom: true,
+            on_pick: move |value: String| pick.call(("evidence_style".to_owned(), value)),
+        }
+    }
+}
+
 /// True when a choice is the judgment one: an empty value stands for
 /// `the agent decides`, and the card draws it as the dashed chip.
 pub(crate) fn is_judgment_choice(value: &str) -> bool {
@@ -1284,6 +1446,57 @@ mod tests {
             .as_deref(),
             Some("educate")
         );
+    }
+
+    #[test]
+    fn a_print_record_names_its_kind_size_and_length() {
+        let options = api::SessionOptions {
+            print_kind: Some("poster".to_owned()),
+            print_size: Some("a3".to_owned()),
+            orientation: Some("landscape".to_owned()),
+            sheet_count: Some(2),
+            tone: Some("confident".to_owned()),
+            ..Default::default()
+        };
+        let entries = app_answers(ArtifactKind::Print, &options);
+        let row = |question: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.question == question)
+                .cloned()
+        };
+        let kind = row("What kind of print piece is it?").expect("kind row");
+        assert_eq!(kind.answer, "Poster");
+        let size = row("What paper size is it for?").expect("size row");
+        assert_eq!(size.answer, "A3");
+        let orientation = row("How is it turned?").expect("orientation row");
+        assert_eq!(orientation.answer, "Landscape");
+        let length = row("How many sheets should it have?").expect("length row");
+        assert_eq!(length.answer, "2 sheets");
+        let tone = row("What tone should it have?").expect("tone row");
+        assert!(!tone.is_assumed);
+        assert!(row("What paper is it for?").is_none());
+        assert!(row("What platform is it for?").is_none());
+        let next = with_axis(&options, "print_size", "a5".to_owned());
+        assert_eq!(axis_value(&next, "print_size").as_deref(), Some("a5"));
+        assert_eq!(next.print_size.as_deref(), Some("a5"));
+        let cleared = with_axis(&next, "orientation", String::new());
+        assert_eq!(axis_value(&cleared, "orientation"), None);
+    }
+
+    #[test]
+    fn the_sheet_count_options_stay_under_the_limit() {
+        let options = sheet_count_options();
+        assert_eq!(options[0].1, "The agent decides");
+        assert_eq!(options[1], ("1".to_owned(), "1 sheet".to_owned()));
+        assert!(options.iter().any(|(_, label)| label == "4 sheets"));
+        for (value, _) in options.iter().skip(1) {
+            let count = value.parse::<u32>().ok();
+            assert!(
+                count.is_some_and(|count| (1..=SHEET_COUNT_LIMIT).contains(&count)),
+                "{value}"
+            );
+        }
     }
 
     #[test]
