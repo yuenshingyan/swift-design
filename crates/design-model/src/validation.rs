@@ -1,20 +1,23 @@
 //! Semantic checks that JSON Schema alone cannot express.
 //!
-//! Every error names the screen, slide, page, frame, or sheet index
-//! and the field, so an agent can fix the artifact from the message
-//! alone. HTML and CSS are checked by `markup`, which rejects unsafe
-//! and malformed markup. The design, the deck, the document, the
-//! social, and the print share one error type and the same checks;
-//! only the field paths differ.
+//! Every error names the screen, slide, page, frame, sheet, or email
+//! index and the field, so an agent can fix the artifact from the
+//! message alone. HTML and CSS are checked by `markup`, which rejects
+//! unsafe and malformed markup. The design, the deck, the document,
+//! the social, the print, and the mailing share one error type and the
+//! same checks; only the field paths differ.
 
+use crate::mailing::EMAIL_COUNT_LIMIT;
 use crate::markup::{SCREEN_CSS_LIMIT, SCREEN_HTML_LIMIT, css_problems, html_problems};
 use crate::print::SHEET_COUNT_LIMIT;
 use crate::transition::{MAX_TRANSITION_MS, Transition};
 use crate::viewport::{MAX_VIEWPORT_SIDE, MIN_VIEWPORT_SIDE};
-use crate::{Deck, Design, Document, Frame, Page, Print, Screen, Sheet, Slide, Social, Theme};
+use crate::{
+    Deck, Design, Document, Email, Frame, Mailing, Page, Print, Screen, Sheet, Slide, Social, Theme,
+};
 
 /// A single problem found in a design, a deck, a document, a social,
-/// or a print.
+/// a print, or a mailing.
 ///
 /// Messages address the agent that wrote the artifact: they state what
 /// is wrong and how to fix it.
@@ -58,6 +61,20 @@ pub enum ValidationError {
         /// The allowed maximum.
         limit: usize,
     },
+    /// The mailing `title` field is empty.
+    #[error("mailing title is empty: set a non-empty `title`")]
+    EmptyMailingTitle,
+    /// The mailing has no emails.
+    #[error("mailing has no emails: add at least one entry to `emails`")]
+    NoEmails,
+    /// The mailing has more emails than the limit.
+    #[error("mailing has {count} emails: use at most {limit}")]
+    TooManyEmails {
+        /// The rejected email count.
+        count: usize,
+        /// The allowed maximum.
+        limit: usize,
+    },
     /// A theme color is not a `#rrggbb` hex string.
     #[error("theme.colors.{field} has value `{value}`: use the form #rrggbb")]
     InvalidThemeColor {
@@ -94,6 +111,12 @@ pub enum ValidationError {
     #[error("sheets[{index}].html is empty: write the sheet as an HTML fragment")]
     EmptySheet {
         /// Zero-based sheet index.
+        index: usize,
+    },
+    /// An email's `html` is blank.
+    #[error("emails[{index}].html is empty: write the email as an HTML fragment")]
+    EmptyEmail {
+        /// Zero-based email index.
         index: usize,
     },
     /// A screen's or slide's `html` or `css` is longer than the limit.
@@ -268,6 +291,34 @@ impl Print {
     }
 }
 
+impl Mailing {
+    /// Checks the mailing and returns every problem found, not only
+    /// the first.
+    ///
+    /// Agents fix mailings from these messages, so an empty result
+    /// means the mailing is ready to render.
+    pub fn validate(&self) -> Vec<ValidationError> {
+        let mut errors = Vec::new();
+        if self.title.trim().is_empty() {
+            errors.push(ValidationError::EmptyMailingTitle);
+        }
+        if self.emails.is_empty() {
+            errors.push(ValidationError::NoEmails);
+        }
+        if self.emails.len() > EMAIL_COUNT_LIMIT as usize {
+            errors.push(ValidationError::TooManyEmails {
+                count: self.emails.len(),
+                limit: EMAIL_COUNT_LIMIT as usize,
+            });
+        }
+        theme_problems(&self.theme, &mut errors);
+        for (index, email) in self.emails.iter().enumerate() {
+            validate_email(email, index, &mut errors);
+        }
+        errors
+    }
+}
+
 /// Adds one error per theme color that is not `#rrggbb`.
 fn theme_problems(theme: &Theme, errors: &mut Vec<ValidationError>) {
     let colors = &theme.colors;
@@ -389,8 +440,27 @@ fn validate_sheet(sheet: &Sheet, index: usize, errors: &mut Vec<ValidationError>
     );
 }
 
+/// Checks one email's html and css.
+fn validate_email(email: &Email, index: usize, errors: &mut Vec<ValidationError>) {
+    if email.html.trim().is_empty() {
+        errors.push(ValidationError::EmptyEmail { index });
+        css_fragment_problems(
+            &format!("emails[{index}].css"),
+            email.css.as_deref(),
+            errors,
+        );
+        return;
+    }
+    fragment_problems(
+        &format!("emails[{index}]"),
+        &email.html,
+        email.css.as_deref(),
+        errors,
+    );
+}
+
 /// Checks a non-empty html fragment and its css. `path_base` is the
-/// field path of the screen, slide, page, frame, or sheet, like
+/// field path of the screen, slide, page, frame, sheet, or email, like
 /// `screens[2]`.
 fn fragment_problems(
     path_base: &str,
@@ -450,12 +520,15 @@ fn is_hex_color(value: &str) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use crate::test_support::{
-        sample_deck, sample_design, sample_document, sample_print, sample_social,
+        sample_deck, sample_design, sample_document, sample_mailing, sample_print, sample_social,
     };
     use crate::transition::MAX_TRANSITION_MS;
     use crate::validation::ValidationError;
     use crate::viewport::{MAX_VIEWPORT_SIDE, MIN_VIEWPORT_SIDE};
-    use crate::{Frame, Page, SHEET_COUNT_LIMIT, Screen, Sheet, Slide, Transition, Viewport};
+    use crate::{
+        EMAIL_COUNT_LIMIT, Email, Frame, Page, SHEET_COUNT_LIMIT, Screen, Sheet, Slide, Transition,
+        Viewport,
+    };
 
     #[test]
     fn a_valid_social_has_no_errors() {
@@ -567,6 +640,70 @@ mod tests {
                 .any(|message| message.starts_with("sheets[2].css: contains `@import`"))
         );
         assert!(!messages.iter().any(|message| message.contains("frames[")));
+    }
+
+    #[test]
+    fn a_valid_mailing_has_no_errors() {
+        assert_eq!(sample_mailing().validate(), Vec::new());
+    }
+
+    #[test]
+    fn reports_every_mailing_error_at_once() {
+        let mut mailing = sample_mailing();
+        mailing.title = String::new();
+        mailing.theme.colors.accent = "blue".to_owned();
+        mailing.emails.clear();
+        let errors = mailing.validate();
+        assert_eq!(errors.len(), 3);
+        assert!(errors.contains(&ValidationError::EmptyMailingTitle));
+        assert!(errors.contains(&ValidationError::NoEmails));
+        assert!(errors[0].to_string().starts_with("mailing title is empty"));
+    }
+
+    #[test]
+    fn a_mailing_past_the_email_limit_is_rejected() {
+        let mut mailing = sample_mailing();
+        let email = mailing.emails[0].clone();
+        while mailing.emails.len() <= EMAIL_COUNT_LIMIT as usize {
+            mailing.emails.push(email.clone());
+        }
+        let errors = mailing.validate();
+        assert!(errors.contains(&ValidationError::TooManyEmails {
+            count: EMAIL_COUNT_LIMIT as usize + 1,
+            limit: EMAIL_COUNT_LIMIT as usize,
+        }));
+        mailing.emails.truncate(EMAIL_COUNT_LIMIT as usize);
+        assert_eq!(mailing.validate(), Vec::new());
+    }
+
+    #[test]
+    fn mailing_emails_use_email_paths_in_messages() {
+        let mut mailing = sample_mailing();
+        mailing.emails.push(Email {
+            html: "   ".to_owned(),
+            css: None,
+            notes: None,
+        });
+        mailing.emails.push(Email {
+            html: "<div><script>x</script>".to_owned(),
+            css: Some("@import url(x); .a { width: 10vw }".to_owned()),
+            notes: None,
+        });
+        let errors = mailing.validate();
+        let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        assert!(errors.contains(&ValidationError::EmptyEmail { index: 1 }));
+        assert!(messages[0].starts_with("emails[1].html is empty"));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.starts_with("emails[2].html: contains <script>"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.starts_with("emails[2].css: contains `@import`"))
+        );
+        assert!(!messages.iter().any(|message| message.contains("sheets[")));
     }
 
     #[test]

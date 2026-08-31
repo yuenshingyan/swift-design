@@ -6,14 +6,15 @@
 //! canvas. A `document` is a paged document, such as a report or a
 //! memo, on A4 or Letter paper. A `social` is a post or a carousel on
 //! a social canvas. A `print` is a poster or a flyer on a paper-size
-//! canvas. The kinds have separate types, stores, routes, and
+//! canvas. A `mailing` is an email or an email sequence on a 600 px
+//! wide canvas. The kinds have separate types, stores, routes, and
 //! editors; the brief-first workflow is the same for all.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// What a session builds: a software demo, a deck, a document, a
-/// social, or a print.
+/// social, a print, or a mailing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
@@ -33,16 +34,20 @@ pub enum ArtifactKind {
     /// A poster, a flyer, or a similar print piece on an A5 to A3,
     /// Letter, or Tabloid canvas. Written as a print.
     Print,
+    /// An email or an email sequence on a 600 px wide canvas. Written
+    /// as a mailing.
+    Mailing,
 }
 
 impl ArtifactKind {
     /// Every kind, in the order the UI shows them.
-    pub const ALL: [ArtifactKind; 5] = [
+    pub const ALL: [ArtifactKind; 6] = [
         ArtifactKind::Demo,
         ArtifactKind::Deck,
         ArtifactKind::Document,
         ArtifactKind::Social,
         ArtifactKind::Print,
+        ArtifactKind::Mailing,
     ];
 
     /// The snake_case name used in JSON.
@@ -53,6 +58,7 @@ impl ArtifactKind {
             ArtifactKind::Document => "document",
             ArtifactKind::Social => "social",
             ArtifactKind::Print => "print",
+            ArtifactKind::Mailing => "mailing",
         }
     }
 
@@ -64,6 +70,7 @@ impl ArtifactKind {
             ArtifactKind::Document => "Document",
             ArtifactKind::Social => "Social post",
             ArtifactKind::Print => "Print piece",
+            ArtifactKind::Mailing => "Email",
         }
     }
 
@@ -109,6 +116,10 @@ mod tests {
             Some(ArtifactKind::Social)
         );
         assert_eq!(ArtifactKind::from_name("print"), Some(ArtifactKind::Print));
+        assert_eq!(
+            ArtifactKind::from_name("mailing"),
+            Some(ArtifactKind::Mailing)
+        );
     }
 
     #[test]
@@ -118,5 +129,6 @@ mod tests {
         assert_eq!(ArtifactKind::Document.label(), "Document");
         assert_eq!(ArtifactKind::Social.label(), "Social post");
         assert_eq!(ArtifactKind::Print.label(), "Print piece");
+        assert_eq!(ArtifactKind::Mailing.label(), "Email");
     }
 }

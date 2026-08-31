@@ -4,15 +4,16 @@
 //! format that LLM agents write. `schemars` derives the JSON Schema from
 //! them; regenerate `schemas/` after any change here. This crate does no IO.
 //!
-//! There are five artifact kinds. A design is a theme, a viewport, and
+//! There are six artifact kinds. A design is a theme, a viewport, and
 //! screens, plus an optional page transition. A deck is a theme and
 //! slides on a fixed 1920 by 1080 px canvas, plus an optional page
 //! transition. A document is a theme, a paper, and pages on the px
 //! canvas of that paper. A social is a theme, a format, and frames on
 //! the px canvas of that format. A print is a theme, a size, an
-//! orientation, and sheets on the px canvas of that size. A screen, a
-//! slide, a page, a frame, or a sheet is one HTML fragment plus its
-//! own CSS. `markup` checks all of them.
+//! orientation, and sheets on the px canvas of that size. A mailing is
+//! a theme, a format, and emails on the px canvas of that format. A
+//! screen, a slide, a page, a frame, a sheet, or an email is one HTML
+//! fragment plus its own CSS. `markup` checks all of them.
 //!
 //! The crate also holds the brief-first workflow types the server and
 //! the studio share: the `workflow` state machine, the `question`
@@ -23,7 +24,9 @@ pub mod deck;
 pub mod deck_questions;
 pub mod design;
 pub mod document;
+pub mod email;
 pub mod frame;
+pub mod mailing;
 pub mod markup;
 pub mod page;
 pub mod print;
@@ -45,7 +48,12 @@ pub use deck::{DECK_HEIGHT, DECK_VIEWPORT, DECK_WIDTH, Deck};
 pub use deck_questions::{DECK_SCENARIOS, DECK_VARIETY_LEVELS, is_deck_scenario};
 pub use design::Design;
 pub use document::{A4_VIEWPORT, Document, LETTER_VIEWPORT, PAGE_COUNT_LIMIT, Paper};
+pub use email::Email;
 pub use frame::Frame;
+pub use mailing::{
+    EMAIL_COUNT_LIMIT, EmailFormat, LONG_EMAIL_VIEWPORT, Mailing, SHORT_EMAIL_VIEWPORT,
+    STANDARD_EMAIL_VIEWPORT,
+};
 pub use page::Page;
 pub use print::{
     A3_VIEWPORT, A5_VIEWPORT, Orientation, Print, PrintSize, SHEET_COUNT_LIMIT, TABLOID_VIEWPORT,
@@ -57,10 +65,11 @@ pub use question::{
 };
 pub use run_questions::{
     AUDIENCES, AppAxis, COLOR_MODES, CUSTOM_ANSWER_LIMIT, DATA_STATES, DECK_AXES, DEMO_AXES,
-    DEMO_SCOPES, DOCUMENT_AXES, DOCUMENT_KINDS, EVIDENCE_STYLES, FIDELITIES, FORMATS, ORIENTATIONS,
-    PAPERS, PLATFORMS, POST_GOALS, PRINT_AXES, PRINT_KINDS, PRINT_SIZES, PRODUCT_KINDS,
-    SHARED_AXES, SLIDE_DENSITIES, SOCIAL_AXES, SPEECH_AXES, TONES, app_axes, audience_label,
-    axis_by_key, axis_label, demo_scope_label, is_custom_answer, tone_label,
+    DEMO_SCOPES, DOCUMENT_AXES, DOCUMENT_KINDS, EMAIL_FORMATS, EMAIL_KINDS, EVIDENCE_STYLES,
+    FIDELITIES, FORMATS, MAILING_AXES, ORIENTATIONS, PAPERS, PLATFORMS, POST_GOALS, PRINT_AXES,
+    PRINT_KINDS, PRINT_SIZES, PRODUCT_KINDS, SHARED_AXES, SLIDE_DENSITIES, SOCIAL_AXES,
+    SPEECH_AXES, TONES, app_axes, audience_label, axis_by_key, axis_label, demo_scope_label,
+    is_custom_answer, tone_label,
 };
 pub use screen::Screen;
 pub use sheet::Sheet;
@@ -78,8 +87,8 @@ pub use workflow::{WorkflowError, WorkflowEvent, WorkflowState, transition};
 #[cfg(test)]
 pub(crate) mod test_support {
     use crate::{
-        Deck, Design, Document, FontSet, Format, Frame, Orientation, Page, Palette, Paper, Print,
-        PrintSize, Screen, Sheet, Slide, Social, Theme, Viewport,
+        Deck, Design, Document, Email, EmailFormat, FontSet, Format, Frame, Mailing, Orientation,
+        Page, Palette, Paper, Print, PrintSize, Screen, Sheet, Slide, Social, Theme, Viewport,
     };
 
     /// The theme every sample artifact uses.
@@ -155,6 +164,21 @@ pub(crate) mod test_support {
             sheets: vec![Sheet {
                 html: "<h1 class='title'>Sample</h1>".to_owned(),
                 css: Some(".title { font-size: 64px; }".to_owned()),
+                notes: None,
+            }],
+            outline: Vec::new(),
+        }
+    }
+
+    /// Builds a small mailing that passes validation.
+    pub fn sample_mailing() -> Mailing {
+        Mailing {
+            title: "Sample".to_owned(),
+            theme: sample_theme(),
+            format: EmailFormat::Standard,
+            emails: vec![Email {
+                html: "<h1 class='title'>Sample</h1>".to_owned(),
+                css: Some(".title { font-size: 32px; }".to_owned()),
                 notes: None,
             }],
             outline: Vec::new(),

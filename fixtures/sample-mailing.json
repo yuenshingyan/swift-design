@@ -1,0 +1,30 @@
+{
+  "title": "Swift Design launch email",
+  "theme": {
+    "name": "signal",
+    "colors": {
+      "background": "#f8fafc",
+      "text": "#0f172a",
+      "accent": "#0284c7",
+      "muted": "#64748b"
+    },
+    "fonts": {
+      "heading": "Inter",
+      "body": "Inter",
+      "mono": "JetBrains Mono"
+    }
+  },
+  "format": "standard",
+  "emails": [
+    {
+      "html": "<div class='e1-email'><p class='e1-brand'>Swift Design</p><h1>Six kinds. One chat.</h1><p class='e1-lead'>Demos, decks, documents, socials, prints, and now email, from one request.</p><a class='e1-cta' href='https://swift.design'>See it work</a><p class='e1-footer'>Swift Design · 1 Harness Way · Unsubscribe</p></div>",
+      "css": ".e1-email { height: 100%; padding: 48px 40px; display: flex; flex-direction: column; gap: 24px; } .e1-brand { font-size: 14px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); } h1 { font-size: 36px; font-weight: 800; line-height: 1.1; } .e1-lead { font-size: 17px; line-height: 1.5; color: var(--muted); } .e1-cta { align-self: flex-start; padding: 14px 28px; border-radius: 8px; background: var(--accent); color: var(--background); font-weight: 700; } .e1-footer { margin-top: auto; font-size: 12px; color: var(--muted); }",
+      "notes": "Subject: Six kinds, one chat. Preheader: Email joins the harness."
+    },
+    {
+      "html": "<div class='e2-email'><p class='e2-brand'>Swift Design</p><h2>Ask, then send</h2><ol><li>Describe the email.</li><li>Answer three short questions.</li><li>Pick a candidate.</li><li>Export the HTML for your list.</li></ol><a class='e2-cta' href='https://swift.design'>Try it now</a><p class='e2-footer'>Swift Design · 1 Harness Way · Unsubscribe</p></div>",
+      "css": ".e2-email { height: 100%; padding: 48px 40px; display: flex; flex-direction: column; gap: 24px; } .e2-brand { font-size: 14px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); } h2 { font-size: 30px; font-weight: 800; line-height: 1.15; } ol { padding-left: 24px; display: grid; gap: 14px; font-size: 17px; line-height: 1.5; } li::marker { color: var(--accent); font-weight: 700; } .e2-cta { align-self: flex-start; padding: 14px 28px; border-radius: 8px; background: var(--accent); color: var(--background); font-weight: 700; } .e2-footer { margin-top: auto; font-size: 12px; color: var(--muted); }",
+      "notes": "Subject: Still writing emails by hand? Preheader: Three questions, one candidate."
+    }
+  ]
+}

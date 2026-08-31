@@ -1,8 +1,9 @@
 //! The app's own questions: how the colors read for every kind, how
 //! much of a demo to build and what it shows, who a deck, a document,
-//! a social, or a print is for and what tone it takes, what a document
-//! is and what paper it takes, where a social is posted and on what
-//! canvas, and what a print is and on what paper size and orientation.
+//! a social, a print, or a mailing is for and what tone it takes, what
+//! a document is and what paper it takes, where a social is posted and
+//! on what canvas, what a print is and on what paper size and
+//! orientation, and what an email is and on what canvas.
 //!
 //! These recur in every session with the same answers, so the app asks
 //! them from a fixed list instead of letting the agent invent options
@@ -166,6 +167,27 @@ pub const PRINT_SIZES: [(&str, &str); 5] = [
 /// How a print's sheets are turned, as (value, label). The values are
 /// the `orientation` names in the print JSON.
 pub const ORIENTATIONS: [(&str, &str); 2] = [("portrait", "Portrait"), ("landscape", "Landscape")];
+
+/// What kind of email to write, as (value, label). It decides the
+/// email vocabulary: a newsletter and a welcome email share no
+/// furniture.
+pub const EMAIL_KINDS: [(&str, &str); 6] = [
+    ("newsletter", "Newsletter"),
+    ("announcement", "Announcement"),
+    ("promotion", "Promotion or offer"),
+    ("welcome", "Welcome email"),
+    ("digest", "Digest"),
+    ("invitation", "Invitation"),
+];
+
+/// The canvas an email is laid out on, as (value, label). The values
+/// are the `format` names in the mailing JSON. Every format is 600 px
+/// wide; the formats differ in height.
+pub const EMAIL_FORMATS: [(&str, &str); 3] = [
+    ("short", "Short, one glance"),
+    ("standard", "Standard, one scroll"),
+    ("long", "Long, a full read"),
+];
 
 /// How much of a demo to build, as (value, label). A deck says its size
 /// with the slide count instead.
@@ -347,6 +369,20 @@ pub const PRINT_AXES: [AppAxis; 3] = [
     },
 ];
 
+/// Every app-owned axis only a mailing asks.
+pub const MAILING_AXES: [AppAxis; 2] = [
+    AppAxis {
+        key: "email_kind",
+        name: "Email kind",
+        choices: &EMAIL_KINDS,
+    },
+    AppAxis {
+        key: "email_format",
+        name: "Email format",
+        choices: &EMAIL_FORMATS,
+    },
+];
+
 /// Every app-owned axis of every kind.
 fn every_axis() -> impl Iterator<Item = &'static AppAxis> {
     SHARED_AXES
@@ -357,6 +393,7 @@ fn every_axis() -> impl Iterator<Item = &'static AppAxis> {
         .chain(DOCUMENT_AXES.iter())
         .chain(SOCIAL_AXES.iter())
         .chain(PRINT_AXES.iter())
+        .chain(MAILING_AXES.iter())
 }
 
 /// The app-owned axes `kind` asks, shared ones first.
@@ -367,6 +404,7 @@ pub fn app_axes(kind: ArtifactKind) -> impl Iterator<Item = &'static AppAxis> {
         ArtifactKind::Document => (&SPEECH_AXES, &DOCUMENT_AXES),
         ArtifactKind::Social => (&SPEECH_AXES, &SOCIAL_AXES),
         ArtifactKind::Print => (&SPEECH_AXES, &PRINT_AXES),
+        ArtifactKind::Mailing => (&SPEECH_AXES, &MAILING_AXES),
     };
     SHARED_AXES.iter().chain(spoken.iter()).chain(own.iter())
 }
@@ -488,6 +526,20 @@ mod tests {
                 "Orientation"
             ]
         );
+        let mailing: Vec<&str> = app_axes(ArtifactKind::Mailing)
+            .map(|axis| axis.name)
+            .collect();
+        assert_eq!(
+            mailing,
+            [
+                "Color mode",
+                "Audience",
+                "Tone",
+                "Evidence",
+                "Email kind",
+                "Email format"
+            ]
+        );
     }
 
     #[test]
@@ -519,6 +571,14 @@ mod tests {
             assert!(crate::Orientation::from_name(value).is_some(), "{value}");
         }
         assert_eq!(ORIENTATIONS.len(), crate::Orientation::ALL.len());
+    }
+
+    #[test]
+    fn the_email_format_values_are_the_email_format_names() {
+        for (value, _) in EMAIL_FORMATS {
+            assert!(crate::EmailFormat::from_name(value).is_some(), "{value}");
+        }
+        assert_eq!(EMAIL_FORMATS.len(), crate::EmailFormat::ALL.len());
     }
 
     #[test]
@@ -587,6 +647,8 @@ mod tests {
             &PRINT_KINDS[..],
             &PRINT_SIZES[..],
             &ORIENTATIONS[..],
+            &EMAIL_KINDS[..],
+            &EMAIL_FORMATS[..],
         ];
         for choices in banks {
             let values: Vec<&str> = choices.iter().map(|(value, _)| *value).collect();
