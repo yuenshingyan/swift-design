@@ -1,12 +1,14 @@
-//! Screen, slide, and page screenshots: how a model sees its own work.
+//! Screen, slide, page, and frame screenshots: how a model sees its own
+//! work.
 //!
-//! The server renders one screen, slide, or page to HTML and asks an
-//! installed Chrome or Chromium to draw it as a PNG. No browser crate is
-//! shipped: the binary is the user's own. `GET
-//! /designs/{id}/screens/{n}.png`, `GET /decks/{id}/slides/{n}.png`, and
-//! `GET /documents/{id}/pages/{n}.png` serve a screenshot to external
-//! agents, and the polish pass sends the images to vision-capable
-//! models. Without Chrome, everything falls back to text.
+//! The server renders one screen, slide, page, or frame to HTML and
+//! asks an installed Chrome or Chromium to draw it as a PNG. No browser
+//! crate is shipped: the binary is the user's own. `GET
+//! /designs/{id}/screens/{n}.png`, `GET /decks/{id}/slides/{n}.png`,
+//! `GET /documents/{id}/pages/{n}.png`, and `GET
+//! /socials/{id}/frames/{n}.png` serve a screenshot to external agents,
+//! and the polish pass sends the images to vision-capable models.
+//! Without Chrome, everything falls back to text.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,7 +19,7 @@ use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use design_model::{DECK_VIEWPORT, Deck, Design, Document, Viewport};
+use design_model::{DECK_VIEWPORT, Deck, Design, Document, Social, Viewport};
 
 use crate::api_error;
 use crate::deck_render;
@@ -27,6 +29,8 @@ use crate::document_render;
 use crate::documents::{DocumentStore, is_valid_document_id};
 use crate::render::{RenderOptions, render_design_with};
 use crate::settings::SettingsStore;
+use crate::social_render;
+use crate::socials::{SocialStore, is_valid_social_id};
 
 /// Environment variable that names the Chrome binary to use.
 pub const CHROME_ENVIRONMENT_VARIABLE: &str = "SWIFT_DESIGN_CHROME";
@@ -235,6 +239,43 @@ pub async fn dump_document_dom(document: &Document, base_url: &str) -> anyhow::R
         },
     );
     dump_rendered_dom(&html, base_url, document.viewport()).await
+}
+
+/// Renders frame `index` (zero-based) of `social` to a PNG. `base_url`
+/// resolves relative image paths like `/uploads/…`.
+pub async fn screenshot_frame(
+    social: &Social,
+    index: usize,
+    base_url: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let chrome = find_chrome().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
+        )
+    })?;
+    let html = social_render::render_social_with(
+        social,
+        social_render::RenderOptions {
+            only_frame: Some(index),
+            asset_origin: Some(base_url.to_owned()),
+            ..social_render::RenderOptions::default()
+        },
+    );
+    screenshot_html(&chrome, &with_base_href(&html, base_url), social.viewport()).await
+}
+
+/// Renders the whole social with the layout audit script and returns
+/// the DOM after the audit ran, as Chrome dumps it.
+pub async fn dump_social_dom(social: &Social, base_url: &str) -> anyhow::Result<String> {
+    let html = social_render::render_social_with(
+        social,
+        social_render::RenderOptions {
+            is_auditing: true,
+            asset_origin: Some(base_url.to_owned()),
+            ..social_render::RenderOptions::default()
+        },
+    );
+    dump_rendered_dom(&html, base_url, social.viewport()).await
 }
 
 /// Loads a rendered page in Chrome and returns the DOM after its
@@ -465,12 +506,14 @@ async fn run_chrome(
 }
 
 /// The `/designs/{id}/screens/{n}.png`, `/decks/{id}/slides/{n}.png`,
-/// and `/documents/{id}/pages/{n}.png` route table.
+/// `/documents/{id}/pages/{n}.png`, and `/socials/{id}/frames/{n}.png`
+/// route table.
 pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/designs/{id}/screens/{file}", get(get_screen_image))
         .route("/decks/{id}/slides/{file}", get(get_slide_image))
         .route("/documents/{id}/pages/{file}", get(get_page_image))
+        .route("/socials/{id}/frames/{file}", get(get_frame_image))
 }
 
 /// The 1-based number in a `{n}.png` file name. `None` for any other
@@ -597,6 +640,43 @@ async fn get_page_image(
     }
     let base_url = format!("http://{}", settings.address());
     match screenshot_page(&document, number - 1, &base_url).await {
+        Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Serves a PNG of one frame. `file` is `{n}.png` with a 1-based `n`.
+async fn get_frame_image(
+    State(socials): State<SocialStore>,
+    State(settings): State<SettingsStore>,
+    Path((id, file)): Path<(String, String)>,
+) -> Response {
+    if !is_valid_social_id(&id) {
+        return api_error::invalid_social_id(&id);
+    }
+    let Some(number) = image_number(&file) else {
+        return bad_image_name("frame", &file);
+    };
+    let social = match socials.load(&id).await {
+        Ok(Some(social)) => social,
+        Ok(None) => return api_error::social_not_found(&id),
+        Err(error) => return api_error::internal_error(&error),
+    };
+    if number > social.frames.len() {
+        return api_error::error_response(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "social `{id}` has no frame {number}: use 1 to {}",
+                social.frames.len()
+            ),
+            Vec::new(),
+        );
+    }
+    if find_chrome().is_none() {
+        return chrome_missing_response("frame images");
+    }
+    let base_url = format!("http://{}", settings.address());
+    match screenshot_frame(&social, number - 1, &base_url).await {
         Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
         Err(error) => api_error::internal_error(&error),
     }
