@@ -144,6 +144,16 @@ pub struct RunOptions {
     /// agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sheet_count: Option<u32>,
+    /// What kind of email to write, one of `EMAIL_KINDS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_kind: Option<String>,
+    /// The canvas an email is laid out on, one of `EMAIL_FORMATS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_format: Option<String>,
+    /// How many emails a mailing run writes. `None` leaves it to the
+    /// agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_count: Option<u32>,
     /// The axes whose value the planner suggested from the request, by
     /// option key. The card shows them as picked and marks them as
     /// suggested. A pick by the user removes the key.
@@ -174,6 +184,8 @@ impl RunOptions {
             "print_kind" => &self.print_kind,
             "print_size" => &self.print_size,
             "orientation" => &self.orientation,
+            "email_kind" => &self.email_kind,
+            "email_format" => &self.email_format,
             _ => return None,
         })
     }
@@ -199,6 +211,8 @@ impl RunOptions {
             "print_kind" => &mut self.print_kind,
             "print_size" => &mut self.print_size,
             "orientation" => &mut self.orientation,
+            "email_kind" => &mut self.email_kind,
+            "email_format" => &mut self.email_format,
             _ => return None,
         })
     }
@@ -275,6 +289,9 @@ impl Default for RunOptions {
             print_size: None,
             orientation: None,
             sheet_count: None,
+            email_kind: None,
+            email_format: None,
+            email_count: None,
             suggested: Vec::new(),
             variety: default_effort(),
             templates: Vec::new(),
@@ -588,6 +605,9 @@ pub struct SessionView {
     /// The prints that belong to this session. Empty unless the
     /// session is a print session.
     pub prints: Vec<crate::prints::PrintSummary>,
+    /// The mailings that belong to this session. Empty unless the
+    /// session is a mailing session.
+    pub mailings: Vec<crate::mailings::MailingSummary>,
 }
 
 /// What went wrong in a session operation.

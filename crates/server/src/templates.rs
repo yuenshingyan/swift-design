@@ -25,6 +25,7 @@ use crate::decks::{DeckStore, is_pending_slide};
 use crate::designs::{DesignStore, is_pending_screen};
 use crate::documents::{DocumentStore, is_pending_page};
 use crate::events::ChangeNotifier;
+use crate::mailings::{MailingStore, is_pending_email};
 use crate::prints::{PrintStore, is_pending_sheet};
 use crate::socials::{SocialStore, is_pending_frame};
 
@@ -124,6 +125,9 @@ struct SaveRequest {
     /// The print to save the style of.
     #[serde(default)]
     print_id: Option<String>,
+    /// The mailing to save the style of.
+    #[serde(default)]
+    mailing_id: Option<String>,
     /// The name to show in the template list.
     name: String,
 }
@@ -141,6 +145,8 @@ enum TemplateSource {
     Social(String),
     /// The print with this id.
     Print(String),
+    /// The mailing with this id.
+    Mailing(String),
 }
 
 /// The one source a save request names, or the message when it names
@@ -167,13 +173,17 @@ fn template_source(request: &SaveRequest) -> Result<TemplateSource, String> {
             .print_id
             .as_ref()
             .map(|id| TemplateSource::Print(id.clone())),
+        request
+            .mailing_id
+            .as_ref()
+            .map(|id| TemplateSource::Mailing(id.clone())),
     ];
     let mut sources = named.into_iter().flatten();
     match (sources.next(), sources.next()) {
         (Some(source), None) => Ok(source),
         _ => Err(
-            "name exactly one source: `design_id`, `deck_id`, `document_id`, `social_id`, or \
-             `print_id`"
+            "name exactly one source: `design_id`, `deck_id`, `document_id`, `social_id`, \
+             `print_id`, or `mailing_id`"
                 .to_owned(),
         ),
     }
@@ -707,8 +717,41 @@ async fn print_style(prints: &PrintStore, id: &str) -> Result<SourceStyle, Respo
     })
 }
 
-/// Saves the style of one design, deck, document, social, or print as
-/// a template.
+/// The style of a stored mailing: its theme, the email canvas, and
+/// its first written emails as screens.
+async fn mailing_style(mailings: &MailingStore, id: &str) -> Result<SourceStyle, Response> {
+    let mailing = match mailings.load(id).await {
+        Ok(Some(mailing)) => mailing,
+        Ok(None) => {
+            return Err(api_error::error_response(
+                StatusCode::NOT_FOUND,
+                &format!("no mailing `{id}`: run `GET /mailings` for the list"),
+                Vec::new(),
+            ));
+        }
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    let viewport = mailing.viewport();
+    Ok(SourceStyle {
+        theme: mailing.theme,
+        viewport,
+        screens: mailing
+            .emails
+            .iter()
+            .filter(|email| !is_pending_email(email))
+            .take(TEMPLATE_SCREEN_LIMIT)
+            .map(|email| Screen {
+                name: String::new(),
+                html: email.html.clone(),
+                css: email.css.clone(),
+                notes: email.notes.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// Saves the style of one design, deck, document, social, print, or
+/// mailing as a template.
 async fn save_template(
     State(store): State<TemplateStore>,
     State(stores): State<crate::session_routes::ArtifactStores>,
@@ -735,6 +778,7 @@ async fn save_template(
         TemplateSource::Document(id) => (id.clone(), document_style(&stores.documents, id).await),
         TemplateSource::Social(id) => (id.clone(), social_style(&stores.socials, id).await),
         TemplateSource::Print(id) => (id.clone(), print_style(&stores.prints, id).await),
+        TemplateSource::Mailing(id) => (id.clone(), mailing_style(&stores.mailings, id).await),
     };
     let style = match style {
         Ok(style) => style,
@@ -744,8 +788,8 @@ async fn save_template(
         return api_error::error_response(
             StatusCode::BAD_REQUEST,
             &format!(
-                "`{source_id}` has no written screens, slides, pages, frames, or sheets to save \
-                 as a template"
+                "`{source_id}` has no written screens, slides, pages, frames, sheets, or \
+                 emails to save as a template"
             ),
             Vec::new(),
         );
@@ -850,6 +894,7 @@ mod tests {
             document_id: None,
             social_id: None,
             print_id: None,
+            mailing_id: None,
             name: "x".to_owned(),
         };
         assert!(template_source(&both).is_err());
@@ -859,6 +904,7 @@ mod tests {
             document_id: None,
             social_id: None,
             print_id: None,
+            mailing_id: None,
             name: "x".to_owned(),
         };
         assert!(template_source(&none).is_err());
@@ -868,6 +914,7 @@ mod tests {
             document_id: None,
             social_id: None,
             print_id: None,
+            mailing_id: None,
             name: "x".to_owned(),
         };
         assert_eq!(
@@ -880,6 +927,7 @@ mod tests {
             document_id: Some("report".to_owned()),
             social_id: None,
             print_id: None,
+            mailing_id: None,
             name: "x".to_owned(),
         };
         assert_eq!(
@@ -892,6 +940,7 @@ mod tests {
             document_id: None,
             social_id: Some("launch".to_owned()),
             print_id: None,
+            mailing_id: None,
             name: "x".to_owned(),
         };
         assert_eq!(
@@ -904,6 +953,7 @@ mod tests {
             document_id: Some("report".to_owned()),
             social_id: Some("launch".to_owned()),
             print_id: None,
+            mailing_id: None,
             name: "x".to_owned(),
         };
         assert!(template_source(&document_and_social).is_err());

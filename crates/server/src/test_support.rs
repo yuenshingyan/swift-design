@@ -59,6 +59,14 @@ pub(crate) fn sample_print() -> design_model::Print {
     serde_json::from_str(SAMPLE_PRINT).unwrap()
 }
 
+/// The canonical valid mailing, as JSON.
+pub(crate) const SAMPLE_MAILING: &str = include_str!("../../../fixtures/sample-mailing.json");
+
+/// The canonical valid mailing, parsed.
+pub(crate) fn sample_mailing() -> design_model::Mailing {
+    serde_json::from_str(SAMPLE_MAILING).unwrap()
+}
+
 /// The multipart boundary the upload helper uses.
 pub(crate) const MULTIPART_BOUNDARY: &str = "swiftdesignboundary";
 
@@ -89,6 +97,9 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
     let prints = PrintStore::new(directory.path().join("prints")).with_history(
         crate::history::HistoryStore::new(directory.path().join("print-history")),
     );
+    let mailings = MailingStore::new(directory.path().join("mailings")).with_history(
+        crate::history::HistoryStore::new(directory.path().join("mailing-history")),
+    );
     let sessions = SessionStore::new(directory.path().join("data/sessions"));
     let settings = crate::settings::SettingsStore::new(
         directory.path().join("data/settings.json"),
@@ -105,13 +116,15 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
     .with_decks(decks.clone())
     .with_documents(documents.clone())
     .with_socials(socials.clone())
-    .with_prints(prints.clone());
+    .with_prints(prints.clone())
+    .with_mailings(mailings.clone());
     router(AppState {
         designs,
         decks,
         documents,
         socials,
         prints,
+        mailings,
         uploads: UploadStore::new(directory.path().join("uploads")),
         sessions,
         settings,
@@ -125,6 +138,7 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
 use crate::decks::DeckStore;
 use crate::designs::DesignStore;
 use crate::documents::DocumentStore;
+use crate::mailings::MailingStore;
 use crate::prints::PrintStore;
 use crate::socials::SocialStore;
 use crate::uploads::UploadStore;
@@ -267,6 +281,15 @@ pub(crate) async fn open_generating_social_session(application: &Router, id: &st
 pub(crate) async fn open_generating_print_session(application: &Router, id: &str) {
     let body = format!(
         "{{\"id\":\"{id}\",\"request\":\"A poster about {id}.\",\"artifact_kind\":\"print\"}}"
+    );
+    open_generating_session_with(application, id, &body).await;
+}
+
+/// Creates a mailing session and drives it to the generating state,
+/// so mailing writes are allowed.
+pub(crate) async fn open_generating_mailing_session(application: &Router, id: &str) {
+    let body = format!(
+        "{{\"id\":\"{id}\",\"request\":\"An email about {id}.\",\"artifact_kind\":\"mailing\"}}"
     );
     open_generating_session_with(application, id, &body).await;
 }

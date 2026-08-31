@@ -136,6 +136,24 @@ pub(crate) fn request_input(request: &SessionRequest) -> String {
                 input.push_str(&format!("Sheet count the user asked for: {count}\n"));
             }
         }
+        ArtifactKind::Mailing => {
+            // The format axis prints its label below; the canvas line
+            // gives the model the px size to lay out for.
+            let format = request
+                .options
+                .email_format
+                .as_deref()
+                .and_then(design_model::EmailFormat::from_name)
+                .unwrap_or_default();
+            let viewport = format.viewport();
+            input.push_str(&format!(
+                "Canvas: {} by {} px per email\n",
+                viewport.width, viewport.height
+            ));
+            if let Some(count) = request.options.email_count {
+                input.push_str(&format!("Email count the user asked for: {count}\n"));
+            }
+        }
     }
     // The app's own answers, which recur in every session. An axis
     // the user has not picked is absent, so the agent decides it. A

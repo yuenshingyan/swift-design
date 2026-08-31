@@ -116,6 +116,7 @@ pub struct AgentRunner {
     documents: Option<crate::documents::DocumentStore>,
     socials: Option<crate::socials::SocialStore>,
     prints: Option<crate::prints::PrintStore>,
+    mailings: Option<crate::mailings::MailingStore>,
     sessions: SessionStore,
     address: String,
     templates: Option<crate::templates::TemplateStore>,
@@ -143,6 +144,7 @@ impl AgentRunner {
             documents: None,
             socials: None,
             prints: None,
+            mailings: None,
             sessions,
             address,
             templates: None,
@@ -187,6 +189,13 @@ impl AgentRunner {
     /// Lets print sessions write their candidates to the print store.
     pub fn with_prints(mut self, prints: crate::prints::PrintStore) -> Self {
         self.prints = Some(prints);
+        self
+    }
+
+    /// Lets mailing sessions write their candidates to the mailing
+    /// store.
+    pub fn with_mailings(mut self, mailings: crate::mailings::MailingStore) -> Self {
+        self.mailings = Some(mailings);
         self
     }
 
@@ -260,6 +269,9 @@ impl AgentRunner {
                 }
                 if let Some(prints) = &self.prints {
                     engine = engine.with_prints(prints.clone());
+                }
+                if let Some(mailings) = &self.mailings {
+                    engine = engine.with_mailings(mailings.clone());
                 }
                 if let Some(templates) = &self.templates {
                     engine = engine.with_templates(templates.clone());

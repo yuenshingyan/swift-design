@@ -213,6 +213,10 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
             "You plan print pieces with the user: posters, flyers, menus, programs, certificates, and signs on paper-size canvases.",
             "how the colors read, the audience, the tone, how much the piece leans on data, what kind of print piece it is, the paper size, the orientation, the number of sheets, the number of candidates, and how different the candidates are",
         ),
+        ArtifactKind::Mailing => (
+            "You plan emails with the user: newsletters, announcements, promotions, welcome emails, digests, and invitations, as one email or a sequence.",
+            "how the colors read, the audience, the tone, how much the email leans on data, what kind of email it is, the email format, the number of emails, the number of candidates, and how different the candidates are",
+        ),
     };
     // The example in the JSON names a real axis of this kind, so the
     // model copies a shape it can use.
@@ -302,6 +306,15 @@ pub(crate) fn planner_input(
                 "Length in sheets: {}\nCandidates requested: {candidates}\nVariety: {}\n",
                 options
                     .sheet_count
+                    .map_or("not chosen yet".to_owned(), |count| count.to_string()),
+                options.variety
+            ));
+        }
+        ArtifactKind::Mailing => {
+            input.push_str(&format!(
+                "Length in emails: {}\nCandidates requested: {candidates}\nVariety: {}\n",
+                options
+                    .email_count
                     .map_or("not chosen yet".to_owned(), |count| count.to_string()),
                 options.variety
             ));

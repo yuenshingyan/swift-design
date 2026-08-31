@@ -21,6 +21,7 @@ use crate::decks::DeckStore;
 use crate::designs::{DesignStore, is_valid_design_id};
 use crate::documents::DocumentStore;
 use crate::events::ChangeNotifier;
+use crate::mailings::MailingStore;
 use crate::prints::PrintStore;
 use crate::session_routes::ArtifactStores;
 use crate::sessions::SessionStore;
@@ -183,6 +184,23 @@ async fn print_cards(store: &PrintStore, base: &str) -> anyhow::Result<Vec<Candi
         .collect())
 }
 
+/// The mailing candidates of `base` as cards, sorted by id.
+async fn mailing_cards(store: &MailingStore, base: &str) -> anyhow::Result<Vec<CandidateCard>> {
+    let prefix = format!("{base}-candidate-");
+    Ok(store
+        .list()
+        .await?
+        .into_iter()
+        .filter(|summary| summary.id.starts_with(&prefix))
+        .map(|summary| CandidateCard {
+            preview_url: format!("/mailings/{}/render", summary.id),
+            ratio: summary.format.viewport().aspect_ratio_css(),
+            id: summary.id,
+            theme: summary.theme,
+        })
+        .collect())
+}
+
 /// Shows every candidate for `base` side by side with a choose button.
 async fn chooser(
     State(stores): State<ArtifactStores>,
@@ -199,6 +217,7 @@ async fn chooser(
         ArtifactKind::Document => document_cards(&stores.documents, &base).await,
         ArtifactKind::Social => social_cards(&stores.socials, &base).await,
         ArtifactKind::Print => print_cards(&stores.prints, &base).await,
+        ArtifactKind::Mailing => mailing_cards(&stores.mailings, &base).await,
     };
     let mut cards = match cards {
         Ok(cards) => cards,
@@ -244,6 +263,7 @@ async fn choose(
         ArtifactKind::Document => copy_document(&stores.documents, &request.id, &base).await,
         ArtifactKind::Social => copy_social(&stores.socials, &request.id, &base).await,
         ArtifactKind::Print => copy_print(&stores.prints, &request.id, &base).await,
+        ArtifactKind::Mailing => copy_mailing(&stores.mailings, &request.id, &base).await,
     };
     if let Err(response) = copied {
         return response;
@@ -349,6 +369,27 @@ pub(crate) async fn copy_print(store: &PrintStore, id: &str, base: &str) -> Resu
         .map_err(|error| api_error::internal_error(&error))
 }
 
+/// Copies the mailing `id` to `base`. The copy is agent-authored.
+pub(crate) async fn copy_mailing(
+    store: &MailingStore,
+    id: &str,
+    base: &str,
+) -> Result<(), Response> {
+    let mailing = match store.load(id).await {
+        Ok(Some(mailing)) => mailing,
+        Ok(None) => return Err(api_error::mailing_not_found(id)),
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    store
+        .save(base, &mailing)
+        .await
+        .map_err(|error| api_error::internal_error(&error))?;
+    store
+        .clear_user_paths(base)
+        .await
+        .map_err(|error| api_error::internal_error(&error))
+}
+
 /// The word for one artifact of `kind`, for the page text.
 fn unit_name(kind: ArtifactKind) -> &'static str {
     match kind {
@@ -357,6 +398,7 @@ fn unit_name(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Document => "document",
         ArtifactKind::Social => "social post",
         ArtifactKind::Print => "print piece",
+        ArtifactKind::Mailing => "mailing",
     }
 }
 
@@ -369,6 +411,7 @@ fn chosen_url(kind: ArtifactKind, base: &str) -> String {
         ArtifactKind::Document => format!("/documents/{base}/render"),
         ArtifactKind::Social => format!("/socials/{base}/render"),
         ArtifactKind::Print => format!("/prints/{base}/render"),
+        ArtifactKind::Mailing => format!("/mailings/{base}/render"),
     }
 }
 

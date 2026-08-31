@@ -1,5 +1,5 @@
 //! Projects: the id prefix that groups a chosen design, deck, document,
-//! social, or print and its candidates. Renaming a project moves every
+//! social, print, or mailing and its candidates. Renaming a project moves every
 //! artifact in it.
 
 use axum::extract::{Path, State};
@@ -38,8 +38,8 @@ fn renamed_id(id: &str, old: &str, new: &str) -> String {
     format!("{new}{}", &id[old.len()..])
 }
 
-/// Moves every design, deck, document, social, and print of the
-/// project to the new name and renames the session that owns it.
+/// Moves every design, deck, document, social, print, and mailing of
+/// the project to the new name and renames the session that owns it.
 async fn rename_project(
     State(stores): State<ArtifactStores>,
     State(sessions): State<SessionStore>,
@@ -53,6 +53,7 @@ async fn rename_project(
         documents,
         socials,
         prints,
+        mailings,
     } = &stores;
     let new = request.name.trim().to_owned();
     if !is_valid_design_id(&old) {
@@ -99,12 +100,17 @@ async fn rename_project(
         Ok(summaries) => summaries.into_iter().map(|print| print.id).collect(),
         Err(error) => return api_error::internal_error(&error),
     };
+    let mailing_ids: Vec<String> = match mailings.list().await {
+        Ok(summaries) => summaries.into_iter().map(|mailing| mailing.id).collect(),
+        Err(error) => return api_error::internal_error(&error),
+    };
     let ids = ProjectIds {
         designs: &design_ids,
         decks: &deck_ids,
         documents: &document_ids,
         socials: &social_ids,
         prints: &print_ids,
+        mailings: &mailing_ids,
     };
     let members = match project_members(&ids, &old, &new) {
         Ok(members) => members,
@@ -135,6 +141,11 @@ async fn rename_project(
             return api_error::internal_error(&error);
         }
     }
+    for id in &members.mailings {
+        if let Err(error) = mailings.rename(id, &renamed_id(id, &old, &new)).await {
+            return api_error::internal_error(&error);
+        }
+    }
     if let Err(error) = sessions.rename(&old, &new).await {
         return api_error::internal_error(&anyhow::anyhow!(error.to_string()));
     }
@@ -146,7 +157,8 @@ async fn rename_project(
             + members.decks.len()
             + members.documents.len()
             + members.socials.len()
-            + members.prints.len(),
+            + members.prints.len()
+            + members.mailings.len(),
         "project renamed"
     );
     Json(serde_json::json!({ "name": new })).into_response()
@@ -159,6 +171,7 @@ struct ProjectIds<'ids> {
     documents: &'ids [String],
     socials: &'ids [String],
     prints: &'ids [String],
+    mailings: &'ids [String],
 }
 
 /// The ids that move with a project, by store.
@@ -169,10 +182,11 @@ struct ProjectMembers {
     documents: Vec<String>,
     socials: Vec<String>,
     prints: Vec<String>,
+    mailings: Vec<String>,
 }
 
-/// The design, deck, document, social, and print ids that move with
-/// the project `old`. Fails with a status and a message when `new` is
+/// The design, deck, document, social, print, and mailing ids that
+/// move with the project `old`. Fails with a status and a message when `new` is
 /// taken by any store, or when `old` has no members.
 fn project_members(
     ids: &ProjectIds<'_>,
@@ -186,6 +200,7 @@ fn project_members(
         .chain(ids.documents)
         .chain(ids.socials)
         .chain(ids.prints)
+        .chain(ids.mailings)
         .any(|id| is_in_project(id, new));
     if is_taken {
         return Err((
@@ -205,16 +220,20 @@ fn project_members(
         documents: members(ids.documents),
         socials: members(ids.socials),
         prints: members(ids.prints),
+        mailings: members(ids.mailings),
     };
     if found.designs.is_empty()
         && found.decks.is_empty()
         && found.documents.is_empty()
         && found.socials.is_empty()
         && found.prints.is_empty()
+        && found.mailings.is_empty()
     {
         return Err((
             StatusCode::NOT_FOUND,
-            format!("project `{old}` has no designs, decks, documents, socials, or prints"),
+            format!(
+                "project `{old}` has no designs, decks, documents, socials, prints, or mailings"
+            ),
         ));
     }
     Ok(found)
@@ -232,12 +251,14 @@ mod tests {
         let documents = vec!["talk-candidate-3".to_owned(), "memo".to_owned()];
         let socials = vec!["talk-candidate-4".to_owned(), "launch".to_owned()];
         let prints = vec!["talk-candidate-5".to_owned(), "poster".to_owned()];
+        let mailings = vec!["talk-candidate-6".to_owned(), "launch-mail".to_owned()];
         let ids = ProjectIds {
             designs: &designs,
             decks: &decks,
             documents: &documents,
             socials: &socials,
             prints: &prints,
+            mailings: &mailings,
         };
         let members = project_members(&ids, "talk", "pitch").unwrap();
         assert_eq!(members.designs, ["talk-candidate-1"]);
@@ -245,10 +266,12 @@ mod tests {
         assert_eq!(members.documents, ["talk-candidate-3"]);
         assert_eq!(members.socials, ["talk-candidate-4"]);
         assert_eq!(members.prints, ["talk-candidate-5"]);
+        assert_eq!(members.mailings, ["talk-candidate-6"]);
         assert!(project_members(&ids, "talk", "other").is_err());
         assert!(project_members(&ids, "talk", "memo").is_err());
         assert!(project_members(&ids, "talk", "launch").is_err());
         assert!(project_members(&ids, "talk", "poster").is_err());
+        assert!(project_members(&ids, "talk", "launch-mail").is_err());
         assert!(project_members(&ids, "missing", "pitch").is_err());
     }
 
