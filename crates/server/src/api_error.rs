@@ -109,6 +109,35 @@ pub fn invalid_print_id(id: &str) -> Response {
     )
 }
 
+/// 422 with one detail line per mailing validation error.
+pub fn mailing_validation_failed(errors: &[ValidationError]) -> Response {
+    let details: Vec<String> = errors.iter().map(ToString::to_string).collect();
+    tracing::info!(error_count = details.len(), "rejected invalid mailing");
+    error_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "mailing failed validation",
+        details,
+    )
+}
+
+/// 404 for a mailing id with no file behind it.
+pub fn mailing_not_found(id: &str) -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        &format!("no mailing with id `{id}`"),
+        Vec::new(),
+    )
+}
+
+/// 400 for a mailing id that is not kebab-case.
+pub fn invalid_mailing_id(id: &str) -> Response {
+    error_response(
+        StatusCode::BAD_REQUEST,
+        &format!("invalid mailing id `{id}`: use lowercase letters, digits, and hyphens"),
+        Vec::new(),
+    )
+}
+
 /// 422 with one detail line per document validation error.
 pub fn document_validation_failed(errors: &[ValidationError]) -> Response {
     let details: Vec<String> = errors.iter().map(ToString::to_string).collect();
