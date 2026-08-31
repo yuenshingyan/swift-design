@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mailing",
+  "description": "A complete mailing: one theme applied to an ordered list of emails\non one format.",
+  "type": "object",
+  "properties": {
+    "emails": {
+      "description": "Emails in send order. One email is a single send; two or more\nare a sequence.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Email"
+      }
+    },
+    "format": {
+      "description": "The format every email is laid out on. Absent means standard.",
+      "$ref": "#/$defs/EmailFormat",
+      "default": "standard"
+    },
+    "outline": {
+      "description": "The email titles of the complete mailing, in order. A preview\nmailing lists more titles than it has emails: the app continues\nit from this list later. Leave it empty when the mailing is\ncomplete.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "theme": {
+      "description": "Visual identity applied to every email.",
+      "$ref": "#/$defs/Theme"
+    },
+    "title": {
+      "description": "Mailing title, shown in the editor. Not rendered on an email.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "theme",
+    "emails"
+  ],
+  "$defs": {
+    "Email": {
+      "description": "One email: an HTML fragment for the mailing's format, CSS for that\nfragment, and author notes.",
+      "type": "object",
+      "properties": {
+        "css": {
+          "description": "CSS for this email only. The server scopes every selector to\nthis email. Use plain selectors such as `.title` or `h1`. Use the\ntheme through `var(--background)`, `var(--text)`, `var(--accent)`,\n`var(--muted)`, `var(--heading-font)`, `var(--body-font)`,\n`var(--mono-font)`. No `@import`, no viewport units, no `<`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "html": {
+          "description": "The email as one HTML fragment. The canvas is the mailing's\n`format` in px, 600 wide: 600 by 800 for short, 600 by 1200 for\nstandard, 600 by 1800 for long. Use px units. Allowed: headings,\ntext, lists, tables, `<img>` with `src=\"/uploads/{name}\"`,\ninline `<svg>`, `<pre><code>`, `<blockquote>`, `<a>`. Not\nallowed: `<script>`, `<style>`, `<iframe>`, `<object>`,\n`<embed>`, `<link>`, `<meta>`, `<form>`, `<button>`, `<input>`,\nmedia, comments, `on*` attributes, `javascript:` and `data:`\nURLs, external images. Close every tag.",
+          "type": "string"
+        },
+        "notes": {
+          "description": "Author notes: the subject line and the preheader text, as a\n`Subject:` line and a `Preheader:` line, plus intent or handoff\nremarks. Never rendered on the email and never exported.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "html"
+      ]
+    },
+    "EmailFormat": {
+      "description": "The canvas an email is laid out on. Every format is 600 px wide,\nthe email-client column; the formats differ in height.",
+      "oneOf": [
+        {
+          "description": "Short: 600 by 800 px.",
+          "type": "string",
+          "const": "short"
+        },
+        {
+          "description": "Standard: 600 by 1200 px.",
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "description": "Long: 600 by 1800 px.",
+          "type": "string",
+          "const": "long"
+        }
+      ]
+    },
+    "FontSet": {
+      "description": "Default CSS font family names.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "Family for every other text element that sets no font.",
+          "type": "string"
+        },
+        "heading": {
+          "description": "Family for text elements with role `title` or `heading`.",
+          "type": "string"
+        },
+        "mono": {
+          "description": "Family for code elements.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "heading",
+        "body",
+        "mono"
+      ]
+    },
+    "Palette": {
+      "description": "Default colors as `#rrggbb` hex strings.",
+      "type": "object",
+      "properties": {
+        "accent": {
+          "description": "Color for highlights, shapes, and chart series that set no color.",
+          "type": "string"
+        },
+        "background": {
+          "description": "Screen background color when a screen sets no background.",
+          "type": "string"
+        },
+        "muted": {
+          "description": "Secondary color for captions, rules, and table stripes.",
+          "type": "string"
+        },
+        "text": {
+          "description": "Text color when an element sets no color.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "background",
+        "text",
+        "accent",
+        "muted"
+      ]
+    },
+    "Theme": {
+      "description": "Default colors and fonts that elements inherit when they omit their\nown.",
+      "type": "object",
+      "properties": {
+        "colors": {
+          "description": "Default colors.",
+          "$ref": "#/$defs/Palette"
+        },
+        "fonts": {
+          "description": "Default font families.",
+          "$ref": "#/$defs/FontSet"
+        },
+        "name": {
+          "description": "Theme name shown in the editor.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "colors",
+        "fonts"
+      ]
+    }
+  }
+}

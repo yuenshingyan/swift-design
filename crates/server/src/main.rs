@@ -27,6 +27,11 @@ mod generation;
 mod history;
 mod icon;
 mod instructions;
+mod mailing_generation;
+mod mailing_patch;
+mod mailing_polish;
+mod mailing_render;
+mod mailings;
 mod model_client;
 mod office;
 mod patch;
@@ -67,7 +72,7 @@ use axum::extract::FromRef;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use design_model::{Deck, Design, Document, Print, Social};
+use design_model::{Deck, Design, Document, Mailing, Print, Social};
 use tracing_subscriber::EnvFilter;
 
 use crate::agent_runs::AgentRunner;
@@ -76,6 +81,7 @@ use crate::designs::DesignStore;
 use crate::documents::DocumentStore;
 use crate::events::ChangeNotifier;
 use crate::history::HistoryStore;
+use crate::mailings::MailingStore;
 use crate::prints::PrintStore;
 use crate::sessions::SessionStore;
 use crate::settings::SettingsStore;
@@ -97,6 +103,8 @@ pub(crate) struct AppState {
     socials: SocialStore,
     /// Print storage.
     prints: PrintStore,
+    /// Mailing storage.
+    mailings: MailingStore,
     /// Upload storage.
     uploads: UploadStore,
     /// Session storage.
@@ -140,6 +148,12 @@ impl FromRef<AppState> for SocialStore {
 impl FromRef<AppState> for PrintStore {
     fn from_ref(state: &AppState) -> PrintStore {
         state.prints.clone()
+    }
+}
+
+impl FromRef<AppState> for MailingStore {
+    fn from_ref(state: &AppState) -> MailingStore {
+        state.mailings.clone()
     }
 }
 
@@ -222,6 +236,10 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("SWIFT_DESIGN_PRINTS_DIR").unwrap_or_else(|_| "prints".to_owned());
     let print_history_directory = std::env::var("SWIFT_DESIGN_PRINT_HISTORY_DIR")
         .unwrap_or_else(|_| "print-history".to_owned());
+    let mailings_directory =
+        std::env::var("SWIFT_DESIGN_MAILINGS_DIR").unwrap_or_else(|_| "mailings".to_owned());
+    let mailing_history_directory = std::env::var("SWIFT_DESIGN_MAILING_HISTORY_DIR")
+        .unwrap_or_else(|_| "mailing-history".to_owned());
     let changes = ChangeNotifier::new();
     let designs = DesignStore::new(PathBuf::from(designs_directory))
         .with_history(HistoryStore::new(PathBuf::from(history_directory)));
@@ -233,6 +251,8 @@ async fn main() -> anyhow::Result<()> {
         .with_history(HistoryStore::new(PathBuf::from(social_history_directory)));
     let prints = PrintStore::new(PathBuf::from(prints_directory))
         .with_history(HistoryStore::new(PathBuf::from(print_history_directory)));
+    let mailings = MailingStore::new(PathBuf::from(mailings_directory))
+        .with_history(HistoryStore::new(PathBuf::from(mailing_history_directory)));
     let sessions = SessionStore::new(PathBuf::from(sessions_directory));
     // A run dies with the process. Its session would wait for it forever.
     for session_id in sessions
@@ -257,6 +277,7 @@ async fn main() -> anyhow::Result<()> {
     .with_documents(documents.clone())
     .with_socials(socials.clone())
     .with_prints(prints.clone())
+    .with_mailings(mailings.clone())
     .with_templates(templates.clone())
     .with_uploads(uploads.clone());
     let state = AppState {
@@ -265,6 +286,7 @@ async fn main() -> anyhow::Result<()> {
         documents,
         socials,
         prints,
+        mailings,
         uploads,
         sessions,
         settings,
@@ -289,6 +311,7 @@ fn router(state: AppState) -> Router {
         .route("/documents/render", post(render_document))
         .route("/socials/render", post(render_social))
         .route("/prints/render", post(render_print))
+        .route("/mailings/render", post(render_mailing))
         .merge(agent_runs::routes())
         .merge(candidates::routes())
         .merge(events::routes())
@@ -299,6 +322,7 @@ fn router(state: AppState) -> Router {
         .merge(documents::routes())
         .merge(socials::routes())
         .merge(prints::routes())
+        .merge(mailings::routes())
         .merge(presenter::routes())
         .merge(projects::routes())
         .merge(export::routes())
@@ -362,6 +386,16 @@ async fn render_print(Json(print): Json<Print>) -> Response {
     api_error::print_validation_failed(&errors)
 }
 
+/// Renders a posted mailing to HTML, or reports every validation
+/// error.
+async fn render_mailing(Json(mailing): Json<Mailing>) -> Response {
+    let errors = mailing.validate();
+    if errors.is_empty() {
+        return Html(mailing_render::render_mailing(&mailing, false)).into_response();
+    }
+    api_error::mailing_validation_failed(&errors)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -372,11 +406,165 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::test_support::{
-        SAMPLE_DECK, SAMPLE_DESIGN, SAMPLE_DOCUMENT, SAMPLE_PRINT, SAMPLE_SOCIAL,
+        SAMPLE_DECK, SAMPLE_DESIGN, SAMPLE_DOCUMENT, SAMPLE_MAILING, SAMPLE_PRINT, SAMPLE_SOCIAL,
         application_with_command, invalid_sample_design, open_generating_deck_session,
-        open_generating_document_session, open_generating_print_session, open_generating_session,
-        open_generating_social_session, send, send_upload, send_user_put, test_application,
+        open_generating_document_session, open_generating_mailing_session,
+        open_generating_print_session, open_generating_session, open_generating_social_session,
+        send, send_upload, send_user_put, test_application,
     };
+
+    #[tokio::test]
+    async fn a_mailing_session_lists_its_mailings_and_chooses_from_the_mailing_store() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_mailing_session(&application, "launch").await;
+        let (status, body) = send(application.clone(), "GET", "/sessions/launch", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(view["session"]["artifact_kind"], "mailing");
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/mailings/launch-candidate-1",
+            Some(SAMPLE_MAILING),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, body) = send(application.clone(), "GET", "/sessions/launch", None).await;
+        let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(view["mailings"].as_array().unwrap().len(), 1);
+        assert_eq!(view["mailings"][0]["format"], "standard");
+        assert_eq!(view["mailings"][0]["email_count"], 2);
+        assert_eq!(view["prints"].as_array().unwrap().len(), 0);
+        assert_eq!(view["designs"].as_array().unwrap().len(), 0);
+        let (status, body) = send(application.clone(), "GET", "/candidates/launch", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Choose this mailing"));
+        assert!(body.contains("/mailings/launch-candidate-1/render"));
+        let (status, _) = send(
+            application.clone(),
+            "POST",
+            "/candidates/launch/choose",
+            Some(r#"{"id":"launch-candidate-1"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(application.clone(), "GET", "/mailings/launch", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(application, "GET", "/prints/launch", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn renders_a_valid_mailing_to_html() {
+        let directory = TempDir::new().unwrap();
+        let (status, body) = send(
+            test_application(&directory),
+            "POST",
+            "/mailings/render",
+            Some(SAMPLE_MAILING),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.starts_with("<!doctype html>"));
+        assert!(body.contains("data-swift-design-width=\"600\""));
+        assert!(body.contains("data-swift-design-height=\"1200\""));
+        let (status, body) = send(
+            test_application(&directory),
+            "POST",
+            "/mailings/render",
+            Some(r##"{"title":"","theme":{"name":"x","colors":{"background":"#000000","text":"#ffffff","accent":"#ff0000","muted":"#888888"},"fonts":{"heading":"Inter","body":"Inter","mono":"Inter"}},"emails":[]}"##),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("mailing failed validation"));
+        assert!(body.contains("mailing has no emails"));
+    }
+
+    #[tokio::test]
+    async fn saving_then_fetching_a_mailing_round_trips() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "launch").await;
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/mailings/launch-candidate-1",
+            Some(SAMPLE_MAILING),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, body) = send(
+            application.clone(),
+            "GET",
+            "/mailings/launch-candidate-1",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let mailing: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(mailing["emails"].as_array().unwrap().len(), 2);
+        let (status, body) = send(application.clone(), "GET", "/mailings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"email_count\":2"));
+        // The mailing is not a print.
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            "/prints/launch-candidate-1",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, body) = send(
+            application.clone(),
+            "GET",
+            "/mailings/launch-candidate-1/render?email=2",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("data-swift-design-screen=\"1\""));
+        let (status, _) = send(
+            application,
+            "GET",
+            "/mailings/launch-candidate-1/render?email=9",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn exporting_a_mailing_returns_an_html_download() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "launch").await;
+        send(
+            application.clone(),
+            "PUT",
+            "/mailings/launch",
+            Some(SAMPLE_MAILING),
+        )
+        .await;
+        let request = Request::builder()
+            .method("GET")
+            .uri("/mailings/launch/export")
+            .body(Body::empty())
+            .unwrap();
+        let response = application.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename=\"launch.html\""
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            String::from_utf8(bytes.to_vec())
+                .unwrap()
+                .contains("<h1>Six kinds. One chat.</h1>")
+        );
+    }
 
     #[tokio::test]
     async fn a_print_session_lists_its_prints_and_chooses_from_the_print_store() {
