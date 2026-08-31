@@ -990,6 +990,7 @@ pub(crate) fn HistorySection(
                 ArtifactKind::Document => api::fetch_document_history(&id).await,
                 ArtifactKind::Social => api::fetch_social_history(&id).await,
                 ArtifactKind::Print => api::fetch_print_history(&id).await,
+                ArtifactKind::Mailing => api::fetch_mailing_history(&id).await,
             }
         }
     });
@@ -1035,6 +1036,9 @@ pub(crate) fn HistorySection(
                                                     }
                                                     ArtifactKind::Print => {
                                                         api::restore_print_history(&design_id, &stamp).await
+                                                    }
+                                                    ArtifactKind::Mailing => {
+                                                        api::restore_mailing_history(&design_id, &stamp).await
                                                     }
                                                 };
                                                 match restored {

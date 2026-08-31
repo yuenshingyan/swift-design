@@ -11,8 +11,8 @@
 use std::collections::{HashMap, HashSet};
 
 use design_model::{
-    A4_VIEWPORT, ArtifactKind, DECK_VIEWPORT, Format, LETTER_VIEWPORT, Orientation, PrintSize,
-    Viewport,
+    A4_VIEWPORT, ArtifactKind, DECK_VIEWPORT, EmailFormat, Format, LETTER_VIEWPORT, Orientation,
+    PrintSize, Viewport,
 };
 use dioxus::prelude::*;
 
@@ -84,6 +84,9 @@ impl CanvasCard {
             }
             ArtifactKind::Print => {
                 format!("/prints/{}/render?v={revision}&sheet={current}", self.id)
+            }
+            ArtifactKind::Mailing => {
+                format!("/mailings/{}/render?v={revision}&email={current}", self.id)
             }
         }
     }
@@ -212,6 +215,30 @@ pub(crate) fn cards_from_prints(
     mine
 }
 
+/// The mailing cards that belong to `session_id`, chosen mailing
+/// first.
+pub(crate) fn cards_from_mailings(
+    mailings: &[api::MailingSummary],
+    session_id: &str,
+    chosen: Option<&str>,
+) -> Vec<CanvasCard> {
+    let mut mine: Vec<CanvasCard> = mailings
+        .iter()
+        .filter(|summary| crate::settings::artifact_project(&summary.id) == session_id)
+        .map(|summary| CanvasCard {
+            id: summary.id.clone(),
+            title: summary.title.clone(),
+            kind: ArtifactKind::Mailing,
+            count: summary.email_count,
+            outline_count: summary.outline_count,
+            ratio: summary.aspect_ratio(),
+            viewport: summary.viewport(),
+        })
+        .collect();
+    mine.sort_by_key(|card| Some(card.id.as_str()) != chosen);
+    mine
+}
+
 /// The card name from its id: `Candidate 2` from `talk-candidate-2`, or
 /// `Candidate` when the id has no number.
 pub(crate) fn candidate_label(id: &str) -> String {
@@ -236,8 +263,9 @@ pub(crate) fn candidate_number(id: &str) -> &str {
 }
 
 /// The name of one canvas, for a tab: `Desktop`, `Tablet`, `Phone`,
-/// `Deck`, `A4`, `Letter`, a social format such as `Square`, or a
-/// print size such as `A3` or `A4 landscape`.
+/// `Deck`, `A4`, `Letter`, a social format such as `Square`, a print
+/// size such as `A3` or `A4 landscape`, or an email format such as
+/// `Email` or `Long email`.
 pub(crate) fn canvas_name(viewport: Viewport) -> &'static str {
     if viewport == A4_VIEWPORT {
         return "A4";
@@ -271,6 +299,17 @@ pub(crate) fn canvas_name(viewport: Viewport) -> &'static str {
             PrintSize::A3 => "A3 landscape",
             PrintSize::Letter => "Letter landscape",
             PrintSize::Tabloid => "Tabloid landscape",
+        };
+    }
+    // Every email format is 600 px wide; no other canvas is.
+    if let Some(format) = EmailFormat::ALL
+        .into_iter()
+        .find(|format| format.viewport() == viewport)
+    {
+        return match format {
+            EmailFormat::Short => "Short email",
+            EmailFormat::Standard => "Email",
+            EmailFormat::Long => "Long email",
         };
     }
     match (viewport.width, viewport.height) {
@@ -506,6 +545,7 @@ pub(crate) fn CandidateCanvas(
                     ArtifactKind::Document => api::delete_document(&id).await,
                     ArtifactKind::Social => api::delete_social(&id).await,
                     ArtifactKind::Print => api::delete_print(&id).await,
+                    ArtifactKind::Mailing => api::delete_mailing(&id).await,
                 };
                 if let Err(message) = deleted {
                     on_error.call(message);
@@ -1041,6 +1081,12 @@ mod tests {
             canvas_name(Orientation::Landscape.apply(A4_VIEWPORT)),
             "A4 landscape"
         );
+        assert_eq!(canvas_name(design_model::STANDARD_EMAIL_VIEWPORT), "Email");
+        assert_eq!(
+            canvas_name(design_model::SHORT_EMAIL_VIEWPORT),
+            "Short email"
+        );
+        assert_eq!(canvas_name(design_model::LONG_EMAIL_VIEWPORT), "Long email");
         assert_eq!(canvas_size(Viewport::default()), "1440 × 900");
         assert_eq!(canvas_size(DECK_VIEWPORT), "1920 × 1080");
     }

@@ -19,6 +19,8 @@ pub(crate) enum View {
     Social(String),
     /// The editor for one print.
     Print(String),
+    /// The editor for one mailing.
+    Mailing(String),
 }
 
 /// The view for `hash`. Unknown or empty hashes land on Home.
@@ -35,13 +37,14 @@ pub(crate) fn route_from_hash(hash: &str) -> View {
         (Some("documents"), Some(id), None) if is_slug(id) => View::Document(id.to_owned()),
         (Some("socials"), Some(id), None) if is_slug(id) => View::Social(id.to_owned()),
         (Some("prints"), Some(id), None) if is_slug(id) => View::Print(id.to_owned()),
+        (Some("mailings"), Some(id), None) if is_slug(id) => View::Mailing(id.to_owned()),
         _ => View::Home,
     }
 }
 
 /// The hash for `view`: `#/`, `#/sessions/{id}`, `#/designs/{id}`,
-/// `#/decks/{id}`, `#/documents/{id}`, `#/socials/{id}`, or
-/// `#/prints/{id}`.
+/// `#/decks/{id}`, `#/documents/{id}`, `#/socials/{id}`,
+/// `#/prints/{id}`, or `#/mailings/{id}`.
 pub(crate) fn hash_for(view: &View) -> String {
     match view {
         View::Home => "#/".to_owned(),
@@ -51,6 +54,7 @@ pub(crate) fn hash_for(view: &View) -> String {
         View::Document(id) => format!("#/documents/{id}"),
         View::Social(id) => format!("#/socials/{id}"),
         View::Print(id) => format!("#/prints/{id}"),
+        View::Mailing(id) => format!("#/mailings/{id}"),
     }
 }
 
@@ -149,6 +153,18 @@ mod tests {
     }
 
     #[test]
+    fn mailing_hashes_route_to_the_mailing_editor() {
+        assert_eq!(
+            route_from_hash("#/mailings/launch-candidate-1"),
+            View::Mailing("launch-candidate-1".to_owned())
+        );
+        assert_eq!(
+            hash_for(&View::Mailing("launch".to_owned())),
+            "#/mailings/launch"
+        );
+    }
+
+    #[test]
     fn unknown_hashes_fall_back_to_home() {
         assert_eq!(route_from_hash("#/x"), View::Home);
         assert_eq!(route_from_hash("#/sessions/"), View::Home);
@@ -166,6 +182,7 @@ mod tests {
             View::Document("report-candidate-1".to_owned()),
             View::Social("post-candidate-1".to_owned()),
             View::Print("poster-candidate-1".to_owned()),
+            View::Mailing("launch-candidate-1".to_owned()),
         ] {
             assert_eq!(route_from_hash(&hash_for(&view)), view);
         }
