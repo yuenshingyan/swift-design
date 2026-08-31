@@ -1,4 +1,4 @@
-//! Screen, slide, page, and frame screenshots: how a model sees its own
+//! Screen, slide, page, frame, and sheet screenshots: how a model sees its own
 //! work.
 //!
 //! The server renders one screen, slide, page, or frame to HTML and
@@ -19,7 +19,7 @@ use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use design_model::{DECK_VIEWPORT, Deck, Design, Document, Social, Viewport};
+use design_model::{DECK_VIEWPORT, Deck, Design, Document, Print, Social, Viewport};
 
 use crate::api_error;
 use crate::deck_render;
@@ -27,6 +27,8 @@ use crate::decks::{DeckStore, is_valid_deck_id};
 use crate::designs::{DesignStore, is_valid_design_id};
 use crate::document_render;
 use crate::documents::{DocumentStore, is_valid_document_id};
+use crate::print_render;
+use crate::prints::{PrintStore, is_valid_print_id};
 use crate::render::{RenderOptions, render_design_with};
 use crate::settings::SettingsStore;
 use crate::social_render;
@@ -278,6 +280,43 @@ pub async fn dump_social_dom(social: &Social, base_url: &str) -> anyhow::Result<
     dump_rendered_dom(&html, base_url, social.viewport()).await
 }
 
+/// Renders sheet `index` (zero-based) of `print` to a PNG. `base_url`
+/// resolves relative image paths like `/uploads/…`.
+pub async fn screenshot_sheet(
+    print: &Print,
+    index: usize,
+    base_url: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let chrome = find_chrome().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
+        )
+    })?;
+    let html = print_render::render_print_with(
+        print,
+        print_render::RenderOptions {
+            only_sheet: Some(index),
+            asset_origin: Some(base_url.to_owned()),
+            ..print_render::RenderOptions::default()
+        },
+    );
+    screenshot_html(&chrome, &with_base_href(&html, base_url), print.viewport()).await
+}
+
+/// Renders the whole print with the layout audit script and returns
+/// the DOM after the audit ran, as Chrome dumps it.
+pub async fn dump_print_dom(print: &Print, base_url: &str) -> anyhow::Result<String> {
+    let html = print_render::render_print_with(
+        print,
+        print_render::RenderOptions {
+            is_auditing: true,
+            asset_origin: Some(base_url.to_owned()),
+            ..print_render::RenderOptions::default()
+        },
+    );
+    dump_rendered_dom(&html, base_url, print.viewport()).await
+}
+
 /// Loads a rendered page in Chrome and returns the DOM after its
 /// scripts ran. `base_url` resolves relative image paths; `viewport`
 /// sizes the window.
@@ -506,14 +545,15 @@ async fn run_chrome(
 }
 
 /// The `/designs/{id}/screens/{n}.png`, `/decks/{id}/slides/{n}.png`,
-/// `/documents/{id}/pages/{n}.png`, and `/socials/{id}/frames/{n}.png`
-/// route table.
+/// `/documents/{id}/pages/{n}.png`, `/socials/{id}/frames/{n}.png`,
+/// and `/prints/{id}/sheets/{n}.png` route table.
 pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/designs/{id}/screens/{file}", get(get_screen_image))
         .route("/decks/{id}/slides/{file}", get(get_slide_image))
         .route("/documents/{id}/pages/{file}", get(get_page_image))
         .route("/socials/{id}/frames/{file}", get(get_frame_image))
+        .route("/prints/{id}/sheets/{file}", get(get_sheet_image))
 }
 
 /// The 1-based number in a `{n}.png` file name. `None` for any other
@@ -677,6 +717,43 @@ async fn get_frame_image(
     }
     let base_url = format!("http://{}", settings.address());
     match screenshot_frame(&social, number - 1, &base_url).await {
+        Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Serves a PNG of one sheet. `file` is `{n}.png` with a 1-based `n`.
+async fn get_sheet_image(
+    State(prints): State<PrintStore>,
+    State(settings): State<SettingsStore>,
+    Path((id, file)): Path<(String, String)>,
+) -> Response {
+    if !is_valid_print_id(&id) {
+        return api_error::invalid_print_id(&id);
+    }
+    let Some(number) = image_number(&file) else {
+        return bad_image_name("sheet", &file);
+    };
+    let print = match prints.load(&id).await {
+        Ok(Some(print)) => print,
+        Ok(None) => return api_error::print_not_found(&id),
+        Err(error) => return api_error::internal_error(&error),
+    };
+    if number > print.sheets.len() {
+        return api_error::error_response(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "print `{id}` has no sheet {number}: use 1 to {}",
+                print.sheets.len()
+            ),
+            Vec::new(),
+        );
+    }
+    if find_chrome().is_none() {
+        return chrome_missing_response("sheet images");
+    }
+    let base_url = format!("http://{}", settings.address());
+    match screenshot_sheet(&print, number - 1, &base_url).await {
         Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
         Err(error) => api_error::internal_error(&error),
     }
