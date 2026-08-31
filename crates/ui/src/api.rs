@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 
 use design_model::{
-    ArtifactKind, BriefQuestionSet, DECK_VIEWPORT, Deck, Design, Document, Format, Paper,
-    QuestionAnswer, Social, WorkflowState,
+    ArtifactKind, BriefQuestionSet, DECK_VIEWPORT, Deck, Design, Document, Format, Orientation,
+    Paper, Print, PrintSize, QuestionAnswer, Social, WorkflowState,
 };
 use gloo_net::http::{Request, RequestBuilder, Response};
 use serde::{Deserialize, Serialize};
@@ -241,6 +241,19 @@ pub struct SessionOptions {
     /// agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_count: Option<u32>,
+    /// What kind of print piece to lay out, one of `PRINT_KINDS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub print_kind: Option<String>,
+    /// The paper size a print is laid out on, one of `PRINT_SIZES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub print_size: Option<String>,
+    /// How a print's sheets are turned, one of `ORIENTATIONS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orientation: Option<String>,
+    /// How many sheets a print run writes. `None` leaves it to the
+    /// agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_count: Option<u32>,
     /// The axes the planner filled from the request, by option key.
     /// The card marks them as suggested until the user picks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -275,6 +288,10 @@ impl Default for SessionOptions {
             format: None,
             post_goal: None,
             frame_count: None,
+            print_kind: None,
+            print_size: None,
+            orientation: None,
+            sheet_count: None,
             suggested: Vec::new(),
         }
     }
@@ -324,6 +341,10 @@ pub struct SessionView {
     /// session is a social session.
     #[serde(default)]
     pub socials: Vec<SocialSummary>,
+    /// The prints that belong to this session. Empty unless the
+    /// session is a print session.
+    #[serde(default)]
+    pub prints: Vec<PrintSummary>,
 }
 
 /// Body of `POST /sessions`.
@@ -331,7 +352,7 @@ pub struct SessionView {
 pub struct CreateSessionRequest<'value> {
     /// The user's request.
     pub request: &'value str,
-    /// `demo`, `deck`, `document`, or `social`.
+    /// `demo`, `deck`, `document`, `social`, or `print`.
     pub artifact_kind: &'value str,
     /// How hard to work.
     pub options: CreateOptions<'value>,
@@ -667,6 +688,18 @@ pub async fn fork_document(id: &str) -> Result<String, String> {
 pub async fn fork_social(id: &str) -> Result<String, String> {
     let request = built(Request::post(&format!("/socials/{id}/fork")))?;
     let response = send_checked(request, "POST /socials/fork").await?;
+    response
+        .json::<ForkResponse>()
+        .await
+        .map(|fork| fork.id)
+        .map_err(|error| error.to_string())
+}
+
+/// Copies one print candidate under the next free number of its
+/// session. Returns the new id.
+pub async fn fork_print(id: &str) -> Result<String, String> {
+    let request = built(Request::post(&format!("/prints/{id}/fork")))?;
+    let response = send_checked(request, "POST /prints/fork").await?;
     response
         .json::<ForkResponse>()
         .await
@@ -1033,6 +1066,115 @@ pub async fn restore_social_history(id: &str, stamp: &str) -> Result<(), String>
     .await
 }
 
+// -- Prints --------------------------------------------------------------
+
+/// One row of `GET /prints`, mirrored from the server.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct PrintSummary {
+    /// Print id used in `/prints/{id}` routes.
+    pub id: String,
+    /// Print title.
+    pub title: String,
+    /// Theme name.
+    pub theme: String,
+    /// The paper size the sheets are laid out on.
+    #[serde(default)]
+    pub size: PrintSize,
+    /// How the sheets are turned.
+    #[serde(default)]
+    pub orientation: Orientation,
+    /// Number of sheets.
+    pub sheet_count: usize,
+    /// Number of titles in the planned outline.
+    #[serde(default)]
+    pub outline_count: usize,
+    /// Number of placeholder sheets a run left behind.
+    #[serde(default)]
+    pub pending_count: usize,
+}
+
+impl PrintSummary {
+    /// True when the print is a preview that waits for its sheets.
+    pub fn is_preview(&self) -> bool {
+        self.outline_count > self.sheet_count
+    }
+
+    /// True when the print still owes sheets.
+    pub fn is_unfinished(&self) -> bool {
+        self.is_preview() || self.pending_count > 0
+    }
+
+    /// The px canvas of every sheet: the size rotated by the
+    /// orientation.
+    pub fn viewport(&self) -> design_model::Viewport {
+        self.orientation.apply(self.size.viewport())
+    }
+
+    /// The CSS aspect-ratio of the print's canvas.
+    pub fn aspect_ratio(&self) -> String {
+        self.viewport().aspect_ratio_css()
+    }
+}
+
+/// Fetches the print listing.
+pub async fn fetch_print_list() -> Result<Vec<PrintSummary>, String> {
+    get_json("/prints").await
+}
+
+/// Fetches one print.
+pub async fn fetch_print(id: &str) -> Result<Print, String> {
+    get_json(&format!("/prints/{id}")).await
+}
+
+/// Saves one print as a user edit. `Err` carries one message per
+/// problem, so the editor can show every validation error at once.
+pub async fn save_print(id: &str, print: &Print) -> Result<(), Vec<String>> {
+    let response = Request::put(&format!("/prints/{id}"))
+        .header("x-swift-design-author", "user")
+        .json(print)
+        .map_err(|error| vec![error.to_string()])?
+        .send()
+        .await
+        .map_err(|error| vec![error.to_string()])?;
+    if response.ok() {
+        return Ok(());
+    }
+    let status = response.status();
+    match response.json::<ErrorEnvelope>().await {
+        Ok(envelope) if !envelope.error.details.is_empty() => Err(envelope.error.details),
+        Ok(envelope) => Err(vec![envelope.error.message]),
+        Err(_) => Err(vec![format!(
+            "PUT /prints/{id} failed with status {status}"
+        )]),
+    }
+}
+
+/// Deletes one print.
+pub async fn delete_print(id: &str) -> Result<(), String> {
+    send_empty(Request::delete(&format!("/prints/{id}")), "DELETE /prints").await
+}
+
+/// Fetches the field paths the user changed in this print.
+pub async fn fetch_print_user_paths(id: &str) -> Result<Vec<String>, String> {
+    get_json::<AuthorsResponse>(&format!("/prints/{id}/authors"))
+        .await
+        .map(|authors| authors.user_paths)
+}
+
+/// Fetches the saved snapshots of one print.
+pub async fn fetch_print_history(id: &str) -> Result<Vec<HistorySnapshot>, String> {
+    get_json(&format!("/prints/{id}/history")).await
+}
+
+/// Writes one snapshot back as the current print.
+pub async fn restore_print_history(id: &str, stamp: &str) -> Result<(), String> {
+    send_empty(
+        Request::post(&format!("/prints/{id}/history/{stamp}/restore")),
+        "restore",
+    )
+    .await
+}
+
 // -- Templates -----------------------------------------------------------
 
 /// One row of `GET /templates`.
@@ -1112,6 +1254,8 @@ struct SaveTemplateRequest<'value> {
     document_id: Option<&'value str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     social_id: Option<&'value str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    print_id: Option<&'value str>,
     name: &'value str,
 }
 
@@ -1127,6 +1271,7 @@ pub async fn save_template(design_id: &str, name: &str) -> Result<TemplateSummar
         deck_id: None,
         document_id: None,
         social_id: None,
+        print_id: None,
         name,
     })
     .await
@@ -1139,6 +1284,7 @@ pub async fn save_deck_template(deck_id: &str, name: &str) -> Result<TemplateSum
         deck_id: Some(deck_id),
         document_id: None,
         social_id: None,
+        print_id: None,
         name,
     })
     .await
@@ -1154,6 +1300,7 @@ pub async fn save_document_template(
         deck_id: None,
         document_id: Some(document_id),
         social_id: None,
+        print_id: None,
         name,
     })
     .await
@@ -1166,6 +1313,20 @@ pub async fn save_social_template(social_id: &str, name: &str) -> Result<Templat
         deck_id: None,
         document_id: None,
         social_id: Some(social_id),
+        print_id: None,
+        name,
+    })
+    .await
+}
+
+/// Saves the style of one print as a template.
+pub async fn save_print_template(print_id: &str, name: &str) -> Result<TemplateSummary, String> {
+    save_template_from(SaveTemplateRequest {
+        design_id: None,
+        deck_id: None,
+        document_id: None,
+        social_id: None,
+        print_id: Some(print_id),
         name,
     })
     .await
