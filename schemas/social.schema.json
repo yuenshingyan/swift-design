@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Social",
+  "description": "A complete social: one theme applied to an ordered list of frames\non one format.",
+  "type": "object",
+  "properties": {
+    "format": {
+      "description": "The format every frame is laid out on. Absent means portrait.",
+      "$ref": "#/$defs/Format",
+      "default": "portrait"
+    },
+    "frames": {
+      "description": "Frames in swipe order. One frame is a single post; two or more\nare a carousel.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Frame"
+      }
+    },
+    "outline": {
+      "description": "The frame titles of the complete social, in order. A preview\nsocial lists more titles than it has frames: the app continues\nit from this list later. Leave it empty when the social is\ncomplete.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "theme": {
+      "description": "Visual identity applied to every frame.",
+      "$ref": "#/$defs/Theme"
+    },
+    "title": {
+      "description": "Social title, shown in the editor. Not rendered on a frame.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "theme",
+    "frames"
+  ],
+  "$defs": {
+    "FontSet": {
+      "description": "Default CSS font family names.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "Family for every other text element that sets no font.",
+          "type": "string"
+        },
+        "heading": {
+          "description": "Family for text elements with role `title` or `heading`.",
+          "type": "string"
+        },
+        "mono": {
+          "description": "Family for code elements.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "heading",
+        "body",
+        "mono"
+      ]
+    },
+    "Format": {
+      "description": "The canvas a social is laid out on.",
+      "oneOf": [
+        {
+          "description": "Square: 1080 by 1080 px.",
+          "type": "string",
+          "const": "square"
+        },
+        {
+          "description": "Portrait: 1080 by 1350 px.",
+          "type": "string",
+          "const": "portrait"
+        },
+        {
+          "description": "Story: 1080 by 1920 px.",
+          "type": "string",
+          "const": "story"
+        },
+        {
+          "description": "Landscape: 1200 by 630 px.",
+          "type": "string",
+          "const": "landscape"
+        }
+      ]
+    },
+    "Frame": {
+      "description": "One frame: an HTML fragment for the social's format, CSS for that\nfragment, and author notes.",
+      "type": "object",
+      "properties": {
+        "css": {
+          "description": "CSS for this frame only. The server scopes every selector to\nthis frame. Use plain selectors such as `.title` or `h1`. Use the\ntheme through `var(--background)`, `var(--text)`, `var(--accent)`,\n`var(--muted)`, `var(--heading-font)`, `var(--body-font)`,\n`var(--mono-font)`. No `@import`, no viewport units, no `<`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "html": {
+          "description": "The frame as one HTML fragment. The canvas is the social's\n`format` in px: 1080 by 1080 for square, 1080 by 1350 for\nportrait, 1080 by 1920 for story, 1200 by 630 for landscape.\nUse px units. Allowed: headings, text, lists, tables, `<img>`\nwith `src=\"/uploads/{name}\"`, inline `<svg>`, `<pre><code>`,\n`<blockquote>`, `<a>`. Not allowed: `<script>`, `<style>`,\n`<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, `<form>`,\n`<button>`, `<input>`, media, comments, `on*` attributes,\n`javascript:` and `data:` URLs, external images. Close every tag.",
+          "type": "string"
+        },
+        "notes": {
+          "description": "Author notes: the caption to post with the frame, intent, or\nhandoff remarks. Never rendered on the frame and never exported.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "html"
+      ]
+    },
+    "Palette": {
+      "description": "Default colors as `#rrggbb` hex strings.",
+      "type": "object",
+      "properties": {
+        "accent": {
+          "description": "Color for highlights, shapes, and chart series that set no color.",
+          "type": "string"
+        },
+        "background": {
+          "description": "Screen background color when a screen sets no background.",
+          "type": "string"
+        },
+        "muted": {
+          "description": "Secondary color for captions, rules, and table stripes.",
+          "type": "string"
+        },
+        "text": {
+          "description": "Text color when an element sets no color.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "background",
+        "text",
+        "accent",
+        "muted"
+      ]
+    },
+    "Theme": {
+      "description": "Default colors and fonts that elements inherit when they omit their\nown.",
+      "type": "object",
+      "properties": {
+        "colors": {
+          "description": "Default colors.",
+          "$ref": "#/$defs/Palette"
+        },
+        "fonts": {
+          "description": "Default font families.",
+          "$ref": "#/$defs/FontSet"
+        },
+        "name": {
+          "description": "Theme name shown in the editor.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "colors",
+        "fonts"
+      ]
+    }
+  }
+}
