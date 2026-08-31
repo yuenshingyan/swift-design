@@ -5,7 +5,8 @@
 //! bridge, the node inspector, the theme form, and the history section
 //! with the design editor; what differs is the mailing type, the
 //! `/mailings` routes, the email vocabulary, the format control, and
-//! the exports: PDF and a PNG zip beside the HTML file.
+//! the exports: PDF, a PNG zip, and an email-client HTML zip beside
+//! the HTML file.
 
 use design_model::{ArtifactKind, Email, EmailFormat, Mailing, Theme};
 use dioxus::document;
@@ -736,8 +737,9 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
 }
 
 /// The mailing toolbar's export group: the HTML file, the
-/// Chrome-backed PDF of one page per email, and the Chrome-backed zip
-/// of one PNG per email.
+/// email-client HTML zip (no Chrome needed), the Chrome-backed PDF of
+/// one page per email, and the Chrome-backed zip of one PNG per
+/// email.
 #[component]
 fn MailingExportGroup(mailing_id: String, can_export_with_chrome: bool) -> Element {
     rsx! {
@@ -748,6 +750,13 @@ fn MailingExportGroup(mailing_id: String, can_export_with_chrome: bool) -> Eleme
                 title: "Export as one HTML file",
                 span { dangerous_inner_html: icons::DOWNLOAD }
                 "HTML"
+            }
+            a {
+                class: "button",
+                href: "/mailings/{mailing_id}/export.email.zip",
+                title: "Export as email-client HTML, one file per email",
+                span { dangerous_inner_html: icons::DOWNLOAD }
+                "Email"
             }
             ChromeExportLink {
                 href: format!("/mailings/{mailing_id}/export.pdf"),
