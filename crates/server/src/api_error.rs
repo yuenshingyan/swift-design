@@ -80,6 +80,35 @@ pub fn invalid_social_id(id: &str) -> Response {
     )
 }
 
+/// 422 with one detail line per print validation error.
+pub fn print_validation_failed(errors: &[ValidationError]) -> Response {
+    let details: Vec<String> = errors.iter().map(ToString::to_string).collect();
+    tracing::info!(error_count = details.len(), "rejected invalid print");
+    error_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "print failed validation",
+        details,
+    )
+}
+
+/// 404 for a print id with no file behind it.
+pub fn print_not_found(id: &str) -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        &format!("no print with id `{id}`"),
+        Vec::new(),
+    )
+}
+
+/// 400 for a print id that is not kebab-case.
+pub fn invalid_print_id(id: &str) -> Response {
+    error_response(
+        StatusCode::BAD_REQUEST,
+        &format!("invalid print id `{id}`: use lowercase letters, digits, and hyphens"),
+        Vec::new(),
+    )
+}
+
 /// 422 with one detail line per document validation error.
 pub fn document_validation_failed(errors: &[ValidationError]) -> Response {
     let details: Vec<String> = errors.iter().map(ToString::to_string).collect();

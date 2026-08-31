@@ -1,13 +1,14 @@
 /target
 .DS_Store
 
-# Runtime data: user designs, decks, documents, and socials, uploaded
+# Runtime data: user designs, decks, documents, socials, and prints, uploaded
 # materials, sessions with their briefs and runs, save history, and saved
 # templates.
 /designs
 /decks
 /documents
 /socials
+/prints
 /uploads
 /data
 /templates
@@ -15,3 +16,4 @@
 /deck-history
 /document-history
 /social-history
+/print-history
