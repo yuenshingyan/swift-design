@@ -1,5 +1,5 @@
-//! Swift Design server: serves the editor UI, design, deck, and
-//! document files, and uploads.
+//! Swift Design server: serves the editor UI, design, deck, document,
+//! and social files, and uploads.
 
 mod agent_runs;
 mod api_error;
@@ -43,6 +43,11 @@ mod screenshots;
 mod session_routes;
 mod sessions;
 mod settings;
+mod social_generation;
+mod social_patch;
+mod social_polish;
+mod social_render;
+mod socials;
 mod static_files;
 mod templates;
 #[cfg(test)]
@@ -57,7 +62,7 @@ use axum::extract::FromRef;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use design_model::{Deck, Design, Document};
+use design_model::{Deck, Design, Document, Social};
 use tracing_subscriber::EnvFilter;
 
 use crate::agent_runs::AgentRunner;
@@ -68,6 +73,7 @@ use crate::events::ChangeNotifier;
 use crate::history::HistoryStore;
 use crate::sessions::SessionStore;
 use crate::settings::SettingsStore;
+use crate::socials::SocialStore;
 use crate::static_files::UiDirectory;
 use crate::templates::TemplateStore;
 use crate::uploads::UploadStore;
@@ -81,6 +87,8 @@ pub(crate) struct AppState {
     decks: DeckStore,
     /// Document storage.
     documents: DocumentStore,
+    /// Social storage.
+    socials: SocialStore,
     /// Upload storage.
     uploads: UploadStore,
     /// Session storage.
@@ -112,6 +120,12 @@ impl FromRef<AppState> for DeckStore {
 impl FromRef<AppState> for DocumentStore {
     fn from_ref(state: &AppState) -> DocumentStore {
         state.documents.clone()
+    }
+}
+
+impl FromRef<AppState> for SocialStore {
+    fn from_ref(state: &AppState) -> SocialStore {
+        state.socials.clone()
     }
 }
 
@@ -186,6 +200,10 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("SWIFT_DESIGN_DOCUMENTS_DIR").unwrap_or_else(|_| "documents".to_owned());
     let document_history_directory = std::env::var("SWIFT_DESIGN_DOCUMENT_HISTORY_DIR")
         .unwrap_or_else(|_| "document-history".to_owned());
+    let socials_directory =
+        std::env::var("SWIFT_DESIGN_SOCIALS_DIR").unwrap_or_else(|_| "socials".to_owned());
+    let social_history_directory = std::env::var("SWIFT_DESIGN_SOCIAL_HISTORY_DIR")
+        .unwrap_or_else(|_| "social-history".to_owned());
     let changes = ChangeNotifier::new();
     let designs = DesignStore::new(PathBuf::from(designs_directory))
         .with_history(HistoryStore::new(PathBuf::from(history_directory)));
@@ -193,6 +211,8 @@ async fn main() -> anyhow::Result<()> {
         .with_history(HistoryStore::new(PathBuf::from(deck_history_directory)));
     let documents = DocumentStore::new(PathBuf::from(documents_directory))
         .with_history(HistoryStore::new(PathBuf::from(document_history_directory)));
+    let socials = SocialStore::new(PathBuf::from(socials_directory))
+        .with_history(HistoryStore::new(PathBuf::from(social_history_directory)));
     let sessions = SessionStore::new(PathBuf::from(sessions_directory));
     // A run dies with the process. Its session would wait for it forever.
     for session_id in sessions
@@ -215,12 +235,14 @@ async fn main() -> anyhow::Result<()> {
     )
     .with_decks(decks.clone())
     .with_documents(documents.clone())
+    .with_socials(socials.clone())
     .with_templates(templates.clone())
     .with_uploads(uploads.clone());
     let state = AppState {
         designs,
         decks,
         documents,
+        socials,
         uploads,
         sessions,
         settings,
@@ -243,6 +265,7 @@ fn router(state: AppState) -> Router {
         .route("/designs/render", post(render_design))
         .route("/decks/render", post(render_deck))
         .route("/documents/render", post(render_document))
+        .route("/socials/render", post(render_social))
         .merge(agent_runs::routes())
         .merge(candidates::routes())
         .merge(events::routes())
@@ -251,6 +274,7 @@ fn router(state: AppState) -> Router {
         .merge(designs::routes())
         .merge(decks::routes())
         .merge(documents::routes())
+        .merge(socials::routes())
         .merge(presenter::routes())
         .merge(projects::routes())
         .merge(export::routes())
@@ -296,6 +320,15 @@ async fn render_document(Json(document): Json<Document>) -> Response {
     api_error::document_validation_failed(&errors)
 }
 
+/// Renders a posted social to HTML, or reports every validation error.
+async fn render_social(Json(social): Json<Social>) -> Response {
+    let errors = social.validate();
+    if errors.is_empty() {
+        return Html(social_render::render_social(&social, false)).into_response();
+    }
+    api_error::social_validation_failed(&errors)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -306,10 +339,182 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::test_support::{
-        SAMPLE_DECK, SAMPLE_DESIGN, SAMPLE_DOCUMENT, application_with_command,
+        SAMPLE_DECK, SAMPLE_DESIGN, SAMPLE_DOCUMENT, SAMPLE_SOCIAL, application_with_command,
         invalid_sample_design, open_generating_deck_session, open_generating_document_session,
-        open_generating_session, send, send_upload, send_user_put, test_application,
+        open_generating_session, open_generating_social_session, send, send_upload, send_user_put,
+        test_application,
     };
+
+    #[tokio::test]
+    async fn a_social_session_lists_its_socials_and_chooses_from_the_social_store() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_social_session(&application, "launch").await;
+        let (status, body) = send(application.clone(), "GET", "/sessions/launch", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(view["session"]["artifact_kind"], "social");
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/socials/launch-candidate-1",
+            Some(SAMPLE_SOCIAL),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, body) = send(application.clone(), "GET", "/sessions/launch", None).await;
+        let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(view["socials"].as_array().unwrap().len(), 1);
+        assert_eq!(view["socials"][0]["format"], "portrait");
+        assert_eq!(view["socials"][0]["frame_count"], 3);
+        assert_eq!(view["documents"].as_array().unwrap().len(), 0);
+        assert_eq!(view["designs"].as_array().unwrap().len(), 0);
+        let (status, body) = send(application.clone(), "GET", "/candidates/launch", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Choose this social post"));
+        assert!(body.contains("/socials/launch-candidate-1/render"));
+        let (status, _) = send(
+            application.clone(),
+            "POST",
+            "/candidates/launch/choose",
+            Some(r#"{"id":"launch-candidate-1"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(application.clone(), "GET", "/socials/launch", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(application, "GET", "/documents/launch", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn renders_a_valid_social_to_html() {
+        let directory = TempDir::new().unwrap();
+        let (status, body) = send(
+            test_application(&directory),
+            "POST",
+            "/socials/render",
+            Some(SAMPLE_SOCIAL),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.starts_with("<!doctype html>"));
+        assert!(body.contains("data-swift-design-width=\"1080\""));
+        assert!(body.contains("data-swift-design-height=\"1350\""));
+        let (status, body) = send(
+            test_application(&directory),
+            "POST",
+            "/socials/render",
+            Some(r##"{"title":"","theme":{"name":"x","colors":{"background":"#000000","text":"#ffffff","accent":"#ff0000","muted":"#888888"},"fonts":{"heading":"Inter","body":"Inter","mono":"Inter"}},"frames":[]}"##),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("social failed validation"));
+        assert!(body.contains("social has no frames"));
+    }
+
+    #[tokio::test]
+    async fn saving_then_fetching_a_social_round_trips() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "launch").await;
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/socials/launch-candidate-1",
+            Some(SAMPLE_SOCIAL),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, body) = send(
+            application.clone(),
+            "GET",
+            "/socials/launch-candidate-1",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let social: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(social["frames"].as_array().unwrap().len(), 3);
+        let (status, body) = send(application.clone(), "GET", "/socials", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"frame_count\":3"));
+        // The social is not a document.
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            "/documents/launch-candidate-1",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, body) = send(
+            application.clone(),
+            "GET",
+            "/socials/launch-candidate-1/render?frame=2",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("data-swift-design-screen=\"1\""));
+        let (status, _) = send(
+            application,
+            "GET",
+            "/socials/launch-candidate-1/render?frame=9",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn exporting_a_social_returns_an_html_download() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "launch").await;
+        send(
+            application.clone(),
+            "PUT",
+            "/socials/launch",
+            Some(SAMPLE_SOCIAL),
+        )
+        .await;
+        let request = Request::builder()
+            .method("GET")
+            .uri("/socials/launch/export")
+            .body(Body::empty())
+            .unwrap();
+        let response = application.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename=\"launch.html\""
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            String::from_utf8(bytes.to_vec())
+                .unwrap()
+                .contains("<h1>One harness. Four kinds.</h1>")
+        );
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            "/socials/launch/frames/cover.png",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            "/socials/launch/frames/9.png",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send(application, "GET", "/socials/missing/export.zip", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
 
     #[tokio::test]
     async fn a_document_session_lists_its_documents_and_chooses_from_the_document_store() {
@@ -1205,6 +1410,7 @@ mod tests {
             ("/schemas/design", "screens"),
             ("/schemas/deck", "slides"),
             ("/schemas/document", "pages"),
+            ("/schemas/social", "frames"),
             ("/schemas/question-set", "can_proceed_with_assumptions"),
         ] {
             let (status, body) = send(test_application(&directory), "GET", path, None).await;
