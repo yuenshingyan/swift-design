@@ -42,6 +42,11 @@
 //! `GET /campaigns/{id}/export.pdf` prints the campaign with the
 //! user's Chrome, one ad per PDF page. `GET /campaigns/{id}/export.zip`
 //! packs one PNG per ad: the files an ad platform takes.
+//!
+//! Artworks export under `/artworks/{id}/export`, and
+//! `GET /artworks/{id}/export.pdf` prints the artwork with the user's
+//! Chrome, one cover per PDF page. `GET /artworks/{id}/export.zip`
+//! packs one PNG per cover: the files the platforms take.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -56,11 +61,15 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use design_model::{Campaign, DECK_VIEWPORT, Deck, Design, Document, Mailing, Print, Social};
+use design_model::{
+    Artwork, Campaign, DECK_VIEWPORT, Deck, Design, Document, Mailing, Print, Social,
+};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use crate::api_error;
+use crate::artwork_render;
+use crate::artworks::{ArtworkStore, is_valid_artwork_id};
 use crate::campaign_render;
 use crate::campaigns::{CampaignStore, is_valid_campaign_id};
 use crate::deck_render;
@@ -114,6 +123,9 @@ pub fn routes() -> Router<crate::AppState> {
         .route("/campaigns/{id}/export", get(export_campaign))
         .route("/campaigns/{id}/export.pdf", get(export_campaign_pdf))
         .route("/campaigns/{id}/export.zip", get(export_campaign_zip))
+        .route("/artworks/{id}/export", get(export_artwork))
+        .route("/artworks/{id}/export.pdf", get(export_artwork_pdf))
+        .route("/artworks/{id}/export.zip", get(export_artwork_zip))
 }
 
 /// The `Content-Disposition` value that names the download `{id}.{extension}`.
@@ -1024,6 +1036,172 @@ async fn inline_uploaded_ad_images(
         ad.html = replace_upload_references(&ad.html, &data_uris);
         if let Some(css) = &ad.css {
             ad.css = Some(replace_upload_references(css, &data_uris));
+        }
+    }
+    Ok(())
+}
+
+/// Loads a stored artwork for an export: 400, 404, or 422 as a
+/// response when the id, the file, or the artwork is not usable.
+async fn load_artwork_for_export(artworks: &ArtworkStore, id: &str) -> Result<Artwork, Response> {
+    if !is_valid_artwork_id(id) {
+        return Err(api_error::invalid_artwork_id(id));
+    }
+    let artwork = match artworks.load(id).await {
+        Ok(Some(artwork)) => artwork,
+        Ok(None) => return Err(api_error::artwork_not_found(id)),
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    let errors = artwork.validate();
+    if !errors.is_empty() {
+        return Err(api_error::artwork_validation_failed(&errors));
+    }
+    Ok(artwork)
+}
+
+/// Renders a stored artwork with uploaded images and theme fonts
+/// inlined and returns it as a file download.
+async fn export_artwork(
+    State(artworks): State<ArtworkStore>,
+    State(uploads): State<UploadStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let mut artwork = match load_artwork_for_export(&artworks, &id).await {
+        Ok(artwork) => artwork,
+        Err(response) => return response,
+    };
+    if let Err(error) = inline_uploaded_cover_images(&mut artwork, &uploads).await {
+        return api_error::internal_error(&error);
+    }
+    let html = inline_google_fonts(
+        artwork_render::render_artwork(&artwork, false),
+        fetch_as_browser,
+    )
+    .await;
+    tracing::info!(%id, size_bytes = html.len(), "artwork exported");
+    file_download(&id, "html", "text/html; charset=utf-8", html.into_bytes())
+}
+
+/// Prints a stored artwork to a PDF with the user's Chrome, one cover
+/// per PDF page, and returns it as a file download. 503 when no Chrome
+/// is installed.
+async fn export_artwork_pdf(
+    State(artworks): State<ArtworkStore>,
+    State(uploads): State<UploadStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let artwork = match load_artwork_for_export(&artworks, &id).await {
+        Ok(artwork) => artwork,
+        Err(response) => return response,
+    };
+    build_artwork_pdf_response(&id, artwork, &uploads, screenshots::find_chrome()).await
+}
+
+/// Packs one PNG per cover of a stored artwork into a zip and returns
+/// it as a file download. 503 when no Chrome is installed.
+async fn export_artwork_zip(
+    State(artworks): State<ArtworkStore>,
+    State(settings): State<SettingsStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let artwork = match load_artwork_for_export(&artworks, &id).await {
+        Ok(artwork) => artwork,
+        Err(response) => return response,
+    };
+    let base_url = format!("http://{}", settings.address());
+    build_artwork_zip_response(&id, &artwork, &base_url, screenshots::find_chrome()).await
+}
+
+/// Inlines uploaded images, renders the artwork's print page, and
+/// prints it with `chrome`. `chrome` is a parameter so the no-Chrome
+/// path is testable.
+async fn build_artwork_pdf_response(
+    id: &str,
+    mut artwork: Artwork,
+    uploads: &UploadStore,
+    chrome: Option<PathBuf>,
+) -> Response {
+    let Some(chrome) = chrome else {
+        return screenshots::chrome_missing_response("PDF exports");
+    };
+    if let Err(error) = inline_uploaded_cover_images(&mut artwork, uploads).await {
+        return api_error::internal_error(&error);
+    }
+    let html = artwork_render::render_artwork_with(
+        &artwork,
+        artwork_render::RenderOptions {
+            is_print: true,
+            ..artwork_render::RenderOptions::default()
+        },
+    );
+    match screenshots::print_html_to_pdf(&chrome, &html, artwork.viewport()).await {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), "artwork exported as pdf");
+            file_download(id, "pdf", "application/pdf", bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Screenshots every cover and packs the PNGs. `chrome` is a parameter
+/// so the no-Chrome path is testable.
+async fn build_artwork_zip_response(
+    id: &str,
+    artwork: &Artwork,
+    base_url: &str,
+    chrome: Option<PathBuf>,
+) -> Response {
+    if chrome.is_none() {
+        return screenshots::chrome_missing_response("PNG exports");
+    }
+    let mut images = Vec::with_capacity(artwork.covers.len());
+    for index in 0..artwork.covers.len() {
+        match screenshots::screenshot_cover(artwork, index, base_url).await {
+            Ok(bytes) => images.push(bytes),
+            Err(error) => return api_error::internal_error(&error),
+        }
+    }
+    match pack_cover_images(id, &images) {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), cover_count = images.len(), "artwork exported as png zip");
+            file_download(id, "zip", "application/zip", bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// One zip with `{id}-cover-{n}.png` per image, 1-based, in order. A
+/// PNG is compressed already, so the entries are stored as they are.
+fn pack_cover_images(id: &str, images: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    for (index, image) in images.iter().enumerate() {
+        writer.start_file(format!("{id}-cover-{}.png", index + 1), options)?;
+        writer.write_all(image)?;
+    }
+    Ok(writer.finish()?.into_inner())
+}
+
+/// The artwork twin of `inline_uploaded_images`: rewrites cover html
+/// and css.
+async fn inline_uploaded_cover_images(
+    artwork: &mut Artwork,
+    uploads: &UploadStore,
+) -> anyhow::Result<()> {
+    let texts: Vec<&str> = artwork
+        .covers
+        .iter()
+        .flat_map(|cover| [Some(cover.html.as_str()), cover.css.as_deref()])
+        .flatten()
+        .collect();
+    let data_uris = collect_data_uris(&texts, uploads).await?;
+    if data_uris.is_empty() {
+        return Ok(());
+    }
+    for cover in &mut artwork.covers {
+        cover.html = replace_upload_references(&cover.html, &data_uris);
+        if let Some(css) = &cover.css {
+            cover.css = Some(replace_upload_references(css, &data_uris));
         }
     }
     Ok(())

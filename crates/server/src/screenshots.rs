@@ -25,6 +25,7 @@ use design_model::{
 
 use crate::api_error;
 use crate::artwork_render;
+use crate::artworks::{ArtworkStore, is_valid_artwork_id};
 use crate::campaign_render;
 use crate::campaigns::{CampaignStore, is_valid_campaign_id};
 use crate::deck_render;
@@ -700,8 +701,9 @@ async fn run_chrome(
 
 /// The `/designs/{id}/screens/{n}.png`, `/decks/{id}/slides/{n}.png`,
 /// `/documents/{id}/pages/{n}.png`, `/socials/{id}/frames/{n}.png`,
-/// `/prints/{id}/sheets/{n}.png`, `/mailings/{id}/emails/{n}.png`, and
-/// `/campaigns/{id}/ads/{n}.png` route table.
+/// `/prints/{id}/sheets/{n}.png`, `/mailings/{id}/emails/{n}.png`,
+/// `/campaigns/{id}/ads/{n}.png`, and `/artworks/{id}/covers/{n}.png`
+/// route table.
 pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/designs/{id}/screens/{file}", get(get_screen_image))
@@ -711,6 +713,7 @@ pub fn routes() -> Router<crate::AppState> {
         .route("/prints/{id}/sheets/{file}", get(get_sheet_image))
         .route("/mailings/{id}/emails/{file}", get(get_email_image))
         .route("/campaigns/{id}/ads/{file}", get(get_ad_image))
+        .route("/artworks/{id}/covers/{file}", get(get_cover_image))
 }
 
 /// The 1-based number in a `{n}.png` file name. `None` for any other
@@ -999,6 +1002,43 @@ async fn get_ad_image(
     }
     let base_url = format!("http://{}", settings.address());
     match screenshot_ad(&campaign, number - 1, &base_url).await {
+        Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Serves a PNG of one cover. `file` is `{n}.png` with a 1-based `n`.
+async fn get_cover_image(
+    State(artworks): State<ArtworkStore>,
+    State(settings): State<SettingsStore>,
+    Path((id, file)): Path<(String, String)>,
+) -> Response {
+    if !is_valid_artwork_id(&id) {
+        return api_error::invalid_artwork_id(&id);
+    }
+    let Some(number) = image_number(&file) else {
+        return bad_image_name("cover", &file);
+    };
+    let artwork = match artworks.load(&id).await {
+        Ok(Some(artwork)) => artwork,
+        Ok(None) => return api_error::artwork_not_found(&id),
+        Err(error) => return api_error::internal_error(&error),
+    };
+    if number > artwork.covers.len() {
+        return api_error::error_response(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "artwork `{id}` has no cover {number}: use 1 to {}",
+                artwork.covers.len()
+            ),
+            Vec::new(),
+        );
+    }
+    if find_chrome().is_none() {
+        return chrome_missing_response("cover images");
+    }
+    let base_url = format!("http://{}", settings.address());
+    match screenshot_cover(&artwork, number - 1, &base_url).await {
         Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
         Err(error) => api_error::internal_error(&error),
     }

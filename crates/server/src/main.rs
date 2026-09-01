@@ -961,6 +961,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exporting_an_artwork_returns_an_html_download() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "launch").await;
+        send(
+            application.clone(),
+            "PUT",
+            "/artworks/launch",
+            Some(SAMPLE_ARTWORK),
+        )
+        .await;
+        let request = Request::builder()
+            .method("GET")
+            .uri("/artworks/launch/export")
+            .body(Body::empty())
+            .unwrap();
+        let response = application.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename=\"launch.html\""
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            String::from_utf8(bytes.to_vec())
+                .unwrap()
+                .contains("<h1>Eight kinds. One chat.</h1>")
+        );
+    }
+
+    #[tokio::test]
     async fn exporting_a_campaign_returns_an_html_download() {
         let directory = TempDir::new().unwrap();
         let application = test_application(&directory);
