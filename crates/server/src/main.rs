@@ -991,6 +991,182 @@ mod tests {
         );
     }
 
+    /// GETs `uri` and asserts a scoped export: 200, the download named
+    /// `filename`, a body that holds `present` and not `absent`.
+    async fn assert_scoped_export(
+        application: axum::Router,
+        uri: &str,
+        filename: &str,
+        markers: (&str, &str),
+    ) {
+        let request = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        let response = application.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-disposition"],
+            format!("attachment; filename=\"{filename}\"")
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        let (present, absent) = markers;
+        assert!(html.contains(present), "missing {present} in {uri}");
+        assert!(!html.contains(absent), "unexpected {absent} in {uri}");
+    }
+
+    #[tokio::test]
+    async fn exporting_one_frame_returns_that_frame_alone() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "launch").await;
+        send(
+            application.clone(),
+            "PUT",
+            "/socials/launch",
+            Some(SAMPLE_SOCIAL),
+        )
+        .await;
+        assert_scoped_export(
+            application.clone(),
+            "/socials/launch/export?frame=2",
+            "launch-frame-2.html",
+            ("id=\"frame-2\"", "id=\"frame-1\""),
+        )
+        .await;
+        let (status, body) = send(
+            application.clone(),
+            "GET",
+            "/socials/launch/export?frame=9",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("use 1 to 3"));
+    }
+
+    #[tokio::test]
+    async fn exporting_one_sheet_returns_that_sheet_alone() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "launch").await;
+        send(
+            application.clone(),
+            "PUT",
+            "/prints/launch",
+            Some(SAMPLE_PRINT),
+        )
+        .await;
+        assert_scoped_export(
+            application.clone(),
+            "/prints/launch/export?sheet=2",
+            "launch-sheet-2.html",
+            ("id=\"sheet-2\"", "id=\"sheet-1\""),
+        )
+        .await;
+        let (status, body) = send(
+            application.clone(),
+            "GET",
+            "/prints/launch/export?sheet=0",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("use 1 to 2"));
+    }
+
+    #[tokio::test]
+    async fn exporting_one_email_returns_that_email_alone() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "launch").await;
+        send(
+            application.clone(),
+            "PUT",
+            "/mailings/launch",
+            Some(SAMPLE_MAILING),
+        )
+        .await;
+        assert_scoped_export(
+            application.clone(),
+            "/mailings/launch/export?email=2",
+            "launch-email-2.html",
+            ("id=\"email-2\"", "id=\"email-1\""),
+        )
+        .await;
+        let (status, body) = send(
+            application.clone(),
+            "GET",
+            "/mailings/launch/export?email=9",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("use 1 to 2"));
+    }
+
+    #[tokio::test]
+    async fn exporting_one_ad_returns_that_ad_alone() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "launch").await;
+        send(
+            application.clone(),
+            "PUT",
+            "/campaigns/launch",
+            Some(SAMPLE_CAMPAIGN),
+        )
+        .await;
+        assert_scoped_export(
+            application.clone(),
+            "/campaigns/launch/export?ad=2",
+            "launch-ad-2.html",
+            ("id=\"ad-2\"", "id=\"ad-1\""),
+        )
+        .await;
+        let (status, body) = send(
+            application.clone(),
+            "GET",
+            "/campaigns/launch/export?ad=9",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("use 1 to 2"));
+    }
+
+    #[tokio::test]
+    async fn exporting_one_cover_returns_that_cover_alone() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        open_generating_session(&application, "launch").await;
+        send(
+            application.clone(),
+            "PUT",
+            "/artworks/launch",
+            Some(SAMPLE_ARTWORK),
+        )
+        .await;
+        assert_scoped_export(
+            application.clone(),
+            "/artworks/launch/export?cover=2",
+            "launch-cover-2.html",
+            ("id=\"cover-2\"", "id=\"cover-1\""),
+        )
+        .await;
+        let (status, body) = send(
+            application.clone(),
+            "GET",
+            "/artworks/launch/export?cover=9",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("use 1 to 2"));
+    }
+
     #[tokio::test]
     async fn exporting_a_campaign_returns_an_html_download() {
         let directory = TempDir::new().unwrap();

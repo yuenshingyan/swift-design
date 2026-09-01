@@ -47,6 +47,11 @@
 //! `GET /artworks/{id}/export.pdf` prints the artwork with the user's
 //! Chrome, one cover per PDF page. `GET /artworks/{id}/export.zip`
 //! packs one PNG per cover: the files the platforms take.
+//!
+//! The HTML and PDF exports of the five multi-unit kinds take an
+//! optional one-based unit query (`?frame=N`, `?sheet=N`, `?email=N`,
+//! `?ad=N`, `?cover=N`) that exports that unit alone. The download is
+//! then named after the unit, like the zip entries.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -55,7 +60,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
@@ -64,6 +69,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use design_model::{
     Artwork, Campaign, DECK_VIEWPORT, Deck, Design, Document, Mailing, Print, Social,
 };
+use serde::Deserialize;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
@@ -146,6 +152,26 @@ fn file_download(id: &str, extension: &str, content_type: &str, bytes: Vec<u8>) 
         bytes,
     )
         .into_response()
+}
+
+/// Which part of an artifact an export covers: the whole artifact, or
+/// one zero-based unit.
+struct ExportScope<'a> {
+    /// The artifact id.
+    id: &'a str,
+    /// The zero-based unit to export alone. `None` exports every unit.
+    only: Option<usize>,
+}
+
+impl ExportScope<'_> {
+    /// The download file stem: `{id}` for the whole artifact,
+    /// `{id}-{unit}-{n}` for one unit, matching the zip entry names.
+    fn stem(&self, unit: &str) -> String {
+        match self.only {
+            Some(index) => format!("{}-{unit}-{}", self.id, index + 1),
+            None => self.id.to_owned(),
+        }
+    }
 }
 
 /// The User-Agent the font fetch sends. Google Fonts returns `woff2`
@@ -586,42 +612,97 @@ async fn load_social_for_export(socials: &SocialStore, id: &str) -> Result<Socia
     Ok(social)
 }
 
-/// Renders a stored social with uploaded images and theme fonts inlined
-/// and returns it as a file download.
+/// Query of `GET /socials/{id}/export` and `export.pdf`.
+#[derive(Debug, Deserialize)]
+struct FrameQuery {
+    /// Export only this one-based frame. Without it, every frame.
+    #[serde(default)]
+    frame: Option<usize>,
+}
+
+/// Converts a one-based frame number to a zero-based index. `Err` is
+/// the 404 that names the valid range.
+fn only_frame_index(
+    id: &str,
+    social: &Social,
+    number: Option<usize>,
+) -> Result<Option<usize>, Box<Response>> {
+    match number {
+        Some(number) if number >= 1 && number <= social.frames.len() => Ok(Some(number - 1)),
+        Some(number) => Err(Box::new(api_error::error_response(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "social `{id}` has no frame {number}: use 1 to {}",
+                social.frames.len()
+            ),
+            Vec::new(),
+        ))),
+        None => Ok(None),
+    }
+}
+
+/// Renders a stored social, or one frame of it, with uploaded images
+/// and theme fonts inlined and returns it as a file download.
 async fn export_social(
     State(socials): State<SocialStore>,
     State(uploads): State<UploadStore>,
     Path(id): Path<String>,
+    Query(query): Query<FrameQuery>,
 ) -> Response {
     let mut social = match load_social_for_export(&socials, &id).await {
         Ok(social) => social,
         Err(response) => return response,
     };
+    let only_frame = match only_frame_index(&id, &social, query.frame) {
+        Ok(only_frame) => only_frame,
+        Err(response) => return *response,
+    };
     if let Err(error) = inline_uploaded_frame_images(&mut social, &uploads).await {
         return api_error::internal_error(&error);
     }
     let html = inline_google_fonts(
-        social_render::render_social(&social, false),
+        social_render::render_social_with(
+            &social,
+            social_render::RenderOptions {
+                only_frame,
+                ..social_render::RenderOptions::default()
+            },
+        ),
         fetch_as_browser,
     )
     .await;
     tracing::info!(%id, size_bytes = html.len(), "social exported");
-    file_download(&id, "html", "text/html; charset=utf-8", html.into_bytes())
+    let scope = ExportScope {
+        id: &id,
+        only: only_frame,
+    };
+    file_download(
+        &scope.stem("frame"),
+        "html",
+        "text/html; charset=utf-8",
+        html.into_bytes(),
+    )
 }
 
-/// Prints a stored social to a PDF with the user's Chrome, one frame
-/// per sheet, and returns it as a file download. 503 when no Chrome is
-/// installed.
+/// Prints a stored social, or one frame of it, to a PDF with the
+/// user's Chrome, one frame per sheet, and returns it as a file
+/// download. 503 when no Chrome is installed.
 async fn export_social_pdf(
     State(socials): State<SocialStore>,
     State(uploads): State<UploadStore>,
     Path(id): Path<String>,
+    Query(query): Query<FrameQuery>,
 ) -> Response {
     let social = match load_social_for_export(&socials, &id).await {
         Ok(social) => social,
         Err(response) => return response,
     };
-    build_social_pdf_response(&id, social, &uploads, screenshots::find_chrome()).await
+    let only = match only_frame_index(&id, &social, query.frame) {
+        Ok(only) => only,
+        Err(response) => return *response,
+    };
+    let scope = ExportScope { id: &id, only };
+    build_social_pdf_response(scope, social, &uploads, screenshots::find_chrome()).await
 }
 
 /// Packs one PNG per frame of a stored social into a zip and returns
@@ -643,7 +724,7 @@ async fn export_social_zip(
 /// it with `chrome`. `chrome` is a parameter so the no-Chrome path is
 /// testable.
 async fn build_social_pdf_response(
-    id: &str,
+    scope: ExportScope<'_>,
     mut social: Social,
     uploads: &UploadStore,
     chrome: Option<PathBuf>,
@@ -658,13 +739,14 @@ async fn build_social_pdf_response(
         &social,
         social_render::RenderOptions {
             is_print: true,
+            only_frame: scope.only,
             ..social_render::RenderOptions::default()
         },
     );
     match screenshots::print_html_to_pdf(&chrome, &html, social.viewport()).await {
         Ok(bytes) => {
-            tracing::info!(%id, size_bytes = bytes.len(), "social exported as pdf");
-            file_download(id, "pdf", "application/pdf", bytes)
+            tracing::info!(id = %scope.id, size_bytes = bytes.len(), "social exported as pdf");
+            file_download(&scope.stem("frame"), "pdf", "application/pdf", bytes)
         }
         Err(error) => api_error::internal_error(&error),
     }
@@ -727,39 +809,97 @@ async fn load_print_for_export(prints: &PrintStore, id: &str) -> Result<Print, R
     Ok(print)
 }
 
-/// Renders a stored print with uploaded images and theme fonts inlined
-/// and returns it as a file download.
+/// Query of `GET /prints/{id}/export` and `export.pdf`.
+#[derive(Debug, Deserialize)]
+struct SheetQuery {
+    /// Export only this one-based sheet. Without it, every sheet.
+    #[serde(default)]
+    sheet: Option<usize>,
+}
+
+/// Converts a one-based sheet number to a zero-based index. `Err` is
+/// the 404 that names the valid range.
+fn only_sheet_index(
+    id: &str,
+    print: &Print,
+    number: Option<usize>,
+) -> Result<Option<usize>, Box<Response>> {
+    match number {
+        Some(number) if number >= 1 && number <= print.sheets.len() => Ok(Some(number - 1)),
+        Some(number) => Err(Box::new(api_error::error_response(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "print `{id}` has no sheet {number}: use 1 to {}",
+                print.sheets.len()
+            ),
+            Vec::new(),
+        ))),
+        None => Ok(None),
+    }
+}
+
+/// Renders a stored print, or one sheet of it, with uploaded images
+/// and theme fonts inlined and returns it as a file download.
 async fn export_print(
     State(prints): State<PrintStore>,
     State(uploads): State<UploadStore>,
     Path(id): Path<String>,
+    Query(query): Query<SheetQuery>,
 ) -> Response {
     let mut print = match load_print_for_export(&prints, &id).await {
         Ok(print) => print,
         Err(response) => return response,
     };
+    let only_sheet = match only_sheet_index(&id, &print, query.sheet) {
+        Ok(only_sheet) => only_sheet,
+        Err(response) => return *response,
+    };
     if let Err(error) = inline_uploaded_sheet_images(&mut print, &uploads).await {
         return api_error::internal_error(&error);
     }
-    let html =
-        inline_google_fonts(print_render::render_print(&print, false), fetch_as_browser).await;
+    let html = inline_google_fonts(
+        print_render::render_print_with(
+            &print,
+            print_render::RenderOptions {
+                only_sheet,
+                ..print_render::RenderOptions::default()
+            },
+        ),
+        fetch_as_browser,
+    )
+    .await;
     tracing::info!(%id, size_bytes = html.len(), "print exported");
-    file_download(&id, "html", "text/html; charset=utf-8", html.into_bytes())
+    let scope = ExportScope {
+        id: &id,
+        only: only_sheet,
+    };
+    file_download(
+        &scope.stem("sheet"),
+        "html",
+        "text/html; charset=utf-8",
+        html.into_bytes(),
+    )
 }
 
-/// Prints a stored print to a PDF with the user's Chrome, one sheet
-/// per PDF page, and returns it as a file download. 503 when no Chrome
-/// is installed.
+/// Prints a stored print, or one sheet of it, to a PDF with the user's
+/// Chrome, one sheet per PDF page, and returns it as a file download.
+/// 503 when no Chrome is installed.
 async fn export_print_pdf(
     State(prints): State<PrintStore>,
     State(uploads): State<UploadStore>,
     Path(id): Path<String>,
+    Query(query): Query<SheetQuery>,
 ) -> Response {
     let print = match load_print_for_export(&prints, &id).await {
         Ok(print) => print,
         Err(response) => return response,
     };
-    build_print_pdf_response(&id, print, &uploads, screenshots::find_chrome()).await
+    let only = match only_sheet_index(&id, &print, query.sheet) {
+        Ok(only) => only,
+        Err(response) => return *response,
+    };
+    let scope = ExportScope { id: &id, only };
+    build_print_pdf_response(scope, print, &uploads, screenshots::find_chrome()).await
 }
 
 /// Packs one PNG per sheet of a stored print into a zip and returns
@@ -781,7 +921,7 @@ async fn export_print_zip(
 /// it with `chrome`. `chrome` is a parameter so the no-Chrome path is
 /// testable.
 async fn build_print_pdf_response(
-    id: &str,
+    scope: ExportScope<'_>,
     mut print: Print,
     uploads: &UploadStore,
     chrome: Option<PathBuf>,
@@ -796,13 +936,14 @@ async fn build_print_pdf_response(
         &print,
         print_render::RenderOptions {
             is_print: true,
+            only_sheet: scope.only,
             ..print_render::RenderOptions::default()
         },
     );
     match screenshots::print_html_to_pdf(&chrome, &html, print.viewport()).await {
         Ok(bytes) => {
-            tracing::info!(%id, size_bytes = bytes.len(), "print exported as pdf");
-            file_download(id, "pdf", "application/pdf", bytes)
+            tracing::info!(id = %scope.id, size_bytes = bytes.len(), "print exported as pdf");
+            file_download(&scope.stem("sheet"), "pdf", "application/pdf", bytes)
         }
         Err(error) => api_error::internal_error(&error),
     }
@@ -893,42 +1034,97 @@ async fn load_campaign_for_export(
     Ok(campaign)
 }
 
-/// Renders a stored campaign with uploaded images and theme fonts
-/// inlined and returns it as a file download.
+/// Query of `GET /campaigns/{id}/export` and `export.pdf`.
+#[derive(Debug, Deserialize)]
+struct AdQuery {
+    /// Export only this one-based ad. Without it, every ad.
+    #[serde(default)]
+    ad: Option<usize>,
+}
+
+/// Converts a one-based ad number to a zero-based index. `Err` is the
+/// 404 that names the valid range.
+fn only_ad_index(
+    id: &str,
+    campaign: &Campaign,
+    number: Option<usize>,
+) -> Result<Option<usize>, Box<Response>> {
+    match number {
+        Some(number) if number >= 1 && number <= campaign.ads.len() => Ok(Some(number - 1)),
+        Some(number) => Err(Box::new(api_error::error_response(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "campaign `{id}` has no ad {number}: use 1 to {}",
+                campaign.ads.len()
+            ),
+            Vec::new(),
+        ))),
+        None => Ok(None),
+    }
+}
+
+/// Renders a stored campaign, or one ad of it, with uploaded images
+/// and theme fonts inlined and returns it as a file download.
 async fn export_campaign(
     State(campaigns): State<CampaignStore>,
     State(uploads): State<UploadStore>,
     Path(id): Path<String>,
+    Query(query): Query<AdQuery>,
 ) -> Response {
     let mut campaign = match load_campaign_for_export(&campaigns, &id).await {
         Ok(campaign) => campaign,
         Err(response) => return response,
     };
+    let only_ad = match only_ad_index(&id, &campaign, query.ad) {
+        Ok(only_ad) => only_ad,
+        Err(response) => return *response,
+    };
     if let Err(error) = inline_uploaded_ad_images(&mut campaign, &uploads).await {
         return api_error::internal_error(&error);
     }
     let html = inline_google_fonts(
-        campaign_render::render_campaign(&campaign, false),
+        campaign_render::render_campaign_with(
+            &campaign,
+            campaign_render::RenderOptions {
+                only_ad,
+                ..campaign_render::RenderOptions::default()
+            },
+        ),
         fetch_as_browser,
     )
     .await;
     tracing::info!(%id, size_bytes = html.len(), "campaign exported");
-    file_download(&id, "html", "text/html; charset=utf-8", html.into_bytes())
+    let scope = ExportScope {
+        id: &id,
+        only: only_ad,
+    };
+    file_download(
+        &scope.stem("ad"),
+        "html",
+        "text/html; charset=utf-8",
+        html.into_bytes(),
+    )
 }
 
-/// Prints a stored campaign to a PDF with the user's Chrome, one ad
-/// per PDF page, and returns it as a file download. 503 when no Chrome
-/// is installed.
+/// Prints a stored campaign, or one ad of it, to a PDF with the user's
+/// Chrome, one ad per PDF page, and returns it as a file download.
+/// 503 when no Chrome is installed.
 async fn export_campaign_pdf(
     State(campaigns): State<CampaignStore>,
     State(uploads): State<UploadStore>,
     Path(id): Path<String>,
+    Query(query): Query<AdQuery>,
 ) -> Response {
     let campaign = match load_campaign_for_export(&campaigns, &id).await {
         Ok(campaign) => campaign,
         Err(response) => return response,
     };
-    build_campaign_pdf_response(&id, campaign, &uploads, screenshots::find_chrome()).await
+    let only = match only_ad_index(&id, &campaign, query.ad) {
+        Ok(only) => only,
+        Err(response) => return *response,
+    };
+    let scope = ExportScope { id: &id, only };
+    build_campaign_pdf_response(scope, campaign, &uploads, screenshots::find_chrome()).await
 }
 
 /// Packs one PNG per ad of a stored campaign into a zip and returns
@@ -950,7 +1146,7 @@ async fn export_campaign_zip(
 /// prints it with `chrome`. `chrome` is a parameter so the no-Chrome
 /// path is testable.
 async fn build_campaign_pdf_response(
-    id: &str,
+    scope: ExportScope<'_>,
     mut campaign: Campaign,
     uploads: &UploadStore,
     chrome: Option<PathBuf>,
@@ -965,13 +1161,14 @@ async fn build_campaign_pdf_response(
         &campaign,
         campaign_render::RenderOptions {
             is_print: true,
+            only_ad: scope.only,
             ..campaign_render::RenderOptions::default()
         },
     );
     match screenshots::print_html_to_pdf(&chrome, &html, campaign.viewport()).await {
         Ok(bytes) => {
-            tracing::info!(%id, size_bytes = bytes.len(), "campaign exported as pdf");
-            file_download(id, "pdf", "application/pdf", bytes)
+            tracing::info!(id = %scope.id, size_bytes = bytes.len(), "campaign exported as pdf");
+            file_download(&scope.stem("ad"), "pdf", "application/pdf", bytes)
         }
         Err(error) => api_error::internal_error(&error),
     }
@@ -1059,42 +1256,97 @@ async fn load_artwork_for_export(artworks: &ArtworkStore, id: &str) -> Result<Ar
     Ok(artwork)
 }
 
-/// Renders a stored artwork with uploaded images and theme fonts
-/// inlined and returns it as a file download.
+/// Query of `GET /artworks/{id}/export` and `export.pdf`.
+#[derive(Debug, Deserialize)]
+struct CoverQuery {
+    /// Export only this one-based cover. Without it, every cover.
+    #[serde(default)]
+    cover: Option<usize>,
+}
+
+/// Converts a one-based cover number to a zero-based index. `Err` is
+/// the 404 that names the valid range.
+fn only_cover_index(
+    id: &str,
+    artwork: &Artwork,
+    number: Option<usize>,
+) -> Result<Option<usize>, Box<Response>> {
+    match number {
+        Some(number) if number >= 1 && number <= artwork.covers.len() => Ok(Some(number - 1)),
+        Some(number) => Err(Box::new(api_error::error_response(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "artwork `{id}` has no cover {number}: use 1 to {}",
+                artwork.covers.len()
+            ),
+            Vec::new(),
+        ))),
+        None => Ok(None),
+    }
+}
+
+/// Renders a stored artwork, or one cover of it, with uploaded images
+/// and theme fonts inlined and returns it as a file download.
 async fn export_artwork(
     State(artworks): State<ArtworkStore>,
     State(uploads): State<UploadStore>,
     Path(id): Path<String>,
+    Query(query): Query<CoverQuery>,
 ) -> Response {
     let mut artwork = match load_artwork_for_export(&artworks, &id).await {
         Ok(artwork) => artwork,
         Err(response) => return response,
     };
+    let only_cover = match only_cover_index(&id, &artwork, query.cover) {
+        Ok(only_cover) => only_cover,
+        Err(response) => return *response,
+    };
     if let Err(error) = inline_uploaded_cover_images(&mut artwork, &uploads).await {
         return api_error::internal_error(&error);
     }
     let html = inline_google_fonts(
-        artwork_render::render_artwork(&artwork, false),
+        artwork_render::render_artwork_with(
+            &artwork,
+            artwork_render::RenderOptions {
+                only_cover,
+                ..artwork_render::RenderOptions::default()
+            },
+        ),
         fetch_as_browser,
     )
     .await;
     tracing::info!(%id, size_bytes = html.len(), "artwork exported");
-    file_download(&id, "html", "text/html; charset=utf-8", html.into_bytes())
+    let scope = ExportScope {
+        id: &id,
+        only: only_cover,
+    };
+    file_download(
+        &scope.stem("cover"),
+        "html",
+        "text/html; charset=utf-8",
+        html.into_bytes(),
+    )
 }
 
-/// Prints a stored artwork to a PDF with the user's Chrome, one cover
-/// per PDF page, and returns it as a file download. 503 when no Chrome
-/// is installed.
+/// Prints a stored artwork, or one cover of it, to a PDF with the
+/// user's Chrome, one cover per PDF page, and returns it as a file
+/// download. 503 when no Chrome is installed.
 async fn export_artwork_pdf(
     State(artworks): State<ArtworkStore>,
     State(uploads): State<UploadStore>,
     Path(id): Path<String>,
+    Query(query): Query<CoverQuery>,
 ) -> Response {
     let artwork = match load_artwork_for_export(&artworks, &id).await {
         Ok(artwork) => artwork,
         Err(response) => return response,
     };
-    build_artwork_pdf_response(&id, artwork, &uploads, screenshots::find_chrome()).await
+    let only = match only_cover_index(&id, &artwork, query.cover) {
+        Ok(only) => only,
+        Err(response) => return *response,
+    };
+    let scope = ExportScope { id: &id, only };
+    build_artwork_pdf_response(scope, artwork, &uploads, screenshots::find_chrome()).await
 }
 
 /// Packs one PNG per cover of a stored artwork into a zip and returns
@@ -1116,7 +1368,7 @@ async fn export_artwork_zip(
 /// prints it with `chrome`. `chrome` is a parameter so the no-Chrome
 /// path is testable.
 async fn build_artwork_pdf_response(
-    id: &str,
+    scope: ExportScope<'_>,
     mut artwork: Artwork,
     uploads: &UploadStore,
     chrome: Option<PathBuf>,
@@ -1131,13 +1383,14 @@ async fn build_artwork_pdf_response(
         &artwork,
         artwork_render::RenderOptions {
             is_print: true,
+            only_cover: scope.only,
             ..artwork_render::RenderOptions::default()
         },
     );
     match screenshots::print_html_to_pdf(&chrome, &html, artwork.viewport()).await {
         Ok(bytes) => {
-            tracing::info!(%id, size_bytes = bytes.len(), "artwork exported as pdf");
-            file_download(id, "pdf", "application/pdf", bytes)
+            tracing::info!(id = %scope.id, size_bytes = bytes.len(), "artwork exported as pdf");
+            file_download(&scope.stem("cover"), "pdf", "application/pdf", bytes)
         }
         Err(error) => api_error::internal_error(&error),
     }
@@ -1225,42 +1478,97 @@ async fn load_mailing_for_export(mailings: &MailingStore, id: &str) -> Result<Ma
     Ok(mailing)
 }
 
-/// Renders a stored mailing with uploaded images and theme fonts
-/// inlined and returns it as a file download.
+/// Query of `GET /mailings/{id}/export` and `export.pdf`.
+#[derive(Debug, Deserialize)]
+struct EmailQuery {
+    /// Export only this one-based email. Without it, every email.
+    #[serde(default)]
+    email: Option<usize>,
+}
+
+/// Converts a one-based email number to a zero-based index. `Err` is
+/// the 404 that names the valid range.
+fn only_email_index(
+    id: &str,
+    mailing: &Mailing,
+    number: Option<usize>,
+) -> Result<Option<usize>, Box<Response>> {
+    match number {
+        Some(number) if number >= 1 && number <= mailing.emails.len() => Ok(Some(number - 1)),
+        Some(number) => Err(Box::new(api_error::error_response(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "mailing `{id}` has no email {number}: use 1 to {}",
+                mailing.emails.len()
+            ),
+            Vec::new(),
+        ))),
+        None => Ok(None),
+    }
+}
+
+/// Renders a stored mailing, or one email of it, with uploaded images
+/// and theme fonts inlined and returns it as a file download.
 async fn export_mailing(
     State(mailings): State<MailingStore>,
     State(uploads): State<UploadStore>,
     Path(id): Path<String>,
+    Query(query): Query<EmailQuery>,
 ) -> Response {
     let mut mailing = match load_mailing_for_export(&mailings, &id).await {
         Ok(mailing) => mailing,
         Err(response) => return response,
     };
+    let only_email = match only_email_index(&id, &mailing, query.email) {
+        Ok(only_email) => only_email,
+        Err(response) => return *response,
+    };
     if let Err(error) = inline_uploaded_email_images(&mut mailing, &uploads).await {
         return api_error::internal_error(&error);
     }
     let html = inline_google_fonts(
-        mailing_render::render_mailing(&mailing, false),
+        mailing_render::render_mailing_with(
+            &mailing,
+            mailing_render::RenderOptions {
+                only_email,
+                ..mailing_render::RenderOptions::default()
+            },
+        ),
         fetch_as_browser,
     )
     .await;
     tracing::info!(%id, size_bytes = html.len(), "mailing exported");
-    file_download(&id, "html", "text/html; charset=utf-8", html.into_bytes())
+    let scope = ExportScope {
+        id: &id,
+        only: only_email,
+    };
+    file_download(
+        &scope.stem("email"),
+        "html",
+        "text/html; charset=utf-8",
+        html.into_bytes(),
+    )
 }
 
-/// Prints a stored mailing to a PDF with the user's Chrome, one email
-/// per PDF page, and returns it as a file download. 503 when no
-/// Chrome is installed.
+/// Prints a stored mailing, or one email of it, to a PDF with the
+/// user's Chrome, one email per PDF page, and returns it as a file
+/// download. 503 when no Chrome is installed.
 async fn export_mailing_pdf(
     State(mailings): State<MailingStore>,
     State(uploads): State<UploadStore>,
     Path(id): Path<String>,
+    Query(query): Query<EmailQuery>,
 ) -> Response {
     let mailing = match load_mailing_for_export(&mailings, &id).await {
         Ok(mailing) => mailing,
         Err(response) => return response,
     };
-    build_mailing_pdf_response(&id, mailing, &uploads, screenshots::find_chrome()).await
+    let only = match only_email_index(&id, &mailing, query.email) {
+        Ok(only) => only,
+        Err(response) => return *response,
+    };
+    let scope = ExportScope { id: &id, only };
+    build_mailing_pdf_response(scope, mailing, &uploads, screenshots::find_chrome()).await
 }
 
 /// Packs one PNG per email of a stored mailing into a zip and returns
@@ -1282,7 +1590,7 @@ async fn export_mailing_zip(
 /// prints it with `chrome`. `chrome` is a parameter so the no-Chrome
 /// path is testable.
 async fn build_mailing_pdf_response(
-    id: &str,
+    scope: ExportScope<'_>,
     mut mailing: Mailing,
     uploads: &UploadStore,
     chrome: Option<PathBuf>,
@@ -1297,13 +1605,14 @@ async fn build_mailing_pdf_response(
         &mailing,
         mailing_render::RenderOptions {
             is_print: true,
+            only_email: scope.only,
             ..mailing_render::RenderOptions::default()
         },
     );
     match screenshots::print_html_to_pdf(&chrome, &html, mailing.viewport()).await {
         Ok(bytes) => {
-            tracing::info!(%id, size_bytes = bytes.len(), "mailing exported as pdf");
-            file_download(id, "pdf", "application/pdf", bytes)
+            tracing::info!(id = %scope.id, size_bytes = bytes.len(), "mailing exported as pdf");
+            file_download(&scope.stem("email"), "pdf", "application/pdf", bytes)
         }
         Err(error) => api_error::internal_error(&error),
     }
@@ -1673,27 +1982,66 @@ mod tests {
     use design_model::Design;
 
     use crate::export::{
-        FONT_LINK_PREFIX, FontLink, attachment_disposition, base64_encode, build_deck_pdf_response,
-        build_document_pdf_response, build_pptx_response, build_social_pdf_response,
-        build_social_zip_response, google_fonts_link, inline_font_urls, inline_google_fonts,
-        inline_uploaded_frame_images, inline_uploaded_images, inline_uploaded_page_images,
-        inline_uploaded_slide_images, pack_frame_images, upload_references,
+        ExportScope, FONT_LINK_PREFIX, FontLink, attachment_disposition, base64_encode,
+        build_deck_pdf_response, build_document_pdf_response, build_pptx_response,
+        build_social_pdf_response, build_social_zip_response, google_fonts_link, inline_font_urls,
+        inline_google_fonts, inline_uploaded_frame_images, inline_uploaded_images,
+        inline_uploaded_page_images, inline_uploaded_slide_images, only_cover_index,
+        pack_frame_images, upload_references,
     };
     use crate::pptx::ExportSources;
     use crate::render;
-    use crate::test_support::{sample_deck, sample_document, sample_social};
+    use crate::test_support::{sample_artwork, sample_deck, sample_document, sample_social};
     use crate::uploads::UploadStore;
 
     #[tokio::test]
     async fn social_exports_without_chrome_are_503() {
         let directory = tempfile::tempdir().unwrap();
         let store = UploadStore::new(directory.path().to_path_buf());
-        let response = build_social_pdf_response("launch", sample_social(), &store, None).await;
+        let scope = ExportScope {
+            id: "launch",
+            only: None,
+        };
+        let response = build_social_pdf_response(scope, sample_social(), &store, None).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let scope = ExportScope {
+            id: "launch",
+            only: Some(1),
+        };
+        let response = build_social_pdf_response(scope, sample_social(), &store, None).await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let response =
             build_social_zip_response("launch", &sample_social(), "http://127.0.0.1:3000", None)
                 .await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn a_scoped_export_stem_names_the_unit_like_a_zip_entry() {
+        let scoped = ExportScope {
+            id: "launch",
+            only: Some(1),
+        };
+        assert_eq!(scoped.stem("cover"), "launch-cover-2");
+        let whole = ExportScope {
+            id: "launch",
+            only: None,
+        };
+        assert_eq!(whole.stem("cover"), "launch");
+    }
+
+    #[test]
+    fn a_unit_number_converts_to_an_index_or_a_404() {
+        let artwork = sample_artwork();
+        assert_eq!(only_cover_index("launch", &artwork, None).unwrap(), None);
+        assert_eq!(
+            only_cover_index("launch", &artwork, Some(2)).unwrap(),
+            Some(1)
+        );
+        let response = only_cover_index("launch", &artwork, Some(9)).unwrap_err();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = only_cover_index("launch", &artwork, Some(0)).unwrap_err();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]
