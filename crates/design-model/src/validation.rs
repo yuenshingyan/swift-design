@@ -1,12 +1,14 @@
 //! Semantic checks that JSON Schema alone cannot express.
 //!
-//! Every error names the screen, slide, page, frame, sheet, email, or
-//! ad index and the field, so an agent can fix the artifact from the
-//! message alone. HTML and CSS are checked by `markup`, which rejects
-//! unsafe and malformed markup. The design, the deck, the document,
-//! the social, the print, the mailing, and the campaign share one
-//! error type and the same checks; only the field paths differ.
+//! Every error names the screen, slide, page, frame, sheet, email,
+//! ad, or cover index and the field, so an agent can fix the artifact
+//! from the message alone. HTML and CSS are checked by `markup`, which
+//! rejects unsafe and malformed markup. The design, the deck, the
+//! document, the social, the print, the mailing, the campaign, and the
+//! artwork share one error type and the same checks; only the field
+//! paths differ.
 
+use crate::artwork::COVER_COUNT_LIMIT;
 use crate::campaign::AD_COUNT_LIMIT;
 use crate::mailing::EMAIL_COUNT_LIMIT;
 use crate::markup::{SCREEN_CSS_LIMIT, SCREEN_HTML_LIMIT, css_problems, html_problems};
@@ -14,12 +16,12 @@ use crate::print::SHEET_COUNT_LIMIT;
 use crate::transition::{MAX_TRANSITION_MS, Transition};
 use crate::viewport::{MAX_VIEWPORT_SIDE, MIN_VIEWPORT_SIDE};
 use crate::{
-    Ad, Campaign, Deck, Design, Document, Email, Frame, Mailing, Page, Print, Screen, Sheet, Slide,
-    Social, Theme,
+    Ad, Artwork, Campaign, Cover, Deck, Design, Document, Email, Frame, Mailing, Page, Print,
+    Screen, Sheet, Slide, Social, Theme,
 };
 
 /// A single problem found in a design, a deck, a document, a social,
-/// a print, a mailing, or a campaign.
+/// a print, a mailing, a campaign, or an artwork.
 ///
 /// Messages address the agent that wrote the artifact: they state what
 /// is wrong and how to fix it.
@@ -91,6 +93,20 @@ pub enum ValidationError {
         /// The allowed maximum.
         limit: usize,
     },
+    /// The artwork `title` field is empty.
+    #[error("artwork title is empty: set a non-empty `title`")]
+    EmptyArtworkTitle,
+    /// The artwork has no covers.
+    #[error("artwork has no covers: add at least one entry to `covers`")]
+    NoCovers,
+    /// The artwork has more covers than the limit.
+    #[error("artwork has {count} covers: use at most {limit}")]
+    TooManyCovers {
+        /// The rejected cover count.
+        count: usize,
+        /// The allowed maximum.
+        limit: usize,
+    },
     /// A theme color is not a `#rrggbb` hex string.
     #[error("theme.colors.{field} has value `{value}`: use the form #rrggbb")]
     InvalidThemeColor {
@@ -139,6 +155,12 @@ pub enum ValidationError {
     #[error("ads[{index}].html is empty: write the ad as an HTML fragment")]
     EmptyAd {
         /// Zero-based ad index.
+        index: usize,
+    },
+    /// A cover's `html` is blank.
+    #[error("covers[{index}].html is empty: write the cover as an HTML fragment")]
+    EmptyCover {
+        /// Zero-based cover index.
         index: usize,
     },
     /// A screen's or slide's `html` or `css` is longer than the limit.
@@ -369,6 +391,34 @@ impl Campaign {
     }
 }
 
+impl Artwork {
+    /// Checks the artwork and returns every problem found, not only
+    /// the first.
+    ///
+    /// Agents fix artworks from these messages, so an empty result
+    /// means the artwork is ready to render.
+    pub fn validate(&self) -> Vec<ValidationError> {
+        let mut errors = Vec::new();
+        if self.title.trim().is_empty() {
+            errors.push(ValidationError::EmptyArtworkTitle);
+        }
+        if self.covers.is_empty() {
+            errors.push(ValidationError::NoCovers);
+        }
+        if self.covers.len() > COVER_COUNT_LIMIT as usize {
+            errors.push(ValidationError::TooManyCovers {
+                count: self.covers.len(),
+                limit: COVER_COUNT_LIMIT as usize,
+            });
+        }
+        theme_problems(&self.theme, &mut errors);
+        for (index, cover) in self.covers.iter().enumerate() {
+            validate_cover(cover, index, &mut errors);
+        }
+        errors
+    }
+}
+
 /// Adds one error per theme color that is not `#rrggbb`.
 fn theme_problems(theme: &Theme, errors: &mut Vec<ValidationError>) {
     let colors = &theme.colors;
@@ -524,9 +574,28 @@ fn validate_ad(ad: &Ad, index: usize, errors: &mut Vec<ValidationError>) {
     );
 }
 
+/// Checks one cover's html and css.
+fn validate_cover(cover: &Cover, index: usize, errors: &mut Vec<ValidationError>) {
+    if cover.html.trim().is_empty() {
+        errors.push(ValidationError::EmptyCover { index });
+        css_fragment_problems(
+            &format!("covers[{index}].css"),
+            cover.css.as_deref(),
+            errors,
+        );
+        return;
+    }
+    fragment_problems(
+        &format!("covers[{index}]"),
+        &cover.html,
+        cover.css.as_deref(),
+        errors,
+    );
+}
+
 /// Checks a non-empty html fragment and its css. `path_base` is the
-/// field path of the screen, slide, page, frame, sheet, email, or ad,
-/// like `screens[2]`.
+/// field path of the screen, slide, page, frame, sheet, email, ad, or
+/// cover, like `screens[2]`.
 fn fragment_problems(
     path_base: &str,
     html: &str,
@@ -585,15 +654,15 @@ fn is_hex_color(value: &str) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use crate::test_support::{
-        sample_campaign, sample_deck, sample_design, sample_document, sample_mailing, sample_print,
-        sample_social,
+        sample_artwork, sample_campaign, sample_deck, sample_design, sample_document,
+        sample_mailing, sample_print, sample_social,
     };
     use crate::transition::MAX_TRANSITION_MS;
     use crate::validation::ValidationError;
     use crate::viewport::{MAX_VIEWPORT_SIDE, MIN_VIEWPORT_SIDE};
     use crate::{
-        AD_COUNT_LIMIT, Ad, EMAIL_COUNT_LIMIT, Email, Frame, Page, SHEET_COUNT_LIMIT, Screen,
-        Sheet, Slide, Transition, Viewport,
+        AD_COUNT_LIMIT, Ad, COVER_COUNT_LIMIT, Cover, EMAIL_COUNT_LIMIT, Email, Frame, Page,
+        SHEET_COUNT_LIMIT, Screen, Sheet, Slide, Transition, Viewport,
     };
 
     #[test]
@@ -834,6 +903,70 @@ mod tests {
                 .any(|message| message.starts_with("ads[2].css: contains `@import`"))
         );
         assert!(!messages.iter().any(|message| message.contains("emails[")));
+    }
+
+    #[test]
+    fn a_valid_artwork_has_no_errors() {
+        assert_eq!(sample_artwork().validate(), Vec::new());
+    }
+
+    #[test]
+    fn reports_every_artwork_error_at_once() {
+        let mut artwork = sample_artwork();
+        artwork.title = String::new();
+        artwork.theme.colors.accent = "blue".to_owned();
+        artwork.covers.clear();
+        let errors = artwork.validate();
+        assert_eq!(errors.len(), 3);
+        assert!(errors.contains(&ValidationError::EmptyArtworkTitle));
+        assert!(errors.contains(&ValidationError::NoCovers));
+        assert!(errors[0].to_string().starts_with("artwork title is empty"));
+    }
+
+    #[test]
+    fn an_artwork_past_the_cover_limit_is_rejected() {
+        let mut artwork = sample_artwork();
+        let cover = artwork.covers[0].clone();
+        while artwork.covers.len() <= COVER_COUNT_LIMIT as usize {
+            artwork.covers.push(cover.clone());
+        }
+        let errors = artwork.validate();
+        assert!(errors.contains(&ValidationError::TooManyCovers {
+            count: COVER_COUNT_LIMIT as usize + 1,
+            limit: COVER_COUNT_LIMIT as usize,
+        }));
+        artwork.covers.truncate(COVER_COUNT_LIMIT as usize);
+        assert_eq!(artwork.validate(), Vec::new());
+    }
+
+    #[test]
+    fn artwork_covers_use_cover_paths_in_messages() {
+        let mut artwork = sample_artwork();
+        artwork.covers.push(Cover {
+            html: "   ".to_owned(),
+            css: None,
+            notes: None,
+        });
+        artwork.covers.push(Cover {
+            html: "<div><script>x</script>".to_owned(),
+            css: Some("@import url(x); .a { width: 10vw }".to_owned()),
+            notes: None,
+        });
+        let errors = artwork.validate();
+        let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        assert!(errors.contains(&ValidationError::EmptyCover { index: 1 }));
+        assert!(messages[0].starts_with("covers[1].html is empty"));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.starts_with("covers[2].html: contains <script>"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.starts_with("covers[2].css: contains `@import`"))
+        );
+        assert!(!messages.iter().any(|message| message.contains("ads[")));
     }
 
     #[test]

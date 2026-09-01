@@ -3,8 +3,9 @@
 //! a social, a print, or a mailing is for and what tone it takes, what
 //! a document is and what paper it takes, where a social is posted and
 //! on what canvas, what a print is and on what paper size and
-//! orientation, what an email is and on what canvas, and what an ad
-//! sells and on what IAB unit.
+//! orientation, what an email is and on what canvas, what an ad sells
+//! and on what IAB unit, and what a cover fronts and on what cover-art
+//! unit.
 //!
 //! These recur in every session with the same answers, so the app asks
 //! them from a fixed list instead of letting the agent invent options
@@ -209,6 +210,28 @@ pub const AD_SIZES: [(&str, &str); 5] = [
     ("half_page", "Half page, 300 by 600"),
     ("skyscraper", "Skyscraper, 160 by 600"),
     ("mobile_banner", "Mobile banner, 320 by 100"),
+];
+
+/// What kind of cover to write, as (value, label). It decides the
+/// framing: a video thumbnail and a book cover share no furniture.
+pub const COVER_KINDS: [(&str, &str); 6] = [
+    ("video_thumbnail", "Video thumbnail"),
+    ("channel_banner", "Channel banner"),
+    ("profile_header", "Profile header"),
+    ("podcast_cover", "Podcast cover"),
+    ("album_cover", "Album cover"),
+    ("book_cover", "Book cover"),
+];
+
+/// The canvas a cover is laid out on, as (value, label). The values
+/// are the `size` names in the artwork JSON, the standard cover-art
+/// units.
+pub const COVER_SIZES: [(&str, &str); 5] = [
+    ("thumbnail", "Thumbnail, 1280 by 720"),
+    ("banner", "Channel banner, 2560 by 1440"),
+    ("header", "Profile header, 1500 by 500"),
+    ("album", "Album cover, 3000 by 3000"),
+    ("book", "Book cover, 1600 by 2560"),
 ];
 
 /// How much of a demo to build, as (value, label). A deck says its size
@@ -419,6 +442,20 @@ pub const CAMPAIGN_AXES: [AppAxis; 2] = [
     },
 ];
 
+/// Every app-owned axis only an artwork asks.
+pub const ARTWORK_AXES: [AppAxis; 2] = [
+    AppAxis {
+        key: "cover_kind",
+        name: "Cover kind",
+        choices: &COVER_KINDS,
+    },
+    AppAxis {
+        key: "cover_size",
+        name: "Cover size",
+        choices: &COVER_SIZES,
+    },
+];
+
 /// Every app-owned axis of every kind.
 fn every_axis() -> impl Iterator<Item = &'static AppAxis> {
     SHARED_AXES
@@ -431,6 +468,7 @@ fn every_axis() -> impl Iterator<Item = &'static AppAxis> {
         .chain(PRINT_AXES.iter())
         .chain(MAILING_AXES.iter())
         .chain(CAMPAIGN_AXES.iter())
+        .chain(ARTWORK_AXES.iter())
 }
 
 /// The app-owned axes `kind` asks, shared ones first.
@@ -443,6 +481,7 @@ pub fn app_axes(kind: ArtifactKind) -> impl Iterator<Item = &'static AppAxis> {
         ArtifactKind::Print => (&SPEECH_AXES, &PRINT_AXES),
         ArtifactKind::Mailing => (&SPEECH_AXES, &MAILING_AXES),
         ArtifactKind::Campaign => (&SPEECH_AXES, &CAMPAIGN_AXES),
+        ArtifactKind::Artwork => (&SPEECH_AXES, &ARTWORK_AXES),
     };
     SHARED_AXES.iter().chain(spoken.iter()).chain(own.iter())
 }
@@ -592,6 +631,20 @@ mod tests {
                 "Ad size"
             ]
         );
+        let artwork: Vec<&str> = app_axes(ArtifactKind::Artwork)
+            .map(|axis| axis.name)
+            .collect();
+        assert_eq!(
+            artwork,
+            [
+                "Color mode",
+                "Audience",
+                "Tone",
+                "Evidence",
+                "Cover kind",
+                "Cover size"
+            ]
+        );
     }
 
     #[test]
@@ -639,6 +692,14 @@ mod tests {
             assert!(crate::AdSize::from_name(value).is_some(), "{value}");
         }
         assert_eq!(AD_SIZES.len(), crate::AdSize::ALL.len());
+    }
+
+    #[test]
+    fn the_cover_size_values_are_the_cover_size_names() {
+        for (value, _) in COVER_SIZES {
+            assert!(crate::CoverSize::from_name(value).is_some(), "{value}");
+        }
+        assert_eq!(COVER_SIZES.len(), crate::CoverSize::ALL.len());
     }
 
     #[test]
@@ -711,6 +772,8 @@ mod tests {
             &EMAIL_FORMATS[..],
             &AD_KINDS[..],
             &AD_SIZES[..],
+            &COVER_KINDS[..],
+            &COVER_SIZES[..],
         ];
         for choices in banks {
             let values: Vec<&str> = choices.iter().map(|(value, _)| *value).collect();

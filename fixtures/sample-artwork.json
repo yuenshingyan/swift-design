@@ -1,0 +1,30 @@
+{
+  "title": "Swift Design launch thumbnails",
+  "theme": {
+    "name": "signal",
+    "colors": {
+      "background": "#f8fafc",
+      "text": "#0f172a",
+      "accent": "#0284c7",
+      "muted": "#64748b"
+    },
+    "fonts": {
+      "heading": "Inter",
+      "body": "Inter",
+      "mono": "JetBrains Mono"
+    }
+  },
+  "size": "thumbnail",
+  "covers": [
+    {
+      "html": "<div class='c1-cover'><p class='c1-brand'>Swift Design</p><h1>Eight kinds. One chat.</h1><p class='c1-tag'>Watch the full tour</p></div>",
+      "css": ".c1-cover { height: 100%; padding: 64px; display: flex; flex-direction: column; justify-content: center; } .c1-brand { font-size: 28px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin-bottom: 24px; } h1 { font-size: 110px; font-weight: 800; line-height: 1.05; margin-bottom: 32px; } .c1-tag { font-size: 36px; font-weight: 700; color: var(--muted); }",
+      "notes": "Title: Swift Design full tour. Alt: Eight kinds, one chat - Swift Design."
+    },
+    {
+      "html": "<div class='c2-cover'><p class='c2-brand'>Swift Design</p><h1>Stop drawing covers by hand</h1><p class='c2-tag'>See it work</p></div>",
+      "css": ".c2-cover { height: 100%; padding: 64px; background: var(--text); color: var(--background); display: flex; flex-direction: column; justify-content: center; } .c2-brand { font-size: 28px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin-bottom: 24px; } h1 { font-size: 100px; font-weight: 800; line-height: 1.1; margin-bottom: 32px; color: var(--background); } .c2-tag { font-size: 36px; font-weight: 700; color: var(--accent); }",
+      "notes": "Title: Swift Design full tour. Alt: Stop drawing covers by hand - Swift Design."
+    }
+  ]
+}
