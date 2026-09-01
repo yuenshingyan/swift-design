@@ -21,6 +21,7 @@ use design_model::{DECK_VIEWPORT, Design, Screen, Theme, Viewport};
 use serde::{Deserialize, Serialize};
 
 use crate::api_error;
+use crate::campaigns::{CampaignStore, is_pending_ad};
 use crate::decks::{DeckStore, is_pending_slide};
 use crate::designs::{DesignStore, is_pending_screen};
 use crate::documents::{DocumentStore, is_pending_page};
@@ -128,6 +129,9 @@ struct SaveRequest {
     /// The mailing to save the style of.
     #[serde(default)]
     mailing_id: Option<String>,
+    /// The campaign to save the style of.
+    #[serde(default)]
+    campaign_id: Option<String>,
     /// The name to show in the template list.
     name: String,
 }
@@ -147,6 +151,8 @@ enum TemplateSource {
     Print(String),
     /// The mailing with this id.
     Mailing(String),
+    /// The campaign with this id.
+    Campaign(String),
 }
 
 /// The one source a save request names, or the message when it names
@@ -177,13 +183,17 @@ fn template_source(request: &SaveRequest) -> Result<TemplateSource, String> {
             .mailing_id
             .as_ref()
             .map(|id| TemplateSource::Mailing(id.clone())),
+        request
+            .campaign_id
+            .as_ref()
+            .map(|id| TemplateSource::Campaign(id.clone())),
     ];
     let mut sources = named.into_iter().flatten();
     match (sources.next(), sources.next()) {
         (Some(source), None) => Ok(source),
         _ => Err(
             "name exactly one source: `design_id`, `deck_id`, `document_id`, `social_id`, \
-             `print_id`, or `mailing_id`"
+             `print_id`, `mailing_id`, or `campaign_id`"
                 .to_owned(),
         ),
     }
@@ -750,8 +760,41 @@ async fn mailing_style(mailings: &MailingStore, id: &str) -> Result<SourceStyle,
     })
 }
 
-/// Saves the style of one design, deck, document, social, print, or
-/// mailing as a template.
+/// The style of a stored campaign: its theme, the ad canvas, and its
+/// first written ads as screens.
+async fn campaign_style(campaigns: &CampaignStore, id: &str) -> Result<SourceStyle, Response> {
+    let campaign = match campaigns.load(id).await {
+        Ok(Some(campaign)) => campaign,
+        Ok(None) => {
+            return Err(api_error::error_response(
+                StatusCode::NOT_FOUND,
+                &format!("no campaign `{id}`: run `GET /campaigns` for the list"),
+                Vec::new(),
+            ));
+        }
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    let viewport = campaign.viewport();
+    Ok(SourceStyle {
+        theme: campaign.theme,
+        viewport,
+        screens: campaign
+            .ads
+            .iter()
+            .filter(|ad| !is_pending_ad(ad))
+            .take(TEMPLATE_SCREEN_LIMIT)
+            .map(|ad| Screen {
+                name: String::new(),
+                html: ad.html.clone(),
+                css: ad.css.clone(),
+                notes: ad.notes.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// Saves the style of one design, deck, document, social, print,
+/// mailing, or campaign as a template.
 async fn save_template(
     State(store): State<TemplateStore>,
     State(stores): State<crate::session_routes::ArtifactStores>,
@@ -779,6 +822,7 @@ async fn save_template(
         TemplateSource::Social(id) => (id.clone(), social_style(&stores.socials, id).await),
         TemplateSource::Print(id) => (id.clone(), print_style(&stores.prints, id).await),
         TemplateSource::Mailing(id) => (id.clone(), mailing_style(&stores.mailings, id).await),
+        TemplateSource::Campaign(id) => (id.clone(), campaign_style(&stores.campaigns, id).await),
     };
     let style = match style {
         Ok(style) => style,
@@ -788,8 +832,8 @@ async fn save_template(
         return api_error::error_response(
             StatusCode::BAD_REQUEST,
             &format!(
-                "`{source_id}` has no written screens, slides, pages, frames, sheets, or \
-                 emails to save as a template"
+                "`{source_id}` has no written screens, slides, pages, frames, sheets, \
+                 emails, or ads to save as a template"
             ),
             Vec::new(),
         );
@@ -895,6 +939,7 @@ mod tests {
             social_id: None,
             print_id: None,
             mailing_id: None,
+            campaign_id: None,
             name: "x".to_owned(),
         };
         assert!(template_source(&both).is_err());
@@ -905,6 +950,7 @@ mod tests {
             social_id: None,
             print_id: None,
             mailing_id: None,
+            campaign_id: None,
             name: "x".to_owned(),
         };
         assert!(template_source(&none).is_err());
@@ -915,6 +961,7 @@ mod tests {
             social_id: None,
             print_id: None,
             mailing_id: None,
+            campaign_id: None,
             name: "x".to_owned(),
         };
         assert_eq!(
@@ -928,6 +975,7 @@ mod tests {
             social_id: None,
             print_id: None,
             mailing_id: None,
+            campaign_id: None,
             name: "x".to_owned(),
         };
         assert_eq!(
@@ -941,6 +989,7 @@ mod tests {
             social_id: Some("launch".to_owned()),
             print_id: None,
             mailing_id: None,
+            campaign_id: None,
             name: "x".to_owned(),
         };
         assert_eq!(
@@ -954,6 +1003,7 @@ mod tests {
             social_id: Some("launch".to_owned()),
             print_id: None,
             mailing_id: None,
+            campaign_id: None,
             name: "x".to_owned(),
         };
         assert!(template_source(&document_and_social).is_err());
