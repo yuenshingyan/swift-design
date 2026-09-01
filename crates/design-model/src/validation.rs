@@ -1,23 +1,25 @@
 //! Semantic checks that JSON Schema alone cannot express.
 //!
-//! Every error names the screen, slide, page, frame, sheet, or email
-//! index and the field, so an agent can fix the artifact from the
+//! Every error names the screen, slide, page, frame, sheet, email, or
+//! ad index and the field, so an agent can fix the artifact from the
 //! message alone. HTML and CSS are checked by `markup`, which rejects
 //! unsafe and malformed markup. The design, the deck, the document,
-//! the social, the print, and the mailing share one error type and the
-//! same checks; only the field paths differ.
+//! the social, the print, the mailing, and the campaign share one
+//! error type and the same checks; only the field paths differ.
 
+use crate::campaign::AD_COUNT_LIMIT;
 use crate::mailing::EMAIL_COUNT_LIMIT;
 use crate::markup::{SCREEN_CSS_LIMIT, SCREEN_HTML_LIMIT, css_problems, html_problems};
 use crate::print::SHEET_COUNT_LIMIT;
 use crate::transition::{MAX_TRANSITION_MS, Transition};
 use crate::viewport::{MAX_VIEWPORT_SIDE, MIN_VIEWPORT_SIDE};
 use crate::{
-    Deck, Design, Document, Email, Frame, Mailing, Page, Print, Screen, Sheet, Slide, Social, Theme,
+    Ad, Campaign, Deck, Design, Document, Email, Frame, Mailing, Page, Print, Screen, Sheet, Slide,
+    Social, Theme,
 };
 
 /// A single problem found in a design, a deck, a document, a social,
-/// a print, or a mailing.
+/// a print, a mailing, or a campaign.
 ///
 /// Messages address the agent that wrote the artifact: they state what
 /// is wrong and how to fix it.
@@ -75,6 +77,20 @@ pub enum ValidationError {
         /// The allowed maximum.
         limit: usize,
     },
+    /// The campaign `title` field is empty.
+    #[error("campaign title is empty: set a non-empty `title`")]
+    EmptyCampaignTitle,
+    /// The campaign has no ads.
+    #[error("campaign has no ads: add at least one entry to `ads`")]
+    NoAds,
+    /// The campaign has more ads than the limit.
+    #[error("campaign has {count} ads: use at most {limit}")]
+    TooManyAds {
+        /// The rejected ad count.
+        count: usize,
+        /// The allowed maximum.
+        limit: usize,
+    },
     /// A theme color is not a `#rrggbb` hex string.
     #[error("theme.colors.{field} has value `{value}`: use the form #rrggbb")]
     InvalidThemeColor {
@@ -117,6 +133,12 @@ pub enum ValidationError {
     #[error("emails[{index}].html is empty: write the email as an HTML fragment")]
     EmptyEmail {
         /// Zero-based email index.
+        index: usize,
+    },
+    /// An ad's `html` is blank.
+    #[error("ads[{index}].html is empty: write the ad as an HTML fragment")]
+    EmptyAd {
+        /// Zero-based ad index.
         index: usize,
     },
     /// A screen's or slide's `html` or `css` is longer than the limit.
@@ -319,6 +341,34 @@ impl Mailing {
     }
 }
 
+impl Campaign {
+    /// Checks the campaign and returns every problem found, not only
+    /// the first.
+    ///
+    /// Agents fix campaigns from these messages, so an empty result
+    /// means the campaign is ready to render.
+    pub fn validate(&self) -> Vec<ValidationError> {
+        let mut errors = Vec::new();
+        if self.title.trim().is_empty() {
+            errors.push(ValidationError::EmptyCampaignTitle);
+        }
+        if self.ads.is_empty() {
+            errors.push(ValidationError::NoAds);
+        }
+        if self.ads.len() > AD_COUNT_LIMIT as usize {
+            errors.push(ValidationError::TooManyAds {
+                count: self.ads.len(),
+                limit: AD_COUNT_LIMIT as usize,
+            });
+        }
+        theme_problems(&self.theme, &mut errors);
+        for (index, ad) in self.ads.iter().enumerate() {
+            validate_ad(ad, index, &mut errors);
+        }
+        errors
+    }
+}
+
 /// Adds one error per theme color that is not `#rrggbb`.
 fn theme_problems(theme: &Theme, errors: &mut Vec<ValidationError>) {
     let colors = &theme.colors;
@@ -459,9 +509,24 @@ fn validate_email(email: &Email, index: usize, errors: &mut Vec<ValidationError>
     );
 }
 
+/// Checks one ad's html and css.
+fn validate_ad(ad: &Ad, index: usize, errors: &mut Vec<ValidationError>) {
+    if ad.html.trim().is_empty() {
+        errors.push(ValidationError::EmptyAd { index });
+        css_fragment_problems(&format!("ads[{index}].css"), ad.css.as_deref(), errors);
+        return;
+    }
+    fragment_problems(
+        &format!("ads[{index}]"),
+        &ad.html,
+        ad.css.as_deref(),
+        errors,
+    );
+}
+
 /// Checks a non-empty html fragment and its css. `path_base` is the
-/// field path of the screen, slide, page, frame, sheet, or email, like
-/// `screens[2]`.
+/// field path of the screen, slide, page, frame, sheet, email, or ad,
+/// like `screens[2]`.
 fn fragment_problems(
     path_base: &str,
     html: &str,
@@ -520,14 +585,15 @@ fn is_hex_color(value: &str) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use crate::test_support::{
-        sample_deck, sample_design, sample_document, sample_mailing, sample_print, sample_social,
+        sample_campaign, sample_deck, sample_design, sample_document, sample_mailing, sample_print,
+        sample_social,
     };
     use crate::transition::MAX_TRANSITION_MS;
     use crate::validation::ValidationError;
     use crate::viewport::{MAX_VIEWPORT_SIDE, MIN_VIEWPORT_SIDE};
     use crate::{
-        EMAIL_COUNT_LIMIT, Email, Frame, Page, SHEET_COUNT_LIMIT, Screen, Sheet, Slide, Transition,
-        Viewport,
+        AD_COUNT_LIMIT, Ad, EMAIL_COUNT_LIMIT, Email, Frame, Page, SHEET_COUNT_LIMIT, Screen,
+        Sheet, Slide, Transition, Viewport,
     };
 
     #[test]
@@ -704,6 +770,70 @@ mod tests {
                 .any(|message| message.starts_with("emails[2].css: contains `@import`"))
         );
         assert!(!messages.iter().any(|message| message.contains("sheets[")));
+    }
+
+    #[test]
+    fn a_valid_campaign_has_no_errors() {
+        assert_eq!(sample_campaign().validate(), Vec::new());
+    }
+
+    #[test]
+    fn reports_every_campaign_error_at_once() {
+        let mut campaign = sample_campaign();
+        campaign.title = String::new();
+        campaign.theme.colors.accent = "blue".to_owned();
+        campaign.ads.clear();
+        let errors = campaign.validate();
+        assert_eq!(errors.len(), 3);
+        assert!(errors.contains(&ValidationError::EmptyCampaignTitle));
+        assert!(errors.contains(&ValidationError::NoAds));
+        assert!(errors[0].to_string().starts_with("campaign title is empty"));
+    }
+
+    #[test]
+    fn a_campaign_past_the_ad_limit_is_rejected() {
+        let mut campaign = sample_campaign();
+        let ad = campaign.ads[0].clone();
+        while campaign.ads.len() <= AD_COUNT_LIMIT as usize {
+            campaign.ads.push(ad.clone());
+        }
+        let errors = campaign.validate();
+        assert!(errors.contains(&ValidationError::TooManyAds {
+            count: AD_COUNT_LIMIT as usize + 1,
+            limit: AD_COUNT_LIMIT as usize,
+        }));
+        campaign.ads.truncate(AD_COUNT_LIMIT as usize);
+        assert_eq!(campaign.validate(), Vec::new());
+    }
+
+    #[test]
+    fn campaign_ads_use_ad_paths_in_messages() {
+        let mut campaign = sample_campaign();
+        campaign.ads.push(Ad {
+            html: "   ".to_owned(),
+            css: None,
+            notes: None,
+        });
+        campaign.ads.push(Ad {
+            html: "<div><script>x</script>".to_owned(),
+            css: Some("@import url(x); .a { width: 10vw }".to_owned()),
+            notes: None,
+        });
+        let errors = campaign.validate();
+        let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        assert!(errors.contains(&ValidationError::EmptyAd { index: 1 }));
+        assert!(messages[0].starts_with("ads[1].html is empty"));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.starts_with("ads[2].html: contains <script>"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.starts_with("ads[2].css: contains `@import`"))
+        );
+        assert!(!messages.iter().any(|message| message.contains("emails[")));
     }
 
     #[test]

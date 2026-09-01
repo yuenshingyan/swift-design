@@ -3,7 +3,8 @@
 //! a social, a print, or a mailing is for and what tone it takes, what
 //! a document is and what paper it takes, where a social is posted and
 //! on what canvas, what a print is and on what paper size and
-//! orientation, and what an email is and on what canvas.
+//! orientation, what an email is and on what canvas, and what an ad
+//! sells and on what IAB unit.
 //!
 //! These recur in every session with the same answers, so the app asks
 //! them from a fixed list instead of letting the agent invent options
@@ -187,6 +188,27 @@ pub const EMAIL_FORMATS: [(&str, &str); 3] = [
     ("short", "Short, one glance"),
     ("standard", "Standard, one scroll"),
     ("long", "Long, a full read"),
+];
+
+/// What kind of ad to write, as (value, label). It decides the copy
+/// vocabulary: a launch ad and a retargeting ad share no furniture.
+pub const AD_KINDS: [(&str, &str); 6] = [
+    ("product_launch", "Product launch"),
+    ("sale", "Sale or offer"),
+    ("brand_awareness", "Brand awareness"),
+    ("event", "Event"),
+    ("retargeting", "Retargeting"),
+    ("app_install", "App install"),
+];
+
+/// The canvas an ad is laid out on, as (value, label). The values are
+/// the `size` names in the campaign JSON, the standard IAB units.
+pub const AD_SIZES: [(&str, &str); 5] = [
+    ("medium_rectangle", "Medium rectangle, 300 by 250"),
+    ("leaderboard", "Leaderboard, 728 by 90"),
+    ("half_page", "Half page, 300 by 600"),
+    ("skyscraper", "Skyscraper, 160 by 600"),
+    ("mobile_banner", "Mobile banner, 320 by 100"),
 ];
 
 /// How much of a demo to build, as (value, label). A deck says its size
@@ -383,6 +405,20 @@ pub const MAILING_AXES: [AppAxis; 2] = [
     },
 ];
 
+/// Every app-owned axis only a campaign asks.
+pub const CAMPAIGN_AXES: [AppAxis; 2] = [
+    AppAxis {
+        key: "ad_kind",
+        name: "Ad kind",
+        choices: &AD_KINDS,
+    },
+    AppAxis {
+        key: "ad_size",
+        name: "Ad size",
+        choices: &AD_SIZES,
+    },
+];
+
 /// Every app-owned axis of every kind.
 fn every_axis() -> impl Iterator<Item = &'static AppAxis> {
     SHARED_AXES
@@ -394,6 +430,7 @@ fn every_axis() -> impl Iterator<Item = &'static AppAxis> {
         .chain(SOCIAL_AXES.iter())
         .chain(PRINT_AXES.iter())
         .chain(MAILING_AXES.iter())
+        .chain(CAMPAIGN_AXES.iter())
 }
 
 /// The app-owned axes `kind` asks, shared ones first.
@@ -405,6 +442,7 @@ pub fn app_axes(kind: ArtifactKind) -> impl Iterator<Item = &'static AppAxis> {
         ArtifactKind::Social => (&SPEECH_AXES, &SOCIAL_AXES),
         ArtifactKind::Print => (&SPEECH_AXES, &PRINT_AXES),
         ArtifactKind::Mailing => (&SPEECH_AXES, &MAILING_AXES),
+        ArtifactKind::Campaign => (&SPEECH_AXES, &CAMPAIGN_AXES),
     };
     SHARED_AXES.iter().chain(spoken.iter()).chain(own.iter())
 }
@@ -540,6 +578,20 @@ mod tests {
                 "Email format"
             ]
         );
+        let campaign: Vec<&str> = app_axes(ArtifactKind::Campaign)
+            .map(|axis| axis.name)
+            .collect();
+        assert_eq!(
+            campaign,
+            [
+                "Color mode",
+                "Audience",
+                "Tone",
+                "Evidence",
+                "Ad kind",
+                "Ad size"
+            ]
+        );
     }
 
     #[test]
@@ -579,6 +631,14 @@ mod tests {
             assert!(crate::EmailFormat::from_name(value).is_some(), "{value}");
         }
         assert_eq!(EMAIL_FORMATS.len(), crate::EmailFormat::ALL.len());
+    }
+
+    #[test]
+    fn the_ad_size_values_are_the_ad_size_names() {
+        for (value, _) in AD_SIZES {
+            assert!(crate::AdSize::from_name(value).is_some(), "{value}");
+        }
+        assert_eq!(AD_SIZES.len(), crate::AdSize::ALL.len());
     }
 
     #[test]
@@ -649,6 +709,8 @@ mod tests {
             &ORIENTATIONS[..],
             &EMAIL_KINDS[..],
             &EMAIL_FORMATS[..],
+            &AD_KINDS[..],
+            &AD_SIZES[..],
         ];
         for choices in banks {
             let values: Vec<&str> = choices.iter().map(|(value, _)| *value).collect();

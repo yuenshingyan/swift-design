@@ -7,14 +7,15 @@
 //! memo, on A4 or Letter paper. A `social` is a post or a carousel on
 //! a social canvas. A `print` is a poster or a flyer on a paper-size
 //! canvas. A `mailing` is an email or an email sequence on a 600 px
-//! wide canvas. The kinds have separate types, stores, routes, and
-//! editors; the brief-first workflow is the same for all.
+//! wide canvas. A `campaign` is a display ad or a set of ad variants
+//! on an IAB unit canvas. The kinds have separate types, stores,
+//! routes, and editors; the brief-first workflow is the same for all.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// What a session builds: a software demo, a deck, a document, a
-/// social, a print, or a mailing.
+/// social, a print, a mailing, or a campaign.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
@@ -37,17 +38,21 @@ pub enum ArtifactKind {
     /// An email or an email sequence on a 600 px wide canvas. Written
     /// as a mailing.
     Mailing,
+    /// A display ad or a set of ad variants on an IAB unit canvas.
+    /// Written as a campaign.
+    Campaign,
 }
 
 impl ArtifactKind {
     /// Every kind, in the order the UI shows them.
-    pub const ALL: [ArtifactKind; 6] = [
+    pub const ALL: [ArtifactKind; 7] = [
         ArtifactKind::Demo,
         ArtifactKind::Deck,
         ArtifactKind::Document,
         ArtifactKind::Social,
         ArtifactKind::Print,
         ArtifactKind::Mailing,
+        ArtifactKind::Campaign,
     ];
 
     /// The snake_case name used in JSON.
@@ -59,6 +64,7 @@ impl ArtifactKind {
             ArtifactKind::Social => "social",
             ArtifactKind::Print => "print",
             ArtifactKind::Mailing => "mailing",
+            ArtifactKind::Campaign => "campaign",
         }
     }
 
@@ -71,6 +77,7 @@ impl ArtifactKind {
             ArtifactKind::Social => "Social post",
             ArtifactKind::Print => "Print piece",
             ArtifactKind::Mailing => "Email",
+            ArtifactKind::Campaign => "Ads",
         }
     }
 
@@ -120,6 +127,10 @@ mod tests {
             ArtifactKind::from_name("mailing"),
             Some(ArtifactKind::Mailing)
         );
+        assert_eq!(
+            ArtifactKind::from_name("campaign"),
+            Some(ArtifactKind::Campaign)
+        );
     }
 
     #[test]
@@ -130,5 +141,6 @@ mod tests {
         assert_eq!(ArtifactKind::Social.label(), "Social post");
         assert_eq!(ArtifactKind::Print.label(), "Print piece");
         assert_eq!(ArtifactKind::Mailing.label(), "Email");
+        assert_eq!(ArtifactKind::Campaign.label(), "Ads");
     }
 }

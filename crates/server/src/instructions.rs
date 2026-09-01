@@ -147,7 +147,7 @@ pub const MAILING_RULES: &[&str] = &[
     "Write a call to action as a styled `<a>` link: a solid accent background, padding of at least 14px by 28px, and rounded corners.",
     SHARED_RULES[5],
     "The first email is the one the reader opens first. Lead with the hook: one claim and one call to action near the top. Put the subject line and the preheader text in `notes`, as a `Subject:` line and a `Preheader:` line. The renderer does not show notes on the email.",
-    "Keep the branding the same on every email: the same fonts, the same palette, the same header, and the same footer, so the sequence reads as one campaign.",
+    "Keep the branding the same on every email: the same fonts, the same palette, the same header, and the same footer, so the sequence reads as one sender.",
     "End every email with a footer in muted small type: the sender name, a postal address line, and an unsubscribe line as a plain `<a>` link.",
     "An email is read in an inbox, not clicked between. Do not write links between emails, `<details>`, `<input>`, or any control. Write a web address that is not a call to action as plain text.",
     "A mailing has no `transition` field.",

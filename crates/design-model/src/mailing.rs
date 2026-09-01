@@ -15,7 +15,7 @@ use crate::theme::Theme;
 use crate::viewport::Viewport;
 
 /// Most emails a mailing run may write: a welcome sequence or a short
-/// campaign. A longer sequence is written in a later run.
+/// promotion series. A longer sequence is written in a later run.
 pub const EMAIL_COUNT_LIMIT: u32 = 5;
 
 /// The short email: 600 by 800 px, an announcement read in one glance.

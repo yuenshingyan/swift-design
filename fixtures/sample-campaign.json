@@ -1,0 +1,30 @@
+{
+  "title": "Swift Design launch ads",
+  "theme": {
+    "name": "signal",
+    "colors": {
+      "background": "#f8fafc",
+      "text": "#0f172a",
+      "accent": "#0284c7",
+      "muted": "#64748b"
+    },
+    "fonts": {
+      "heading": "Inter",
+      "body": "Inter",
+      "mono": "JetBrains Mono"
+    }
+  },
+  "size": "medium_rectangle",
+  "ads": [
+    {
+      "html": "<div class='a1-ad'><p class='a1-brand'>Swift Design</p><h1>Seven kinds. One chat.</h1><a class='a1-cta' href='https://swift.design'>See it work</a></div>",
+      "css": ".a1-ad { height: 100%; padding: 24px; } .a1-brand { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin-bottom: 12px; } h1 { font-size: 26px; font-weight: 800; line-height: 1.1; margin-bottom: 20px; } .a1-cta { display: inline-block; padding: 10px 20px; border-radius: 8px; background: var(--accent); color: var(--background); font-size: 14px; font-weight: 700; }",
+      "notes": "Link: https://swift.design. Alt: Seven kinds, one chat - Swift Design."
+    },
+    {
+      "html": "<div class='a2-ad'><p class='a2-brand'>Swift Design</p><h1>Stop drawing ads by hand</h1><a class='a2-cta' href='https://swift.design'>Try it now</a></div>",
+      "css": ".a2-ad { height: 100%; padding: 24px; background: var(--text); color: var(--background); } .a2-brand { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin-bottom: 12px; } h1 { font-size: 24px; font-weight: 800; line-height: 1.15; margin-bottom: 20px; color: var(--background); } .a2-cta { display: inline-block; padding: 10px 20px; border-radius: 8px; background: var(--accent); color: var(--background); font-size: 14px; font-weight: 700; }",
+      "notes": "Link: https://swift.design. Alt: Stop drawing ads by hand - Swift Design."
+    }
+  ]
+}

@@ -4,22 +4,25 @@
 //! format that LLM agents write. `schemars` derives the JSON Schema from
 //! them; regenerate `schemas/` after any change here. This crate does no IO.
 //!
-//! There are six artifact kinds. A design is a theme, a viewport, and
-//! screens, plus an optional page transition. A deck is a theme and
-//! slides on a fixed 1920 by 1080 px canvas, plus an optional page
+//! There are seven artifact kinds. A design is a theme, a viewport,
+//! and screens, plus an optional page transition. A deck is a theme
+//! and slides on a fixed 1920 by 1080 px canvas, plus an optional page
 //! transition. A document is a theme, a paper, and pages on the px
 //! canvas of that paper. A social is a theme, a format, and frames on
 //! the px canvas of that format. A print is a theme, a size, an
 //! orientation, and sheets on the px canvas of that size. A mailing is
 //! a theme, a format, and emails on the px canvas of that format. A
-//! screen, a slide, a page, a frame, a sheet, or an email is one HTML
-//! fragment plus its own CSS. `markup` checks all of them.
+//! campaign is a theme, a size, and ads on the px canvas of that IAB
+//! unit. A screen, a slide, a page, a frame, a sheet, an email, or an
+//! ad is one HTML fragment plus its own CSS. `markup` checks all of
+//! them.
 //!
-//! The crate also holds the brief-first workflow types the server and
-//! the studio share: the `workflow` state machine, the `question`
-//! protocol, and the `brief`.
+//! The crate also holds the workflow types the server and the studio
+//! share: the `workflow` state machine and the `question` protocol.
 
+pub mod ad;
 pub mod artifact_kind;
+pub mod campaign;
 pub mod deck;
 pub mod deck_questions;
 pub mod design;
@@ -43,7 +46,12 @@ pub mod validation;
 pub mod viewport;
 pub mod workflow;
 
+pub use ad::Ad;
 pub use artifact_kind::ArtifactKind;
+pub use campaign::{
+    AD_COUNT_LIMIT, AdSize, Campaign, HALF_PAGE_AD_VIEWPORT, LEADERBOARD_AD_VIEWPORT,
+    MEDIUM_RECTANGLE_AD_VIEWPORT, MOBILE_BANNER_AD_VIEWPORT, SKYSCRAPER_AD_VIEWPORT,
+};
 pub use deck::{DECK_HEIGHT, DECK_VIEWPORT, DECK_WIDTH, Deck};
 pub use deck_questions::{DECK_SCENARIOS, DECK_VARIETY_LEVELS, is_deck_scenario};
 pub use design::Design;
@@ -64,12 +72,12 @@ pub use question::{
     validate_question_set,
 };
 pub use run_questions::{
-    AUDIENCES, AppAxis, COLOR_MODES, CUSTOM_ANSWER_LIMIT, DATA_STATES, DECK_AXES, DEMO_AXES,
-    DEMO_SCOPES, DOCUMENT_AXES, DOCUMENT_KINDS, EMAIL_FORMATS, EMAIL_KINDS, EVIDENCE_STYLES,
-    FIDELITIES, FORMATS, MAILING_AXES, ORIENTATIONS, PAPERS, PLATFORMS, POST_GOALS, PRINT_AXES,
-    PRINT_KINDS, PRINT_SIZES, PRODUCT_KINDS, SHARED_AXES, SLIDE_DENSITIES, SOCIAL_AXES,
-    SPEECH_AXES, TONES, app_axes, audience_label, axis_by_key, axis_label, demo_scope_label,
-    is_custom_answer, tone_label,
+    AD_KINDS, AD_SIZES, AUDIENCES, AppAxis, CAMPAIGN_AXES, COLOR_MODES, CUSTOM_ANSWER_LIMIT,
+    DATA_STATES, DECK_AXES, DEMO_AXES, DEMO_SCOPES, DOCUMENT_AXES, DOCUMENT_KINDS, EMAIL_FORMATS,
+    EMAIL_KINDS, EVIDENCE_STYLES, FIDELITIES, FORMATS, MAILING_AXES, ORIENTATIONS, PAPERS,
+    PLATFORMS, POST_GOALS, PRINT_AXES, PRINT_KINDS, PRINT_SIZES, PRODUCT_KINDS, SHARED_AXES,
+    SLIDE_DENSITIES, SOCIAL_AXES, SPEECH_AXES, TONES, app_axes, audience_label, axis_by_key,
+    axis_label, demo_scope_label, is_custom_answer, tone_label,
 };
 pub use screen::Screen;
 pub use sheet::Sheet;
@@ -87,8 +95,9 @@ pub use workflow::{WorkflowError, WorkflowEvent, WorkflowState, transition};
 #[cfg(test)]
 pub(crate) mod test_support {
     use crate::{
-        Deck, Design, Document, Email, EmailFormat, FontSet, Format, Frame, Mailing, Orientation,
-        Page, Palette, Paper, Print, PrintSize, Screen, Sheet, Slide, Social, Theme, Viewport,
+        Ad, AdSize, Campaign, Deck, Design, Document, Email, EmailFormat, FontSet, Format, Frame,
+        Mailing, Orientation, Page, Palette, Paper, Print, PrintSize, Screen, Sheet, Slide, Social,
+        Theme, Viewport,
     };
 
     /// The theme every sample artifact uses.
@@ -179,6 +188,21 @@ pub(crate) mod test_support {
             emails: vec![Email {
                 html: "<h1 class='title'>Sample</h1>".to_owned(),
                 css: Some(".title { font-size: 32px; }".to_owned()),
+                notes: None,
+            }],
+            outline: Vec::new(),
+        }
+    }
+
+    /// Builds a small campaign that passes validation.
+    pub fn sample_campaign() -> Campaign {
+        Campaign {
+            title: "Sample".to_owned(),
+            theme: sample_theme(),
+            size: AdSize::MediumRectangle,
+            ads: vec![Ad {
+                html: "<h1 class='title'>Sample</h1>".to_owned(),
+                css: Some(".title { font-size: 24px; }".to_owned()),
                 notes: None,
             }],
             outline: Vec::new(),
