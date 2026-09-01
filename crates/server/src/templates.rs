@@ -21,6 +21,7 @@ use design_model::{DECK_VIEWPORT, Design, Screen, Theme, Viewport};
 use serde::{Deserialize, Serialize};
 
 use crate::api_error;
+use crate::artworks::{ArtworkStore, is_pending_cover};
 use crate::campaigns::{CampaignStore, is_pending_ad};
 use crate::decks::{DeckStore, is_pending_slide};
 use crate::designs::{DesignStore, is_pending_screen};
@@ -132,6 +133,9 @@ struct SaveRequest {
     /// The campaign to save the style of.
     #[serde(default)]
     campaign_id: Option<String>,
+    /// The artwork to save the style of.
+    #[serde(default)]
+    artwork_id: Option<String>,
     /// The name to show in the template list.
     name: String,
 }
@@ -153,6 +157,8 @@ enum TemplateSource {
     Mailing(String),
     /// The campaign with this id.
     Campaign(String),
+    /// The artwork with this id.
+    Artwork(String),
 }
 
 /// The one source a save request names, or the message when it names
@@ -187,13 +193,17 @@ fn template_source(request: &SaveRequest) -> Result<TemplateSource, String> {
             .campaign_id
             .as_ref()
             .map(|id| TemplateSource::Campaign(id.clone())),
+        request
+            .artwork_id
+            .as_ref()
+            .map(|id| TemplateSource::Artwork(id.clone())),
     ];
     let mut sources = named.into_iter().flatten();
     match (sources.next(), sources.next()) {
         (Some(source), None) => Ok(source),
         _ => Err(
             "name exactly one source: `design_id`, `deck_id`, `document_id`, `social_id`, \
-             `print_id`, `mailing_id`, or `campaign_id`"
+             `print_id`, `mailing_id`, `campaign_id`, or `artwork_id`"
                 .to_owned(),
         ),
     }
@@ -793,8 +803,41 @@ async fn campaign_style(campaigns: &CampaignStore, id: &str) -> Result<SourceSty
     })
 }
 
+/// The style of a stored artwork: its theme, the cover canvas, and
+/// its first written covers as screens.
+async fn artwork_style(artworks: &ArtworkStore, id: &str) -> Result<SourceStyle, Response> {
+    let artwork = match artworks.load(id).await {
+        Ok(Some(artwork)) => artwork,
+        Ok(None) => {
+            return Err(api_error::error_response(
+                StatusCode::NOT_FOUND,
+                &format!("no artwork `{id}`: run `GET /artworks` for the list"),
+                Vec::new(),
+            ));
+        }
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    let viewport = artwork.viewport();
+    Ok(SourceStyle {
+        theme: artwork.theme,
+        viewport,
+        screens: artwork
+            .covers
+            .iter()
+            .filter(|cover| !is_pending_cover(cover))
+            .take(TEMPLATE_SCREEN_LIMIT)
+            .map(|cover| Screen {
+                name: String::new(),
+                html: cover.html.clone(),
+                css: cover.css.clone(),
+                notes: cover.notes.clone(),
+            })
+            .collect(),
+    })
+}
+
 /// Saves the style of one design, deck, document, social, print,
-/// mailing, or campaign as a template.
+/// mailing, campaign, or artwork as a template.
 async fn save_template(
     State(store): State<TemplateStore>,
     State(stores): State<crate::session_routes::ArtifactStores>,
@@ -823,6 +866,7 @@ async fn save_template(
         TemplateSource::Print(id) => (id.clone(), print_style(&stores.prints, id).await),
         TemplateSource::Mailing(id) => (id.clone(), mailing_style(&stores.mailings, id).await),
         TemplateSource::Campaign(id) => (id.clone(), campaign_style(&stores.campaigns, id).await),
+        TemplateSource::Artwork(id) => (id.clone(), artwork_style(&stores.artworks, id).await),
     };
     let style = match style {
         Ok(style) => style,
@@ -833,7 +877,7 @@ async fn save_template(
             StatusCode::BAD_REQUEST,
             &format!(
                 "`{source_id}` has no written screens, slides, pages, frames, sheets, \
-                 emails, or ads to save as a template"
+                 emails, ads, or covers to save as a template"
             ),
             Vec::new(),
         );
@@ -940,6 +984,7 @@ mod tests {
             print_id: None,
             mailing_id: None,
             campaign_id: None,
+            artwork_id: None,
             name: "x".to_owned(),
         };
         assert!(template_source(&both).is_err());
@@ -951,6 +996,7 @@ mod tests {
             print_id: None,
             mailing_id: None,
             campaign_id: None,
+            artwork_id: None,
             name: "x".to_owned(),
         };
         assert!(template_source(&none).is_err());
@@ -962,6 +1008,7 @@ mod tests {
             print_id: None,
             mailing_id: None,
             campaign_id: None,
+            artwork_id: None,
             name: "x".to_owned(),
         };
         assert_eq!(
@@ -976,6 +1023,7 @@ mod tests {
             print_id: None,
             mailing_id: None,
             campaign_id: None,
+            artwork_id: None,
             name: "x".to_owned(),
         };
         assert_eq!(
@@ -990,6 +1038,7 @@ mod tests {
             print_id: None,
             mailing_id: None,
             campaign_id: None,
+            artwork_id: None,
             name: "x".to_owned(),
         };
         assert_eq!(
@@ -1004,6 +1053,7 @@ mod tests {
             print_id: None,
             mailing_id: None,
             campaign_id: None,
+            artwork_id: None,
             name: "x".to_owned(),
         };
         assert!(template_source(&document_and_social).is_err());
