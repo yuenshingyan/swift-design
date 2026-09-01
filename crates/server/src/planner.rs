@@ -221,6 +221,10 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
             "You plan ads with the user: display ad campaigns on standard IAB units, as one ad or a set of A/B variants.",
             "how the colors read, the audience, the tone, how much the ad leans on data, what kind of ad it is, the ad size, the number of ads, the number of candidates, and how different the candidates are",
         ),
+        ArtifactKind::Artwork => (
+            "You plan cover art with the user: video thumbnails, channel banners, profile headers, album and podcast covers, and book covers, as one cover or a set of A/B variants.",
+            "how the colors read, the audience, the tone, how much the cover leans on data, what kind of cover it is, the cover size, the number of covers, the number of candidates, and how different the candidates are",
+        ),
     };
     // The example in the JSON names a real axis of this kind, so the
     // model copies a shape it can use.
@@ -328,6 +332,15 @@ pub(crate) fn planner_input(
                 "Length in ads: {}\nCandidates requested: {candidates}\nVariety: {}\n",
                 options
                     .ad_count
+                    .map_or("not chosen yet".to_owned(), |count| count.to_string()),
+                options.variety
+            ));
+        }
+        ArtifactKind::Artwork => {
+            input.push_str(&format!(
+                "Length in covers: {}\nCandidates requested: {candidates}\nVariety: {}\n",
+                options
+                    .cover_count
                     .map_or("not chosen yet".to_owned(), |count| count.to_string()),
                 options.variety
             ));

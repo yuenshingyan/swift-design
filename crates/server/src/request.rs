@@ -172,6 +172,24 @@ pub(crate) fn request_input(request: &SessionRequest) -> String {
                 input.push_str(&format!("Ad count the user asked for: {count}\n"));
             }
         }
+        ArtifactKind::Artwork => {
+            // The size axis prints its label below; the canvas line
+            // gives the model the px size to lay out for.
+            let size = request
+                .options
+                .cover_size
+                .as_deref()
+                .and_then(design_model::CoverSize::from_name)
+                .unwrap_or_default();
+            let viewport = size.viewport();
+            input.push_str(&format!(
+                "Canvas: {} by {} px per cover\n",
+                viewport.width, viewport.height
+            ));
+            if let Some(count) = request.options.cover_count {
+                input.push_str(&format!("Cover count the user asked for: {count}\n"));
+            }
+        }
     }
     // The app's own answers, which recur in every session. An axis
     // the user has not picked is absent, so the agent decides it. A

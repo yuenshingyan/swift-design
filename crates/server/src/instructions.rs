@@ -179,6 +179,28 @@ pub const CAMPAIGN_RULES: &[&str] = &[
     "A campaign has no `transition` field.",
 ];
 
+/// Artwork content rules, shared by the agent instructions and the
+/// built-in generation engine. Simplified Technical English.
+pub const ARTWORK_RULES: &[&str] = &[
+    "A cover is one HTML fragment in `html` and one CSS block in `css`. One cover is a single piece. Two or more covers are A/B variants of the same size, in priority order.",
+    "Design each cover for the px canvas of the artwork's `size`: 1280 by 720 px for `thumbnail` (the default), 2560 by 1440 px for `banner`, 1500 by 500 px for `header`, 3000 by 3000 px for `album`, 1600 by 2560 px for `book`. An artwork has no `viewport` field. Use px units. Do not use vw, vh, vmin, vmax, or container units.",
+    "Lay out with flex, grid, or absolute positioning. The cover root is position: relative, the canvas size, overflow: hidden. Do not add an outer box of your own with a fixed height and overflow: hidden. Such a box hides overflow from the fit.",
+    SHARED_RULES[0],
+    SHARED_RULES[1],
+    SHARED_RULES[2],
+    SHARED_RULES[3],
+    SHARED_RULES[4],
+    "Give every id and @keyframes name a prefix unique to the cover, such as `c3-`.",
+    "Put one message on each cover: one subject, one short line of text, one mood. A cover is judged at a glance; a second idea halves the first.",
+    "Size type for the render size, not the canvas. A 1280 by 720 px thumbnail shows at about 168 px wide in search results: titles 90 to 150px, at most 4 words. A 2560 by 1440 px banner: titles 120 to 200px. A 1500 by 500 px header: titles 60 to 100px. A 3000 by 3000 px album cover must read at 60 px wide: titles 200 to 360px. A 1600 by 2560 px book cover: title 140 to 240px, author line 60 to 90px.",
+    "Keep text inside a safe margin of at least 5 percent of the short edge on every side. On a `banner`, put every word and logo inside the centered 1546 by 423 px safe area; the platform crops the rest on desktop. On a `thumbnail`, keep the bottom right corner clear; the platform overlays the duration there. Backgrounds may run to the edge.",
+    SHARED_RULES[5],
+    "The first cover is the primary variant and must work alone. Later covers vary the hook, the composition, or the palette, not the subject. Put the title context and the alt text in `notes`, as a `Title:` line and an `Alt:` line. The renderer does not show notes on the cover.",
+    "Keep the branding the same on every cover: the same fonts, the same palette, and the same logo treatment, so the set reads as one channel.",
+    "A cover is a picture, not a page. Do not write a call to action button, links between covers, `<details>`, `<input>`, or any control. Do not write body copy; a cover carries a title and at most one support line.",
+    "An artwork has no `transition` field.",
+];
+
 /// Chart rules for data screens, slides, pages, frames, sheets, and
 /// emails. Simplified Technical English.
 pub const CHART_RULES: &[&str] = &[

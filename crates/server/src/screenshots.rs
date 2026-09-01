@@ -20,10 +20,11 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use design_model::{
-    Campaign, DECK_VIEWPORT, Deck, Design, Document, Mailing, Print, Social, Viewport,
+    Artwork, Campaign, DECK_VIEWPORT, Deck, Design, Document, Mailing, Print, Social, Viewport,
 };
 
 use crate::api_error;
+use crate::artwork_render;
 use crate::campaign_render;
 use crate::campaigns::{CampaignStore, is_valid_campaign_id};
 use crate::deck_render;
@@ -423,6 +424,51 @@ pub async fn dump_campaign_dom(campaign: &Campaign, base_url: &str) -> anyhow::R
         },
     );
     dump_rendered_dom(&html, base_url, campaign.viewport()).await
+}
+
+/// Renders cover `index` (zero-based) of `artwork` to a PNG.
+/// `base_url` resolves relative image paths like `/uploads/…`.
+///
+/// Every cover size is larger than Chrome's minimum window, so no
+/// fixed-canvas pin is needed here, unlike `screenshot_ad`.
+pub async fn screenshot_cover(
+    artwork: &Artwork,
+    index: usize,
+    base_url: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let chrome = find_chrome().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
+        )
+    })?;
+    let html = artwork_render::render_artwork_with(
+        artwork,
+        artwork_render::RenderOptions {
+            only_cover: Some(index),
+            asset_origin: Some(base_url.to_owned()),
+            ..artwork_render::RenderOptions::default()
+        },
+    );
+    screenshot_html(
+        &chrome,
+        &with_base_href(&html, base_url),
+        artwork.viewport(),
+    )
+    .await
+}
+
+/// Renders the whole artwork with the layout audit script and returns
+/// the DOM after the audit ran, as Chrome dumps it.
+pub async fn dump_artwork_dom(artwork: &Artwork, base_url: &str) -> anyhow::Result<String> {
+    let html = artwork_render::render_artwork_with(
+        artwork,
+        artwork_render::RenderOptions {
+            is_auditing: true,
+            asset_origin: Some(base_url.to_owned()),
+            ..artwork_render::RenderOptions::default()
+        },
+    );
+    dump_rendered_dom(&html, base_url, artwork.viewport()).await
 }
 
 /// Loads a rendered page in Chrome and returns the DOM after its

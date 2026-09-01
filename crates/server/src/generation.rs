@@ -201,6 +201,9 @@ pub struct GenerationEngine {
     /// The campaign store, for campaign sessions. `None` refuses
     /// campaign runs.
     pub(crate) campaigns: Option<crate::campaigns::CampaignStore>,
+    /// The artwork store, for artwork sessions. `None` refuses artwork
+    /// runs.
+    pub(crate) artworks: Option<crate::artworks::ArtworkStore>,
     pub(crate) sessions: SessionStore,
     address: String,
     pub(crate) notifier: ChangeNotifier,
@@ -370,6 +373,7 @@ impl GenerationEngine {
             prints: None,
             mailings: None,
             campaigns: None,
+            artworks: None,
             sessions,
             address,
             notifier,
@@ -413,6 +417,12 @@ impl GenerationEngine {
     /// Lets the engine write campaigns, for campaign sessions.
     pub fn with_campaigns(mut self, campaigns: crate::campaigns::CampaignStore) -> Self {
         self.campaigns = Some(campaigns);
+        self
+    }
+
+    /// Lets the engine write artworks, for artwork sessions.
+    pub fn with_artworks(mut self, artworks: crate::artworks::ArtworkStore) -> Self {
+        self.artworks = Some(artworks);
         self
     }
 
@@ -740,6 +750,9 @@ impl GenerationEngine {
             design_model::ArtifactKind::Campaign => {
                 self.continue_campaign_requests(&context.session_id).await?
             }
+            design_model::ArtifactKind::Artwork => {
+                self.continue_artwork_requests(&context.session_id).await?
+            }
         };
         Ok((!continues.is_empty()).then_some(GenerationTask::Continue(continues)))
     }
@@ -970,6 +983,18 @@ impl GenerationEngine {
                     .unwrap_or(0),
                 None => 0,
             },
+            design_model::ArtifactKind::Artwork => match &self.artworks {
+                Some(artworks) => artworks
+                    .list()
+                    .await
+                    .map(|rows| {
+                        rows.iter()
+                            .filter(|row| session_id_of_artifact(&row.id) == session_id)
+                            .count()
+                    })
+                    .unwrap_or(0),
+                None => 0,
+            },
         }
     }
 
@@ -1021,6 +1046,9 @@ impl GenerationEngine {
         }
         if context.request.kind == design_model::ArtifactKind::Campaign {
             return self.execute_campaign(client, context, task, log).await;
+        }
+        if context.request.kind == design_model::ArtifactKind::Artwork {
+            return self.execute_artwork(client, context, task, log).await;
         }
         match task {
             GenerationTask::Candidates => self.generate_candidates(client, context, log).await,
@@ -1674,6 +1702,11 @@ impl GenerationEngine {
                 design_model::ArtifactKind::Campaign => {
                     engine
                         .continue_campaign(&client, &context, &id, &attachments, &share, &log)
+                        .await
+                }
+                design_model::ArtifactKind::Artwork => {
+                    engine
+                        .continue_artwork(&client, &context, &id, &attachments, &share, &log)
                         .await
                 }
             };
@@ -2921,6 +2954,12 @@ impl Validated for design_model::Mailing {
 }
 
 impl Validated for design_model::Campaign {
+    fn problems(&self) -> Vec<design_model::ValidationError> {
+        self.validate()
+    }
+}
+
+impl Validated for design_model::Artwork {
     fn problems(&self) -> Vec<design_model::ValidationError> {
         self.validate()
     }
