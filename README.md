@@ -275,6 +275,11 @@ Campaign-only routes: `GET /campaigns/{id}/ads/{n}.png`,
 Artwork-only routes: `GET /artworks/{id}/covers/{n}.png`,
 `GET /artworks/{id}/export.pdf`, `GET /artworks/{id}/export.zip`.
 
+The HTML and PDF exports of the five multi-unit kinds take an optional
+one-based unit query (`?frame=N`, `?sheet=N`, `?email=N`, `?ad=N`,
+`?cover=N`) that exports that unit alone. The editors offer the same
+choice as a scope toggle beside the export links.
+
 ## Checks
 
 ```sh
