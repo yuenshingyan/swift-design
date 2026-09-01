@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Artwork",
+  "description": "A complete artwork: one theme applied to an ordered list of covers\non one size.",
+  "type": "object",
+  "properties": {
+    "covers": {
+      "description": "Covers in priority order. One cover is a single piece; two or\nmore are A/B variants of the same size.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Cover"
+      }
+    },
+    "outline": {
+      "description": "The cover titles of the complete artwork, in order. A preview\nartwork lists more titles than it has covers: the app continues\nit from this list later. Leave it empty when the artwork is\ncomplete.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "size": {
+      "description": "The size every cover is laid out on. Absent means thumbnail.",
+      "$ref": "#/$defs/CoverSize",
+      "default": "thumbnail"
+    },
+    "theme": {
+      "description": "Visual identity applied to every cover.",
+      "$ref": "#/$defs/Theme"
+    },
+    "title": {
+      "description": "Artwork title, shown in the editor. Not rendered on a cover.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "theme",
+    "covers"
+  ],
+  "$defs": {
+    "Cover": {
+      "description": "One cover: an HTML fragment for the artwork's size, CSS for that\nfragment, and author notes.",
+      "type": "object",
+      "properties": {
+        "css": {
+          "description": "CSS for this cover only. The server scopes every selector to\nthis cover. Use plain selectors such as `.title` or `h1`. Use\nthe theme through `var(--background)`, `var(--text)`,\n`var(--accent)`, `var(--muted)`, `var(--heading-font)`,\n`var(--body-font)`, `var(--mono-font)`. No `@import`, no\nviewport units, no `<`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "html": {
+          "description": "The cover as one HTML fragment. The canvas is the artwork's\n`size` in px: 1280 by 720 for thumbnail, 2560 by 1440 for\nbanner, 1500 by 500 for header, 3000 by 3000 for album, 1600\nby 2560 for book. Use px units.\nAllowed: headings, text, lists, tables, `<img>` with\n`src=\"/uploads/{name}\"`, inline `<svg>`, `<pre><code>`,\n`<blockquote>`, `<a>`. Not allowed: `<script>`, `<style>`,\n`<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`,\n`<form>`, `<button>`, `<input>`, media, comments, `on*`\nattributes, `javascript:` and `data:` URLs, external images.\nClose every tag.",
+          "type": "string"
+        },
+        "notes": {
+          "description": "Author notes: the title context and the alt text, as a\n`Title:` line and an `Alt:` line, plus intent or handoff\nremarks. Never rendered on the cover and never exported.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "html"
+      ]
+    },
+    "CoverSize": {
+      "description": "The canvas a cover is laid out on. Every size is a standard\ncover-art unit in px.",
+      "oneOf": [
+        {
+          "description": "Thumbnail: 1280 by 720 px.",
+          "type": "string",
+          "const": "thumbnail"
+        },
+        {
+          "description": "Channel banner: 2560 by 1440 px.",
+          "type": "string",
+          "const": "banner"
+        },
+        {
+          "description": "Profile header: 1500 by 500 px.",
+          "type": "string",
+          "const": "header"
+        },
+        {
+          "description": "Album cover: 3000 by 3000 px.",
+          "type": "string",
+          "const": "album"
+        },
+        {
+          "description": "Book cover: 1600 by 2560 px.",
+          "type": "string",
+          "const": "book"
+        }
+      ]
+    },
+    "FontSet": {
+      "description": "Default CSS font family names.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "Family for every other text element that sets no font.",
+          "type": "string"
+        },
+        "heading": {
+          "description": "Family for text elements with role `title` or `heading`.",
+          "type": "string"
+        },
+        "mono": {
+          "description": "Family for code elements.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "heading",
+        "body",
+        "mono"
+      ]
+    },
+    "Palette": {
+      "description": "Default colors as `#rrggbb` hex strings.",
+      "type": "object",
+      "properties": {
+        "accent": {
+          "description": "Color for highlights, shapes, and chart series that set no color.",
+          "type": "string"
+        },
+        "background": {
+          "description": "Screen background color when a screen sets no background.",
+          "type": "string"
+        },
+        "muted": {
+          "description": "Secondary color for captions, rules, and table stripes.",
+          "type": "string"
+        },
+        "text": {
+          "description": "Text color when an element sets no color.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "background",
+        "text",
+        "accent",
+        "muted"
+      ]
+    },
+    "Theme": {
+      "description": "Default colors and fonts that elements inherit when they omit their\nown.",
+      "type": "object",
+      "properties": {
+        "colors": {
+          "description": "Default colors.",
+          "$ref": "#/$defs/Palette"
+        },
+        "fonts": {
+          "description": "Default font families.",
+          "$ref": "#/$defs/FontSet"
+        },
+        "name": {
+          "description": "Theme name shown in the editor.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "colors",
+        "fonts"
+      ]
+    }
+  }
+}

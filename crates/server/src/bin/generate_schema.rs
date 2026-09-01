@@ -1,6 +1,6 @@
 //! Writes the JSON Schemas to `schemas/`: the design, the deck, the
-//! document, the social, the print, the mailing, the campaign, and
-//! the question set.
+//! document, the social, the print, the mailing, the campaign, the
+//! artwork, and the question set.
 //!
 //! Run after any change to `design-model` types and commit the result:
 //! `cargo run -p server --bin generate_schema`. CI fails when a
@@ -43,6 +43,10 @@ fn main() -> anyhow::Result<()> {
         (
             "campaign.schema.json",
             schemars::schema_for!(design_model::Campaign),
+        ),
+        (
+            "artwork.schema.json",
+            schemars::schema_for!(design_model::Artwork),
         ),
         (
             "question-set.schema.json",

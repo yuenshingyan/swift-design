@@ -20,7 +20,7 @@
 use axum::routing::get;
 use axum::{Json, Router};
 use design_model::{
-    Campaign, Deck, Design, Document, Mailing, Print, QUESTIONS_PER_TURN_LIMIT, Social,
+    Artwork, Campaign, Deck, Design, Document, Mailing, Print, QUESTIONS_PER_TURN_LIMIT, Social,
 };
 
 /// Rules every screen, slide, page, and frame follow. Shared by every
@@ -244,6 +244,7 @@ pub fn routes() -> Router<crate::AppState> {
         .route("/schemas/print", get(get_print_schema))
         .route("/schemas/mailing", get(get_mailing_schema))
         .route("/schemas/campaign", get(get_campaign_schema))
+        .route("/schemas/artwork", get(get_artwork_schema))
         .route("/schemas/question-set", get(get_question_set_schema))
 }
 
@@ -273,6 +274,11 @@ async fn get_campaign_schema() -> Json<schemars::Schema> {
     Json(schemars::schema_for!(Campaign))
 }
 
+/// Returns the artwork JSON Schema, generated from the artwork types.
+async fn get_artwork_schema() -> Json<schemars::Schema> {
+    Json(schemars::schema_for!(Artwork))
+}
+
 /// Returns the design JSON Schema, generated from the design types.
 async fn get_design_schema() -> Json<schemars::Schema> {
     Json(schemars::schema_for!(Design))
@@ -297,10 +303,10 @@ async fn get_instructions() -> Json<serde_json::Value> {
 /// The build steps, in order. One instruction per sentence.
 fn steps() -> Vec<String> {
     vec![
-        "GET /schemas/design, GET /schemas/deck, GET /schemas/document, GET /schemas/social, GET /schemas/print, GET /schemas/mailing, GET /schemas/campaign, and GET /schemas/question-set. Read the JSON Schemas.".to_owned(),
-        "GET /sessions/{id}. Read the request, the artifact_kind, the options, the state, the messages, the question sets, and the answers. The artifact_kind is `demo`, `deck`, `document`, `social`, `print`, `mailing`, or `campaign`. A demo session writes designs. A deck session writes decks. A document session writes documents. A social session writes socials. A print session writes prints. A mailing session writes mailings. A campaign session writes campaigns. There is no brief: the request and the answers are the input.".to_owned(),
+        "GET /schemas/design, GET /schemas/deck, GET /schemas/document, GET /schemas/social, GET /schemas/print, GET /schemas/mailing, GET /schemas/campaign, GET /schemas/artwork, and GET /schemas/question-set. Read the JSON Schemas.".to_owned(),
+        "GET /sessions/{id}. Read the request, the artifact_kind, the options, the state, the messages, the question sets, and the answers. The artifact_kind is `demo`, `deck`, `document`, `social`, `print`, `mailing`, `campaign`, or `artwork`. A demo session writes designs. A deck session writes decks. A document session writes documents. A social session writes socials. A print session writes prints. A mailing session writes mailings. A campaign session writes campaigns. An artwork session writes artworks. There is no brief: the request and the answers are the input.".to_owned(),
         format!("Plan the turn. When you need a choice from the user, PUT /sessions/{{id}}/question-set with a BriefQuestionSet: at most {limit} questions, each with 2 to 4 short options and allow_other true, none required, can_proceed_with_assumptions true. Use single_select when the options rule each other out. Use multi_select when the user can pick more than one at once. The app adds a skip choice. Write every option from the request and the source files, in their words. An option that would fit any other project is wrong. Name the real thing the option builds. The session moves to clarifying. Then stop. After {answered} answered questions about one request, do not ask more about it. A later request for a change starts fresh: ask when the change is unclear.", limit = QUESTIONS_PER_TURN_LIMIT, answered = crate::planner::ANSWERED_QUESTION_LIMIT),
-        "The app asks the user for these, not you: the artifact kind, how the colors read, the number of variations; for a demo how much to build, what kind of product it is, what state the screens show, and the canvases; for a deck the audience, the tone, the scenario, the number of slides, how much goes on a slide, how much it leans on data, and how different the candidates are; for a document the audience, the tone, how much it leans on data, what kind of document it is, the paper, how much goes on a page, the number of pages, and how different the candidates are; for a social the audience, the tone, how much it leans on data, the platform, the format, what the post is for, the number of frames, and how different the candidates are; for a print the audience, the tone, how much it leans on data, what kind of print piece it is, the paper size, the orientation, the number of sheets, and how different the candidates are; for a mailing the audience, the tone, how much it leans on data, what kind of email it is, the email format, the number of emails, and how different the candidates are; for a campaign the audience, the tone, how much it leans on data, what kind of ad it is, the ad size, the number of ads, and how different the candidates are. Never ask about them, and never ask about them in other words. Ask only what this request raises and that list does not cover, such as the features to show or the data on a screen. Ask nothing when the request and the source files already say enough. Read them from the session options and follow them. A demo with several platforms wants one design per canvas: write one file per canvas, each with that canvas in `viewport`.".to_owned(),
+        "The app asks the user for these, not you: the artifact kind, how the colors read, the number of variations; for a demo how much to build, what kind of product it is, what state the screens show, and the canvases; for a deck the audience, the tone, the scenario, the number of slides, how much goes on a slide, how much it leans on data, and how different the candidates are; for a document the audience, the tone, how much it leans on data, what kind of document it is, the paper, how much goes on a page, the number of pages, and how different the candidates are; for a social the audience, the tone, how much it leans on data, the platform, the format, what the post is for, the number of frames, and how different the candidates are; for a print the audience, the tone, how much it leans on data, what kind of print piece it is, the paper size, the orientation, the number of sheets, and how different the candidates are; for a mailing the audience, the tone, how much it leans on data, what kind of email it is, the email format, the number of emails, and how different the candidates are; for a campaign the audience, the tone, how much it leans on data, what kind of ad it is, the ad size, the number of ads, and how different the candidates are; for an artwork the audience, the tone, how much it leans on data, what kind of cover it is, the cover size, the number of covers, and how different the candidates are. Never ask about them, and never ask about them in other words. Ask only what this request raises and that list does not cover, such as the features to show or the data on a screen. Ask nothing when the request and the source files already say enough. Read them from the session options and follow them. A demo with several platforms wants one design per canvas: write one file per canvas, each with that canvas in `viewport`.".to_owned(),
         "When you know enough, write. First POST /sessions/{id}/generate: the session moves to generating and accepts artifact writes; in any other state the server answers 409. Demo session: write the design as JSON that conforms to GET /schemas/design. PUT it to /designs/{id}-candidate-1. Use the session id as the base. Number a later run after the candidates the session has: with candidates 1 to 3 present, write candidate 4. The browser shows the candidates.".to_owned(),
         "Deck session: write the deck as JSON that conforms to GET /schemas/deck. The deck has `slides`, not `screens`, and no `viewport`. PUT it to /decks/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
         "Document session: write the document as JSON that conforms to GET /schemas/document. The document has `pages` and `paper`, and no `viewport`. Set `paper` to the paper in the session options: `a4` or `letter`. PUT it to /documents/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
@@ -308,8 +314,9 @@ fn steps() -> Vec<String> {
         "Print session: write the print as JSON that conforms to GET /schemas/print. The print has `sheets`, `size`, and `orientation`, and no `viewport`. Set `size` and `orientation` to the values in the session options. PUT it to /prints/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
         "Mailing session: write the mailing as JSON that conforms to GET /schemas/mailing. The mailing has `emails` and `format`, and no `viewport`. Set `format` to the format in the session options: `short`, `standard`, or `long`. PUT it to /mailings/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
         "Campaign session: write the campaign as JSON that conforms to GET /schemas/campaign. The campaign has `ads` and `size`, and no `viewport`. Set `size` to the size in the session options: `medium_rectangle`, `leaderboard`, `half_page`, `skyscraper`, or `mobile_banner`. PUT it to /campaigns/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
+        "Artwork session: write the artwork as JSON that conforms to GET /schemas/artwork. The artwork has `covers` and `size`, and no `viewport`. Set `size` to the size in the session options: `thumbnail`, `banner`, `header`, `album`, or `book`. PUT it to /artworks/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
         "A 422 response lists every problem in error.details. Fix each one. PUT again.".to_owned(),
-        "When the user asks for a change in the chat while an artifact is open, edit that artifact and PUT it again. When no artifact is open, write new candidates. A message that pins two or more candidates and asks to combine parts of them is a merge: write one new candidate under the next free number, and take each part from the candidate the user names for it. A message with is_regenerate true names units like `[screen 2]`, `[slide 2]`, `[page 2]`, `[frame 2]`, `[sheet 2]`, `[email 2]`, or `[ad 2]`: write those units anew, without their old markup, and keep the rest. POST /designs/{id}/fork, POST /decks/{id}/fork, POST /documents/{id}/fork, POST /socials/{id}/fork, POST /prints/{id}/fork, POST /mailings/{id}/fork, or POST /campaigns/{id}/fork copies a candidate to the next free number; the user presses Fork for that, you do not.".to_owned(),
+        "When the user asks for a change in the chat while an artifact is open, edit that artifact and PUT it again. When no artifact is open, write new candidates. A message that pins two or more candidates and asks to combine parts of them is a merge: write one new candidate under the next free number, and take each part from the candidate the user names for it. A message with is_regenerate true names units like `[screen 2]`, `[slide 2]`, `[page 2]`, `[frame 2]`, `[sheet 2]`, `[email 2]`, `[ad 2]`, or `[cover 2]`: write those units anew, without their old markup, and keep the rest. POST /designs/{id}/fork, POST /decks/{id}/fork, POST /documents/{id}/fork, POST /socials/{id}/fork, POST /prints/{id}/fork, POST /mailings/{id}/fork, POST /campaigns/{id}/fork, or POST /artworks/{id}/fork copies a candidate to the next free number; the user presses Fork for that, you do not.".to_owned(),
         "GET /uploads?session={id} lists the source files of that session. Each row has name, size_bytes, content_type, and is_image. GET /uploads/{name} returns the file. Use an image row as `<img src='/uploads/{name}'>`. A file belongs to one session: never read another session's files.".to_owned(),
         "After you save a design, look at it: GET /designs/{id}/screens/{n}.png returns a PNG of screen n, 1-based. It needs Chrome or Chromium and answers 503 without one. Review every screen for overlap, overflow, empty space, and weak contrast. Fix what you see and PUT the design again. GET /designs/{id}/export returns the design as one HTML file. A design has no PDF export.".to_owned(),
         "After you save a deck, look at it: GET /decks/{id}/slides/{n}.png returns a PNG of slide n, 1-based. Review every slide the same way and PUT the deck again. GET /decks/{id}/export returns the deck as one HTML file. GET /decks/{id}/export.pdf returns it as a PDF, one page per slide. GET /decks/{id}/export.pptx returns it as a PowerPoint file. GET /decks/{id}/present is the presenter view with the notes.".to_owned(),
@@ -318,7 +325,8 @@ fn steps() -> Vec<String> {
         "After you save a print, look at it: GET /prints/{id}/sheets/{n}.png returns a PNG of sheet n, 1-based. Review every sheet the same way and PUT the print again. GET /prints/{id}/export returns the print as one HTML file. GET /prints/{id}/export.pdf returns it as a PDF, one PDF page per sheet, the file a print shop takes. GET /prints/{id}/export.zip returns one PNG per sheet in a zip.".to_owned(),
         "After you save a mailing, look at it: GET /mailings/{id}/emails/{n}.png returns a PNG of email n, 1-based. Review every email the same way and PUT the mailing again. GET /mailings/{id}/export returns the mailing as one HTML file. GET /mailings/{id}/export.pdf returns it as a PDF, one PDF page per email. GET /mailings/{id}/export.zip returns one PNG per email in a zip. GET /mailings/{id}/export.email.zip returns one email-client HTML file per email in a zip: inlined styles, a 600 px table shell, and Outlook support. Send that file from your email service.".to_owned(),
         "After you save a campaign, look at it: GET /campaigns/{id}/ads/{n}.png returns a PNG of ad n, 1-based. Review every ad the same way and PUT the campaign again. GET /campaigns/{id}/export returns the campaign as one HTML file. GET /campaigns/{id}/export.pdf returns it as a PDF, one PDF page per ad. GET /campaigns/{id}/export.zip returns one PNG per ad in a zip: the files an ad platform takes.".to_owned(),
-        "When the design, the deck, the document, the social, the print, the mailing, or the campaign is written, POST /sessions/{id}/complete, or exit with code 0. The session moves to reviewing.".to_owned(),
+        "After you save an artwork, look at it: GET /artworks/{id}/covers/{n}.png returns a PNG of cover n, 1-based. Review every cover the same way and PUT the artwork again. GET /artworks/{id}/export returns the artwork as one HTML file. GET /artworks/{id}/export.pdf returns it as a PDF, one PDF page per cover. GET /artworks/{id}/export.zip returns one PNG per cover in a zip: the files the platforms take.".to_owned(),
+        "When the design, the deck, the document, the social, the print, the mailing, the campaign, or the artwork is written, POST /sessions/{id}/complete, or exit with code 0. The session moves to reviewing.".to_owned(),
         "GET /events returns {\"revision\": n}. The revision increases when data changes. To wait for a change in one run, call GET /events?after={revision}&wait=25 in a loop. Each call returns within the wait time, so loop; do not treat a timeout as an error.".to_owned(),
     ]
 }
@@ -335,6 +343,7 @@ fn routes_map() -> serde_json::Value {
         ("schema_print", "GET /schemas/print"),
         ("schema_mailing", "GET /schemas/mailing"),
         ("schema_campaign", "GET /schemas/campaign"),
+        ("schema_artwork", "GET /schemas/artwork"),
         ("schema_question_set", "GET /schemas/question-set"),
         ("session", "GET /sessions/{id}"),
         ("question_set", "PUT /sessions/{id}/question-set"),
@@ -404,6 +413,14 @@ fn routes_map() -> serde_json::Value {
         ("export_campaign_pdf", "GET /campaigns/{id}/export.pdf"),
         ("export_campaign_zip", "GET /campaigns/{id}/export.zip"),
         ("fork_campaign", "POST /campaigns/{id}/fork"),
+        ("save_artwork", "PUT /artworks/{id}"),
+        ("check_artwork", "POST /artworks/render"),
+        ("render_artwork", "GET /artworks/{id}/render"),
+        ("cover_image", "GET /artworks/{id}/covers/{n}.png"),
+        ("export_artwork_html", "GET /artworks/{id}/export"),
+        ("export_artwork_pdf", "GET /artworks/{id}/export.pdf"),
+        ("export_artwork_zip", "GET /artworks/{id}/export.zip"),
+        ("fork_artwork", "POST /artworks/{id}/fork"),
         ("chooser", "GET /candidates/{base}"),
         ("templates", "GET /templates"),
         ("template", "GET /templates/{id}"),
@@ -436,12 +453,15 @@ fn instructions() -> serde_json::Value {
     let example_campaign: serde_json::Value =
         serde_json::from_str(include_str!("../../../fixtures/sample-campaign.json"))
             .unwrap_or_default();
+    let example_artwork: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/sample-artwork.json"))
+            .unwrap_or_default();
     let example_mailing: serde_json::Value =
         serde_json::from_str(include_str!("../../../fixtures/sample-mailing.json"))
             .unwrap_or_default();
     serde_json::json!({
-        "purpose": "Turn a request into HTML designs, decks, documents, social posts, print pieces, emails, or display ads: ask a few questions in the chat, write candidates, then edit them from the chat. Swift Design keeps the workflow state, validates, renders, and lets the user edit. Swift Design makes no LLM API calls.",
-        "session": "The run works on one session. Its id is in the SWIFT_DESIGN_SESSION_ID environment variable. The mode is in SWIFT_DESIGN_RUN_MODE: generation. The artifact kind is in SWIFT_DESIGN_ARTIFACT_KIND: demo, deck, document, social, print, mailing, or campaign. GET /sessions/{id} returns the state, the artifact_kind, the options, the question sets, the answers, and the messages.",
+        "purpose": "Turn a request into HTML designs, decks, documents, social posts, print pieces, emails, display ads, or cover art: ask a few questions in the chat, write candidates, then edit them from the chat. Swift Design keeps the workflow state, validates, renders, and lets the user edit. Swift Design makes no LLM API calls.",
+        "session": "The run works on one session. Its id is in the SWIFT_DESIGN_SESSION_ID environment variable. The mode is in SWIFT_DESIGN_RUN_MODE: generation. The artifact kind is in SWIFT_DESIGN_ARTIFACT_KIND: demo, deck, document, social, print, mailing, campaign, or artwork. GET /sessions/{id} returns the state, the artifact_kind, the options, the question sets, the answers, and the messages.",
         "kinds": {
             "demo": "A software demo: a landing page, app screens, or a similar layout on a device viewport. Written as a design with `screens` and a `viewport`. Saved under /designs.",
             "deck": "A slide presentation on a 1920 by 1080 px canvas. Written as a deck with `slides` and no `viewport`. Saved under /decks.",
@@ -450,6 +470,7 @@ fn instructions() -> serde_json::Value {
             "print": "A print piece on an A5, A4, A3, Letter, or Tabloid canvas, portrait or landscape: a poster, a flyer, a menu, a program, a certificate, or a sign. Written as a print with `sheets`, `size`, and `orientation`, and no `viewport`. Saved under /prints.",
             "mailing": "An email or an email sequence on a 600 px wide canvas: a newsletter, an announcement, a promotion, a welcome email, a digest, or an invitation. Written as a mailing with `emails` and `format`, and no `viewport`. Saved under /mailings.",
             "campaign": "A display ad or a set of A/B variants on an IAB unit canvas: a product launch, a sale, brand awareness, an event, retargeting, or an app install. Written as a campaign with `ads` and `size`, and no `viewport`. Saved under /campaigns.",
+            "artwork": "A piece of cover art or a set of A/B variants on a cover-art canvas: a video thumbnail, a channel banner, a profile header, a podcast or album cover, or a book cover. Written as an artwork with `covers` and `size`, and no `viewport`. Saved under /artworks.",
         },
         "steps": steps(),
         "demo_rules": DEMO_RULES,
@@ -459,15 +480,16 @@ fn instructions() -> serde_json::Value {
         "print_rules": PRINT_RULES,
         "mailing_rules": MAILING_RULES,
         "campaign_rules": CAMPAIGN_RULES,
+        "artwork_rules": ARTWORK_RULES,
         "charts": {
             "rules": CHART_RULES,
             "example": CHART_EXAMPLE,
         },
         "conventions": {
-            "canvas": "a design's `viewport` in px (default 1440 by 900); a deck's fixed 1920 by 1080; a document's `paper`: 794 by 1123 for a4, 816 by 1056 for letter; a social's `format`: 1080 by 1080 for square, 1080 by 1350 for portrait, 1080 by 1920 for story, 1200 by 630 for landscape; a print's `size`: 559 by 794 for a5, 794 by 1123 for a4, 1123 by 1587 for a3, 816 by 1056 for letter, 1056 by 1632 for tabloid, with `orientation: 'landscape'` swapping width and height; a mailing's `format`: 600 by 800 for short, 600 by 1200 for standard, 600 by 1800 for long; a campaign's `size`: 300 by 250 for medium_rectangle, 728 by 90 for leaderboard, 300 by 600 for half_page, 160 by 600 for skyscraper, 320 by 100 for mobile_banner. Use px units. The server scales the canvas to any frame.",
+            "canvas": "a design's `viewport` in px (default 1440 by 900); a deck's fixed 1920 by 1080; a document's `paper`: 794 by 1123 for a4, 816 by 1056 for letter; a social's `format`: 1080 by 1080 for square, 1080 by 1350 for portrait, 1080 by 1920 for story, 1200 by 630 for landscape; a print's `size`: 559 by 794 for a5, 794 by 1123 for a4, 1123 by 1587 for a3, 816 by 1056 for letter, 1056 by 1632 for tabloid, with `orientation: 'landscape'` swapping width and height; a mailing's `format`: 600 by 800 for short, 600 by 1200 for standard, 600 by 1800 for long; a campaign's `size`: 300 by 250 for medium_rectangle, 728 by 90 for leaderboard, 300 by 600 for half_page, 160 by 600 for skyscraper, 320 by 100 for mobile_banner; an artwork's `size`: 1280 by 720 for thumbnail, 2560 by 1440 for banner, 1500 by 500 for header, 3000 by 3000 for album, 1600 by 2560 for book. Use px units. The server scales the canvas to any frame.",
             "css_variables": ["--background", "--text", "--accent", "--muted", "--heading-font", "--body-font", "--mono-font"],
             "base_styles": "32px body text in the body font and text color; headings in the heading font with margin 0; paragraphs and lists margin 0; images block and max-width 100%",
-            "node_reference": "[screen N, node a/b/c <tag.class>: text] for a design; [slide N, node a/b/c <tag.class>: text] for a deck; [page N, node a/b/c <tag.class>: text] for a document; [frame N, node a/b/c <tag.class>: text] for a social; [sheet N, node a/b/c <tag.class>: text] for a print; [email N, node a/b/c <tag.class>: text] for a mailing; [ad N, node a/b/c <tag.class>: text] for a campaign",
+            "node_reference": "[screen N, node a/b/c <tag.class>: text] for a design; [slide N, node a/b/c <tag.class>: text] for a deck; [page N, node a/b/c <tag.class>: text] for a document; [frame N, node a/b/c <tag.class>: text] for a social; [sheet N, node a/b/c <tag.class>: text] for a print; [email N, node a/b/c <tag.class>: text] for a mailing; [ad N, node a/b/c <tag.class>: text] for a campaign; [cover N, node a/b/c <tag.class>: text] for an artwork",
             "upload_reference": "[upload name]",
             "comment_lines": "A message may carry several comments, one per line, each `<node or page reference>: <note>`. Apply every line in one edit.",
         },
@@ -487,6 +509,8 @@ fn instructions() -> serde_json::Value {
             "POST /mailings/render": "the mailing JSON; returns the rendered HTML, or every validation error",
             "PUT /campaigns/{id}": "the campaign JSON",
             "POST /campaigns/render": "the campaign JSON; returns the rendered HTML, or every validation error",
+            "PUT /artworks/{id}": "the artwork JSON",
+            "POST /artworks/render": "the artwork JSON; returns the rendered HTML, or every validation error",
         },
         "routes": routes_map(),
         "example_design": example_design,
@@ -496,17 +520,18 @@ fn instructions() -> serde_json::Value {
         "example_print": example_print,
         "example_mailing": example_mailing,
         "example_campaign": example_campaign,
+        "example_artwork": example_artwork,
     })
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use design_model::{Campaign, Deck, Design, Document, Mailing, Print, Social};
+    use design_model::{Artwork, Campaign, Deck, Design, Document, Mailing, Print, Social};
 
     use crate::instructions::{
-        CAMPAIGN_RULES, CHART_EXAMPLE, DECK_RULES, DEMO_RULES, DOCUMENT_RULES, MAILING_RULES,
-        PRINT_RULES, SOCIAL_RULES, instructions,
+        ARTWORK_RULES, CAMPAIGN_RULES, CHART_EXAMPLE, DECK_RULES, DEMO_RULES, DOCUMENT_RULES,
+        MAILING_RULES, PRINT_RULES, SOCIAL_RULES, instructions,
     };
 
     #[test]
@@ -543,7 +568,9 @@ mod tests {
         );
         let text = payload.to_string();
         assert!(text.contains("PUT it to /socials/{id}-candidate-1"));
-        assert!(text.contains("demo, deck, document, social, print, mailing, or campaign"));
+        assert!(
+            text.contains("demo, deck, document, social, print, mailing, campaign, or artwork")
+        );
         assert!(text.contains("`[frame 2]`"));
         let example: Social = serde_json::from_value(payload["example_social"].clone()).unwrap();
         assert_eq!(example.validate(), Vec::new());
@@ -585,7 +612,9 @@ mod tests {
         );
         let text = payload.to_string();
         assert!(text.contains("PUT it to /prints/{id}-candidate-1"));
-        assert!(text.contains("demo, deck, document, social, print, mailing, or campaign"));
+        assert!(
+            text.contains("demo, deck, document, social, print, mailing, campaign, or artwork")
+        );
         assert!(text.contains("`[sheet 2]`"));
         let example: Print = serde_json::from_value(payload["example_print"].clone()).unwrap();
         assert_eq!(example.validate(), Vec::new());
@@ -640,7 +669,9 @@ mod tests {
         );
         let text = payload.to_string();
         assert!(text.contains("PUT it to /mailings/{id}-candidate-1"));
-        assert!(text.contains("demo, deck, document, social, print, mailing, or campaign"));
+        assert!(
+            text.contains("demo, deck, document, social, print, mailing, campaign, or artwork")
+        );
         assert!(text.contains("`[email 2]`"));
         let example: Mailing = serde_json::from_value(payload["example_mailing"].clone()).unwrap();
         assert_eq!(example.validate(), Vec::new());
@@ -696,6 +727,50 @@ mod tests {
     }
 
     #[test]
+    fn instructions_carry_artwork_rules_routes_and_the_example() {
+        let payload = instructions();
+        assert_eq!(
+            payload["artwork_rules"].as_array().unwrap().len(),
+            ARTWORK_RULES.len()
+        );
+        let artwork = payload["artwork_rules"].to_string();
+        assert!(artwork.contains("1280 by 720 px"));
+        assert!(artwork.contains("`size`"));
+        assert!(artwork.contains("one message on each cover"));
+        assert!(artwork.contains("safe margin"));
+        assert!(artwork.contains("Title:"));
+        assert!(artwork.contains("Do not write a call to action button"));
+        assert!(!artwork.contains("#screen-"));
+        assert!(!artwork.contains("/decks/"));
+        assert_eq!(payload["routes"]["schema_artwork"], "GET /schemas/artwork");
+        assert_eq!(payload["routes"]["save_artwork"], "PUT /artworks/{id}");
+        assert_eq!(
+            payload["routes"]["cover_image"],
+            "GET /artworks/{id}/covers/{n}.png"
+        );
+        assert_eq!(
+            payload["routes"]["export_artwork_zip"],
+            "GET /artworks/{id}/export.zip"
+        );
+        assert_eq!(
+            payload["routes"]["fork_artwork"],
+            "POST /artworks/{id}/fork"
+        );
+        assert!(
+            payload["kinds"]["artwork"]
+                .as_str()
+                .unwrap()
+                .contains("`covers`")
+        );
+        let text = payload.to_string();
+        assert!(text.contains("PUT it to /artworks/{id}-candidate-1"));
+        assert!(text.contains("`[cover 2]`"));
+        let example: Artwork = serde_json::from_value(payload["example_artwork"].clone()).unwrap();
+        assert_eq!(example.validate(), Vec::new());
+        assert!(payload["example_artwork"].get("viewport").is_none());
+    }
+
+    #[test]
     fn instructions_carry_document_rules_routes_and_the_example() {
         let payload = instructions();
         assert_eq!(
@@ -734,7 +809,9 @@ mod tests {
         );
         let text = payload.to_string();
         assert!(text.contains("PUT it to /documents/{id}-candidate-1"));
-        assert!(text.contains("demo, deck, document, social, print, mailing, or campaign"));
+        assert!(
+            text.contains("demo, deck, document, social, print, mailing, campaign, or artwork")
+        );
         assert!(text.contains("`[page 2]`"));
         let example: Document =
             serde_json::from_value(payload["example_document"].clone()).unwrap();
