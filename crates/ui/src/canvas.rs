@@ -11,8 +11,8 @@
 use std::collections::{HashMap, HashSet};
 
 use design_model::{
-    A4_VIEWPORT, AdSize, ArtifactKind, DECK_VIEWPORT, EmailFormat, Format, LETTER_VIEWPORT,
-    Orientation, PrintSize, Viewport,
+    A4_VIEWPORT, AdSize, ArtifactKind, CoverSize, DECK_VIEWPORT, EmailFormat, Format,
+    LETTER_VIEWPORT, Orientation, PrintSize, Viewport,
 };
 use dioxus::prelude::*;
 
@@ -90,6 +90,9 @@ impl CanvasCard {
             }
             ArtifactKind::Campaign => {
                 format!("/campaigns/{}/render?v={revision}&ad={current}", self.id)
+            }
+            ArtifactKind::Artwork => {
+                format!("/artworks/{}/render?v={revision}&cover={current}", self.id)
             }
         }
     }
@@ -266,6 +269,30 @@ pub(crate) fn cards_from_campaigns(
     mine
 }
 
+/// The artwork cards that belong to `session_id`, chosen artwork
+/// first.
+pub(crate) fn cards_from_artworks(
+    artworks: &[api::ArtworkSummary],
+    session_id: &str,
+    chosen: Option<&str>,
+) -> Vec<CanvasCard> {
+    let mut mine: Vec<CanvasCard> = artworks
+        .iter()
+        .filter(|summary| crate::settings::artifact_project(&summary.id) == session_id)
+        .map(|summary| CanvasCard {
+            id: summary.id.clone(),
+            title: summary.title.clone(),
+            kind: ArtifactKind::Artwork,
+            count: summary.cover_count,
+            outline_count: summary.outline_count,
+            ratio: summary.aspect_ratio(),
+            viewport: summary.viewport(),
+        })
+        .collect();
+    mine.sort_by_key(|card| Some(card.id.as_str()) != chosen);
+    mine
+}
+
 /// The card name from its id: `Candidate 2` from `talk-candidate-2`, or
 /// `Candidate` when the id has no number.
 pub(crate) fn candidate_label(id: &str) -> String {
@@ -292,7 +319,8 @@ pub(crate) fn candidate_number(id: &str) -> &str {
 /// The name of one canvas, for a tab: `Desktop`, `Tablet`, `Phone`,
 /// `Deck`, `A4`, `Letter`, a social format such as `Square`, a print
 /// size such as `A3` or `A4 landscape`, an email format such as
-/// `Email` or `Long email`, or an ad size such as `Leaderboard`.
+/// `Email` or `Long email`, an ad size such as `Leaderboard`, or a
+/// cover size such as `Thumbnail`.
 pub(crate) fn canvas_name(viewport: Viewport) -> &'static str {
     if viewport == A4_VIEWPORT {
         return "A4";
@@ -341,6 +369,13 @@ pub(crate) fn canvas_name(viewport: Viewport) -> &'static str {
     }
     // The IAB ad units share no size with any canvas above.
     if let Some(size) = AdSize::ALL
+        .into_iter()
+        .find(|size| size.viewport() == viewport)
+    {
+        return size.label();
+    }
+    // The cover-art units share no size with any canvas above either.
+    if let Some(size) = CoverSize::ALL
         .into_iter()
         .find(|size| size.viewport() == viewport)
     {
@@ -590,6 +625,7 @@ pub(crate) fn CandidateCanvas(
                     ArtifactKind::Print => api::delete_print(&id).await,
                     ArtifactKind::Mailing => api::delete_mailing(&id).await,
                     ArtifactKind::Campaign => api::delete_campaign(&id).await,
+                    ArtifactKind::Artwork => api::delete_artwork(&id).await,
                 };
                 if let Err(message) = deleted {
                     on_error.call(message);
@@ -1143,6 +1179,15 @@ mod tests {
             canvas_name(design_model::MOBILE_BANNER_AD_VIEWPORT),
             "Mobile banner"
         );
+        assert_eq!(
+            canvas_name(design_model::THUMBNAIL_COVER_VIEWPORT),
+            "Thumbnail"
+        );
+        assert_eq!(
+            canvas_name(design_model::BANNER_COVER_VIEWPORT),
+            "Channel banner"
+        );
+        assert_eq!(canvas_name(design_model::BOOK_COVER_VIEWPORT), "Book cover");
         assert_eq!(canvas_size(Viewport::default()), "1440 × 900");
         assert_eq!(canvas_size(DECK_VIEWPORT), "1920 × 1080");
     }

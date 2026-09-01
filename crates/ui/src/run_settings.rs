@@ -4,18 +4,19 @@
 //! platform, the format, and the length for a social, the print kind,
 //! the size, the orientation, and the length for a print, the email
 //! kind, the format, and the length for a mailing, the ad kind, the
-//! size, and the length for a campaign, and the number of variations. Each has a closed set of answers, so a chip settles it
-//! in one click.
+//! size, and the length for a campaign, the cover kind, the size, and
+//! the length for an artwork, and the number of variations. Each has a
+//! closed set of answers, so a chip settles it in one click.
 
 use std::collections::HashMap;
 
 use design_model::{
     AD_COUNT_LIMIT, AD_KINDS, AD_SIZES, AUDIENCES, AnsweredQuestion, ArtifactKind, COLOR_MODES,
-    CUSTOM_ANSWER_LIMIT, DATA_STATES, DECK_SCENARIOS, DECK_VARIETY_LEVELS, DEMO_SCOPES,
-    DOCUMENT_KINDS, EMAIL_COUNT_LIMIT, EMAIL_FORMATS, EMAIL_KINDS, EVIDENCE_STYLES, FIDELITIES,
-    FORMATS, FRAME_COUNT_LIMIT, ORIENTATIONS, PAGE_COUNT_LIMIT, PAPERS, PLATFORMS, POST_GOALS,
-    PRINT_KINDS, PRINT_SIZES, PRODUCT_KINDS, SHEET_COUNT_LIMIT, SLIDE_DENSITIES, TONES, Viewport,
-    WorkflowState,
+    COVER_COUNT_LIMIT, COVER_KINDS, COVER_SIZES, CUSTOM_ANSWER_LIMIT, DATA_STATES, DECK_SCENARIOS,
+    DECK_VARIETY_LEVELS, DEMO_SCOPES, DOCUMENT_KINDS, EMAIL_COUNT_LIMIT, EMAIL_FORMATS,
+    EMAIL_KINDS, EVIDENCE_STYLES, FIDELITIES, FORMATS, FRAME_COUNT_LIMIT, ORIENTATIONS,
+    PAGE_COUNT_LIMIT, PAPERS, PLATFORMS, POST_GOALS, PRINT_KINDS, PRINT_SIZES, PRODUCT_KINDS,
+    SHEET_COUNT_LIMIT, SLIDE_DENSITIES, TONES, Viewport, WorkflowState,
 };
 use dioxus::prelude::*;
 
@@ -220,6 +221,25 @@ pub(crate) fn ad_count_options() -> Vec<(String, String)> {
             "A single ad".to_owned()
         } else {
             format!("{count} ad variants")
+        };
+        options.push((count.to_string(), label));
+    }
+    options
+}
+
+/// The cover counts the app offers, as (brief value, label). The
+/// empty value leaves the length to the agent. One cover is a single
+/// piece; two or more are A/B variants.
+pub(crate) fn cover_count_options() -> Vec<(String, String)> {
+    let mut options = vec![(String::new(), "The agent decides".to_owned())];
+    for count in [1, 2, 3, 4] {
+        if count > COVER_COUNT_LIMIT {
+            break;
+        }
+        let label = if count == 1 {
+            "A single cover".to_owned()
+        } else {
+            format!("{count} cover variants")
         };
         options.push((count.to_string(), label));
     }
@@ -474,6 +494,32 @@ fn axes_for(kind: ArtifactKind) -> Vec<Axis> {
                 choices: &AD_SIZES,
             },
         ],
+        // An artwork speaks to a viewer too. Its own axes name the
+        // cover kind and the size. The colors, the evidence, the
+        // length, the candidates, and the variety sit on
+        // `ArtworkQuestions`.
+        ArtifactKind::Artwork => vec![
+            Axis {
+                key: "audience",
+                label: "Who is it for?",
+                choices: &AUDIENCES,
+            },
+            Axis {
+                key: "tone",
+                label: "What tone should it have?",
+                choices: &TONES,
+            },
+            Axis {
+                key: "cover_kind",
+                label: "What kind of cover is it?",
+                choices: &COVER_KINDS,
+            },
+            Axis {
+                key: "cover_size",
+                label: "What size is it laid out on?",
+                choices: &COVER_SIZES,
+            },
+        ],
     }
 }
 
@@ -688,6 +734,36 @@ pub(crate) fn app_answers(
                 &fixed_choices(&EVIDENCE_STYLES),
             ));
         }
+        ArtifactKind::Artwork => {
+            entries.push(recorded(
+                "How should the colors read?",
+                options.color_mode.as_deref(),
+                &fixed_choices(&COLOR_MODES),
+            ));
+            entries.push(recorded(
+                "How different should the candidates be?",
+                Some(&options.variety),
+                &variety_choices(),
+            ));
+            entries.push(recorded(
+                "How many covers are in the set?",
+                options
+                    .cover_count
+                    .map(|count| count.to_string())
+                    .as_deref(),
+                &cover_count_options(),
+            ));
+            entries.push(recorded(
+                "How many candidates should I write?",
+                options.variations.map(|count| count.to_string()).as_deref(),
+                &candidate_choices(),
+            ));
+            entries.push(recorded(
+                "How much does it lean on data?",
+                options.evidence_style.as_deref(),
+                &fixed_choices(&EVIDENCE_STYLES),
+            ));
+        }
     }
     entries
 }
@@ -751,6 +827,8 @@ fn axis_value(options: &api::SessionOptions, key: &str) -> Option<String> {
         "email_format" => options.email_format.clone(),
         "ad_kind" => options.ad_kind.clone(),
         "ad_size" => options.ad_size.clone(),
+        "cover_kind" => options.cover_kind.clone(),
+        "cover_size" => options.cover_size.clone(),
         _ => None,
     }
 }
@@ -785,6 +863,8 @@ fn with_axis(options: &api::SessionOptions, key: &str, value: String) -> api::Se
         "email_format" => next.email_format = picked,
         "ad_kind" => next.ad_kind = picked,
         "ad_size" => next.ad_size = picked,
+        "cover_kind" => next.cover_kind = picked,
+        "cover_size" => next.cover_size = picked,
         _ => {}
     }
     next
@@ -792,7 +872,7 @@ fn with_axis(options: &api::SessionOptions, key: &str, value: String) -> api::Se
 
 /// The options after one pick on a setup card. `key` is an axis key,
 /// or `scenario`, `slides`, `pages`, `frames`, `sheets`, `emails`,
-/// `ads`, `candidates`, or `variety`.
+/// `ads`, `covers`, `candidates`, or `variety`.
 /// An empty value is the judgment choice: it clears the field, or sets
 /// the server default where the field has no blank state.
 fn with_pick(options: &api::SessionOptions, key: &str, value: &str) -> api::SessionOptions {
@@ -805,6 +885,7 @@ fn with_pick(options: &api::SessionOptions, key: &str, value: &str) -> api::Sess
         "sheets" => next.sheet_count = value.parse().ok(),
         "emails" => next.email_count = value.parse().ok(),
         "ads" => next.ad_count = value.parse().ok(),
+        "covers" => next.cover_count = value.parse().ok(),
         "candidates" => next.variations = value.parse().ok(),
         "variety" => {
             next.variety = if value.is_empty() {
@@ -1009,6 +1090,13 @@ pub(crate) fn CanvasPicker(
             return rsx! {
                 div { class: "campaign-questions",
                     CampaignQuestions { session_id, options, on_error }
+                }
+            };
+        }
+        ArtifactKind::Artwork => {
+            return rsx! {
+                div { class: "artwork-questions",
+                    ArtworkQuestions { session_id, options, on_error }
                 }
             };
         }
@@ -1491,6 +1579,68 @@ pub(crate) fn CampaignQuestions(
     }
 }
 
+/// The artwork setup card: the colors, the variety, the length, the
+/// candidates, and the evidence. The cover kind and the size sit in
+/// the axis chips above.
+#[component]
+pub(crate) fn ArtworkQuestions(
+    session_id: String,
+    options: api::SessionOptions,
+    on_error: EventHandler<String>,
+) -> Element {
+    let (picks, pick) = use_setup_picks(session_id, options.clone(), on_error);
+    let shown = |key: &str| picks().get(key).cloned();
+    // A suggestion shows on the card as picked, so the user sees what
+    // the planner read from the request.
+    let suggested = |key: &str, value: Option<String>| {
+        value.filter(|_| is_still_suggested(&options, &picks(), key))
+    };
+    let colors =
+        shown("color_mode").or_else(|| suggested("color_mode", options.color_mode.clone()));
+    let evidence = shown("evidence_style")
+        .or_else(|| suggested("evidence_style", options.evidence_style.clone()));
+    let is_colors_suggested = suggested("color_mode", options.color_mode.clone()).is_some();
+    let is_evidence_suggested =
+        suggested("evidence_style", options.evidence_style.clone()).is_some();
+    rsx! {
+        ChoiceCard {
+            label: "How should the colors read?",
+            current: colors,
+            choices: fixed_choices(&COLOR_MODES),
+            is_wide: true,
+            is_suggested: is_colors_suggested,
+            allows_custom: true,
+            on_pick: move |value: String| pick.call(("color_mode".to_owned(), value)),
+        }
+        ChoiceCard {
+            label: "How different should the candidates be?",
+            current: shown("variety"),
+            choices: variety_choices(),
+            on_pick: move |value: String| pick.call(("variety".to_owned(), value)),
+        }
+        ChoiceCard {
+            label: "How many covers are in the set?",
+            current: shown("covers"),
+            choices: cover_count_options(),
+            on_pick: move |value: String| pick.call(("covers".to_owned(), value)),
+        }
+        ChoiceCard {
+            label: "How many candidates should I write?",
+            current: shown("candidates"),
+            choices: candidate_choices(),
+            on_pick: move |value: String| pick.call(("candidates".to_owned(), value)),
+        }
+        ChoiceCard {
+            label: "How much does it lean on data?",
+            current: evidence,
+            choices: fixed_choices(&EVIDENCE_STYLES),
+            is_suggested: is_evidence_suggested,
+            allows_custom: true,
+            on_pick: move |value: String| pick.call(("evidence_style".to_owned(), value)),
+        }
+    }
+}
+
 /// True when a choice is the judgment one: an empty value stands for
 /// `the agent decides`, and the card draws it as the dashed chip.
 pub(crate) fn is_judgment_choice(value: &str) -> bool {
@@ -1861,6 +2011,54 @@ mod tests {
         assert_eq!(next.ad_size.as_deref(), Some("half_page"));
         let cleared = with_axis(&next, "ad_kind", String::new());
         assert_eq!(axis_value(&cleared, "ad_kind"), None);
+    }
+
+    #[test]
+    fn an_artwork_record_names_its_kind_size_and_length() {
+        let options = api::SessionOptions {
+            cover_kind: Some("podcast_cover".to_owned()),
+            cover_size: Some("album".to_owned()),
+            cover_count: Some(2),
+            tone: Some("confident".to_owned()),
+            ..Default::default()
+        };
+        let entries = app_answers(ArtifactKind::Artwork, &options);
+        let row = |question: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.question == question)
+                .cloned()
+        };
+        let kind = row("What kind of cover is it?").expect("kind row");
+        assert_eq!(kind.answer, "Podcast cover");
+        let size = row("What size is it laid out on?").expect("size row");
+        assert_eq!(size.answer, "Album cover, 3000 by 3000");
+        let length = row("How many covers are in the set?").expect("length row");
+        assert_eq!(length.answer, "2 cover variants");
+        let tone = row("What tone should it have?").expect("tone row");
+        assert!(!tone.is_assumed);
+        assert!(row("What kind of ad is it?").is_none());
+        assert!(row("What platform is it for?").is_none());
+        let next = with_axis(&options, "cover_size", "book".to_owned());
+        assert_eq!(axis_value(&next, "cover_size").as_deref(), Some("book"));
+        assert_eq!(next.cover_size.as_deref(), Some("book"));
+        let cleared = with_axis(&next, "cover_kind", String::new());
+        assert_eq!(axis_value(&cleared, "cover_kind"), None);
+    }
+
+    #[test]
+    fn the_cover_count_options_stay_under_the_limit() {
+        let options = cover_count_options();
+        assert_eq!(options[0].1, "The agent decides");
+        assert_eq!(options[1], ("1".to_owned(), "A single cover".to_owned()));
+        assert!(options.iter().any(|(_, label)| label == "4 cover variants"));
+        for (value, _) in options.iter().skip(1) {
+            let count = value.parse::<u32>().ok();
+            assert!(
+                count.is_some_and(|count| (1..=COVER_COUNT_LIMIT).contains(&count)),
+                "{value}"
+            );
+        }
     }
 
     #[test]

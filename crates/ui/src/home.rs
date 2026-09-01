@@ -48,6 +48,9 @@ fn kind_detail(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Campaign => {
             "A display ad or a set of A/B variants on a standard IAB unit, with PDF and PNG exports."
         }
+        ArtifactKind::Artwork => {
+            "A video thumbnail, channel banner, album or book cover, with PDF and PNG exports."
+        }
     }
 }
 

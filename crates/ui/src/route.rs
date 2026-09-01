@@ -23,6 +23,8 @@ pub(crate) enum View {
     Mailing(String),
     /// The editor for one campaign.
     Campaign(String),
+    /// The editor for one artwork.
+    Artwork(String),
 }
 
 /// The view for `hash`. Unknown or empty hashes land on Home.
@@ -41,13 +43,15 @@ pub(crate) fn route_from_hash(hash: &str) -> View {
         (Some("prints"), Some(id), None) if is_slug(id) => View::Print(id.to_owned()),
         (Some("mailings"), Some(id), None) if is_slug(id) => View::Mailing(id.to_owned()),
         (Some("campaigns"), Some(id), None) if is_slug(id) => View::Campaign(id.to_owned()),
+        (Some("artworks"), Some(id), None) if is_slug(id) => View::Artwork(id.to_owned()),
         _ => View::Home,
     }
 }
 
 /// The hash for `view`: `#/`, `#/sessions/{id}`, `#/designs/{id}`,
 /// `#/decks/{id}`, `#/documents/{id}`, `#/socials/{id}`,
-/// `#/prints/{id}`, `#/mailings/{id}`, or `#/campaigns/{id}`.
+/// `#/prints/{id}`, `#/mailings/{id}`, `#/campaigns/{id}`, or
+/// `#/artworks/{id}`.
 pub(crate) fn hash_for(view: &View) -> String {
     match view {
         View::Home => "#/".to_owned(),
@@ -59,6 +63,7 @@ pub(crate) fn hash_for(view: &View) -> String {
         View::Print(id) => format!("#/prints/{id}"),
         View::Mailing(id) => format!("#/mailings/{id}"),
         View::Campaign(id) => format!("#/campaigns/{id}"),
+        View::Artwork(id) => format!("#/artworks/{id}"),
     }
 }
 
@@ -153,6 +158,18 @@ mod tests {
         assert_eq!(
             hash_for(&View::Print("poster".to_owned())),
             "#/prints/poster"
+        );
+    }
+
+    #[test]
+    fn artwork_hashes_route_to_the_artwork_editor() {
+        assert_eq!(
+            route_from_hash("#/artworks/launch-candidate-1"),
+            View::Artwork("launch-candidate-1".to_owned())
+        );
+        assert_eq!(
+            hash_for(&View::Artwork("launch".to_owned())),
+            "#/artworks/launch"
         );
     }
 
