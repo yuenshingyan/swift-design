@@ -19,9 +19,12 @@ use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use design_model::{DECK_VIEWPORT, Deck, Design, Document, Mailing, Print, Social, Viewport};
+use design_model::{
+    Campaign, DECK_VIEWPORT, Deck, Design, Document, Mailing, Print, Social, Viewport,
+};
 
 use crate::api_error;
+use crate::campaign_render;
 use crate::deck_render;
 use crate::decks::{DeckStore, is_valid_deck_id};
 use crate::designs::{DesignStore, is_valid_design_id};
@@ -359,6 +362,48 @@ pub async fn dump_mailing_dom(mailing: &Mailing, base_url: &str) -> anyhow::Resu
         },
     );
     dump_rendered_dom(&html, base_url, mailing.viewport()).await
+}
+
+/// Renders ad `index` (zero-based) of `campaign` to a PNG.
+/// `base_url` resolves relative image paths like `/uploads/…`.
+pub async fn screenshot_ad(
+    campaign: &Campaign,
+    index: usize,
+    base_url: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let chrome = find_chrome().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
+        )
+    })?;
+    let html = campaign_render::render_campaign_with(
+        campaign,
+        campaign_render::RenderOptions {
+            only_ad: Some(index),
+            asset_origin: Some(base_url.to_owned()),
+            ..campaign_render::RenderOptions::default()
+        },
+    );
+    screenshot_html(
+        &chrome,
+        &with_base_href(&html, base_url),
+        campaign.viewport(),
+    )
+    .await
+}
+
+/// Renders the whole campaign with the layout audit script and returns
+/// the DOM after the audit ran, as Chrome dumps it.
+pub async fn dump_campaign_dom(campaign: &Campaign, base_url: &str) -> anyhow::Result<String> {
+    let html = campaign_render::render_campaign_with(
+        campaign,
+        campaign_render::RenderOptions {
+            is_auditing: true,
+            asset_origin: Some(base_url.to_owned()),
+            ..campaign_render::RenderOptions::default()
+        },
+    );
+    dump_rendered_dom(&html, base_url, campaign.viewport()).await
 }
 
 /// Loads a rendered page in Chrome and returns the DOM after its

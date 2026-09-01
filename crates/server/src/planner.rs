@@ -217,6 +217,10 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
             "You plan emails with the user: newsletters, announcements, promotions, welcome emails, digests, and invitations, as one email or a sequence.",
             "how the colors read, the audience, the tone, how much the email leans on data, what kind of email it is, the email format, the number of emails, the number of candidates, and how different the candidates are",
         ),
+        ArtifactKind::Campaign => (
+            "You plan ads with the user: display ad campaigns on standard IAB units, as one ad or a set of A/B variants.",
+            "how the colors read, the audience, the tone, how much the ad leans on data, what kind of ad it is, the ad size, the number of ads, the number of candidates, and how different the candidates are",
+        ),
     };
     // The example in the JSON names a real axis of this kind, so the
     // model copies a shape it can use.
@@ -315,6 +319,15 @@ pub(crate) fn planner_input(
                 "Length in emails: {}\nCandidates requested: {candidates}\nVariety: {}\n",
                 options
                     .email_count
+                    .map_or("not chosen yet".to_owned(), |count| count.to_string()),
+                options.variety
+            ));
+        }
+        ArtifactKind::Campaign => {
+            input.push_str(&format!(
+                "Length in ads: {}\nCandidates requested: {candidates}\nVariety: {}\n",
+                options
+                    .ad_count
                     .map_or("not chosen yet".to_owned(), |count| count.to_string()),
                 options.variety
             ));

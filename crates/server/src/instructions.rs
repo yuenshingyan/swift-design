@@ -153,6 +153,29 @@ pub const MAILING_RULES: &[&str] = &[
     "A mailing has no `transition` field.",
 ];
 
+/// Campaign content rules, shared by the agent instructions and the
+/// built-in generation engine. Simplified Technical English.
+pub const CAMPAIGN_RULES: &[&str] = &[
+    "An ad is one HTML fragment in `html` and one CSS block in `css`. One ad is a single placement. Two or more ads are A/B variants of the same size, in priority order.",
+    "Design each ad for the px canvas of the campaign's `size`: 300 by 250 px for `medium_rectangle` (the default), 728 by 90 px for `leaderboard`, 300 by 600 px for `half_page`, 160 by 600 px for `skyscraper`, 320 by 100 px for `mobile_banner`. A campaign has no `viewport` field. Use px units. Do not use vw, vh, vmin, vmax, or container units.",
+    "Lay out with flex, grid, or absolute positioning. The ad root is position: relative, the canvas size, overflow: hidden. Do not add an outer box of your own with a fixed height and overflow: hidden. Such a box hides overflow from the fit.",
+    SHARED_RULES[0],
+    SHARED_RULES[1],
+    SHARED_RULES[2],
+    SHARED_RULES[3],
+    SHARED_RULES[4],
+    "Give every id and @keyframes name a prefix unique to the ad, such as `a3-`.",
+    "Put one message on each ad: one claim, one visual, one call to action. An ad is seen for one second; a second idea halves the first.",
+    "Size type for the canvas. On a 300 by 250 px rectangle: titles 22 to 30px, body 13 to 16px. On a 728 by 90 px leaderboard: one line of 20 to 28px beside the call to action. On a 300 by 600 or 160 by 600 px unit: titles 24 to 34px, body 13 to 16px. On a 320 by 100 px banner: one line of 16 to 22px. Give boxes enough height for every line.",
+    "Write the call to action as a styled `<a>` link: a solid accent background, padding scaled to the canvas, and rounded corners. Every ad carries exactly one.",
+    "Keep text inside a safe margin of at least 5 percent of the short edge on every side. Backgrounds may run to the edge.",
+    SHARED_RULES[5],
+    "The first ad is the primary variant and must work alone. Later ads vary the hook, the visual, or the call to action, not the offer. Put the click-through URL and the alt text in `notes`, as a `Link:` line and an `Alt:` line. The renderer does not show notes on the ad.",
+    "Keep the branding the same on every ad: the same fonts, the same palette, and the same logo treatment, so the set reads as one sender.",
+    "An ad is one click, not a page. Do not write links between ads, `<details>`, `<input>`, or any control besides the one call-to-action `<a>`. Do not write body copy that needs scrolling.",
+    "A campaign has no `transition` field.",
+];
+
 /// Chart rules for data screens, slides, pages, frames, sheets, and
 /// emails. Simplified Technical English.
 pub const CHART_RULES: &[&str] = &[
