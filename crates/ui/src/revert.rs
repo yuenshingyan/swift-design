@@ -42,6 +42,7 @@ pub(crate) async fn revert_artifact(
         ArtifactKind::Social => api::fetch_social_history(id).await?,
         ArtifactKind::Print => api::fetch_print_history(id).await?,
         ArtifactKind::Mailing => api::fetch_mailing_history(id).await?,
+        ArtifactKind::Campaign => api::fetch_campaign_history(id).await?,
     };
     match snapshot_since(&history, since) {
         Some(stamp) => {
@@ -52,6 +53,7 @@ pub(crate) async fn revert_artifact(
                 ArtifactKind::Social => api::restore_social_history(id, &stamp).await?,
                 ArtifactKind::Print => api::restore_print_history(id, &stamp).await?,
                 ArtifactKind::Mailing => api::restore_mailing_history(id, &stamp).await?,
+                ArtifactKind::Campaign => api::restore_campaign_history(id, &stamp).await?,
             }
             Ok("restored")
         }
@@ -64,6 +66,7 @@ pub(crate) async fn revert_artifact(
                 ArtifactKind::Social => api::delete_social(id).await?,
                 ArtifactKind::Print => api::delete_print(id).await?,
                 ArtifactKind::Mailing => api::delete_mailing(id).await?,
+                ArtifactKind::Campaign => api::delete_campaign(id).await?,
             }
             Ok("deleted")
         }

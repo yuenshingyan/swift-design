@@ -991,6 +991,7 @@ pub(crate) fn HistorySection(
                 ArtifactKind::Social => api::fetch_social_history(&id).await,
                 ArtifactKind::Print => api::fetch_print_history(&id).await,
                 ArtifactKind::Mailing => api::fetch_mailing_history(&id).await,
+                ArtifactKind::Campaign => api::fetch_campaign_history(&id).await,
             }
         }
     });
@@ -1039,6 +1040,9 @@ pub(crate) fn HistorySection(
                                                     }
                                                     ArtifactKind::Mailing => {
                                                         api::restore_mailing_history(&design_id, &stamp).await
+                                                    }
+                                                    ArtifactKind::Campaign => {
+                                                        api::restore_campaign_history(&design_id, &stamp).await
                                                     }
                                                 };
                                                 match restored {
