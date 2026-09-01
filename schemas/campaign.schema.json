@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Campaign",
+  "description": "A complete campaign: one theme applied to an ordered list of ads on\none size.",
+  "type": "object",
+  "properties": {
+    "ads": {
+      "description": "Ads in priority order. One ad is a single placement; two or\nmore are A/B variants of the same size.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Ad"
+      }
+    },
+    "outline": {
+      "description": "The ad titles of the complete campaign, in order. A preview\ncampaign lists more titles than it has ads: the app continues\nit from this list later. Leave it empty when the campaign is\ncomplete.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "size": {
+      "description": "The size every ad is laid out on. Absent means medium rectangle.",
+      "$ref": "#/$defs/AdSize",
+      "default": "medium_rectangle"
+    },
+    "theme": {
+      "description": "Visual identity applied to every ad.",
+      "$ref": "#/$defs/Theme"
+    },
+    "title": {
+      "description": "Campaign title, shown in the editor. Not rendered on an ad.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "theme",
+    "ads"
+  ],
+  "$defs": {
+    "Ad": {
+      "description": "One ad: an HTML fragment for the campaign's size, CSS for that\nfragment, and author notes.",
+      "type": "object",
+      "properties": {
+        "css": {
+          "description": "CSS for this ad only. The server scopes every selector to this\nad. Use plain selectors such as `.title` or `h1`. Use the theme\nthrough `var(--background)`, `var(--text)`, `var(--accent)`,\n`var(--muted)`, `var(--heading-font)`, `var(--body-font)`,\n`var(--mono-font)`. No `@import`, no viewport units, no `<`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "html": {
+          "description": "The ad as one HTML fragment. The canvas is the campaign's\n`size` in px: 300 by 250 for medium rectangle, 728 by 90 for\nleaderboard, 300 by 600 for half page, 160 by 600 for\nskyscraper, 320 by 100 for mobile banner. Use px units.\nAllowed: headings, text, lists, tables, `<img>` with\n`src=\"/uploads/{name}\"`, inline `<svg>`, `<pre><code>`,\n`<blockquote>`, `<a>`. Not allowed: `<script>`, `<style>`,\n`<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`,\n`<form>`, `<button>`, `<input>`, media, comments, `on*`\nattributes, `javascript:` and `data:` URLs, external images.\nClose every tag.",
+          "type": "string"
+        },
+        "notes": {
+          "description": "Author notes: the click-through URL and the alt text, as a\n`Link:` line and an `Alt:` line, plus intent or handoff\nremarks. Never rendered on the ad and never exported.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "html"
+      ]
+    },
+    "AdSize": {
+      "description": "The canvas an ad is laid out on. Every size is a standard IAB\ndisplay unit in px.",
+      "oneOf": [
+        {
+          "description": "Medium rectangle: 300 by 250 px.",
+          "type": "string",
+          "const": "medium_rectangle"
+        },
+        {
+          "description": "Leaderboard: 728 by 90 px.",
+          "type": "string",
+          "const": "leaderboard"
+        },
+        {
+          "description": "Half page: 300 by 600 px.",
+          "type": "string",
+          "const": "half_page"
+        },
+        {
+          "description": "Skyscraper: 160 by 600 px.",
+          "type": "string",
+          "const": "skyscraper"
+        },
+        {
+          "description": "Mobile banner: 320 by 100 px.",
+          "type": "string",
+          "const": "mobile_banner"
+        }
+      ]
+    },
+    "FontSet": {
+      "description": "Default CSS font family names.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "Family for every other text element that sets no font.",
+          "type": "string"
+        },
+        "heading": {
+          "description": "Family for text elements with role `title` or `heading`.",
+          "type": "string"
+        },
+        "mono": {
+          "description": "Family for code elements.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "heading",
+        "body",
+        "mono"
+      ]
+    },
+    "Palette": {
+      "description": "Default colors as `#rrggbb` hex strings.",
+      "type": "object",
+      "properties": {
+        "accent": {
+          "description": "Color for highlights, shapes, and chart series that set no color.",
+          "type": "string"
+        },
+        "background": {
+          "description": "Screen background color when a screen sets no background.",
+          "type": "string"
+        },
+        "muted": {
+          "description": "Secondary color for captions, rules, and table stripes.",
+          "type": "string"
+        },
+        "text": {
+          "description": "Text color when an element sets no color.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "background",
+        "text",
+        "accent",
+        "muted"
+      ]
+    },
+    "Theme": {
+      "description": "Default colors and fonts that elements inherit when they omit their\nown.",
+      "type": "object",
+      "properties": {
+        "colors": {
+          "description": "Default colors.",
+          "$ref": "#/$defs/Palette"
+        },
+        "fonts": {
+          "description": "Default font families.",
+          "$ref": "#/$defs/FontSet"
+        },
+        "name": {
+          "description": "Theme name shown in the editor.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "colors",
+        "fonts"
+      ]
+    }
+  }
+}
