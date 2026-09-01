@@ -774,7 +774,7 @@ impl SessionStore {
             .await
             .map_err(SessionError::io)?;
         let json = serde_json::to_string_pretty(session).map_err(SessionError::io)?;
-        tokio::fs::write(self.session_path(&session.id), json)
+        crate::files::write_atomically(&self.session_path(&session.id), &json)
             .await
             .map_err(SessionError::io)
     }
@@ -919,7 +919,7 @@ impl SessionStore {
             .await
             .map_err(SessionError::io)?;
         let json = serde_json::to_string_pretty(set).map_err(SessionError::io)?;
-        tokio::fs::write(self.question_set_path(id, number), json)
+        crate::files::write_atomically(&self.question_set_path(id, number), &json)
             .await
             .map_err(SessionError::io)?;
         session.latest_question_set = Some(number);
@@ -1035,7 +1035,7 @@ impl SessionStore {
         let existing = self.runs(id).await?.len();
         record.run_id = format!("{}-{}", crate::time::unix_now_seconds(), existing + 1);
         let json = serde_json::to_string_pretty(&record).map_err(SessionError::io)?;
-        tokio::fs::write(directory.join(format!("{}.json", record.run_id)), json)
+        crate::files::write_atomically(&directory.join(format!("{}.json", record.run_id)), &json)
             .await
             .map_err(SessionError::io)?;
         Ok(record.run_id)
@@ -1060,7 +1060,7 @@ impl SessionStore {
         record.error = error;
         record.artifacts = artifacts;
         let json = serde_json::to_string_pretty(&record).map_err(SessionError::io)?;
-        tokio::fs::write(&path, json)
+        crate::files::write_atomically(&path, &json)
             .await
             .map_err(SessionError::io)
     }
@@ -1121,7 +1121,9 @@ impl SessionStore {
                 .map_err(SessionError::io)?;
         }
         let json = serde_json::to_string_pretty(value).map_err(SessionError::io)?;
-        tokio::fs::write(path, json).await.map_err(SessionError::io)
+        crate::files::write_atomically(path, &json)
+            .await
+            .map_err(SessionError::io)
     }
 
     async fn read_json<T: for<'de> Deserialize<'de> + Default>(
@@ -1378,6 +1380,29 @@ mod tests {
         assert_eq!(loaded.request, "Design a landing page.");
         assert_eq!(loaded.state, WorkflowState::Intake);
         assert_eq!(store.list().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_session_rewrite_replaces_the_record_and_leaves_no_temporary() {
+        let (_directory, store) = store();
+        store
+            .create(NewSession::demo("talk", "Talk", "A talk."))
+            .await
+            .unwrap();
+        store
+            .apply("talk", WorkflowEvent::GenerationStarted)
+            .await
+            .unwrap();
+        let names: Vec<String> = std::fs::read_dir(store.session_directory("talk"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.iter().all(|name| !name.contains(".writing")),
+            "leftover temporary in {names:?}"
+        );
+        let loaded = store.read("talk").await.unwrap().unwrap();
+        assert_eq!(loaded.state, WorkflowState::Generating);
     }
 
     #[tokio::test]
