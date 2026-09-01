@@ -37,6 +37,11 @@
 //! packs one PNG per email. `GET /mailings/{id}/export.email.zip`
 //! packs one email-client HTML file per email, built by `email_html`
 //! with no Chrome, plus a subjects file.
+//!
+//! Campaigns export under `/campaigns/{id}/export`, and
+//! `GET /campaigns/{id}/export.pdf` prints the campaign with the
+//! user's Chrome, one ad per PDF page. `GET /campaigns/{id}/export.zip`
+//! packs one PNG per ad: the files an ad platform takes.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -51,11 +56,13 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use design_model::{DECK_VIEWPORT, Deck, Design, Document, Mailing, Print, Social};
+use design_model::{Campaign, DECK_VIEWPORT, Deck, Design, Document, Mailing, Print, Social};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use crate::api_error;
+use crate::campaign_render;
+use crate::campaigns::{CampaignStore, is_valid_campaign_id};
 use crate::deck_render;
 use crate::decks::{DeckStore, is_valid_deck_id};
 use crate::designs::{DesignStore, is_valid_design_id};
@@ -104,6 +111,9 @@ pub fn routes() -> Router<crate::AppState> {
             "/mailings/{id}/export.email.zip",
             get(export_mailing_email_zip),
         )
+        .route("/campaigns/{id}/export", get(export_campaign))
+        .route("/campaigns/{id}/export.pdf", get(export_campaign_pdf))
+        .route("/campaigns/{id}/export.zip", get(export_campaign_zip))
 }
 
 /// The `Content-Disposition` value that names the download `{id}.{extension}`.
@@ -845,6 +855,175 @@ async fn inline_uploaded_sheet_images(
         sheet.html = replace_upload_references(&sheet.html, &data_uris);
         if let Some(css) = &sheet.css {
             sheet.css = Some(replace_upload_references(css, &data_uris));
+        }
+    }
+    Ok(())
+}
+
+/// Loads a stored campaign for an export: 400, 404, or 422 as a
+/// response when the id, the file, or the campaign is not usable.
+async fn load_campaign_for_export(
+    campaigns: &CampaignStore,
+    id: &str,
+) -> Result<Campaign, Response> {
+    if !is_valid_campaign_id(id) {
+        return Err(api_error::invalid_campaign_id(id));
+    }
+    let campaign = match campaigns.load(id).await {
+        Ok(Some(campaign)) => campaign,
+        Ok(None) => return Err(api_error::campaign_not_found(id)),
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    let errors = campaign.validate();
+    if !errors.is_empty() {
+        return Err(api_error::campaign_validation_failed(&errors));
+    }
+    Ok(campaign)
+}
+
+/// Renders a stored campaign with uploaded images and theme fonts
+/// inlined and returns it as a file download.
+async fn export_campaign(
+    State(campaigns): State<CampaignStore>,
+    State(uploads): State<UploadStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let mut campaign = match load_campaign_for_export(&campaigns, &id).await {
+        Ok(campaign) => campaign,
+        Err(response) => return response,
+    };
+    if let Err(error) = inline_uploaded_ad_images(&mut campaign, &uploads).await {
+        return api_error::internal_error(&error);
+    }
+    let html = inline_google_fonts(
+        campaign_render::render_campaign(&campaign, false),
+        fetch_as_browser,
+    )
+    .await;
+    tracing::info!(%id, size_bytes = html.len(), "campaign exported");
+    file_download(&id, "html", "text/html; charset=utf-8", html.into_bytes())
+}
+
+/// Prints a stored campaign to a PDF with the user's Chrome, one ad
+/// per PDF page, and returns it as a file download. 503 when no Chrome
+/// is installed.
+async fn export_campaign_pdf(
+    State(campaigns): State<CampaignStore>,
+    State(uploads): State<UploadStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let campaign = match load_campaign_for_export(&campaigns, &id).await {
+        Ok(campaign) => campaign,
+        Err(response) => return response,
+    };
+    build_campaign_pdf_response(&id, campaign, &uploads, screenshots::find_chrome()).await
+}
+
+/// Packs one PNG per ad of a stored campaign into a zip and returns
+/// it as a file download. 503 when no Chrome is installed.
+async fn export_campaign_zip(
+    State(campaigns): State<CampaignStore>,
+    State(settings): State<SettingsStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let campaign = match load_campaign_for_export(&campaigns, &id).await {
+        Ok(campaign) => campaign,
+        Err(response) => return response,
+    };
+    let base_url = format!("http://{}", settings.address());
+    build_campaign_zip_response(&id, &campaign, &base_url, screenshots::find_chrome()).await
+}
+
+/// Inlines uploaded images, renders the campaign's print page, and
+/// prints it with `chrome`. `chrome` is a parameter so the no-Chrome
+/// path is testable.
+async fn build_campaign_pdf_response(
+    id: &str,
+    mut campaign: Campaign,
+    uploads: &UploadStore,
+    chrome: Option<PathBuf>,
+) -> Response {
+    let Some(chrome) = chrome else {
+        return screenshots::chrome_missing_response("PDF exports");
+    };
+    if let Err(error) = inline_uploaded_ad_images(&mut campaign, uploads).await {
+        return api_error::internal_error(&error);
+    }
+    let html = campaign_render::render_campaign_with(
+        &campaign,
+        campaign_render::RenderOptions {
+            is_print: true,
+            ..campaign_render::RenderOptions::default()
+        },
+    );
+    match screenshots::print_html_to_pdf(&chrome, &html, campaign.viewport()).await {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), "campaign exported as pdf");
+            file_download(id, "pdf", "application/pdf", bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Screenshots every ad and packs the PNGs. `chrome` is a parameter so
+/// the no-Chrome path is testable.
+async fn build_campaign_zip_response(
+    id: &str,
+    campaign: &Campaign,
+    base_url: &str,
+    chrome: Option<PathBuf>,
+) -> Response {
+    if chrome.is_none() {
+        return screenshots::chrome_missing_response("PNG exports");
+    }
+    let mut images = Vec::with_capacity(campaign.ads.len());
+    for index in 0..campaign.ads.len() {
+        match screenshots::screenshot_ad(campaign, index, base_url).await {
+            Ok(bytes) => images.push(bytes),
+            Err(error) => return api_error::internal_error(&error),
+        }
+    }
+    match pack_ad_images(id, &images) {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), ad_count = images.len(), "campaign exported as png zip");
+            file_download(id, "zip", "application/zip", bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// One zip with `{id}-ad-{n}.png` per image, 1-based, in order. A PNG
+/// is compressed already, so the entries are stored as they are.
+fn pack_ad_images(id: &str, images: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    for (index, image) in images.iter().enumerate() {
+        writer.start_file(format!("{id}-ad-{}.png", index + 1), options)?;
+        writer.write_all(image)?;
+    }
+    Ok(writer.finish()?.into_inner())
+}
+
+/// The campaign twin of `inline_uploaded_images`: rewrites ad html and
+/// css.
+async fn inline_uploaded_ad_images(
+    campaign: &mut Campaign,
+    uploads: &UploadStore,
+) -> anyhow::Result<()> {
+    let texts: Vec<&str> = campaign
+        .ads
+        .iter()
+        .flat_map(|ad| [Some(ad.html.as_str()), ad.css.as_deref()])
+        .flatten()
+        .collect();
+    let data_uris = collect_data_uris(&texts, uploads).await?;
+    if data_uris.is_empty() {
+        return Ok(());
+    }
+    for ad in &mut campaign.ads {
+        ad.html = replace_upload_references(&ad.html, &data_uris);
+        if let Some(css) = &ad.css {
+            ad.css = Some(replace_upload_references(css, &data_uris));
         }
     }
     Ok(())

@@ -25,6 +25,7 @@ use design_model::{
 
 use crate::api_error;
 use crate::campaign_render;
+use crate::campaigns::{CampaignStore, is_valid_campaign_id};
 use crate::deck_render;
 use crate::decks::{DeckStore, is_valid_deck_id};
 use crate::designs::{DesignStore, is_valid_design_id};
@@ -635,8 +636,8 @@ async fn run_chrome(
 
 /// The `/designs/{id}/screens/{n}.png`, `/decks/{id}/slides/{n}.png`,
 /// `/documents/{id}/pages/{n}.png`, `/socials/{id}/frames/{n}.png`,
-/// `/prints/{id}/sheets/{n}.png`, and `/mailings/{id}/emails/{n}.png`
-/// route table.
+/// `/prints/{id}/sheets/{n}.png`, `/mailings/{id}/emails/{n}.png`, and
+/// `/campaigns/{id}/ads/{n}.png` route table.
 pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/designs/{id}/screens/{file}", get(get_screen_image))
@@ -645,6 +646,7 @@ pub fn routes() -> Router<crate::AppState> {
         .route("/socials/{id}/frames/{file}", get(get_frame_image))
         .route("/prints/{id}/sheets/{file}", get(get_sheet_image))
         .route("/mailings/{id}/emails/{file}", get(get_email_image))
+        .route("/campaigns/{id}/ads/{file}", get(get_ad_image))
 }
 
 /// The 1-based number in a `{n}.png` file name. `None` for any other
@@ -896,6 +898,43 @@ async fn get_email_image(
     }
     let base_url = format!("http://{}", settings.address());
     match screenshot_email(&mailing, number - 1, &base_url).await {
+        Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Serves a PNG of one ad. `file` is `{n}.png` with a 1-based `n`.
+async fn get_ad_image(
+    State(campaigns): State<CampaignStore>,
+    State(settings): State<SettingsStore>,
+    Path((id, file)): Path<(String, String)>,
+) -> Response {
+    if !is_valid_campaign_id(&id) {
+        return api_error::invalid_campaign_id(&id);
+    }
+    let Some(number) = image_number(&file) else {
+        return bad_image_name("ad", &file);
+    };
+    let campaign = match campaigns.load(&id).await {
+        Ok(Some(campaign)) => campaign,
+        Ok(None) => return api_error::campaign_not_found(&id),
+        Err(error) => return api_error::internal_error(&error),
+    };
+    if number > campaign.ads.len() {
+        return api_error::error_response(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "campaign `{id}` has no ad {number}: use 1 to {}",
+                campaign.ads.len()
+            ),
+            Vec::new(),
+        );
+    }
+    if find_chrome().is_none() {
+        return chrome_missing_response("ad images");
+    }
+    let base_url = format!("http://{}", settings.address());
+    match screenshot_ad(&campaign, number - 1, &base_url).await {
         Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
         Err(error) => api_error::internal_error(&error),
     }
