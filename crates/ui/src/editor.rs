@@ -992,6 +992,7 @@ pub(crate) fn HistorySection(
                 ArtifactKind::Print => api::fetch_print_history(&id).await,
                 ArtifactKind::Mailing => api::fetch_mailing_history(&id).await,
                 ArtifactKind::Campaign => api::fetch_campaign_history(&id).await,
+                ArtifactKind::Artwork => api::fetch_artwork_history(&id).await,
             }
         }
     });
@@ -1043,6 +1044,9 @@ pub(crate) fn HistorySection(
                                                     }
                                                     ArtifactKind::Campaign => {
                                                         api::restore_campaign_history(&design_id, &stamp).await
+                                                    }
+                                                    ArtifactKind::Artwork => {
+                                                        api::restore_artwork_history(&design_id, &stamp).await
                                                     }
                                                 };
                                                 match restored {
