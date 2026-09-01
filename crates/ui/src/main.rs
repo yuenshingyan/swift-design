@@ -5,6 +5,7 @@
 //! crate's directory.
 
 mod api;
+mod campaign_editor;
 mod canvas;
 mod chat;
 mod chat_controls;
@@ -787,8 +788,8 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
 .count-chips .effect-chips button { min-width: 1.8rem; padding: 0.3rem 0.55rem;
   justify-content: center; }
 .kind-field { margin-bottom: 0.75rem; }
-/* The app's deck, document, social, print, and mailing questions: cards that look like the model's questions. */
-.deck-questions, .document-questions, .social-questions, .print-questions, .mailing-questions { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+/* The app's deck, document, social, print, mailing, and campaign questions: cards that look like the model's questions. */
+.deck-questions, .document-questions, .social-questions, .print-questions, .mailing-questions, .campaign-questions { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
   align-items: start; }
 .app-question { display: flex; flex-direction: column; gap: 0.6rem; padding: 0.9rem 1rem; }
 /* The cards mix short and tall: fill the rows, and keep every card at
@@ -1263,6 +1264,7 @@ fn App() -> Element {
                     on_open_social: move |social_id| view.set(Some(View::Social(social_id))),
                     on_open_print: move |print_id| view.set(Some(View::Print(print_id))),
                     on_open_mailing: move |mailing_id| view.set(Some(View::Mailing(mailing_id))),
+                    on_open_campaign: move |campaign_id| view.set(Some(View::Campaign(campaign_id))),
                     on_home: move |_| view.set(Some(View::Home)),
                 }
             },
@@ -1316,6 +1318,15 @@ fn App() -> Element {
                 rsx! {
                     mailing_editor::MailingEditor {
                         mailing_id: id,
+                        on_back: move |_| view.set(Some(View::Session(session.clone()))),
+                    }
+                }
+            }
+            Some(View::Campaign(id)) => {
+                let session = settings::artifact_project(&id);
+                rsx! {
+                    campaign_editor::CampaignEditor {
+                        campaign_id: id,
                         on_back: move |_| view.set(Some(View::Session(session.clone()))),
                     }
                 }

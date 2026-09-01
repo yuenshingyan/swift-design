@@ -45,6 +45,9 @@ fn kind_detail(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Mailing => {
             "An email or an email sequence on a 600 px wide canvas, with PDF and PNG exports."
         }
+        ArtifactKind::Campaign => {
+            "A display ad or a set of A/B variants on a standard IAB unit, with PDF and PNG exports."
+        }
     }
 }
 

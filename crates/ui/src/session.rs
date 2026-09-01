@@ -8,8 +8,9 @@ use dioxus::prelude::*;
 
 use crate::api;
 use crate::canvas::{
-    CandidateCanvas, candidate_label, cards_from_decks, cards_from_designs, cards_from_documents,
-    cards_from_mailings, cards_from_prints, cards_from_socials, queued_finishes,
+    CandidateCanvas, candidate_label, cards_from_campaigns, cards_from_decks, cards_from_designs,
+    cards_from_documents, cards_from_mailings, cards_from_prints, cards_from_socials,
+    queued_finishes,
 };
 use crate::chat::{mention_at, recall_prompt, remove_mention, watch_caret};
 use crate::chat_controls::{ModelChip, SendButton, with_effort};
@@ -20,13 +21,13 @@ use crate::question_card::{
 };
 use crate::revert::{revert_artifact, turn_start};
 use crate::run_settings::{
-    DeckQuestions, DocumentQuestions, MailingQuestions, PrintQuestions, RunSettings,
-    SharedQuestions, SocialQuestions, app_answers,
+    CampaignQuestions, DeckQuestions, DocumentQuestions, MailingQuestions, PrintQuestions,
+    RunSettings, SharedQuestions, SocialQuestions, app_answers,
 };
 use crate::settings::{SettingsPanel, pause_briefly};
 use crate::status::{RunStatusCard, working_label};
 use design_model::{
-    ArtifactKind, DECK_VIEWPORT, EmailFormat, Format, Orientation, Paper, PrintSize,
+    AdSize, ArtifactKind, DECK_VIEWPORT, EmailFormat, Format, Orientation, Paper, PrintSize,
     QuestionAnswer, Viewport, WorkflowState,
 };
 
@@ -71,6 +72,8 @@ pub(crate) fn generation_step(log_tail: &str) -> Option<&'static str> {
         Some("Writing sheets")
     } else if lower.contains("email") {
         Some("Writing emails")
+    } else if lower.contains(" ads") || lower.contains(" ad ") {
+        Some("Writing ads")
     } else if lower.contains("candidate") || lower.contains("screen") || lower.contains("writ") {
         Some("Writing screens")
     } else {
@@ -94,6 +97,7 @@ pub(crate) fn SessionWorkspace(
     on_open_social: EventHandler<String>,
     on_open_print: EventHandler<String>,
     on_open_mailing: EventHandler<String>,
+    on_open_campaign: EventHandler<String>,
     on_home: EventHandler<()>,
 ) -> Element {
     let mut view = use_signal(|| Option::<api::SessionView>::None);
@@ -103,6 +107,7 @@ pub(crate) fn SessionWorkspace(
     let mut socials = use_signal(Vec::<api::SocialSummary>::new);
     let mut prints = use_signal(Vec::<api::PrintSummary>::new);
     let mut mailings = use_signal(Vec::<api::MailingSummary>::new);
+    let mut campaigns = use_signal(Vec::<api::CampaignSummary>::new);
     let mut run = use_signal(|| Option::<api::AgentRun>::None);
     let mut settings = use_signal(|| Option::<api::SettingsView>::None);
     let is_configuring = use_signal(|| false);
@@ -149,6 +154,9 @@ pub(crate) fn SessionWorkspace(
                     }
                     if let Ok(list) = api::fetch_mailing_list().await {
                         mailings.set(list);
+                    }
+                    if let Ok(list) = api::fetch_campaign_list().await {
+                        campaigns.set(list);
                     }
                     if let Ok(fetched) = api::fetch_agent_run().await {
                         run.set(Some(fetched));
@@ -223,11 +231,15 @@ pub(crate) fn SessionWorkspace(
         ArtifactKind::Mailing => {
             cards_from_mailings(&mailings(), &session_id, session.chosen_design.as_deref())
         }
+        ArtifactKind::Campaign => {
+            cards_from_campaigns(&campaigns(), &session_id, session.chosen_design.as_deref())
+        }
     };
     // A placeholder before the first card takes the kind's canvas: the
     // paper the options name for a document, the format they name for
     // a social or a mailing, the size and orientation they name for a
-    // print, the deck canvas, or the desktop.
+    // print, the ad size they name for a campaign, the deck canvas, or
+    // the desktop.
     let blank_viewport = match session.artifact_kind {
         ArtifactKind::Demo => Viewport::default(),
         ArtifactKind::Deck => DECK_VIEWPORT,
@@ -265,6 +277,13 @@ pub(crate) fn SessionWorkspace(
             .email_format
             .as_deref()
             .and_then(EmailFormat::from_name)
+            .unwrap_or_default()
+            .viewport(),
+        ArtifactKind::Campaign => session
+            .options
+            .ad_size
+            .as_deref()
+            .and_then(AdSize::from_name)
             .unwrap_or_default()
             .viewport(),
     };
@@ -736,6 +755,13 @@ pub(crate) fn SessionWorkspace(
                                         on_error: move |message| error.set(Some(message)),
                                     }
                                 }
+                                if session.artifact_kind == ArtifactKind::Campaign {
+                                    CampaignQuestions {
+                                        session_id: session_id.clone(),
+                                        options: session.options.clone(),
+                                        on_error: move |message| error.set(Some(message)),
+                                    }
+                                }
                             }),
                             // A demo's run settings belong with the
                             // app's cards: the card is open on the
@@ -780,6 +806,7 @@ pub(crate) fn SessionWorkspace(
                             ArtifactKind::Social => on_open_social.call(id),
                             ArtifactKind::Print => on_open_print.call(id),
                             ArtifactKind::Mailing => on_open_mailing.call(id),
+                            ArtifactKind::Campaign => on_open_campaign.call(id),
                         },
                         on_continue: {
                             let session_id = session_id.clone();
@@ -804,6 +831,7 @@ pub(crate) fn SessionWorkspace(
                                     ArtifactKind::Social => api::fork_social(&artifact_id).await,
                                     ArtifactKind::Print => api::fork_print(&artifact_id).await,
                                     ArtifactKind::Mailing => api::fork_mailing(&artifact_id).await,
+                                    ArtifactKind::Campaign => api::fork_campaign(&artifact_id).await,
                                 };
                                 if let Err(message) = forked {
                                     error.set(Some(message));

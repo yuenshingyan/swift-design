@@ -11,8 +11,8 @@
 use std::collections::{HashMap, HashSet};
 
 use design_model::{
-    A4_VIEWPORT, ArtifactKind, DECK_VIEWPORT, EmailFormat, Format, LETTER_VIEWPORT, Orientation,
-    PrintSize, Viewport,
+    A4_VIEWPORT, AdSize, ArtifactKind, DECK_VIEWPORT, EmailFormat, Format, LETTER_VIEWPORT,
+    Orientation, PrintSize, Viewport,
 };
 use dioxus::prelude::*;
 
@@ -87,6 +87,9 @@ impl CanvasCard {
             }
             ArtifactKind::Mailing => {
                 format!("/mailings/{}/render?v={revision}&email={current}", self.id)
+            }
+            ArtifactKind::Campaign => {
+                format!("/campaigns/{}/render?v={revision}&ad={current}", self.id)
             }
         }
     }
@@ -239,6 +242,30 @@ pub(crate) fn cards_from_mailings(
     mine
 }
 
+/// The campaign cards that belong to `session_id`, chosen campaign
+/// first.
+pub(crate) fn cards_from_campaigns(
+    campaigns: &[api::CampaignSummary],
+    session_id: &str,
+    chosen: Option<&str>,
+) -> Vec<CanvasCard> {
+    let mut mine: Vec<CanvasCard> = campaigns
+        .iter()
+        .filter(|summary| crate::settings::artifact_project(&summary.id) == session_id)
+        .map(|summary| CanvasCard {
+            id: summary.id.clone(),
+            title: summary.title.clone(),
+            kind: ArtifactKind::Campaign,
+            count: summary.ad_count,
+            outline_count: summary.outline_count,
+            ratio: summary.aspect_ratio(),
+            viewport: summary.viewport(),
+        })
+        .collect();
+    mine.sort_by_key(|card| Some(card.id.as_str()) != chosen);
+    mine
+}
+
 /// The card name from its id: `Candidate 2` from `talk-candidate-2`, or
 /// `Candidate` when the id has no number.
 pub(crate) fn candidate_label(id: &str) -> String {
@@ -264,8 +291,8 @@ pub(crate) fn candidate_number(id: &str) -> &str {
 
 /// The name of one canvas, for a tab: `Desktop`, `Tablet`, `Phone`,
 /// `Deck`, `A4`, `Letter`, a social format such as `Square`, a print
-/// size such as `A3` or `A4 landscape`, or an email format such as
-/// `Email` or `Long email`.
+/// size such as `A3` or `A4 landscape`, an email format such as
+/// `Email` or `Long email`, or an ad size such as `Leaderboard`.
 pub(crate) fn canvas_name(viewport: Viewport) -> &'static str {
     if viewport == A4_VIEWPORT {
         return "A4";
@@ -312,6 +339,13 @@ pub(crate) fn canvas_name(viewport: Viewport) -> &'static str {
             EmailFormat::Long => "Long email",
         };
     }
+    // The IAB ad units share no size with any canvas above.
+    if let Some(size) = AdSize::ALL
+        .into_iter()
+        .find(|size| size.viewport() == viewport)
+    {
+        return size.label();
+    }
     match (viewport.width, viewport.height) {
         (390, 844) => "Phone",
         (1024, 768) => "Tablet",
@@ -352,7 +386,16 @@ pub(crate) fn stage_height_rem(viewport: Viewport, count: usize) -> f64 {
     let count = count.max(1) as f64;
     let width_each = (ROW_WIDTH_REM - CARD_GAP_REM * (count - 1.0)) / count;
     let ratio = f64::from(viewport.width) / f64::from(viewport.height);
-    (width_each / ratio).clamp(CARD_STAGE_HEIGHT_REM, STAGE_HEIGHT_CAP_REM)
+    // The floor keeps a card readable, but a very wide canvas floored
+    // to it grows past the whole row: a 728 by 90 leaderboard at 13.5
+    // rem is 109 rem wide. Drop the floor when even one floored card
+    // cannot fit the row.
+    let floor = if CARD_STAGE_HEIGHT_REM * ratio <= ROW_WIDTH_REM {
+        CARD_STAGE_HEIGHT_REM
+    } else {
+        0.0
+    };
+    (width_each / ratio).clamp(floor, STAGE_HEIGHT_CAP_REM)
 }
 
 /// The sizes one card sets as CSS variables, in rem: the frame width at
@@ -546,6 +589,7 @@ pub(crate) fn CandidateCanvas(
                     ArtifactKind::Social => api::delete_social(&id).await,
                     ArtifactKind::Print => api::delete_print(&id).await,
                     ArtifactKind::Mailing => api::delete_mailing(&id).await,
+                    ArtifactKind::Campaign => api::delete_campaign(&id).await,
                 };
                 if let Err(message) = deleted {
                     on_error.call(message);
@@ -1087,6 +1131,18 @@ mod tests {
             "Short email"
         );
         assert_eq!(canvas_name(design_model::LONG_EMAIL_VIEWPORT), "Long email");
+        assert_eq!(
+            canvas_name(design_model::MEDIUM_RECTANGLE_AD_VIEWPORT),
+            "Medium rectangle"
+        );
+        assert_eq!(
+            canvas_name(design_model::LEADERBOARD_AD_VIEWPORT),
+            "Leaderboard"
+        );
+        assert_eq!(
+            canvas_name(design_model::MOBILE_BANNER_AD_VIEWPORT),
+            "Mobile banner"
+        );
         assert_eq!(canvas_size(Viewport::default()), "1440 × 900");
         assert_eq!(canvas_size(DECK_VIEWPORT), "1920 × 1080");
     }
@@ -1207,6 +1263,19 @@ mod tests {
         // A phone is narrow, so six still share a tall row.
         assert!((stage_height_rem(phone(), 6) - 28.5).abs() < 0.01);
         assert!((stage_height_rem(tablet(), 3) - 20.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_wide_ad_canvas_drops_the_stage_floor_instead_of_overflowing_the_row() {
+        let leaderboard = design_model::LEADERBOARD_AD_VIEWPORT;
+        // One 728 by 90 card fills the row at its natural height; the
+        // 13.5 rem floor would make it 109 rem wide.
+        assert!((stage_height_rem(leaderboard, 1) - 10.39).abs() < 0.01);
+        assert!((stage_height_rem(leaderboard, 2) - 5.13).abs() < 0.01);
+        // A 320 by 100 banner still fits the row when floored, so it
+        // keeps the floor like every other canvas.
+        let banner = design_model::MOBILE_BANNER_AD_VIEWPORT;
+        assert!((stage_height_rem(banner, 2) - 13.5).abs() < 0.01);
     }
 
     #[test]
