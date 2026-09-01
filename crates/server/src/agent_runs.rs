@@ -294,6 +294,9 @@ impl AgentRunner {
                 if let Some(campaigns) = &self.campaigns {
                     engine = engine.with_campaigns(campaigns.clone());
                 }
+                if let Some(artworks) = &self.artworks {
+                    engine = engine.with_artworks(artworks.clone());
+                }
                 if let Some(templates) = &self.templates {
                     engine = engine.with_templates(templates.clone());
                 }
