@@ -379,6 +379,8 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                         span { class: "divider" }
                         PrintExportGroup {
                             print_id: print_id.clone(),
+                            selected: selected(),
+                            sheet_count,
                             can_export_with_chrome,
                         }
                         button {
@@ -763,48 +765,120 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
     }
 }
 
-/// The print toolbar's export group: the HTML file, the Chrome-backed
-/// PDF for the print shop, and the Chrome-backed zip of one PNG per
-/// sheet.
+/// The href of the HTML or PDF export: the whole print, or one
+/// zero-based sheet through the export route's `?sheet=N` query.
+fn export_href(print_id: &str, extension: &str, only: Option<usize>) -> String {
+    match only {
+        Some(index) => format!("/prints/{print_id}/export{extension}?sheet={}", index + 1),
+        None => format!("/prints/{print_id}/export{extension}"),
+    }
+}
+
+/// The href of the PNG export: one sheet's image when scoped, the zip
+/// of every sheet otherwise.
+fn png_export_href(print_id: &str, only: Option<usize>) -> String {
+    match only {
+        Some(index) => format!("/prints/{print_id}/sheets/{}.png", index + 1),
+        None => format!("/prints/{print_id}/export.zip"),
+    }
+}
+
+/// The download name of a scoped export file, matching the zip entry.
+fn sheet_download_name(print_id: &str, index: usize, extension: &str) -> String {
+    format!("{print_id}-sheet-{}.{extension}", index + 1)
+}
+
+/// The print toolbar's export group: a scope toggle when the print
+/// has more than one sheet, then the HTML file, the Chrome-backed
+/// PDF, and the PNG export. The scope picks the sheet on screen or
+/// every sheet; scoped, the PNG link downloads that sheet's image.
 #[component]
-fn PrintExportGroup(print_id: String, can_export_with_chrome: bool) -> Element {
+fn PrintExportGroup(
+    print_id: String,
+    selected: usize,
+    sheet_count: usize,
+    can_export_with_chrome: bool,
+) -> Element {
+    let mut is_scoped = use_signal(|| false);
+    let only = (is_scoped() && sheet_count > 1).then_some(selected);
+    let number = selected + 1;
+    let html_title = if only.is_some() {
+        "Export the sheet on screen as one HTML file"
+    } else {
+        "Export as one HTML file"
+    };
+    let pdf_title = if only.is_some() {
+        "Export the sheet on screen as a one-page PDF"
+    } else {
+        "Export as a PDF for the print shop, one page per sheet"
+    };
+    let png_title = if only.is_some() {
+        "Download the sheet on screen as a PNG"
+    } else {
+        "Export as a zip of one PNG per sheet"
+    };
     rsx! {
         div { class: "export-group",
+            if sheet_count > 1 {
+                div { class: "canvas-tabs export-scope", role: "tablist",
+                    button {
+                        role: "tab",
+                        class: if only.is_none() { "canvas-tab open" } else { "canvas-tab" },
+                        title: "Export every sheet",
+                        onclick: move |_| is_scoped.set(false),
+                        "All sheets"
+                    }
+                    button {
+                        role: "tab",
+                        class: if only.is_some() { "canvas-tab open" } else { "canvas-tab" },
+                        title: "Export only the sheet on screen",
+                        onclick: move |_| is_scoped.set(true),
+                        "Sheet {number}"
+                    }
+                }
+            }
             a {
                 class: "button",
-                href: "/prints/{print_id}/export",
-                title: "Export as one HTML file",
+                href: export_href(&print_id, "", only),
+                title: "{html_title}",
                 span { dangerous_inner_html: icons::DOWNLOAD }
                 "HTML"
             }
             ChromeExportLink {
-                href: format!("/prints/{print_id}/export.pdf"),
+                href: export_href(&print_id, ".pdf", only),
                 label: "PDF",
-                title: "Export as a PDF for the print shop, one page per sheet",
+                title: pdf_title,
                 is_enabled: can_export_with_chrome,
             }
             ChromeExportLink {
-                href: format!("/prints/{print_id}/export.zip"),
+                href: png_export_href(&print_id, only),
                 label: "PNG",
-                title: "Export as a zip of one PNG per sheet",
+                title: png_title,
                 is_enabled: can_export_with_chrome,
+                download: only.map(|index| sheet_download_name(&print_id, index, "png")),
             }
         }
     }
 }
 
 /// One export link that needs Chrome on the server: a link when Chrome
-/// is there, a disabled cell with the install hint otherwise.
+/// is there, a disabled cell with the install hint otherwise. With
+/// `download`, the link saves under that name instead of navigating.
 #[component]
 fn ChromeExportLink(
     href: String,
     label: &'static str,
     title: &'static str,
     is_enabled: bool,
+    #[props(default)] download: Option<String>,
 ) -> Element {
     if is_enabled {
         return rsx! {
-            a { class: "button", href: "{href}", title: "{title}",
+            a {
+                class: "button",
+                href: "{href}",
+                title: "{title}",
+                download,
                 span { dangerous_inner_html: icons::DOWNLOAD }
                 "{label}"
             }
@@ -900,6 +974,30 @@ mod tests {
         PrintPreviewMode, default_sheet, field_count, outline_title, preview_stage_class,
         remove_sheet, sheet_label, size_option_label,
     };
+
+    #[test]
+    fn a_scoped_export_names_the_sheet_in_href_and_filename() {
+        assert_eq!(
+            super::export_href("launch", "", None),
+            "/prints/launch/export"
+        );
+        assert_eq!(
+            super::export_href("launch", ".pdf", Some(1)),
+            "/prints/launch/export.pdf?sheet=2"
+        );
+        assert_eq!(
+            super::png_export_href("launch", None),
+            "/prints/launch/export.zip"
+        );
+        assert_eq!(
+            super::png_export_href("launch", Some(1)),
+            "/prints/launch/sheets/2.png"
+        );
+        assert_eq!(
+            super::sheet_download_name("launch", 1, "png"),
+            "launch-sheet-2.png"
+        );
+    }
 
     #[test]
     fn a_print_opens_in_read_mode_and_edit_loads_the_editing_script() {

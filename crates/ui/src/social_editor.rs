@@ -379,6 +379,8 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                         span { class: "divider" }
                         SocialExportGroup {
                             social_id: social_id.clone(),
+                            selected: selected(),
+                            frame_count,
                             can_export_with_chrome,
                         }
                         button {
@@ -734,47 +736,120 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
     }
 }
 
-/// The social toolbar's export group: the HTML file, the Chrome-backed
-/// PDF, and the Chrome-backed zip of one PNG per frame.
+/// The href of the HTML or PDF export: the whole social, or one
+/// zero-based frame through the export route's `?frame=N` query.
+fn export_href(social_id: &str, extension: &str, only: Option<usize>) -> String {
+    match only {
+        Some(index) => format!("/socials/{social_id}/export{extension}?frame={}", index + 1),
+        None => format!("/socials/{social_id}/export{extension}"),
+    }
+}
+
+/// The href of the PNG export: one frame's image when scoped, the zip
+/// of every frame otherwise.
+fn png_export_href(social_id: &str, only: Option<usize>) -> String {
+    match only {
+        Some(index) => format!("/socials/{social_id}/frames/{}.png", index + 1),
+        None => format!("/socials/{social_id}/export.zip"),
+    }
+}
+
+/// The download name of a scoped export file, matching the zip entry.
+fn frame_download_name(social_id: &str, index: usize, extension: &str) -> String {
+    format!("{social_id}-frame-{}.{extension}", index + 1)
+}
+
+/// The social toolbar's export group: a scope toggle when the social
+/// has more than one frame, then the HTML file, the Chrome-backed
+/// PDF, and the PNG export. The scope picks the frame on screen or
+/// every frame; scoped, the PNG link downloads that frame's image.
 #[component]
-fn SocialExportGroup(social_id: String, can_export_with_chrome: bool) -> Element {
+fn SocialExportGroup(
+    social_id: String,
+    selected: usize,
+    frame_count: usize,
+    can_export_with_chrome: bool,
+) -> Element {
+    let mut is_scoped = use_signal(|| false);
+    let only = (is_scoped() && frame_count > 1).then_some(selected);
+    let number = selected + 1;
+    let html_title = if only.is_some() {
+        "Export the frame on screen as one HTML file"
+    } else {
+        "Export as one HTML file"
+    };
+    let pdf_title = if only.is_some() {
+        "Export the frame on screen as a one-page PDF"
+    } else {
+        "Export as a PDF, one sheet per frame"
+    };
+    let png_title = if only.is_some() {
+        "Download the frame on screen as a PNG"
+    } else {
+        "Export as a zip of one PNG per frame"
+    };
     rsx! {
         div { class: "export-group",
+            if frame_count > 1 {
+                div { class: "canvas-tabs export-scope", role: "tablist",
+                    button {
+                        role: "tab",
+                        class: if only.is_none() { "canvas-tab open" } else { "canvas-tab" },
+                        title: "Export every frame",
+                        onclick: move |_| is_scoped.set(false),
+                        "All frames"
+                    }
+                    button {
+                        role: "tab",
+                        class: if only.is_some() { "canvas-tab open" } else { "canvas-tab" },
+                        title: "Export only the frame on screen",
+                        onclick: move |_| is_scoped.set(true),
+                        "Frame {number}"
+                    }
+                }
+            }
             a {
                 class: "button",
-                href: "/socials/{social_id}/export",
-                title: "Export as one HTML file",
+                href: export_href(&social_id, "", only),
+                title: "{html_title}",
                 span { dangerous_inner_html: icons::DOWNLOAD }
                 "HTML"
             }
             ChromeExportLink {
-                href: format!("/socials/{social_id}/export.pdf"),
+                href: export_href(&social_id, ".pdf", only),
                 label: "PDF",
-                title: "Export as a PDF, one sheet per frame",
+                title: pdf_title,
                 is_enabled: can_export_with_chrome,
             }
             ChromeExportLink {
-                href: format!("/socials/{social_id}/export.zip"),
+                href: png_export_href(&social_id, only),
                 label: "PNG",
-                title: "Export as a zip of one PNG per frame",
+                title: png_title,
                 is_enabled: can_export_with_chrome,
+                download: only.map(|index| frame_download_name(&social_id, index, "png")),
             }
         }
     }
 }
 
 /// One export link that needs Chrome on the server: a link when Chrome
-/// is there, a disabled cell with the install hint otherwise.
+/// is there, a disabled cell with the install hint otherwise. With
+/// `download`, the link saves under that name instead of navigating.
 #[component]
 fn ChromeExportLink(
     href: String,
     label: &'static str,
     title: &'static str,
     is_enabled: bool,
+    #[props(default)] download: Option<String>,
 ) -> Element {
     if is_enabled {
         return rsx! {
-            a { class: "button", href: "{href}", title: "{title}",
+            a {
+                class: "button",
+                href: "{href}",
+                title: "{title}",
+                download,
                 span { dangerous_inner_html: icons::DOWNLOAD }
                 "{label}"
             }
@@ -871,6 +946,30 @@ mod tests {
         SocialPreviewMode, default_frame, field_count, format_option_label, frame_label,
         outline_title, preview_stage_class, remove_frame,
     };
+
+    #[test]
+    fn a_scoped_export_names_the_frame_in_href_and_filename() {
+        assert_eq!(
+            super::export_href("launch", "", None),
+            "/socials/launch/export"
+        );
+        assert_eq!(
+            super::export_href("launch", ".pdf", Some(1)),
+            "/socials/launch/export.pdf?frame=2"
+        );
+        assert_eq!(
+            super::png_export_href("launch", None),
+            "/socials/launch/export.zip"
+        );
+        assert_eq!(
+            super::png_export_href("launch", Some(1)),
+            "/socials/launch/frames/2.png"
+        );
+        assert_eq!(
+            super::frame_download_name("launch", 1, "png"),
+            "launch-frame-2.png"
+        );
+    }
 
     #[test]
     fn a_social_opens_in_read_mode_and_edit_loads_the_editing_script() {

@@ -379,6 +379,8 @@ fn LoadedArtworkEditor(artwork_id: String, initial: Artwork, on_back: EventHandl
                         span { class: "divider" }
                         ArtworkExportGroup {
                             artwork_id: artwork_id.clone(),
+                            selected: selected(),
+                            cover_count,
                             can_export_with_chrome,
                         }
                         button {
@@ -734,48 +736,123 @@ fn LoadedArtworkEditor(artwork_id: String, initial: Artwork, on_back: EventHandl
     }
 }
 
-/// The artwork toolbar's export group: the HTML file, the
-/// Chrome-backed PDF of one page per cover, and the Chrome-backed zip of
-/// one PNG per cover.
+/// The href of the HTML or PDF export: the whole artwork, or one
+/// zero-based cover through the export route's `?cover=N` query.
+fn export_href(artwork_id: &str, extension: &str, only: Option<usize>) -> String {
+    match only {
+        Some(index) => format!(
+            "/artworks/{artwork_id}/export{extension}?cover={}",
+            index + 1
+        ),
+        None => format!("/artworks/{artwork_id}/export{extension}"),
+    }
+}
+
+/// The href of the PNG export: one cover's image when scoped, the zip
+/// of every cover otherwise.
+fn png_export_href(artwork_id: &str, only: Option<usize>) -> String {
+    match only {
+        Some(index) => format!("/artworks/{artwork_id}/covers/{}.png", index + 1),
+        None => format!("/artworks/{artwork_id}/export.zip"),
+    }
+}
+
+/// The download name of a scoped export file, matching the zip entry.
+fn cover_download_name(artwork_id: &str, index: usize, extension: &str) -> String {
+    format!("{artwork_id}-cover-{}.{extension}", index + 1)
+}
+
+/// The artwork toolbar's export group: a scope toggle when the artwork
+/// has more than one cover, then the HTML file, the Chrome-backed PDF,
+/// and the PNG export. The scope picks the cover on screen or every
+/// cover; scoped, the PNG link downloads that cover's image.
 #[component]
-fn ArtworkExportGroup(artwork_id: String, can_export_with_chrome: bool) -> Element {
+fn ArtworkExportGroup(
+    artwork_id: String,
+    selected: usize,
+    cover_count: usize,
+    can_export_with_chrome: bool,
+) -> Element {
+    let mut is_scoped = use_signal(|| false);
+    let only = (is_scoped() && cover_count > 1).then_some(selected);
+    let number = selected + 1;
+    let html_title = if only.is_some() {
+        "Export the cover on screen as one HTML file"
+    } else {
+        "Export as one HTML file"
+    };
+    let pdf_title = if only.is_some() {
+        "Export the cover on screen as a one-page PDF"
+    } else {
+        "Export as a PDF, one page per cover"
+    };
+    let png_title = if only.is_some() {
+        "Download the cover on screen as a PNG"
+    } else {
+        "Export as a zip of one PNG per cover"
+    };
     rsx! {
         div { class: "export-group",
+            if cover_count > 1 {
+                div { class: "canvas-tabs export-scope", role: "tablist",
+                    button {
+                        role: "tab",
+                        class: if only.is_none() { "canvas-tab open" } else { "canvas-tab" },
+                        title: "Export every cover",
+                        onclick: move |_| is_scoped.set(false),
+                        "All covers"
+                    }
+                    button {
+                        role: "tab",
+                        class: if only.is_some() { "canvas-tab open" } else { "canvas-tab" },
+                        title: "Export only the cover on screen",
+                        onclick: move |_| is_scoped.set(true),
+                        "Cover {number}"
+                    }
+                }
+            }
             a {
                 class: "button",
-                href: "/artworks/{artwork_id}/export",
-                title: "Export as one HTML file",
+                href: export_href(&artwork_id, "", only),
+                title: "{html_title}",
                 span { dangerous_inner_html: icons::DOWNLOAD }
                 "HTML"
             }
             ChromeExportLink {
-                href: format!("/artworks/{artwork_id}/export.pdf"),
+                href: export_href(&artwork_id, ".pdf", only),
                 label: "PDF",
-                title: "Export as a PDF, one page per cover",
+                title: pdf_title,
                 is_enabled: can_export_with_chrome,
             }
             ChromeExportLink {
-                href: format!("/artworks/{artwork_id}/export.zip"),
+                href: png_export_href(&artwork_id, only),
                 label: "PNG",
-                title: "Export as a zip of one PNG per cover",
+                title: png_title,
                 is_enabled: can_export_with_chrome,
+                download: only.map(|index| cover_download_name(&artwork_id, index, "png")),
             }
         }
     }
 }
 
 /// One export link that needs Chrome on the server: a link when Chrome
-/// is there, a disabled cell with the install hint otherwise.
+/// is there, a disabled cell with the install hint otherwise. With
+/// `download`, the link saves under that name instead of navigating.
 #[component]
 fn ChromeExportLink(
     href: String,
     label: &'static str,
     title: &'static str,
     is_enabled: bool,
+    #[props(default)] download: Option<String>,
 ) -> Element {
     if is_enabled {
         return rsx! {
-            a { class: "button", href: "{href}", title: "{title}",
+            a {
+                class: "button",
+                href: "{href}",
+                title: "{title}",
+                download,
                 span { dangerous_inner_html: icons::DOWNLOAD }
                 "{label}"
             }
@@ -879,9 +956,31 @@ mod tests {
     use design_model::{Artwork, Cover, CoverSize, FontSet, Palette, Theme};
 
     use super::{
-        ArtworkPreviewMode, cover_label, default_cover, field_count, outline_title,
-        preview_stage_class, remove_cover, size_option_label, strip_tile_width,
+        ArtworkPreviewMode, cover_download_name, cover_label, default_cover, export_href,
+        field_count, outline_title, png_export_href, preview_stage_class, remove_cover,
+        size_option_label, strip_tile_width,
     };
+
+    #[test]
+    fn a_scoped_export_names_the_cover_in_href_and_filename() {
+        assert_eq!(export_href("launch", "", None), "/artworks/launch/export");
+        assert_eq!(
+            export_href("launch", ".pdf", Some(1)),
+            "/artworks/launch/export.pdf?cover=2"
+        );
+        assert_eq!(
+            png_export_href("launch", None),
+            "/artworks/launch/export.zip"
+        );
+        assert_eq!(
+            png_export_href("launch", Some(1)),
+            "/artworks/launch/covers/2.png"
+        );
+        assert_eq!(
+            cover_download_name("launch", 1, "png"),
+            "launch-cover-2.png"
+        );
+    }
 
     #[test]
     fn a_artwork_opens_in_read_mode_and_edit_loads_the_editing_script() {

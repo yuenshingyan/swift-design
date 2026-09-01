@@ -379,6 +379,8 @@ fn LoadedCampaignEditor(
                         span { class: "divider" }
                         CampaignExportGroup {
                             campaign_id: campaign_id.clone(),
+                            selected: selected(),
+                            ad_count,
                             can_export_with_chrome,
                         }
                         button {
@@ -734,48 +736,123 @@ fn LoadedCampaignEditor(
     }
 }
 
-/// The campaign toolbar's export group: the HTML file, the
-/// Chrome-backed PDF of one page per ad, and the Chrome-backed zip of
-/// one PNG per ad.
+/// The href of the HTML or PDF export: the whole campaign, or one
+/// zero-based ad through the export route's `?ad=N` query.
+fn export_href(campaign_id: &str, extension: &str, only: Option<usize>) -> String {
+    match only {
+        Some(index) => format!(
+            "/campaigns/{campaign_id}/export{extension}?ad={}",
+            index + 1
+        ),
+        None => format!("/campaigns/{campaign_id}/export{extension}"),
+    }
+}
+
+/// The href of the PNG export: one ad's image when scoped, the zip
+/// of every ad otherwise.
+fn png_export_href(campaign_id: &str, only: Option<usize>) -> String {
+    match only {
+        Some(index) => format!("/campaigns/{campaign_id}/ads/{}.png", index + 1),
+        None => format!("/campaigns/{campaign_id}/export.zip"),
+    }
+}
+
+/// The download name of a scoped export file, matching the zip entry.
+fn ad_download_name(campaign_id: &str, index: usize, extension: &str) -> String {
+    format!("{campaign_id}-ad-{}.{extension}", index + 1)
+}
+
+/// The campaign toolbar's export group: a scope toggle when the
+/// campaign has more than one ad, then the HTML file, the
+/// Chrome-backed PDF, and the PNG export. The scope picks the ad on
+/// screen or every ad; scoped, the PNG link downloads that ad's image.
 #[component]
-fn CampaignExportGroup(campaign_id: String, can_export_with_chrome: bool) -> Element {
+fn CampaignExportGroup(
+    campaign_id: String,
+    selected: usize,
+    ad_count: usize,
+    can_export_with_chrome: bool,
+) -> Element {
+    let mut is_scoped = use_signal(|| false);
+    let only = (is_scoped() && ad_count > 1).then_some(selected);
+    let number = selected + 1;
+    let html_title = if only.is_some() {
+        "Export the ad on screen as one HTML file"
+    } else {
+        "Export as one HTML file"
+    };
+    let pdf_title = if only.is_some() {
+        "Export the ad on screen as a one-page PDF"
+    } else {
+        "Export as a PDF, one page per ad"
+    };
+    let png_title = if only.is_some() {
+        "Download the ad on screen as a PNG"
+    } else {
+        "Export as a zip of one PNG per ad"
+    };
     rsx! {
         div { class: "export-group",
+            if ad_count > 1 {
+                div { class: "canvas-tabs export-scope", role: "tablist",
+                    button {
+                        role: "tab",
+                        class: if only.is_none() { "canvas-tab open" } else { "canvas-tab" },
+                        title: "Export every ad",
+                        onclick: move |_| is_scoped.set(false),
+                        "All ads"
+                    }
+                    button {
+                        role: "tab",
+                        class: if only.is_some() { "canvas-tab open" } else { "canvas-tab" },
+                        title: "Export only the ad on screen",
+                        onclick: move |_| is_scoped.set(true),
+                        "Ad {number}"
+                    }
+                }
+            }
             a {
                 class: "button",
-                href: "/campaigns/{campaign_id}/export",
-                title: "Export as one HTML file",
+                href: export_href(&campaign_id, "", only),
+                title: "{html_title}",
                 span { dangerous_inner_html: icons::DOWNLOAD }
                 "HTML"
             }
             ChromeExportLink {
-                href: format!("/campaigns/{campaign_id}/export.pdf"),
+                href: export_href(&campaign_id, ".pdf", only),
                 label: "PDF",
-                title: "Export as a PDF, one page per ad",
+                title: pdf_title,
                 is_enabled: can_export_with_chrome,
             }
             ChromeExportLink {
-                href: format!("/campaigns/{campaign_id}/export.zip"),
+                href: png_export_href(&campaign_id, only),
                 label: "PNG",
-                title: "Export as a zip of one PNG per ad",
+                title: png_title,
                 is_enabled: can_export_with_chrome,
+                download: only.map(|index| ad_download_name(&campaign_id, index, "png")),
             }
         }
     }
 }
 
 /// One export link that needs Chrome on the server: a link when Chrome
-/// is there, a disabled cell with the install hint otherwise.
+/// is there, a disabled cell with the install hint otherwise. With
+/// `download`, the link saves under that name instead of navigating.
 #[component]
 fn ChromeExportLink(
     href: String,
     label: &'static str,
     title: &'static str,
     is_enabled: bool,
+    #[props(default)] download: Option<String>,
 ) -> Element {
     if is_enabled {
         return rsx! {
-            a { class: "button", href: "{href}", title: "{title}",
+            a {
+                class: "button",
+                href: "{href}",
+                title: "{title}",
+                download,
                 span { dangerous_inner_html: icons::DOWNLOAD }
                 "{label}"
             }
@@ -882,6 +959,30 @@ mod tests {
         CampaignPreviewMode, ad_label, default_ad, field_count, outline_title, preview_stage_class,
         remove_ad, size_option_label, strip_tile_width,
     };
+
+    #[test]
+    fn a_scoped_export_names_the_ad_in_href_and_filename() {
+        assert_eq!(
+            super::export_href("launch", "", None),
+            "/campaigns/launch/export"
+        );
+        assert_eq!(
+            super::export_href("launch", ".pdf", Some(1)),
+            "/campaigns/launch/export.pdf?ad=2"
+        );
+        assert_eq!(
+            super::png_export_href("launch", None),
+            "/campaigns/launch/export.zip"
+        );
+        assert_eq!(
+            super::png_export_href("launch", Some(1)),
+            "/campaigns/launch/ads/2.png"
+        );
+        assert_eq!(
+            super::ad_download_name("launch", 1, "png"),
+            "launch-ad-2.png"
+        );
+    }
 
     #[test]
     fn a_campaign_opens_in_read_mode_and_edit_loads_the_editing_script() {
