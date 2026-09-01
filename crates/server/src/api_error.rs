@@ -138,6 +138,35 @@ pub fn invalid_mailing_id(id: &str) -> Response {
     )
 }
 
+/// 422 with one detail line per campaign validation error.
+pub fn campaign_validation_failed(errors: &[ValidationError]) -> Response {
+    let details: Vec<String> = errors.iter().map(ToString::to_string).collect();
+    tracing::info!(error_count = details.len(), "rejected invalid campaign");
+    error_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "campaign failed validation",
+        details,
+    )
+}
+
+/// 404 for a campaign id with no file behind it.
+pub fn campaign_not_found(id: &str) -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        &format!("no campaign with id `{id}`"),
+        Vec::new(),
+    )
+}
+
+/// 400 for a campaign id that is not kebab-case.
+pub fn invalid_campaign_id(id: &str) -> Response {
+    error_response(
+        StatusCode::BAD_REQUEST,
+        &format!("invalid campaign id `{id}`: use lowercase letters, digits, and hyphens"),
+        Vec::new(),
+    )
+}
+
 /// 422 with one detail line per document validation error.
 pub fn document_validation_failed(errors: &[ValidationError]) -> Response {
     let details: Vec<String> = errors.iter().map(ToString::to_string).collect();

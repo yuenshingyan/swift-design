@@ -67,6 +67,14 @@ pub(crate) fn sample_mailing() -> design_model::Mailing {
     serde_json::from_str(SAMPLE_MAILING).unwrap()
 }
 
+/// The canonical valid campaign, as JSON.
+pub(crate) const SAMPLE_CAMPAIGN: &str = include_str!("../../../fixtures/sample-campaign.json");
+
+/// The canonical valid campaign, parsed.
+pub(crate) fn sample_campaign() -> design_model::Campaign {
+    serde_json::from_str(SAMPLE_CAMPAIGN).unwrap()
+}
+
 /// The multipart boundary the upload helper uses.
 pub(crate) const MULTIPART_BOUNDARY: &str = "swiftdesignboundary";
 
@@ -100,6 +108,9 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
     let mailings = MailingStore::new(directory.path().join("mailings")).with_history(
         crate::history::HistoryStore::new(directory.path().join("mailing-history")),
     );
+    let campaigns = CampaignStore::new(directory.path().join("campaigns")).with_history(
+        crate::history::HistoryStore::new(directory.path().join("campaign-history")),
+    );
     let sessions = SessionStore::new(directory.path().join("data/sessions"));
     let settings = crate::settings::SettingsStore::new(
         directory.path().join("data/settings.json"),
@@ -117,7 +128,8 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
     .with_documents(documents.clone())
     .with_socials(socials.clone())
     .with_prints(prints.clone())
-    .with_mailings(mailings.clone());
+    .with_mailings(mailings.clone())
+    .with_campaigns(campaigns.clone());
     router(AppState {
         designs,
         decks,
@@ -125,6 +137,7 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
         socials,
         prints,
         mailings,
+        campaigns,
         uploads: UploadStore::new(directory.path().join("uploads")),
         sessions,
         settings,
@@ -135,6 +148,7 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
     })
 }
 
+use crate::campaigns::CampaignStore;
 use crate::decks::DeckStore;
 use crate::designs::DesignStore;
 use crate::documents::DocumentStore;
@@ -290,6 +304,15 @@ pub(crate) async fn open_generating_print_session(application: &Router, id: &str
 pub(crate) async fn open_generating_mailing_session(application: &Router, id: &str) {
     let body = format!(
         "{{\"id\":\"{id}\",\"request\":\"An email about {id}.\",\"artifact_kind\":\"mailing\"}}"
+    );
+    open_generating_session_with(application, id, &body).await;
+}
+
+/// Creates a campaign session and drives it to the generating state,
+/// so campaign writes are allowed.
+pub(crate) async fn open_generating_campaign_session(application: &Router, id: &str) {
+    let body = format!(
+        "{{\"id\":\"{id}\",\"request\":\"An ad about {id}.\",\"artifact_kind\":\"campaign\"}}"
     );
     open_generating_session_with(application, id, &body).await;
 }

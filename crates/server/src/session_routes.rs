@@ -11,15 +11,16 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use design_model::{
-    ArtifactKind, BriefQuestionSet, CUSTOM_ANSWER_LIMIT, DECK_SCENARIOS, EMAIL_COUNT_LIMIT,
-    FRAME_COUNT_LIMIT, PAGE_COUNT_LIMIT, QuestionAnswer, SHEET_COUNT_LIMIT, WorkflowEvent,
-    WorkflowState, app_axes, axis_by_key, is_custom_answer, is_deck_scenario, validate_answers,
-    validate_question_set,
+    AD_COUNT_LIMIT, ArtifactKind, BriefQuestionSet, CUSTOM_ANSWER_LIMIT, DECK_SCENARIOS,
+    EMAIL_COUNT_LIMIT, FRAME_COUNT_LIMIT, PAGE_COUNT_LIMIT, QuestionAnswer, SHEET_COUNT_LIMIT,
+    WorkflowEvent, WorkflowState, app_axes, axis_by_key, is_custom_answer, is_deck_scenario,
+    validate_answers, validate_question_set,
 };
 use serde::Deserialize;
 
 use crate::agent_runs::AgentRunner;
 use crate::api_error;
+use crate::campaigns::CampaignStore;
 use crate::candidates::{CANDIDATE_LIMIT, PLATFORM_LIMIT};
 use crate::decks::DeckStore;
 use crate::designs::{DesignStore, is_valid_design_id};
@@ -83,7 +84,7 @@ fn title_from_request(request: &str) -> String {
     line.chars().take(80).collect()
 }
 
-/// The six artifact stores as one extractor, so a handler that reads
+/// The seven artifact stores as one extractor, so a handler that reads
 /// or deletes a session's artifacts takes one argument for them.
 #[derive(Clone)]
 pub(crate) struct ArtifactStores {
@@ -93,6 +94,7 @@ pub(crate) struct ArtifactStores {
     pub(crate) socials: SocialStore,
     pub(crate) prints: PrintStore,
     pub(crate) mailings: MailingStore,
+    pub(crate) campaigns: CampaignStore,
 }
 
 impl axum::extract::FromRef<crate::AppState> for ArtifactStores {
@@ -104,6 +106,7 @@ impl axum::extract::FromRef<crate::AppState> for ArtifactStores {
             socials: state.socials.clone(),
             prints: state.prints.clone(),
             mailings: state.mailings.clone(),
+            campaigns: state.campaigns.clone(),
         }
     }
 }
@@ -135,6 +138,7 @@ async fn build_view(
         socials: Vec::new(),
         prints: Vec::new(),
         mailings: Vec::new(),
+        campaigns: Vec::new(),
     };
     match view.session.artifact_kind {
         ArtifactKind::Demo => {
@@ -190,6 +194,16 @@ async fn build_view(
         ArtifactKind::Mailing => {
             view.mailings = stores
                 .mailings
+                .list()
+                .await
+                .map_err(io)?
+                .into_iter()
+                .filter(|summary| session_id_of_artifact(&summary.id) == id)
+                .collect();
+        }
+        ArtifactKind::Campaign => {
+            view.campaigns = stores
+                .campaigns
                 .list()
                 .await
                 .map_err(io)?
@@ -404,6 +418,13 @@ async fn delete_session_artifacts(stores: &ArtifactStores, id: &str) {
             tracing::warn!(session_id = %id, %error, "deleting the session mailings failed")
         }
     }
+    match stores.campaigns.delete_session(id).await {
+        Ok(count) if count > 0 => tracing::info!(session_id = %id, count, "campaigns deleted"),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(session_id = %id, %error, "deleting the session campaigns failed")
+        }
+    }
 }
 
 /// Reads a session or turns the miss into a response.
@@ -479,6 +500,13 @@ fn option_problem(options: &RunOptions) -> Option<String> {
     {
         return Some(format!(
             "email_count must be between 1 and {EMAIL_COUNT_LIMIT}, got {count}"
+        ));
+    }
+    if let Some(count) = options.ad_count
+        && (count == 0 || count > AD_COUNT_LIMIT)
+    {
+        return Some(format!(
+            "ad_count must be between 1 and {AD_COUNT_LIMIT}, got {count}"
         ));
     }
     if let Some(variations) = options.variations
@@ -594,6 +622,7 @@ fn regenerate_problem(session: &Session, request: &MessageRequest) -> Option<Str
         design_model::ArtifactKind::Social => "frame",
         design_model::ArtifactKind::Print => "sheet",
         design_model::ArtifactKind::Mailing => "email",
+        design_model::ArtifactKind::Campaign => "ad",
     };
     if referenced_indexes(&request.content, unit).is_empty() {
         return Some(format!(

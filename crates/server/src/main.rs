@@ -4,6 +4,8 @@
 mod agent_runs;
 mod api_error;
 mod brand;
+mod campaign_render;
+mod campaigns;
 mod candidates;
 mod capture;
 mod concepts;
@@ -73,10 +75,11 @@ use axum::extract::FromRef;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use design_model::{Deck, Design, Document, Mailing, Print, Social};
+use design_model::{Campaign, Deck, Design, Document, Mailing, Print, Social};
 use tracing_subscriber::EnvFilter;
 
 use crate::agent_runs::AgentRunner;
+use crate::campaigns::CampaignStore;
 use crate::decks::DeckStore;
 use crate::designs::DesignStore;
 use crate::documents::DocumentStore;
@@ -106,6 +109,8 @@ pub(crate) struct AppState {
     prints: PrintStore,
     /// Mailing storage.
     mailings: MailingStore,
+    /// Campaign storage.
+    campaigns: CampaignStore,
     /// Upload storage.
     uploads: UploadStore,
     /// Session storage.
@@ -155,6 +160,12 @@ impl FromRef<AppState> for PrintStore {
 impl FromRef<AppState> for MailingStore {
     fn from_ref(state: &AppState) -> MailingStore {
         state.mailings.clone()
+    }
+}
+
+impl FromRef<AppState> for CampaignStore {
+    fn from_ref(state: &AppState) -> CampaignStore {
+        state.campaigns.clone()
     }
 }
 
@@ -241,6 +252,10 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("SWIFT_DESIGN_MAILINGS_DIR").unwrap_or_else(|_| "mailings".to_owned());
     let mailing_history_directory = std::env::var("SWIFT_DESIGN_MAILING_HISTORY_DIR")
         .unwrap_or_else(|_| "mailing-history".to_owned());
+    let campaigns_directory =
+        std::env::var("SWIFT_DESIGN_CAMPAIGNS_DIR").unwrap_or_else(|_| "campaigns".to_owned());
+    let campaign_history_directory = std::env::var("SWIFT_DESIGN_CAMPAIGN_HISTORY_DIR")
+        .unwrap_or_else(|_| "campaign-history".to_owned());
     let changes = ChangeNotifier::new();
     let designs = DesignStore::new(PathBuf::from(designs_directory))
         .with_history(HistoryStore::new(PathBuf::from(history_directory)));
@@ -254,6 +269,8 @@ async fn main() -> anyhow::Result<()> {
         .with_history(HistoryStore::new(PathBuf::from(print_history_directory)));
     let mailings = MailingStore::new(PathBuf::from(mailings_directory))
         .with_history(HistoryStore::new(PathBuf::from(mailing_history_directory)));
+    let campaigns = CampaignStore::new(PathBuf::from(campaigns_directory))
+        .with_history(HistoryStore::new(PathBuf::from(campaign_history_directory)));
     let sessions = SessionStore::new(PathBuf::from(sessions_directory));
     // A run dies with the process. Its session would wait for it forever.
     for session_id in sessions
@@ -279,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
     .with_socials(socials.clone())
     .with_prints(prints.clone())
     .with_mailings(mailings.clone())
+    .with_campaigns(campaigns.clone())
     .with_templates(templates.clone())
     .with_uploads(uploads.clone());
     let state = AppState {
@@ -288,6 +306,7 @@ async fn main() -> anyhow::Result<()> {
         socials,
         prints,
         mailings,
+        campaigns,
         uploads,
         sessions,
         settings,
@@ -313,6 +332,7 @@ fn router(state: AppState) -> Router {
         .route("/socials/render", post(render_social))
         .route("/prints/render", post(render_print))
         .route("/mailings/render", post(render_mailing))
+        .route("/campaigns/render", post(render_campaign))
         .merge(agent_runs::routes())
         .merge(candidates::routes())
         .merge(events::routes())
@@ -324,6 +344,7 @@ fn router(state: AppState) -> Router {
         .merge(socials::routes())
         .merge(prints::routes())
         .merge(mailings::routes())
+        .merge(campaigns::routes())
         .merge(presenter::routes())
         .merge(projects::routes())
         .merge(export::routes())
@@ -395,6 +416,16 @@ async fn render_mailing(Json(mailing): Json<Mailing>) -> Response {
         return Html(mailing_render::render_mailing(&mailing, false)).into_response();
     }
     api_error::mailing_validation_failed(&errors)
+}
+
+/// Renders a posted campaign to HTML, or reports every validation
+/// error.
+async fn render_campaign(Json(campaign): Json<Campaign>) -> Response {
+    let errors = campaign.validate();
+    if errors.is_empty() {
+        return Html(campaign_render::render_campaign(&campaign, false)).into_response();
+    }
+    api_error::campaign_validation_failed(&errors)
 }
 
 #[cfg(test)]

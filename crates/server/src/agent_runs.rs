@@ -117,6 +117,7 @@ pub struct AgentRunner {
     socials: Option<crate::socials::SocialStore>,
     prints: Option<crate::prints::PrintStore>,
     mailings: Option<crate::mailings::MailingStore>,
+    campaigns: Option<crate::campaigns::CampaignStore>,
     sessions: SessionStore,
     address: String,
     templates: Option<crate::templates::TemplateStore>,
@@ -145,6 +146,7 @@ impl AgentRunner {
             socials: None,
             prints: None,
             mailings: None,
+            campaigns: None,
             sessions,
             address,
             templates: None,
@@ -196,6 +198,13 @@ impl AgentRunner {
     /// store.
     pub fn with_mailings(mut self, mailings: crate::mailings::MailingStore) -> Self {
         self.mailings = Some(mailings);
+        self
+    }
+
+    /// Lets campaign sessions write their candidates to the campaign
+    /// store.
+    pub fn with_campaigns(mut self, campaigns: crate::campaigns::CampaignStore) -> Self {
+        self.campaigns = Some(campaigns);
         self
     }
 

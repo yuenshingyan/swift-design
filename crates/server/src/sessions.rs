@@ -154,6 +154,16 @@ pub struct RunOptions {
     /// agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email_count: Option<u32>,
+    /// What kind of ad to write, one of `AD_KINDS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ad_kind: Option<String>,
+    /// The canvas an ad is laid out on, one of `AD_SIZES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ad_size: Option<String>,
+    /// How many ads a campaign run writes. `None` leaves it to the
+    /// agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ad_count: Option<u32>,
     /// The axes whose value the planner suggested from the request, by
     /// option key. The card shows them as picked and marks them as
     /// suggested. A pick by the user removes the key.
@@ -186,6 +196,8 @@ impl RunOptions {
             "orientation" => &self.orientation,
             "email_kind" => &self.email_kind,
             "email_format" => &self.email_format,
+            "ad_kind" => &self.ad_kind,
+            "ad_size" => &self.ad_size,
             _ => return None,
         })
     }
@@ -213,6 +225,8 @@ impl RunOptions {
             "orientation" => &mut self.orientation,
             "email_kind" => &mut self.email_kind,
             "email_format" => &mut self.email_format,
+            "ad_kind" => &mut self.ad_kind,
+            "ad_size" => &mut self.ad_size,
             _ => return None,
         })
     }
@@ -292,6 +306,9 @@ impl Default for RunOptions {
             email_kind: None,
             email_format: None,
             email_count: None,
+            ad_kind: None,
+            ad_size: None,
+            ad_count: None,
             suggested: Vec::new(),
             variety: default_effort(),
             templates: Vec::new(),
@@ -608,6 +625,9 @@ pub struct SessionView {
     /// The mailings that belong to this session. Empty unless the
     /// session is a mailing session.
     pub mailings: Vec<crate::mailings::MailingSummary>,
+    /// The campaigns that belong to this session. Empty unless the
+    /// session is a campaign session.
+    pub campaigns: Vec<crate::campaigns::CampaignSummary>,
 }
 
 /// What went wrong in a session operation.
