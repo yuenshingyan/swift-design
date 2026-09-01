@@ -385,12 +385,30 @@ pub async fn screenshot_ad(
             ..campaign_render::RenderOptions::default()
         },
     );
+    let html = with_fixed_canvas(&html, campaign.viewport());
     screenshot_html(
         &chrome,
         &with_base_href(&html, base_url),
         campaign.viewport(),
     )
     .await
+}
+
+/// Pins the canvas to its exact px size at the top left of the page.
+///
+/// Chrome clamps a headless window to about 500 by 375 px. Every IAB
+/// ad unit is smaller than that, so the shared shell, which centers
+/// the canvas and sizes it from the viewport, would render it scaled
+/// and off center, and the screenshot crop of the top left would cut
+/// it. The override wins because it comes after the shell styles.
+fn with_fixed_canvas(html: &str, viewport: Viewport) -> String {
+    let override_style = format!(
+        "<style>main.design > [data-swift-design-frame] {{ align-items: flex-start; \
+         justify-content: flex-start; }}\n\
+         [data-swift-design-screen] {{ width: {}px; }}</style>",
+        viewport.width
+    );
+    html.replacen("</head>", &format!("{override_style}\n</head>"), 1)
 }
 
 /// Renders the whole campaign with the layout audit script and returns
@@ -980,6 +998,18 @@ mod tests {
         let result = with_base_href(html, "http://127.0.0.1:3000/");
         assert!(result.contains("<head>\n<base href=\"http://127.0.0.1:3000/\">"));
         assert!(with_base_href("<p>x</p>", "http://h").starts_with("<base href=\"http://h/\">"));
+    }
+
+    #[test]
+    fn a_fixed_canvas_pins_the_ad_to_the_top_left_at_its_px_size() {
+        let html = "<!doctype html>\n<html><head>\n<style>a</style></head><body></body></html>";
+        let result = with_fixed_canvas(html, design_model::LEADERBOARD_AD_VIEWPORT);
+        assert!(result.contains("justify-content: flex-start"));
+        assert!(result.contains("[data-swift-design-screen] { width: 728px; }</style>\n</head>"));
+        // The override lands after the shell styles, so it wins.
+        let shell = result.find("<style>a</style>").unwrap_or(usize::MAX);
+        let fixed = result.find("flex-start").unwrap_or(0);
+        assert!(shell < fixed);
     }
 
     #[tokio::test]
