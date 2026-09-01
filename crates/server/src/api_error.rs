@@ -167,6 +167,35 @@ pub fn invalid_campaign_id(id: &str) -> Response {
     )
 }
 
+/// 422 with one detail line per artwork validation error.
+pub fn artwork_validation_failed(errors: &[ValidationError]) -> Response {
+    let details: Vec<String> = errors.iter().map(ToString::to_string).collect();
+    tracing::info!(error_count = details.len(), "rejected invalid artwork");
+    error_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "artwork failed validation",
+        details,
+    )
+}
+
+/// 404 for an artwork id with no file behind it.
+pub fn artwork_not_found(id: &str) -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        &format!("no artwork with id `{id}`"),
+        Vec::new(),
+    )
+}
+
+/// 400 for an artwork id that is not kebab-case.
+pub fn invalid_artwork_id(id: &str) -> Response {
+    error_response(
+        StatusCode::BAD_REQUEST,
+        &format!("invalid artwork id `{id}`: use lowercase letters, digits, and hyphens"),
+        Vec::new(),
+    )
+}
+
 /// 422 with one detail line per document validation error.
 pub fn document_validation_failed(errors: &[ValidationError]) -> Response {
     let details: Vec<String> = errors.iter().map(ToString::to_string).collect();

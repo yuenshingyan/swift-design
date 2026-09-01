@@ -17,6 +17,7 @@ use design_model::{ArtifactKind, DECK_VIEWPORT};
 use serde::Deserialize;
 
 use crate::api_error;
+use crate::artworks::ArtworkStore;
 use crate::campaigns::CampaignStore;
 use crate::decks::DeckStore;
 use crate::designs::{DesignStore, is_valid_design_id};
@@ -219,6 +220,23 @@ async fn campaign_cards(store: &CampaignStore, base: &str) -> anyhow::Result<Vec
         .collect())
 }
 
+/// The artwork candidates of `base` as cards, sorted by id.
+async fn artwork_cards(store: &ArtworkStore, base: &str) -> anyhow::Result<Vec<CandidateCard>> {
+    let prefix = format!("{base}-candidate-");
+    Ok(store
+        .list()
+        .await?
+        .into_iter()
+        .filter(|summary| summary.id.starts_with(&prefix))
+        .map(|summary| CandidateCard {
+            preview_url: format!("/artworks/{}/render", summary.id),
+            ratio: summary.size.viewport().aspect_ratio_css(),
+            id: summary.id,
+            theme: summary.theme,
+        })
+        .collect())
+}
+
 /// Shows every candidate for `base` side by side with a choose button.
 async fn chooser(
     State(stores): State<ArtifactStores>,
@@ -237,6 +255,7 @@ async fn chooser(
         ArtifactKind::Print => print_cards(&stores.prints, &base).await,
         ArtifactKind::Mailing => mailing_cards(&stores.mailings, &base).await,
         ArtifactKind::Campaign => campaign_cards(&stores.campaigns, &base).await,
+        ArtifactKind::Artwork => artwork_cards(&stores.artworks, &base).await,
     };
     let mut cards = match cards {
         Ok(cards) => cards,
@@ -284,6 +303,7 @@ async fn choose(
         ArtifactKind::Print => copy_print(&stores.prints, &request.id, &base).await,
         ArtifactKind::Mailing => copy_mailing(&stores.mailings, &request.id, &base).await,
         ArtifactKind::Campaign => copy_campaign(&stores.campaigns, &request.id, &base).await,
+        ArtifactKind::Artwork => copy_artwork(&stores.artworks, &request.id, &base).await,
     };
     if let Err(response) = copied {
         return response;
@@ -431,6 +451,27 @@ pub(crate) async fn copy_campaign(
         .map_err(|error| api_error::internal_error(&error))
 }
 
+/// Copies the artwork `id` to `base`. The copy is agent-authored.
+pub(crate) async fn copy_artwork(
+    store: &ArtworkStore,
+    id: &str,
+    base: &str,
+) -> Result<(), Response> {
+    let artwork = match store.load(id).await {
+        Ok(Some(artwork)) => artwork,
+        Ok(None) => return Err(api_error::artwork_not_found(id)),
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    store
+        .save(base, &artwork)
+        .await
+        .map_err(|error| api_error::internal_error(&error))?;
+    store
+        .clear_user_paths(base)
+        .await
+        .map_err(|error| api_error::internal_error(&error))
+}
+
 /// The word for one artifact of `kind`, for the page text.
 fn unit_name(kind: ArtifactKind) -> &'static str {
     match kind {
@@ -441,6 +482,7 @@ fn unit_name(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Print => "print piece",
         ArtifactKind::Mailing => "mailing",
         ArtifactKind::Campaign => "campaign",
+        ArtifactKind::Artwork => "artwork",
     }
 }
 
@@ -455,6 +497,7 @@ fn chosen_url(kind: ArtifactKind, base: &str) -> String {
         ArtifactKind::Print => format!("/prints/{base}/render"),
         ArtifactKind::Mailing => format!("/mailings/{base}/render"),
         ArtifactKind::Campaign => format!("/campaigns/{base}/render"),
+        ArtifactKind::Artwork => format!("/artworks/{base}/render"),
     }
 }
 

@@ -75,6 +75,14 @@ pub(crate) fn sample_campaign() -> design_model::Campaign {
     serde_json::from_str(SAMPLE_CAMPAIGN).unwrap()
 }
 
+/// The canonical valid artwork, as JSON.
+pub(crate) const SAMPLE_ARTWORK: &str = include_str!("../../../fixtures/sample-artwork.json");
+
+/// The canonical valid artwork, parsed.
+pub(crate) fn sample_artwork() -> design_model::Artwork {
+    serde_json::from_str(SAMPLE_ARTWORK).unwrap()
+}
+
 /// The multipart boundary the upload helper uses.
 pub(crate) const MULTIPART_BOUNDARY: &str = "swiftdesignboundary";
 
@@ -111,6 +119,9 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
     let campaigns = CampaignStore::new(directory.path().join("campaigns")).with_history(
         crate::history::HistoryStore::new(directory.path().join("campaign-history")),
     );
+    let artworks = ArtworkStore::new(directory.path().join("artworks")).with_history(
+        crate::history::HistoryStore::new(directory.path().join("artwork-history")),
+    );
     let sessions = SessionStore::new(directory.path().join("data/sessions"));
     let settings = crate::settings::SettingsStore::new(
         directory.path().join("data/settings.json"),
@@ -129,7 +140,8 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
     .with_socials(socials.clone())
     .with_prints(prints.clone())
     .with_mailings(mailings.clone())
-    .with_campaigns(campaigns.clone());
+    .with_campaigns(campaigns.clone())
+    .with_artworks(artworks.clone());
     router(AppState {
         designs,
         decks,
@@ -138,6 +150,7 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
         prints,
         mailings,
         campaigns,
+        artworks,
         uploads: UploadStore::new(directory.path().join("uploads")),
         sessions,
         settings,
@@ -148,6 +161,7 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
     })
 }
 
+use crate::artworks::ArtworkStore;
 use crate::campaigns::CampaignStore;
 use crate::decks::DeckStore;
 use crate::designs::DesignStore;
@@ -313,6 +327,15 @@ pub(crate) async fn open_generating_mailing_session(application: &Router, id: &s
 pub(crate) async fn open_generating_campaign_session(application: &Router, id: &str) {
     let body = format!(
         "{{\"id\":\"{id}\",\"request\":\"An ad about {id}.\",\"artifact_kind\":\"campaign\"}}"
+    );
+    open_generating_session_with(application, id, &body).await;
+}
+
+/// Creates an artwork session and drives it to the generating state,
+/// so artwork writes are allowed.
+pub(crate) async fn open_generating_artwork_session(application: &Router, id: &str) {
+    let body = format!(
+        "{{\"id\":\"{id}\",\"request\":\"A cover about {id}.\",\"artifact_kind\":\"artwork\"}}"
     );
     open_generating_session_with(application, id, &body).await;
 }

@@ -164,6 +164,16 @@ pub struct RunOptions {
     /// agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ad_count: Option<u32>,
+    /// What kind of cover to write, one of `COVER_KINDS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_kind: Option<String>,
+    /// The canvas a cover is laid out on, one of `COVER_SIZES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_size: Option<String>,
+    /// How many covers an artwork run writes. `None` leaves it to the
+    /// agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_count: Option<u32>,
     /// The axes whose value the planner suggested from the request, by
     /// option key. The card shows them as picked and marks them as
     /// suggested. A pick by the user removes the key.
@@ -198,6 +208,8 @@ impl RunOptions {
             "email_format" => &self.email_format,
             "ad_kind" => &self.ad_kind,
             "ad_size" => &self.ad_size,
+            "cover_kind" => &self.cover_kind,
+            "cover_size" => &self.cover_size,
             _ => return None,
         })
     }
@@ -227,6 +239,8 @@ impl RunOptions {
             "email_format" => &mut self.email_format,
             "ad_kind" => &mut self.ad_kind,
             "ad_size" => &mut self.ad_size,
+            "cover_kind" => &mut self.cover_kind,
+            "cover_size" => &mut self.cover_size,
             _ => return None,
         })
     }
@@ -309,6 +323,9 @@ impl Default for RunOptions {
             ad_kind: None,
             ad_size: None,
             ad_count: None,
+            cover_kind: None,
+            cover_size: None,
+            cover_count: None,
             suggested: Vec::new(),
             variety: default_effort(),
             templates: Vec::new(),
@@ -628,6 +645,9 @@ pub struct SessionView {
     /// The campaigns that belong to this session. Empty unless the
     /// session is a campaign session.
     pub campaigns: Vec<crate::campaigns::CampaignSummary>,
+    /// The artworks that belong to this session. Empty unless the
+    /// session is an artwork session.
+    pub artworks: Vec<crate::artworks::ArtworkSummary>,
 }
 
 /// What went wrong in a session operation.
