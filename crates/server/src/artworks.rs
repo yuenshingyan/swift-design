@@ -687,7 +687,7 @@ mod tests {
         store.save("report", &edited).await.unwrap();
         let stamp = store.history("report").await.unwrap()[0].stamp.clone();
         let restored = store.restore("report", &stamp).await.unwrap().unwrap();
-        assert_eq!(restored.title, "Swift Design launch covers");
+        assert_eq!(restored.title, "Swift Design launch thumbnails");
         assert_eq!(store.history("report").await.unwrap().len(), 2);
         assert!(
             store

@@ -164,7 +164,7 @@ mod tests {
         );
         assert!(html.starts_with("<!doctype html>"));
         assert!(html.contains("id=\"cover-1\""));
-        assert!(html.contains("<h1>Seven kinds. One chat.</h1>"));
+        assert!(html.contains("<h1>Eight kinds. One chat.</h1>"));
         assert!(html.contains("<main class=\"design artwork\" data-swift-design-width=\"1280\" data-swift-design-height=\"720\">"));
         assert!(html.contains("--swift-design-scale: calc(tan(atan2(100cqw, 1280px)))"));
         assert!(html.contains("aspect-ratio: 1280 / 720;"));
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn cover_css_is_scoped_to_its_cover() {
         let html = render_artwork(&sample_artwork(), false);
-        assert!(html.contains("[data-swift-design-screen=\"0\"] .a1-cover{"));
+        assert!(html.contains("[data-swift-design-screen=\"0\"] .c1-cover{"));
         assert!(html.contains("[data-swift-design-screen=\"1\"] h1{"));
         assert!(!html.contains("\nh1{"));
     }
