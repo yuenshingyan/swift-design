@@ -314,6 +314,59 @@ function postHtml(root, save) {
   post({ type: 'swift-design-html', screen: screenIndexOf(root), html: serialize(root), save: !!save });
   updateHandles();
 }
+// Undo keeps one snapshot stack per screen root. A snapshot is the
+// serialized HTML from before a mutation; redo holds what undo popped.
+const UNDO_LIMIT = 50;
+const undoStacks = new Map();
+let lastEditedRoot = null;
+let coalesced = null;
+function stacksOf(root) {
+  if (!undoStacks.has(root)) { undoStacks.set(root, { undo: [], redo: [] }); }
+  return undoStacks.get(root);
+}
+function recordSnapshot(root) {
+  const stacks = stacksOf(root);
+  stacks.undo.push(serialize(root));
+  if (stacks.undo.length > UNDO_LIMIT) { stacks.undo.shift(); }
+  stacks.redo = [];
+  lastEditedRoot = root;
+  coalesced = null;
+}
+// A keystroke stream from the inspector arrives as one apply message
+// per key. One snapshot per second per property keeps the stack from
+// draining on a burst.
+function recordCoalesced(root, key) {
+  const now = Date.now();
+  if (coalesced && coalesced.key === key && now - coalesced.at < 1000) { coalesced.at = now; return; }
+  recordSnapshot(root);
+  coalesced = { key, at: now };
+}
+function undoTargetRoot() {
+  return (selected && selected.isConnected && rootOf(selected)) || lastEditedRoot;
+}
+function restoreSnapshot(pop, push) {
+  const root = undoTargetRoot();
+  if (!root) { return; }
+  const stacks = stacksOf(root);
+  const html = stacks[pop].pop();
+  if (html === undefined) { return; }
+  stacks[push].push(serialize(root));
+  root.innerHTML = html;
+  select(null);
+  postHtml(root, true);
+  lastEditedRoot = root;
+}
+function undo() { restoreSnapshot('undo', 'redo'); }
+function redo() { restoreSnapshot('redo', 'undo'); }
+// Capture phase, so the shortcut wins over every bubble listener. A
+// text edit keeps the browser's own undo.
+document.addEventListener('keydown', (event) => {
+  if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'z') { return; }
+  if (event.target && event.target.isContentEditable) { return; }
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (event.shiftKey) { redo(); } else { undo(); }
+}, true);
 function toHex(color) {
   const match = /rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?/.exec(color || '');
   if (!match || (match[4] !== undefined && Number(match[4]) === 0)) { return null; }
@@ -387,6 +440,8 @@ function scheduleHtml(root) {
 }
 function makeEditable(element) {
   if (!hasOwnText(element)) { return; }
+  // One snapshot per text-edit session; the browser undoes keystrokes.
+  recordSnapshot(rootOf(element));
   try { element.contentEditable = 'plaintext-only'; } catch (error) { element.contentEditable = 'true'; }
   if (element.contentEditable !== 'plaintext-only') { element.contentEditable = 'true'; }
   element.spellcheck = false;
@@ -538,6 +593,7 @@ function startResize(event, handle) {
 }
 function applyResize(event) {
   event.preventDefault();
+  if (!resize.moved) { recordSnapshot(resize.root); }
   resize.moved = true;
   hideMenu();
   const handle = resize.handle;
@@ -605,6 +661,7 @@ document.addEventListener('pointermove', (event) => {
   if (!drag.moved) {
     if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) { return; }
     drag.moved = true;
+    recordSnapshot(drag.root);
     drag.root.setAttribute('data-swift-design-dragging', '');
     hideMenu();
     select(drag.element);
@@ -666,10 +723,10 @@ document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
     event.stopPropagation();
     if (event.target === root) {
       showMenu(event.clientX, event.clientY, [
-        { label: 'Background color', color: true, value: toHex(getComputedStyle(root).backgroundColor) || '#ffffff', run: (value) => { applyAction(root, root, 'background', value); }, done: () => postHtml(root, true) },
+        { label: 'Background color', color: true, value: toHex(getComputedStyle(root).backgroundColor) || '#ffffff', run: (value) => { recordCoalesced(root, 'menu-color'); applyAction(root, root, 'background', value); }, done: () => postHtml(root, true) },
         '-',
-        { label: 'Add text', run: () => { applyAction(root, root, 'add-text'); postHtml(root, true); } },
-        { label: 'Add image', run: () => { applyAction(root, root, 'add-image'); postHtml(root, true); } },
+        { label: 'Add text', run: () => { recordSnapshot(root); applyAction(root, root, 'add-text'); postHtml(root, true); } },
+        { label: 'Add image', run: () => { recordSnapshot(root); applyAction(root, root, 'add-image'); postHtml(root, true); } },
         '-',
         { label: 'Ask AI about this screen', run: () => post({ type: 'swift-design-action', screen, action: 'ask', path: null }) },
         { label: 'Properties…', run: () => post({ type: 'swift-design-action', screen, action: 'properties', path: null }) },
@@ -680,7 +737,7 @@ document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
     }
     const element = editableTarget(event.target);
     select(element);
-    const act = (action, value) => () => { if (applyAction(root, element, action, value)) { postHtml(root, true); } };
+    const act = (action, value) => () => { recordSnapshot(root); if (applyAction(root, element, action, value)) { postHtml(root, true); } };
     const items = [];
     if (hasOwnText(element)) {
       items.push({ label: 'Bigger', run: act('bigger') });
@@ -690,7 +747,7 @@ document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
       items.push({ label: 'Align right', run: act('align', 'right') });
       items.push('-');
     }
-    items.push({ label: 'Color', color: true, value: toHex(getComputedStyle(element).color) || '#000000', run: (value) => { applyAction(root, element, 'color', value); }, done: () => postHtml(root, true) });
+    items.push({ label: 'Color', color: true, value: toHex(getComputedStyle(element).color) || '#000000', run: (value) => { recordCoalesced(root, 'menu-color'); applyAction(root, element, 'color', value); }, done: () => postHtml(root, true) });
     items.push('-');
     if (element.style.translate) { items.push({ label: 'Reset position', run: act('reset-position') }); }
     if (element.style.width || element.style.height) { items.push({ label: 'Reset size', run: act('reset-size') }); }
@@ -714,6 +771,7 @@ window.addEventListener('message', (event) => {
   if (!root) { return; }
   const element = nodeAt(root, data.path);
   if (!element) { return; }
+  recordCoalesced(root, data.property + ':' + data.path);
   if (applyAction(root, element, data.property, data.value)) { postHtml(root, false); }
 });
 "##;
@@ -1269,6 +1327,17 @@ mod tests {
         // Only that screen's CSS is emitted.
         assert!(html.contains("[data-swift-design-screen=\"2\"] h2{"));
         assert!(!html.contains("[data-swift-design-screen=\"0\"]"));
+    }
+
+    #[test]
+    fn undo_and_redo_ship_with_the_editing_script() {
+        assert!(EDITING_SCRIPT.contains("UNDO_LIMIT = 50"));
+        assert!(EDITING_SCRIPT.contains("recordSnapshot("));
+        assert!(EDITING_SCRIPT.contains("recordCoalesced("));
+        assert!(EDITING_SCRIPT.contains("stacksOf"));
+        assert!(EDITING_SCRIPT.contains("stopImmediatePropagation"));
+        assert!(EDITING_SCRIPT.contains("event.shiftKey"));
+        assert!(EDITING_SCRIPT.contains("redo()"));
     }
 
     #[test]
