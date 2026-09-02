@@ -762,10 +762,10 @@ fn ad_download_name(campaign_id: &str, index: usize, extension: &str) -> String 
     format!("{campaign_id}-ad-{}.{extension}", index + 1)
 }
 
-/// The campaign toolbar's export group and, with more than one ad,
-/// the ad menu beside it. The group always exports the whole
-/// campaign; the menu downloads the ad on screen in one format,
-/// with no mode to forget.
+/// The campaign toolbar's export menus: `All` downloads the whole
+/// campaign in one format, and with more than one ad a second menu
+/// downloads the ad on screen. Every action is one shot, with no
+/// mode to forget.
 #[component]
 fn CampaignExportGroup(
     campaign_id: String,
@@ -773,28 +773,52 @@ fn CampaignExportGroup(
     ad_count: usize,
     can_export_with_chrome: bool,
 ) -> Element {
+    let mut is_all_menu_open = use_signal(|| false);
     let mut is_unit_menu_open = use_signal(|| false);
     let number = selected + 1;
     rsx! {
-        div { class: "export-group",
-            a {
-                class: "button",
-                href: export_href(&campaign_id, "", None),
-                title: "Export as one HTML file",
+        div { class: "unit-export",
+            button {
+                title: "Download the whole campaign",
+                onclick: move |_| is_all_menu_open.set(!is_all_menu_open()),
                 span { dangerous_inner_html: icons::DOWNLOAD }
-                "HTML"
+                "All"
             }
-            ChromeExportLink {
-                href: export_href(&campaign_id, ".pdf", None),
-                label: "PDF",
-                title: "Export as a PDF, one page per ad",
-                is_enabled: can_export_with_chrome,
-            }
-            ChromeExportLink {
-                href: png_export_href(&campaign_id, None),
-                label: "PNG",
-                title: "Export as a zip of one PNG per ad",
-                is_enabled: can_export_with_chrome,
+            if is_all_menu_open() {
+                div {
+                    class: "menu-backdrop",
+                    onclick: move |_| is_all_menu_open.set(false),
+                }
+                div { class: "toolbar-menu unit-export-menu",
+                    a {
+                        href: export_href(&campaign_id, "", None),
+                        onclick: move |_| is_all_menu_open.set(false),
+                        "Download as HTML"
+                    }
+                    if can_export_with_chrome {
+                        a {
+                            href: export_href(&campaign_id, ".pdf", None),
+                            onclick: move |_| is_all_menu_open.set(false),
+                            "Download as PDF"
+                        }
+                        a {
+                            href: png_export_href(&campaign_id, None),
+                            onclick: move |_| is_all_menu_open.set(false),
+                            "Download as PNG zip"
+                        }
+                    } else {
+                        a {
+                            "aria-disabled": "true",
+                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                            "Download as PDF"
+                        }
+                        a {
+                            "aria-disabled": "true",
+                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                            "Download as PNG zip"
+                        }
+                    }
+                }
             }
         }
         if ad_count > 1 {
@@ -842,41 +866,6 @@ fn CampaignExportGroup(
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-/// One export link that needs Chrome on the server: a link when Chrome
-/// is there, a disabled cell with the install hint otherwise. With
-/// `download`, the link saves under that name instead of navigating.
-#[component]
-fn ChromeExportLink(
-    href: String,
-    label: &'static str,
-    title: &'static str,
-    is_enabled: bool,
-    #[props(default)] download: Option<String>,
-) -> Element {
-    if is_enabled {
-        return rsx! {
-            a {
-                class: "button",
-                href: "{href}",
-                title: "{title}",
-                download,
-                span { dangerous_inner_html: icons::DOWNLOAD }
-                "{label}"
-            }
-        };
-    }
-    rsx! {
-        span {
-            class: "export-cell",
-            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
-            a { class: "button", "aria-disabled": "true",
-                span { dangerous_inner_html: icons::DOWNLOAD }
-                "{label}"
             }
         }
     }

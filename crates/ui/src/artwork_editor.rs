@@ -762,10 +762,10 @@ fn cover_download_name(artwork_id: &str, index: usize, extension: &str) -> Strin
     format!("{artwork_id}-cover-{}.{extension}", index + 1)
 }
 
-/// The artwork toolbar's export group and, with more than one cover,
-/// the cover menu beside it. The group always exports the whole
-/// artwork; the menu downloads the cover on screen in one format,
-/// with no mode to forget.
+/// The artwork toolbar's export menus: `All` downloads the whole
+/// artwork in one format, and with more than one cover a second menu
+/// downloads the cover on screen. Every action is one shot, with no
+/// mode to forget.
 #[component]
 fn ArtworkExportGroup(
     artwork_id: String,
@@ -773,28 +773,52 @@ fn ArtworkExportGroup(
     cover_count: usize,
     can_export_with_chrome: bool,
 ) -> Element {
+    let mut is_all_menu_open = use_signal(|| false);
     let mut is_unit_menu_open = use_signal(|| false);
     let number = selected + 1;
     rsx! {
-        div { class: "export-group",
-            a {
-                class: "button",
-                href: export_href(&artwork_id, "", None),
-                title: "Export as one HTML file",
+        div { class: "unit-export",
+            button {
+                title: "Download the whole artwork",
+                onclick: move |_| is_all_menu_open.set(!is_all_menu_open()),
                 span { dangerous_inner_html: icons::DOWNLOAD }
-                "HTML"
+                "All"
             }
-            ChromeExportLink {
-                href: export_href(&artwork_id, ".pdf", None),
-                label: "PDF",
-                title: "Export as a PDF, one page per cover",
-                is_enabled: can_export_with_chrome,
-            }
-            ChromeExportLink {
-                href: png_export_href(&artwork_id, None),
-                label: "PNG",
-                title: "Export as a zip of one PNG per cover",
-                is_enabled: can_export_with_chrome,
+            if is_all_menu_open() {
+                div {
+                    class: "menu-backdrop",
+                    onclick: move |_| is_all_menu_open.set(false),
+                }
+                div { class: "toolbar-menu unit-export-menu",
+                    a {
+                        href: export_href(&artwork_id, "", None),
+                        onclick: move |_| is_all_menu_open.set(false),
+                        "Download as HTML"
+                    }
+                    if can_export_with_chrome {
+                        a {
+                            href: export_href(&artwork_id, ".pdf", None),
+                            onclick: move |_| is_all_menu_open.set(false),
+                            "Download as PDF"
+                        }
+                        a {
+                            href: png_export_href(&artwork_id, None),
+                            onclick: move |_| is_all_menu_open.set(false),
+                            "Download as PNG zip"
+                        }
+                    } else {
+                        a {
+                            "aria-disabled": "true",
+                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                            "Download as PDF"
+                        }
+                        a {
+                            "aria-disabled": "true",
+                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                            "Download as PNG zip"
+                        }
+                    }
+                }
             }
         }
         if cover_count > 1 {
@@ -842,41 +866,6 @@ fn ArtworkExportGroup(
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-/// One export link that needs Chrome on the server: a link when Chrome
-/// is there, a disabled cell with the install hint otherwise. With
-/// `download`, the link saves under that name instead of navigating.
-#[component]
-fn ChromeExportLink(
-    href: String,
-    label: &'static str,
-    title: &'static str,
-    is_enabled: bool,
-    #[props(default)] download: Option<String>,
-) -> Element {
-    if is_enabled {
-        return rsx! {
-            a {
-                class: "button",
-                href: "{href}",
-                title: "{title}",
-                download,
-                span { dangerous_inner_html: icons::DOWNLOAD }
-                "{label}"
-            }
-        };
-    }
-    rsx! {
-        span {
-            class: "export-cell",
-            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
-            a { class: "button", "aria-disabled": "true",
-                span { dangerous_inner_html: icons::DOWNLOAD }
-                "{label}"
             }
         }
     }

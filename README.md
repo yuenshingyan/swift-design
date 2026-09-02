@@ -277,8 +277,8 @@ Artwork-only routes: `GET /artworks/{id}/covers/{n}.png`,
 
 The HTML and PDF exports of the five multi-unit kinds take an optional
 one-based unit query (`?frame=N`, `?sheet=N`, `?email=N`, `?ad=N`,
-`?cover=N`) that exports that unit alone. The editors offer the same
-choice as a per-unit download menu beside the export links.
+`?cover=N`) that exports that unit alone. The editors offer both
+choices as download menus: `All` and the unit on screen.
 
 ## Checks
 
