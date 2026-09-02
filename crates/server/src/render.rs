@@ -249,6 +249,9 @@ editingStyle.textContent = `
 [data-swift-design-handle='s'] { left: 50%; top: 100%; cursor: ns-resize; }
 [data-swift-design-handle='sw'] { left: 0; top: 100%; cursor: nesw-resize; }
 [data-swift-design-handle='w'] { left: 0; top: 50%; cursor: ew-resize; }
+.swift-design-rotate { position: absolute; left: 50%; top: -24px; width: 12px; height: 12px;
+  margin: -6px; background: #FFFFFF; border: 1px solid #0E6E63; border-radius: 50%;
+  pointer-events: auto; cursor: grab; }
 .swift-design-guide { position: fixed; z-index: 8; display: none; pointer-events: none; background: #E0457B; }
 .swift-design-guide[data-swift-design-axis='x'] { width: 1px; top: 0; bottom: 0; }
 .swift-design-guide[data-swift-design-axis='y'] { height: 1px; left: 0; right: 0; }
@@ -274,6 +277,10 @@ handleBox.className = 'swift-design-handles';
   handle.addEventListener('pointerdown', (event) => startResize(event, name));
   handleBox.appendChild(handle);
 });
+const rotateHandle = document.createElement('div');
+rotateHandle.className = 'swift-design-rotate';
+rotateHandle.addEventListener('pointerdown', (event) => startRotate(event));
+handleBox.appendChild(rotateHandle);
 document.body.appendChild(handleBox);
 // One vertical and one horizontal guide line for snapping, on the
 // body like the menu and the handles.
@@ -593,6 +600,8 @@ function applyAction(root, element, action, value) {
     case 'width': element.style.width = value; break;
     case 'height': element.style.height = value; break;
     case 'reset-size': element.style.removeProperty('width'); element.style.removeProperty('height'); break;
+    case 'rotate': element.style.rotate = value; break;
+    case 'reset-rotation': element.style.removeProperty('rotate'); break;
     case 'reset-position': element.style.removeProperty('translate'); break;
     case 'select_parent': if (element.parentElement && element.parentElement !== root) { select(element.parentElement); } else { select(root); } return false;
     default: return false;
@@ -638,7 +647,9 @@ function snapAdjust(lines, edges) {
 }
 // Positions the bounding box with the handles over the primary
 // selected node, or hides it. The overlay is fixed and the rect is
-// viewport-relative, so the two always agree, whatever scrolls.
+// viewport-relative, so the two always agree, whatever scrolls. A
+// rotated node reports its axis-aligned rect, so the frame grows
+// around it and resize still edits the unrotated width and height.
 function updateHandles() {
   if (!selected || !selected.isConnected || !rootOf(selected) || selected === rootOf(selected)) {
     handleBox.style.display = 'none';
@@ -766,6 +777,51 @@ function endResize(save) {
   isClickSuppressed = true;
   if (save) { postHtml(finished.root, true); }
 }
+// Rotation lives in the standalone `rotate` property, like the drag
+// offset in `translate`, so it never fights a screen's own transform.
+const ROTATE_SNAP_DEGREES = 15;
+const ROTATE_ZERO_DEGREES = 3;
+function rotationOf(element) {
+  const match = /(-?[\d.]+)deg/.exec(element.style.rotate || '');
+  return match ? parseFloat(match[1]) : 0;
+}
+function pointerAngleOf(event, center) {
+  return Math.atan2(event.clientY - center.y, event.clientX - center.x) * 180 / Math.PI;
+}
+function startRotate(event) {
+  if (event.button !== 0 || !selected) { return; }
+  event.preventDefault();
+  event.stopPropagation();
+  const rect = selected.getBoundingClientRect();
+  const center = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  rotate = {
+    element: selected, root: rootOf(selected), moved: false,
+    center, baseAngle: rotationOf(selected),
+    startPointer: pointerAngleOf(event, center),
+  };
+}
+function applyRotate(event) {
+  event.preventDefault();
+  if (!rotate.moved) { recordSnapshot(rotate.root); hideMenu(); }
+  rotate.moved = true;
+  let degrees = rotate.baseAngle + pointerAngleOf(event, rotate.center) - rotate.startPointer;
+  if (event.shiftKey) { degrees = Math.round(degrees / ROTATE_SNAP_DEGREES) * ROTATE_SNAP_DEGREES; }
+  degrees = ((degrees + 180) % 360 + 360) % 360 - 180;
+  if (Math.abs(degrees) <= ROTATE_ZERO_DEGREES) {
+    rotate.element.style.removeProperty('rotate');
+  } else {
+    rotate.element.style.rotate = Math.round(degrees) + 'deg';
+  }
+  updateHandles();
+}
+function endRotate(save) {
+  if (!rotate) { return; }
+  const finished = rotate;
+  rotate = null;
+  if (!finished.moved) { return; }
+  isClickSuppressed = true;
+  if (save) { postHtml(finished.root, true); }
+}
 // The drag offset lives in the standalone `translate` property, so it
 // never disturbs the layout of the siblings and never overwrites a
 // `transform` the screen CSS already set.
@@ -784,6 +840,7 @@ function endDrag(save) {
   if (save) { postHtml(finished.root, true); }
 }
 document.addEventListener('pointermove', (event) => {
+  if (rotate) { applyRotate(event); return; }
   if (resize) { applyResize(event); return; }
   if (!drag) { return; }
   const dx = event.clientX - drag.x;
@@ -816,9 +873,9 @@ document.addEventListener('pointermove', (event) => {
   drag.element.style.translate = x + 'px ' + y + 'px';
   updateHandles();
 }, { passive: false });
-document.addEventListener('pointerup', () => { endResize(true); endDrag(true); });
-document.addEventListener('pointercancel', () => { endResize(false); endDrag(false); });
-window.addEventListener('blur', () => { endResize(true); endDrag(true); });
+document.addEventListener('pointerup', () => { endRotate(true); endResize(true); endDrag(true); });
+document.addEventListener('pointercancel', () => { endRotate(false); endResize(false); endDrag(false); });
+window.addEventListener('blur', () => { endRotate(true); endResize(true); endDrag(true); });
 // Scroll does not bubble, so the reposition listens in capture.
 document.addEventListener('scroll', updateHandles, true);
 window.addEventListener('resize', updateHandles);
@@ -919,6 +976,7 @@ document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
     items.push('-');
     if (element.style.translate) { items.push({ label: 'Reset position', run: act('reset-position') }); }
     if (element.style.width || element.style.height) { items.push({ label: 'Reset size', run: act('reset-size') }); }
+    if (element.style.rotate) { items.push({ label: 'Reset rotation', run: act('reset-rotation') }); }
     items.push({ label: 'Move forward', run: act('forward') });
     items.push({ label: 'Move backward', run: act('backward') });
     items.push({ label: 'Duplicate', run: act('duplicate') });
@@ -1536,6 +1594,16 @@ mod tests {
     }
 
     #[test]
+    fn the_rotate_handle_ships_with_the_editing_script() {
+        assert!(EDITING_SCRIPT.contains("swift-design-rotate"));
+        assert!(EDITING_SCRIPT.contains("case 'rotate'"));
+        assert!(EDITING_SCRIPT.contains("case 'reset-rotation'"));
+        assert!(EDITING_SCRIPT.contains("Reset rotation"));
+        assert!(EDITING_SCRIPT.contains("ROTATE_SNAP_DEGREES = 15"));
+        assert!(EDITING_SCRIPT.contains("style.rotate"));
+    }
+
+    #[test]
     fn resize_handles_ship_only_with_the_editing_script() {
         assert!(EDITING_SCRIPT.contains("swift-design-handles"));
         assert!(EDITING_SCRIPT.contains("data-swift-design-handle"));
@@ -1571,8 +1639,12 @@ mod tests {
         assert!(editable.contains("selection: selection.map(brief)"));
         assert!(editable.contains("reset-position"));
         assert!(editable.contains("reset-size"));
-        // The plain render carries no handle overlay.
+        // The plain render carries none of the editing overlays.
         assert!(!plain.contains("swift-design-handles"));
+        assert!(!plain.contains("swift-design-toolbar"));
+        assert!(!plain.contains("swift-design-guide"));
+        assert!(!plain.contains("swift-design-rotate"));
+        assert!(!plain.contains("UNDO_LIMIT"));
         assert!(editable.contains("swift-design-handles"));
         let auditing = render_design_with(
             &design,
