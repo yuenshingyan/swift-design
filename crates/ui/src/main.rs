@@ -835,6 +835,16 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
   background: #EDEBE5; color: var(--muted); font-size: 0.8rem; line-height: 1;
   display: flex; align-items: center; justify-content: center; box-shadow: none; }
 .attachment-remove:hover:not(:disabled) { background: #EDEBE5; color: var(--danger); }
+.attachment-summary { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.72rem;
+  padding: 0.3125rem 0.6875rem; border: 1px solid var(--hairline); border-radius: 999px;
+  background: var(--subtle); color: var(--ink-2); line-height: 1; cursor: pointer;
+  box-shadow: none; }
+.attachment-summary span { display: flex; }
+.attachment-summary:hover { border-color: #B4B0A7; color: var(--ink); }
+.attachment-summary-count { font-weight: 600; }
+.attachment-summary-chevron { transition: transform 120ms ease; }
+.attachment-summary.open .attachment-summary-chevron { transform: rotate(180deg); }
+div.brief-attachments:has(+ ul.brief-attachments) { padding-bottom: 0.4rem; }
 
 /* Preview pane */
 .editor-preview { background: var(--sunken); display: flex; flex-direction: column;

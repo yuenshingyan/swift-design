@@ -334,18 +334,63 @@ pub fn AttachButton(
     }
 }
 
+/// From this many files the chip list collapses behind a summary
+/// button, so a big paste does not fill the composer.
+const ATTACHMENT_COLLAPSE_THRESHOLD: usize = 4;
+
+/// True when `count` files render collapsed behind the summary button.
+fn is_collapsed(count: usize) -> bool {
+    count >= ATTACHMENT_COLLAPSE_THRESHOLD
+}
+
 /// The attached source files as chips: name, size, and a `×` that
 /// deletes the upload. `on_changed` fires after a delete so the caller
-/// refreshes its list. Renders nothing for an empty list.
+/// refreshes its list. Renders nothing for an empty list. From
+/// `ATTACHMENT_COLLAPSE_THRESHOLD` files the list collapses behind a
+/// paperclip-and-count button; a click shows the chips.
 #[component]
 pub fn AttachmentChips(
     uploads: Vec<api::UploadSummary>,
     on_changed: EventHandler<()>,
     on_error: EventHandler<String>,
 ) -> Element {
+    let mut is_open = use_signal(|| false);
     if uploads.is_empty() {
         return rsx! {};
     }
+    if is_collapsed(uploads.len()) {
+        return rsx! {
+            div { class: "brief-attachments",
+                button {
+                    class: if is_open() { "attachment-summary open" } else { "attachment-summary" },
+                    "aria-expanded": "{is_open()}",
+                    title: "Show the attached files",
+                    onclick: move |_| is_open.set(!is_open()),
+                    span { dangerous_inner_html: icons::PAPERCLIP }
+                    span { class: "attachment-summary-count", "{uploads.len()} files" }
+                    span {
+                        class: "attachment-summary-chevron",
+                        dangerous_inner_html: icons::CHEVRON_DOWN,
+                    }
+                }
+            }
+            if is_open() {
+                AttachmentList { uploads, on_changed, on_error }
+            }
+        };
+    }
+    rsx! {
+        AttachmentList { uploads, on_changed, on_error }
+    }
+}
+
+/// The chip list itself, one chip per upload.
+#[component]
+fn AttachmentList(
+    uploads: Vec<api::UploadSummary>,
+    on_changed: EventHandler<()>,
+    on_error: EventHandler<String>,
+) -> Element {
     rsx! {
         ul { class: "brief-attachments",
             for upload in uploads {
@@ -389,6 +434,14 @@ pub(crate) fn format_size(size_bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn four_files_collapse_and_three_do_not() {
+        assert!(!is_collapsed(0));
+        assert!(!is_collapsed(3));
+        assert!(is_collapsed(4));
+        assert!(is_collapsed(40));
+    }
 
     #[test]
     fn sizes_format_in_bytes_kilobytes_and_megabytes() {
