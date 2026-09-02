@@ -105,11 +105,13 @@ impl GenerationEngine {
             GenerationTask::Edit {
                 designs,
                 instruction,
+                conversation,
             } => {
                 let order = EditOrder {
                     artifact_ids: &designs,
                     instruction: &instruction,
                     is_fresh: false,
+                    conversation: &conversation,
                 };
                 let design_ids = self.edit_artworks(client, context, &order, log).await?;
                 Ok(GenerationOutcome::Wrote { design_ids })
@@ -117,11 +119,13 @@ impl GenerationEngine {
             GenerationTask::Regenerate {
                 design,
                 instruction,
+                conversation,
             } => {
                 let order = EditOrder {
                     artifact_ids: std::slice::from_ref(&design),
                     instruction: &instruction,
                     is_fresh: true,
+                    conversation: &conversation,
                 };
                 let design_ids = self.edit_artworks(client, context, &order, log).await?;
                 Ok(GenerationOutcome::Wrote { design_ids })
@@ -442,6 +446,7 @@ impl GenerationEngine {
             artifact_json: &artwork_json,
             note: &note,
             findings: &findings,
+            conversation: order.conversation,
         };
         let messages = vec![
             serde_json::json!({ "role": "system", "content": artwork_system_prompt() }),
@@ -854,6 +859,7 @@ impl GenerationEngine {
                 artifact_json: &artwork_json,
                 note: &note,
                 findings: &findings,
+                conversation: "",
             };
             let messages = vec![
                 serde_json::json!({ "role": "system", "content": artwork_system_prompt() }),
@@ -1276,7 +1282,7 @@ fn artwork_candidate_prompt(request: &ArtworkCandidateRequest<'_>) -> String {
 fn artwork_edit_prompt(request: &SessionRequest, input: &EditInput<'_>) -> String {
     format!(
         "Here is the artwork to change:\n{artwork_json}\n{note}\
-         The artwork is for this request:\n{request}\n\
+         The artwork is for this request:\n{request}\n{conversation}\
          Apply this change: {critique}\n{findings}\
          A reference like [cover 3, node 0/1 <h2.title>: What changed] names a cover \
          (1-based) and one element in that cover's html by its index path from the cover root \
@@ -1289,6 +1295,7 @@ fn artwork_edit_prompt(request: &SessionRequest, input: &EditInput<'_>) -> Strin
         note = input.note,
         request = request_input(request),
         critique = input.instruction.trim(),
+        conversation = crate::edit_focus::conversation_block(input.conversation),
         findings = findings_note(input.findings),
         format = crate::artwork_patch::PATCH_FORMAT
     )
@@ -1446,12 +1453,15 @@ mod tests {
             artifact_json: &focused,
             note: "Only cover 2 is shown.\n",
             findings: &findings,
+            conversation: "Conversation, oldest first:\nuser: earlier ask\n",
         };
         let prompt = artwork_edit_prompt(&request, &input);
         assert!(prompt.contains("Only cover 2 is shown."));
         assert!(prompt.contains("Chrome measured these layout problems"));
         assert!(prompt.contains("- covers[1] p (0/2): overflow: shorten"));
         assert!(prompt.contains("Apply this change: [cover 2, node 0/2 <p>: x] Fix the overflow."));
+        assert!(prompt.contains("Conversation, oldest first:\nuser: earlier ask\n"));
+        assert!(prompt.contains("Apply only the change asked below."));
         assert!(!prompt.contains("slide"));
     }
 

@@ -21,7 +21,8 @@ use crate::events::ChangeNotifier;
 use crate::instructions::DEMO_RULES;
 use crate::model_client::{LogSink, ModelClient, ModelConfiguration, TextSink, UsageSink};
 use crate::planner::{
-    ANSWERED_QUESTION_LIMIT, app_question_set, parse_plan, planner_input, planner_prompt,
+    ANSWERED_QUESTION_LIMIT, app_question_set, conversation_note, parse_plan, planner_input,
+    planner_prompt, recent_conversation,
 };
 use crate::request::{SessionRequest, answered_questions_from_answers, request_input};
 use crate::sessions::session_id_of_artifact;
@@ -68,6 +69,8 @@ pub(crate) enum GenerationTask {
         designs: Vec<String>,
         /// What to change, in the user's words.
         instruction: String,
+        /// The windowed conversation note, or empty.
+        conversation: String,
     },
     /// Continue the preview designs named here.
     Continue(Vec<String>),
@@ -84,6 +87,8 @@ pub(crate) enum GenerationTask {
         design: String,
         /// The request, with the `[screen N]` or `[slide N]` references.
         instruction: String,
+        /// The windowed conversation note, or empty.
+        conversation: String,
     },
 }
 
@@ -725,9 +730,11 @@ impl GenerationEngine {
             .await
             .map_err(|error| error.to_string())?;
         if let Some((design, instruction)) = trailing_regenerate(&messages) {
+            let conversation = conversation_note(recent_conversation(&messages));
             return Ok(Some(GenerationTask::Regenerate {
                 design,
                 instruction,
+                conversation,
             }));
         }
         let continues = match context.request.kind {
@@ -884,9 +891,13 @@ impl GenerationEngine {
         }
         if (plan.should_edit || plan.should_merge) && !targets.is_empty() {
             let instruction = latest_user_text(&messages).unwrap_or_default();
+            // The window is built from the messages read before `say`,
+            // so the planner's own reply stays out of its edit context.
+            let conversation = conversation_note(recent_conversation(&messages));
             return Ok(PlanStep::Task(GenerationTask::Edit {
                 designs: targets,
                 instruction,
+                conversation,
             }));
         }
         // Past the question limit the planner writes instead of asking.
@@ -1055,11 +1066,13 @@ impl GenerationEngine {
             GenerationTask::Edit {
                 designs,
                 instruction,
+                conversation,
             } => {
                 let order = EditOrder {
                     artifact_ids: &designs,
                     instruction: &instruction,
                     is_fresh: false,
+                    conversation: &conversation,
                 };
                 let design_ids = self.edit_designs(client, context, &order, log).await?;
                 Ok(GenerationOutcome::Wrote { design_ids })
@@ -1067,11 +1080,13 @@ impl GenerationEngine {
             GenerationTask::Regenerate {
                 design,
                 instruction,
+                conversation,
             } => {
                 let order = EditOrder {
                     artifact_ids: std::slice::from_ref(&design),
                     instruction: &instruction,
                     is_fresh: true,
+                    conversation: &conversation,
                 };
                 let design_ids = self.edit_designs(client, context, &order, log).await?;
                 Ok(GenerationOutcome::Wrote { design_ids })
@@ -1520,6 +1535,7 @@ impl GenerationEngine {
             artifact_json: &design_json,
             note: &note,
             findings: &findings,
+            conversation: order.conversation,
         };
         let messages = vec![
             serde_json::json!({ "role": "system", "content": system_prompt() }),
@@ -2041,11 +2057,13 @@ impl GenerationEngine {
                 .map_err(|error| error.to_string())?;
             let note = focus_note("screen", "screens", &fix.indexes, design.screens.len());
             let instruction = fix_instruction("screens");
+            // A fix round repairs the layout; history is noise there.
             let input = EditInput {
                 instruction: &instruction,
                 artifact_json: &design_json,
                 note: &note,
                 findings: &findings,
+                conversation: "",
             };
             let messages = vec![
                 serde_json::json!({ "role": "system", "content": system_prompt() }),
@@ -2994,7 +3012,7 @@ impl<T> ArtifactRequest<'_, T> {
 fn edit_prompt(request: &SessionRequest, input: &EditInput<'_>) -> String {
     format!(
         "Here is the design to change:\n{design_json}\n{note}\
-         The design is for this request:\n{request}\n\
+         The design is for this request:\n{request}\n{conversation}\
          Apply this change: {critique}\n{findings}\
          A reference like [screen 3, node 0/1 <h2.title>: What Swift Design does] names a screen \
          (1-based) and one element in that screen's html by its index path from the screen root \
@@ -3007,6 +3025,7 @@ fn edit_prompt(request: &SessionRequest, input: &EditInput<'_>) -> String {
         note = input.note,
         request = request_input(request),
         critique = input.instruction.trim(),
+        conversation = crate::edit_focus::conversation_block(input.conversation),
         findings = findings_note(input.findings),
         format = crate::patch::PATCH_FORMAT
     )
@@ -3085,8 +3104,8 @@ fn preview_note(count: usize) -> String {
     )
 }
 
-/// The user prompt for one continuation chunk: the preview design, the
-/// conversation, and the chunk's screens to add, as a patch of inserts.
+/// The user prompt for one continuation chunk: the preview design and
+/// the chunk's screens to add, as a patch of inserts.
 fn continue_prompt(
     request: &SessionRequest,
     design: &Design,
@@ -3944,10 +3963,18 @@ mod tests {
             artifact_json: &focused,
             note: "Only screen 2 is shown.\n",
             findings: &findings,
+            conversation: "Conversation, oldest first:\nuser: earlier ask\n",
         };
         let prompt = edit_prompt(&request, &input);
         assert!(prompt.contains("Only screen 2 is shown."));
         assert!(prompt.contains("- screens[1] h1 (0/1): overflow: shorten"));
+        assert!(prompt.contains("Conversation, oldest first:\nuser: earlier ask\n"));
+        assert!(prompt.contains("Apply only the change asked below."));
+        let bare = EditInput {
+            conversation: "",
+            ..input
+        };
+        assert!(!edit_prompt(&request, &bare).contains("Apply only the change asked below."));
     }
 
     #[tokio::test]

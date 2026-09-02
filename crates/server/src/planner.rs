@@ -14,6 +14,51 @@ use crate::sessions::ChatMessage;
 /// After this many answered questions the planner asks no more.
 pub(crate) const ANSWERED_QUESTION_LIMIT: usize = 5;
 
+/// The planner and the edit turns see at most this many exchanges: one
+/// user message plus the assistant replies that follow it.
+pub(crate) const CONVERSATION_LIMIT: usize = 10;
+
+/// The last `CONVERSATION_LIMIT` exchanges of the conversation. An
+/// exchange starts at a user message, as the studio's revert groups
+/// them. Trailing assistant replies stay with the last exchange.
+pub(crate) fn recent_conversation(messages: &[ChatMessage]) -> &[ChatMessage] {
+    let mut user_turns = 0;
+    for (index, message) in messages.iter().enumerate().rev() {
+        if message.role == "user" {
+            user_turns += 1;
+            if user_turns == CONVERSATION_LIMIT {
+                return &messages[index..];
+            }
+        }
+    }
+    messages
+}
+
+/// The conversation as prompt text, one line per message, oldest
+/// first. An empty slice gives an empty string.
+pub(crate) fn conversation_note(messages: &[ChatMessage]) -> String {
+    if messages.is_empty() {
+        return String::new();
+    }
+    let mut note = String::from("Conversation, oldest first:\n");
+    for message in messages {
+        let about = if !message.pinned.is_empty() {
+            message.pinned.join(", ")
+        } else {
+            message.design.clone().unwrap_or_default()
+        };
+        if about.is_empty() {
+            note.push_str(&format!("{}: {}\n", message.role, message.content));
+        } else {
+            note.push_str(&format!(
+                "{} (editing {about}): {}\n",
+                message.role, message.content
+            ));
+        }
+    }
+    note
+}
+
 /// The title of a planner question set.
 const QUESTION_SET_TITLE: &str = "A few questions first";
 
@@ -363,22 +408,7 @@ pub(crate) fn planner_input(
     if messages.is_empty() {
         input.push_str("Conversation: none yet.\n");
     } else {
-        input.push_str("Conversation, oldest first:\n");
-        for message in messages {
-            let about = if !message.pinned.is_empty() {
-                message.pinned.join(", ")
-            } else {
-                message.design.clone().unwrap_or_default()
-            };
-            if about.is_empty() {
-                input.push_str(&format!("{}: {}\n", message.role, message.content));
-            } else {
-                input.push_str(&format!(
-                    "{} (editing {about}): {}\n",
-                    message.role, message.content
-                ));
-            }
-        }
+        input.push_str(&conversation_note(recent_conversation(messages)));
     }
     input.push_str("Reply with only the JSON.");
     input
@@ -389,6 +419,59 @@ pub(crate) fn planner_input(
 mod tests {
     use super::*;
     use crate::sessions::RunOptions;
+
+    fn exchange(number: usize) -> Vec<ChatMessage> {
+        vec![
+            ChatMessage::user(&format!("ask {number}"), None),
+            ChatMessage::assistant(&format!("reply {number}")),
+        ]
+    }
+
+    #[test]
+    fn an_empty_conversation_gives_an_empty_window_and_note() {
+        let messages: Vec<ChatMessage> = Vec::new();
+        assert!(recent_conversation(&messages).is_empty());
+        assert_eq!(conversation_note(&messages), "");
+    }
+
+    #[test]
+    fn a_conversation_under_the_limit_is_kept_whole() {
+        let messages: Vec<ChatMessage> = (1..=3).flat_map(exchange).collect();
+        let window = recent_conversation(&messages);
+        assert_eq!(window.len(), 6);
+        let note = conversation_note(window);
+        assert!(note.starts_with("Conversation, oldest first:\n"));
+        assert!(note.contains("user: ask 1\n"));
+        assert!(note.contains("assistant: reply 3\n"));
+    }
+
+    #[test]
+    fn only_the_last_ten_exchanges_survive() {
+        let messages: Vec<ChatMessage> = (1..=12).flat_map(exchange).collect();
+        let window = recent_conversation(&messages);
+        assert_eq!(window.len(), 20);
+        let note = conversation_note(window);
+        assert!(!note.contains("ask 1\n"));
+        assert!(!note.contains("ask 2\n"));
+        assert!(note.contains("ask 3\n"));
+        assert!(note.contains("reply 12\n"));
+    }
+
+    #[test]
+    fn trailing_assistant_replies_stay_with_the_last_exchange() {
+        let mut messages: Vec<ChatMessage> = (1..=11).flat_map(exchange).collect();
+        messages.push(ChatMessage::assistant("late reply"));
+        messages.push(ChatMessage::assistant("later reply"));
+        let window = recent_conversation(&messages);
+        assert_eq!(window.first().map(|m| m.content.as_str()), Some("ask 2"));
+        assert_eq!(
+            window.last().map(|m| m.content.as_str()),
+            Some("later reply")
+        );
+
+        let only_assistants = vec![ChatMessage::assistant("a"), ChatMessage::assistant("b")];
+        assert_eq!(recent_conversation(&only_assistants).len(), 2);
+    }
 
     #[test]
     fn a_merge_reply_sets_the_merge_flag_and_the_prompt_explains_it() {

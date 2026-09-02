@@ -146,6 +146,8 @@ pub(crate) struct EditOrder<'a> {
     /// True for a regenerate: the units the instruction names are shown
     /// without their markup, and the model writes them from scratch.
     pub(crate) is_fresh: bool,
+    /// The windowed conversation note, or empty.
+    pub(crate) conversation: &'a str,
 }
 
 /// What a merge writes from: the candidates to combine, each with its
@@ -202,6 +204,17 @@ pub(crate) struct EditInput<'a> {
     pub(crate) note: &'a str,
     /// The measured findings for the units shown.
     pub(crate) findings: &'a [String],
+    /// The windowed conversation note, or empty.
+    pub(crate) conversation: &'a str,
+}
+
+/// The prompt block for the conversation window. An empty note gives
+/// an empty block.
+pub(crate) fn conversation_block(note: &str) -> String {
+    if note.is_empty() {
+        return String::new();
+    }
+    format!("{note}Use the conversation as context. Apply only the change asked below.\n")
 }
 
 #[cfg(test)]
@@ -220,6 +233,14 @@ mod tests {
             vec![3]
         );
         assert!(referenced_indexes("make every title bigger", "slide").is_empty());
+    }
+
+    #[test]
+    fn the_conversation_block_is_empty_without_a_note_and_guarded_with_one() {
+        assert_eq!(conversation_block(""), "");
+        let block = conversation_block("Conversation, oldest first:\nuser: hi\n");
+        assert!(block.starts_with("Conversation, oldest first:\n"));
+        assert!(block.contains("Apply only the change asked below.\n"));
     }
 
     #[test]

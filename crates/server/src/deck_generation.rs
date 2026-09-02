@@ -102,11 +102,13 @@ impl GenerationEngine {
             GenerationTask::Edit {
                 designs,
                 instruction,
+                conversation,
             } => {
                 let order = EditOrder {
                     artifact_ids: &designs,
                     instruction: &instruction,
                     is_fresh: false,
+                    conversation: &conversation,
                 };
                 let design_ids = self.edit_decks(client, context, &order, log).await?;
                 Ok(GenerationOutcome::Wrote { design_ids })
@@ -114,11 +116,13 @@ impl GenerationEngine {
             GenerationTask::Regenerate {
                 design,
                 instruction,
+                conversation,
             } => {
                 let order = EditOrder {
                     artifact_ids: std::slice::from_ref(&design),
                     instruction: &instruction,
                     is_fresh: true,
+                    conversation: &conversation,
                 };
                 let design_ids = self.edit_decks(client, context, &order, log).await?;
                 Ok(GenerationOutcome::Wrote { design_ids })
@@ -435,6 +439,7 @@ impl GenerationEngine {
             artifact_json: &deck_json,
             note: &note,
             findings: &findings,
+            conversation: order.conversation,
         };
         let messages = vec![
             serde_json::json!({ "role": "system", "content": deck_system_prompt() }),
@@ -840,6 +845,7 @@ impl GenerationEngine {
                 artifact_json: &deck_json,
                 note: &note,
                 findings: &findings,
+                conversation: "",
             };
             let messages = vec![
                 serde_json::json!({ "role": "system", "content": deck_system_prompt() }),
@@ -1245,7 +1251,7 @@ fn deck_candidate_prompt(request: &DeckCandidateRequest<'_>) -> String {
 fn deck_edit_prompt(request: &SessionRequest, input: &EditInput<'_>) -> String {
     format!(
         "Here is the deck to change:\n{deck_json}\n{note}\
-         The deck is for this request:\n{request}\n\
+         The deck is for this request:\n{request}\n{conversation}\
          Apply this change: {critique}\n{findings}\
          A reference like [slide 3, node 0/1 <h2.title>: What Swift Design does] names a slide \
          (1-based) and one element in that slide's html by its index path from the slide root \
@@ -1258,6 +1264,7 @@ fn deck_edit_prompt(request: &SessionRequest, input: &EditInput<'_>) -> String {
         note = input.note,
         request = request_input(request),
         critique = input.instruction.trim(),
+        conversation = crate::edit_focus::conversation_block(input.conversation),
         findings = findings_note(input.findings),
         format = crate::deck_patch::PATCH_FORMAT
     )
@@ -1410,12 +1417,15 @@ mod tests {
             artifact_json: &focused,
             note: "Only slide 2 is shown.\n",
             findings: &findings,
+            conversation: "Conversation, oldest first:\nuser: earlier ask\n",
         };
         let prompt = deck_edit_prompt(&request, &input);
         assert!(prompt.contains("Only slide 2 is shown."));
         assert!(prompt.contains("Chrome measured these layout problems"));
         assert!(prompt.contains("- slides[1] p (0/2): overflow: shorten"));
         assert!(prompt.contains("Apply this change: [slide 2, node 0/2 <p>: x] Fix the overflow."));
+        assert!(prompt.contains("Conversation, oldest first:\nuser: earlier ask\n"));
+        assert!(prompt.contains("Apply only the change asked below."));
     }
 
     #[test]
