@@ -848,6 +848,11 @@ mod tests {
         );
         assert!(html_problems("<p style='background:url(/uploads/a.png)'>x</p>").is_empty());
         assert!(first(html_problems("<p style='width:50vw'>x</p>")).contains("vw"));
+        // A resize or a move in the editor writes these inline.
+        assert!(
+            html_problems("<p style='translate: 10px 20px; width: 240px; height: 96px'>x</p>")
+                .is_empty()
+        );
     }
 
     #[test]

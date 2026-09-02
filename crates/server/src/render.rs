@@ -212,7 +212,8 @@ document.addEventListener('click', (event) => {
 /// In-place editing for the editor preview. Loaded only with
 /// `editable=true`, so plain render and export output stays inert.
 /// Clicking a node selects it and posts its path; dragging a node moves
-/// it; double-clicking a text node edits it in place; a right-click menu
+/// it; dragging a handle of the selection's bounding box resizes it;
+/// double-clicking a text node edits it in place; a right-click menu
 /// applies quick actions in the DOM; every change posts the screen root's
 /// HTML back to the editor. Same-origin messages only.
 pub(crate) const EDITING_SCRIPT: &str = r##"const origin = window.location.origin;
@@ -236,11 +237,35 @@ editingStyle.textContent = `
   padding: 0.3rem 0.7rem; cursor: pointer; }
 .swift-design-menu input[type='color'] { width: 1.8rem; height: 1.4rem; border: 1px solid #DAD7D0;
   border-radius: 4px; padding: 0; background: #FFFFFF; }
+.swift-design-handles { position: fixed; z-index: 9; display: none; pointer-events: none;
+  outline: 1px solid rgba(14, 110, 99, 0.9); }
+.swift-design-handle { position: absolute; width: 10px; height: 10px; margin: -5px;
+  background: #FFFFFF; border: 1px solid #0E6E63; border-radius: 2px; pointer-events: auto; }
+[data-swift-design-handle='nw'] { left: 0; top: 0; cursor: nwse-resize; }
+[data-swift-design-handle='n'] { left: 50%; top: 0; cursor: ns-resize; }
+[data-swift-design-handle='ne'] { left: 100%; top: 0; cursor: nesw-resize; }
+[data-swift-design-handle='e'] { left: 100%; top: 50%; cursor: ew-resize; }
+[data-swift-design-handle='se'] { left: 100%; top: 100%; cursor: nwse-resize; }
+[data-swift-design-handle='s'] { left: 50%; top: 100%; cursor: ns-resize; }
+[data-swift-design-handle='sw'] { left: 0; top: 100%; cursor: nesw-resize; }
+[data-swift-design-handle='w'] { left: 0; top: 50%; cursor: ew-resize; }
 `;
 document.head.appendChild(editingStyle);
 const menu = document.createElement('div');
 menu.className = 'swift-design-menu';
 document.body.appendChild(menu);
+// The bounding box with the resize handles. It lives on the body, like
+// the menu, so it never enters the serialized screen HTML.
+const handleBox = document.createElement('div');
+handleBox.className = 'swift-design-handles';
+['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((name) => {
+  const handle = document.createElement('div');
+  handle.className = 'swift-design-handle';
+  handle.setAttribute('data-swift-design-handle', name);
+  handle.addEventListener('pointerdown', (event) => startResize(event, name));
+  handleBox.appendChild(handle);
+});
+document.body.appendChild(handleBox);
 function hideMenu() { menu.style.display = 'none'; menu.innerHTML = ''; }
 document.addEventListener('click', hideMenu);
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape') { hideMenu(); if (document.activeElement) { document.activeElement.blur(); } } });
@@ -287,6 +312,7 @@ function postHtml(root, save) {
   // again before the change leaves the page.
   if (window.swiftDesignFit) { window.swiftDesignFit(); }
   post({ type: 'swift-design-html', screen: screenIndexOf(root), html: serialize(root), save: !!save });
+  updateHandles();
 }
 function toHex(color) {
   const match = /rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?/.exec(color || '');
@@ -309,6 +335,8 @@ function describe(element) {
       text_align: style.textAlign,
       padding: style.padding,
       src: element.getAttribute('src') || '',
+      width: Math.round(baseSizeOf(element).width) + 'px',
+      height: Math.round(baseSizeOf(element).height) + 'px',
       is_leaf: hasOwnText(element) && element.children.length === 0,
     },
   };
@@ -336,6 +364,7 @@ function select(element, isAdditive) {
   document.querySelectorAll('[data-swift-design-selected]').forEach((node) => node.removeAttribute('data-swift-design-selected'));
   selection.forEach((node) => node.setAttribute('data-swift-design-selected', ''));
   selected = selection.length ? selection[selection.length - 1] : null;
+  updateHandles();
   if (!element) { return; }
   const root = rootOf(element);
   if (!selected) { post({ type: 'swift-design-select', screen: screenIndexOf(root), path: null }); return; }
@@ -447,6 +476,9 @@ function applyAction(root, element, action, value) {
     case 'text_align': element.style.textAlign = value; break;
     case 'padding': element.style.padding = value; break;
     case 'src': element.setAttribute('src', value); break;
+    case 'width': element.style.width = value; break;
+    case 'height': element.style.height = value; break;
+    case 'reset-size': element.style.removeProperty('width'); element.style.removeProperty('height'); break;
     case 'reset-position': element.style.removeProperty('translate'); break;
     case 'select_parent': if (element.parentElement && element.parentElement !== root) { select(element.parentElement); } else { select(root); } return false;
     default: return false;
@@ -454,8 +486,101 @@ function applyAction(root, element, action, value) {
   return true;
 }
 const DRAG_THRESHOLD = 4;
+const RESIZE_MINIMUM = 16;
 let drag = null;
+let resize = null;
 let isClickSuppressed = false;
+// Positions the bounding box with the handles over the primary
+// selected node, or hides it. The overlay is fixed and the rect is
+// viewport-relative, so the two always agree, whatever scrolls.
+function updateHandles() {
+  if (!selected || !selected.isConnected || !rootOf(selected) || selected === rootOf(selected)) {
+    handleBox.style.display = 'none';
+    return;
+  }
+  const rect = selected.getBoundingClientRect();
+  handleBox.style.left = rect.left + 'px';
+  handleBox.style.top = rect.top + 'px';
+  handleBox.style.width = rect.width + 'px';
+  handleBox.style.height = rect.height + 'px';
+  handleBox.style.display = 'block';
+}
+// The layout size of the element in canvas pixels. The root scales
+// through a transform, which never changes layout, so layout pixels
+// are canvas pixels. The base stylesheet forces border-box; an inline
+// override or an SVG element falls back to the computed style.
+function baseSizeOf(element) {
+  const style = getComputedStyle(element);
+  if (element.offsetWidth === undefined || style.boxSizing !== 'border-box') {
+    return { width: parseFloat(style.width) || 0, height: parseFloat(style.height) || 0 };
+  }
+  return { width: element.offsetWidth, height: element.offsetHeight };
+}
+function startResize(event, handle) {
+  if (event.button !== 0 || !selected) { return; }
+  event.preventDefault();
+  event.stopPropagation();
+  const root = rootOf(selected);
+  const base = baseSizeOf(selected);
+  const rect = selected.getBoundingClientRect();
+  // Per-axis scales from the element itself absorb the root's two
+  // stacked scales and any transform an ancestor carries.
+  const fallback = root.getBoundingClientRect().width / canvasWidth || 1;
+  resize = {
+    element: selected, root, handle, moved: false,
+    x: event.clientX, y: event.clientY,
+    baseWidth: base.width, baseHeight: base.height,
+    baseTranslate: translateOf(selected),
+    scaleX: base.width ? rect.width / base.width : fallback,
+    scaleY: base.height ? rect.height / base.height : fallback,
+    ratio: base.height ? base.width / base.height : 1,
+  };
+}
+function applyResize(event) {
+  event.preventDefault();
+  resize.moved = true;
+  hideMenu();
+  const handle = resize.handle;
+  const dx = (event.clientX - resize.x) / resize.scaleX;
+  const dy = (event.clientY - resize.y) / resize.scaleY;
+  let width = resize.baseWidth;
+  let height = resize.baseHeight;
+  let shiftX = 0;
+  let shiftY = 0;
+  if (handle.includes('e')) { width += dx; }
+  if (handle.includes('w')) { width -= dx; shiftX = dx; }
+  if (handle.includes('s')) { height += dy; }
+  if (handle.includes('n')) { height -= dy; shiftY = dy; }
+  if (event.shiftKey && handle.length === 2) { height = width / resize.ratio; }
+  // The clamp moves the translate shift in lockstep, so the anchored
+  // edge stays put when the pointer overshoots the minimum.
+  if (width < RESIZE_MINIMUM) {
+    if (shiftX) { shiftX -= RESIZE_MINIMUM - width; }
+    width = RESIZE_MINIMUM;
+  }
+  if (height < RESIZE_MINIMUM) {
+    if (shiftY) { shiftY -= RESIZE_MINIMUM - height; }
+    height = RESIZE_MINIMUM;
+  }
+  if (handle.includes('e') || handle.includes('w')) { resize.element.style.width = Math.round(width) + 'px'; }
+  if (handle.includes('n') || handle.includes('s') || (event.shiftKey && handle.length === 2)) {
+    resize.element.style.height = Math.round(height) + 'px';
+  }
+  if (shiftX || shiftY) {
+    const x = Math.round(resize.baseTranslate.x + shiftX);
+    const y = Math.round(resize.baseTranslate.y + shiftY);
+    resize.element.style.translate = x + 'px ' + y + 'px';
+  }
+  updateHandles();
+}
+function endResize(save) {
+  if (!resize) { return; }
+  const finished = resize;
+  resize = null;
+  if (!finished.moved) { return; }
+  isClickSuppressed = true;
+  if (save) { postHtml(finished.root, true); }
+}
 // The drag offset lives in the standalone `translate` property, so it
 // never disturbs the layout of the siblings and never overwrites a
 // `transform` the screen CSS already set.
@@ -473,6 +598,7 @@ function endDrag(save) {
   if (save) { postHtml(finished.root, true); }
 }
 document.addEventListener('pointermove', (event) => {
+  if (resize) { applyResize(event); return; }
   if (!drag) { return; }
   const dx = event.clientX - drag.x;
   const dy = event.clientY - drag.y;
@@ -488,10 +614,14 @@ document.addEventListener('pointermove', (event) => {
   const x = Math.round(drag.base.x + dx / drag.scale);
   const y = Math.round(drag.base.y + dy / drag.scale);
   drag.element.style.translate = x + 'px ' + y + 'px';
+  updateHandles();
 }, { passive: false });
-document.addEventListener('pointerup', () => endDrag(true));
-document.addEventListener('pointercancel', () => endDrag(false));
-window.addEventListener('blur', () => endDrag(true));
+document.addEventListener('pointerup', () => { endResize(true); endDrag(true); });
+document.addEventListener('pointercancel', () => { endResize(false); endDrag(false); });
+window.addEventListener('blur', () => { endResize(true); endDrag(true); });
+// Scroll does not bubble, so the reposition listens in capture.
+document.addEventListener('scroll', updateHandles, true);
+window.addEventListener('resize', updateHandles);
 document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
   const screen = screenIndexOf(root);
   root.addEventListener('pointerdown', (event) => {
@@ -563,6 +693,7 @@ document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
     items.push({ label: 'Color', color: true, value: toHex(getComputedStyle(element).color) || '#000000', run: (value) => { applyAction(root, element, 'color', value); }, done: () => postHtml(root, true) });
     items.push('-');
     if (element.style.translate) { items.push({ label: 'Reset position', run: act('reset-position') }); }
+    if (element.style.width || element.style.height) { items.push({ label: 'Reset size', run: act('reset-size') }); }
     items.push({ label: 'Move forward', run: act('forward') });
     items.push({ label: 'Move backward', run: act('backward') });
     items.push({ label: 'Duplicate', run: act('duplicate') });
@@ -1141,6 +1272,19 @@ mod tests {
     }
 
     #[test]
+    fn resize_handles_ship_only_with_the_editing_script() {
+        assert!(EDITING_SCRIPT.contains("swift-design-handles"));
+        assert!(EDITING_SCRIPT.contains("data-swift-design-handle"));
+        assert!(EDITING_SCRIPT.contains("case 'width'"));
+        assert!(EDITING_SCRIPT.contains("case 'height'"));
+        assert!(EDITING_SCRIPT.contains("case 'reset-size'"));
+        assert!(EDITING_SCRIPT.contains("RESIZE_MINIMUM = 16"));
+        assert!(EDITING_SCRIPT.contains("Reset size"));
+        // The overlay lives on the body, outside the serialized root.
+        assert!(EDITING_SCRIPT.contains("document.body.appendChild(handleBox)"));
+    }
+
+    #[test]
     fn scripts_follow_the_options() {
         let design = sample_design();
         let plain = render_design(&design, false);
@@ -1162,6 +1306,10 @@ mod tests {
         assert!(editable.contains("event.metaKey || event.ctrlKey"));
         assert!(editable.contains("selection: selection.map(brief)"));
         assert!(editable.contains("reset-position"));
+        assert!(editable.contains("reset-size"));
+        // The plain render carries no handle overlay.
+        assert!(!plain.contains("swift-design-handles"));
+        assert!(editable.contains("swift-design-handles"));
         let auditing = render_design_with(
             &design,
             RenderOptions {
