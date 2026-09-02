@@ -252,6 +252,12 @@ editingStyle.textContent = `
 .swift-design-guide { position: fixed; z-index: 8; display: none; pointer-events: none; background: #E0457B; }
 .swift-design-guide[data-swift-design-axis='x'] { width: 1px; top: 0; bottom: 0; }
 .swift-design-guide[data-swift-design-axis='y'] { height: 1px; left: 0; right: 0; }
+.swift-design-toolbar { position: fixed; z-index: 10; display: none; gap: 2px; padding: 0.2rem;
+  background: #FFFFFF; border: 1px solid #DAD7D0; border-radius: 8px;
+  box-shadow: 0 14px 34px -18px rgba(21, 24, 28, 0.5); font: 500 12px Inter, system-ui, sans-serif; }
+.swift-design-toolbar button { border: 0; background: transparent; color: #15181C; font: inherit;
+  padding: 0.3rem 0.55rem; border-radius: 5px; cursor: pointer; white-space: nowrap; }
+.swift-design-toolbar button:hover { background: #F1EFEA; }
 `;
 document.head.appendChild(editingStyle);
 const menu = document.createElement('div');
@@ -279,6 +285,37 @@ const guides = {};
   document.body.appendChild(guide);
   guides[axis] = guide;
 });
+// The floating toolbar docked to the bounding box: the common actions
+// without the right-click menu. Same body-level home as the menu.
+const toolbar = document.createElement('div');
+toolbar.className = 'swift-design-toolbar';
+function toolbarButton(label, run) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  button.addEventListener('click', (event) => { event.stopPropagation(); if (selected) { run(); } });
+  toolbar.appendChild(button);
+}
+toolbarButton('Duplicate', () => {
+  const root = rootOf(selected);
+  recordSnapshot(root);
+  if (applyAction(root, selected, 'duplicate')) { postHtml(root, true); }
+});
+toolbarButton('Delete', () => {
+  const root = rootOf(selected);
+  recordSnapshot(root);
+  if (applyAction(root, selected, 'delete')) { postHtml(root, true); }
+});
+toolbarButton('Parent', () => { applyAction(rootOf(selected), selected, 'select_parent'); });
+toolbarButton('Ask AI', () => {
+  const root = rootOf(selected);
+  post(Object.assign({ type: 'swift-design-action', screen: screenIndexOf(root), action: 'ask' }, describe(selected)));
+});
+toolbarButton('Properties', () => {
+  const root = rootOf(selected);
+  post(Object.assign({ type: 'swift-design-action', screen: screenIndexOf(root), action: 'properties' }, describe(selected)));
+});
+document.body.appendChild(toolbar);
 function setGuide(axis, position) {
   const guide = guides[axis];
   if (position === null) { guide.style.display = 'none'; return; }
@@ -568,6 +605,7 @@ const SNAP_THRESHOLD = 6;
 const SNAP_SIBLING_LIMIT = 24;
 let drag = null;
 let resize = null;
+let rotate = null;
 let isClickSuppressed = false;
 // The snap targets for one gesture: the screen-pixel positions of the
 // root's edges and centers plus the siblings' edges and centers.
@@ -604,6 +642,7 @@ function snapAdjust(lines, edges) {
 function updateHandles() {
   if (!selected || !selected.isConnected || !rootOf(selected) || selected === rootOf(selected)) {
     handleBox.style.display = 'none';
+    toolbar.style.display = 'none';
     return;
   }
   const rect = selected.getBoundingClientRect();
@@ -612,6 +651,20 @@ function updateHandles() {
   handleBox.style.width = rect.width + 'px';
   handleBox.style.height = rect.height + 'px';
   handleBox.style.display = 'block';
+  updateToolbar(rect);
+}
+// Docks the toolbar above the bounding box, below it when the top is
+// clipped, and hides it while a gesture runs so it never sits under
+// the pointer.
+function updateToolbar(rect) {
+  if ((drag && drag.moved) || resize || rotate) { toolbar.style.display = 'none'; return; }
+  toolbar.style.display = 'flex';
+  // 34 clears the rotate handle, which floats 24 px above the box.
+  let top = rect.top - toolbar.offsetHeight - 34;
+  if (top < 4) { top = rect.bottom + 8; }
+  const left = Math.min(Math.max(rect.left + rect.width / 2 - toolbar.offsetWidth / 2, 8), window.innerWidth - toolbar.offsetWidth - 8);
+  toolbar.style.top = top + 'px';
+  toolbar.style.left = left + 'px';
 }
 // The layout size of the element in canvas pixels. The root scales
 // through a transform, which never changes layout, so layout pixels
@@ -1471,6 +1524,15 @@ mod tests {
         assert!(EDITING_SCRIPT.contains("SNAP_SIBLING_LIMIT = 24"));
         assert!(EDITING_SCRIPT.contains("snapLinesOf"));
         assert!(EDITING_SCRIPT.contains("hideGuides"));
+    }
+
+    #[test]
+    fn the_selection_toolbar_ships_with_the_editing_script() {
+        assert!(EDITING_SCRIPT.contains("swift-design-toolbar"));
+        assert!(EDITING_SCRIPT.contains("toolbarButton('Duplicate'"));
+        assert!(EDITING_SCRIPT.contains("toolbarButton('Parent'"));
+        assert!(EDITING_SCRIPT.contains("action: 'properties'"));
+        assert!(EDITING_SCRIPT.contains("updateToolbar"));
     }
 
     #[test]
