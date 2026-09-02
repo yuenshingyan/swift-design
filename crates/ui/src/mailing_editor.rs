@@ -827,11 +827,10 @@ fn email_download_name(mailing_id: &str, index: usize, extension: &str) -> Strin
     format!("{mailing_id}-email-{}.{extension}", index + 1)
 }
 
-/// The mailing toolbar's export group: a scope toggle when the mailing
-/// has more than one email, then the HTML file, the email-client HTML
-/// export (no Chrome needed), the Chrome-backed PDF, and the PNG
-/// export. The scope picks the email on screen or every email; scoped,
-/// the Email and PNG links download that email's files.
+/// The mailing toolbar's export group and, with more than one email,
+/// the email menu beside it. The group always exports the whole
+/// mailing; the menu downloads the email on screen in one format,
+/// with no mode to forget.
 #[component]
 fn MailingExportGroup(
     mailing_id: String,
@@ -839,72 +838,88 @@ fn MailingExportGroup(
     email_count: usize,
     can_export_with_chrome: bool,
 ) -> Element {
-    let mut is_scoped = use_signal(|| false);
-    let only = (is_scoped() && email_count > 1).then_some(selected);
+    let mut is_unit_menu_open = use_signal(|| false);
     let number = selected + 1;
-    let html_title = if only.is_some() {
-        "Export the email on screen as one HTML file"
-    } else {
-        "Export as one HTML file"
-    };
-    let email_title = if only.is_some() {
-        "Download the email on screen as email-client HTML"
-    } else {
-        "Export as email-client HTML, one file per email"
-    };
-    let pdf_title = if only.is_some() {
-        "Export the email on screen as a one-page PDF"
-    } else {
-        "Export as a PDF, one page per email"
-    };
-    let png_title = if only.is_some() {
-        "Download the email on screen as a PNG"
-    } else {
-        "Export as a zip of one PNG per email"
-    };
     rsx! {
         div { class: "export-group",
-            if email_count > 1 {
-                button {
-                    class: if only.is_none() { "button scope-choice open" } else { "button scope-choice" },
-                    title: "Export every email",
-                    onclick: move |_| is_scoped.set(false),
-                    "All emails"
-                }
-                button {
-                    class: if only.is_some() { "button scope-choice open" } else { "button scope-choice" },
-                    title: "Export only the email on screen",
-                    onclick: move |_| is_scoped.set(true),
-                    "Email {number}"
-                }
-            }
             a {
                 class: "button",
-                href: export_href(&mailing_id, "", only),
-                title: "{html_title}",
+                href: export_href(&mailing_id, "", None),
+                title: "Export as one HTML file",
                 span { dangerous_inner_html: icons::DOWNLOAD }
                 "HTML"
             }
             a {
                 class: "button",
-                href: email_export_href(&mailing_id, only),
-                title: "{email_title}",
-                download: only.map(|index| email_download_name(&mailing_id, index, "html")),
+                href: email_export_href(&mailing_id, None),
+                title: "Export as email-client HTML, one file per email",
                 span { dangerous_inner_html: icons::DOWNLOAD }
                 "Email"
             }
             ChromeExportLink {
-                href: export_href(&mailing_id, ".pdf", only),
+                href: export_href(&mailing_id, ".pdf", None),
                 label: "PDF",
-                title: pdf_title,
+                title: "Export as a PDF, one page per email",
                 is_enabled: can_export_with_chrome,
             }
             ChromeExportLink {
-                href: png_export_href(&mailing_id, only),
+                href: png_export_href(&mailing_id, None),
                 label: "PNG",
-                title: png_title,
+                title: "Export as a zip of one PNG per email",
                 is_enabled: can_export_with_chrome,
-                download: only.map(|index| email_download_name(&mailing_id, index, "png")),
+            }
+        }
+        if email_count > 1 {
+            div { class: "unit-export",
+                button {
+                    title: "Download only the email on screen",
+                    onclick: move |_| is_unit_menu_open.set(!is_unit_menu_open()),
+                    span { dangerous_inner_html: icons::DOWNLOAD }
+                    "Email {number}"
+                }
+                if is_unit_menu_open() {
+                    div {
+                        class: "menu-backdrop",
+                        onclick: move |_| is_unit_menu_open.set(false),
+                    }
+                    div { class: "toolbar-menu unit-export-menu",
+                        a {
+                            href: export_href(&mailing_id, "", Some(selected)),
+                            onclick: move |_| is_unit_menu_open.set(false),
+                            "Download as HTML"
+                        }
+                        a {
+                            href: email_export_href(&mailing_id, Some(selected)),
+                            download: email_download_name(&mailing_id, selected, "html"),
+                            onclick: move |_| is_unit_menu_open.set(false),
+                            "Download as email HTML"
+                        }
+                        if can_export_with_chrome {
+                            a {
+                                href: export_href(&mailing_id, ".pdf", Some(selected)),
+                                onclick: move |_| is_unit_menu_open.set(false),
+                                "Download as PDF"
+                            }
+                            a {
+                                href: png_export_href(&mailing_id, Some(selected)),
+                                download: email_download_name(&mailing_id, selected, "png"),
+                                onclick: move |_| is_unit_menu_open.set(false),
+                                "Download as PNG"
+                            }
+                        } else {
+                            a {
+                                "aria-disabled": "true",
+                                title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                                "Download as PDF"
+                            }
+                            a {
+                                "aria-disabled": "true",
+                                title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                                "Download as PNG"
+                            }
+                        }
+                    }
+                }
             }
         }
     }

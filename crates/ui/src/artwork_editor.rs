@@ -762,10 +762,10 @@ fn cover_download_name(artwork_id: &str, index: usize, extension: &str) -> Strin
     format!("{artwork_id}-cover-{}.{extension}", index + 1)
 }
 
-/// The artwork toolbar's export group: a scope toggle when the artwork
-/// has more than one cover, then the HTML file, the Chrome-backed PDF,
-/// and the PNG export. The scope picks the cover on screen or every
-/// cover; scoped, the PNG link downloads that cover's image.
+/// The artwork toolbar's export group and, with more than one cover,
+/// the cover menu beside it. The group always exports the whole
+/// artwork; the menu downloads the cover on screen in one format,
+/// with no mode to forget.
 #[component]
 fn ArtworkExportGroup(
     artwork_id: String,
@@ -773,59 +773,75 @@ fn ArtworkExportGroup(
     cover_count: usize,
     can_export_with_chrome: bool,
 ) -> Element {
-    let mut is_scoped = use_signal(|| false);
-    let only = (is_scoped() && cover_count > 1).then_some(selected);
+    let mut is_unit_menu_open = use_signal(|| false);
     let number = selected + 1;
-    let html_title = if only.is_some() {
-        "Export the cover on screen as one HTML file"
-    } else {
-        "Export as one HTML file"
-    };
-    let pdf_title = if only.is_some() {
-        "Export the cover on screen as a one-page PDF"
-    } else {
-        "Export as a PDF, one page per cover"
-    };
-    let png_title = if only.is_some() {
-        "Download the cover on screen as a PNG"
-    } else {
-        "Export as a zip of one PNG per cover"
-    };
     rsx! {
         div { class: "export-group",
-            if cover_count > 1 {
-                button {
-                    class: if only.is_none() { "button scope-choice open" } else { "button scope-choice" },
-                    title: "Export every cover",
-                    onclick: move |_| is_scoped.set(false),
-                    "All covers"
-                }
-                button {
-                    class: if only.is_some() { "button scope-choice open" } else { "button scope-choice" },
-                    title: "Export only the cover on screen",
-                    onclick: move |_| is_scoped.set(true),
-                    "Cover {number}"
-                }
-            }
             a {
                 class: "button",
-                href: export_href(&artwork_id, "", only),
-                title: "{html_title}",
+                href: export_href(&artwork_id, "", None),
+                title: "Export as one HTML file",
                 span { dangerous_inner_html: icons::DOWNLOAD }
                 "HTML"
             }
             ChromeExportLink {
-                href: export_href(&artwork_id, ".pdf", only),
+                href: export_href(&artwork_id, ".pdf", None),
                 label: "PDF",
-                title: pdf_title,
+                title: "Export as a PDF, one page per cover",
                 is_enabled: can_export_with_chrome,
             }
             ChromeExportLink {
-                href: png_export_href(&artwork_id, only),
+                href: png_export_href(&artwork_id, None),
                 label: "PNG",
-                title: png_title,
+                title: "Export as a zip of one PNG per cover",
                 is_enabled: can_export_with_chrome,
-                download: only.map(|index| cover_download_name(&artwork_id, index, "png")),
+            }
+        }
+        if cover_count > 1 {
+            div { class: "unit-export",
+                button {
+                    title: "Download only the cover on screen",
+                    onclick: move |_| is_unit_menu_open.set(!is_unit_menu_open()),
+                    span { dangerous_inner_html: icons::DOWNLOAD }
+                    "Cover {number}"
+                }
+                if is_unit_menu_open() {
+                    div {
+                        class: "menu-backdrop",
+                        onclick: move |_| is_unit_menu_open.set(false),
+                    }
+                    div { class: "toolbar-menu unit-export-menu",
+                        a {
+                            href: export_href(&artwork_id, "", Some(selected)),
+                            onclick: move |_| is_unit_menu_open.set(false),
+                            "Download as HTML"
+                        }
+                        if can_export_with_chrome {
+                            a {
+                                href: export_href(&artwork_id, ".pdf", Some(selected)),
+                                onclick: move |_| is_unit_menu_open.set(false),
+                                "Download as PDF"
+                            }
+                            a {
+                                href: png_export_href(&artwork_id, Some(selected)),
+                                download: cover_download_name(&artwork_id, selected, "png"),
+                                onclick: move |_| is_unit_menu_open.set(false),
+                                "Download as PNG"
+                            }
+                        } else {
+                            a {
+                                "aria-disabled": "true",
+                                title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                                "Download as PDF"
+                            }
+                            a {
+                                "aria-disabled": "true",
+                                title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                                "Download as PNG"
+                            }
+                        }
+                    }
+                }
             }
         }
     }

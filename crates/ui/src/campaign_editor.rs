@@ -762,10 +762,10 @@ fn ad_download_name(campaign_id: &str, index: usize, extension: &str) -> String 
     format!("{campaign_id}-ad-{}.{extension}", index + 1)
 }
 
-/// The campaign toolbar's export group: a scope toggle when the
-/// campaign has more than one ad, then the HTML file, the
-/// Chrome-backed PDF, and the PNG export. The scope picks the ad on
-/// screen or every ad; scoped, the PNG link downloads that ad's image.
+/// The campaign toolbar's export group and, with more than one ad,
+/// the ad menu beside it. The group always exports the whole
+/// campaign; the menu downloads the ad on screen in one format,
+/// with no mode to forget.
 #[component]
 fn CampaignExportGroup(
     campaign_id: String,
@@ -773,59 +773,75 @@ fn CampaignExportGroup(
     ad_count: usize,
     can_export_with_chrome: bool,
 ) -> Element {
-    let mut is_scoped = use_signal(|| false);
-    let only = (is_scoped() && ad_count > 1).then_some(selected);
+    let mut is_unit_menu_open = use_signal(|| false);
     let number = selected + 1;
-    let html_title = if only.is_some() {
-        "Export the ad on screen as one HTML file"
-    } else {
-        "Export as one HTML file"
-    };
-    let pdf_title = if only.is_some() {
-        "Export the ad on screen as a one-page PDF"
-    } else {
-        "Export as a PDF, one page per ad"
-    };
-    let png_title = if only.is_some() {
-        "Download the ad on screen as a PNG"
-    } else {
-        "Export as a zip of one PNG per ad"
-    };
     rsx! {
         div { class: "export-group",
-            if ad_count > 1 {
-                button {
-                    class: if only.is_none() { "button scope-choice open" } else { "button scope-choice" },
-                    title: "Export every ad",
-                    onclick: move |_| is_scoped.set(false),
-                    "All ads"
-                }
-                button {
-                    class: if only.is_some() { "button scope-choice open" } else { "button scope-choice" },
-                    title: "Export only the ad on screen",
-                    onclick: move |_| is_scoped.set(true),
-                    "Ad {number}"
-                }
-            }
             a {
                 class: "button",
-                href: export_href(&campaign_id, "", only),
-                title: "{html_title}",
+                href: export_href(&campaign_id, "", None),
+                title: "Export as one HTML file",
                 span { dangerous_inner_html: icons::DOWNLOAD }
                 "HTML"
             }
             ChromeExportLink {
-                href: export_href(&campaign_id, ".pdf", only),
+                href: export_href(&campaign_id, ".pdf", None),
                 label: "PDF",
-                title: pdf_title,
+                title: "Export as a PDF, one page per ad",
                 is_enabled: can_export_with_chrome,
             }
             ChromeExportLink {
-                href: png_export_href(&campaign_id, only),
+                href: png_export_href(&campaign_id, None),
                 label: "PNG",
-                title: png_title,
+                title: "Export as a zip of one PNG per ad",
                 is_enabled: can_export_with_chrome,
-                download: only.map(|index| ad_download_name(&campaign_id, index, "png")),
+            }
+        }
+        if ad_count > 1 {
+            div { class: "unit-export",
+                button {
+                    title: "Download only the ad on screen",
+                    onclick: move |_| is_unit_menu_open.set(!is_unit_menu_open()),
+                    span { dangerous_inner_html: icons::DOWNLOAD }
+                    "Ad {number}"
+                }
+                if is_unit_menu_open() {
+                    div {
+                        class: "menu-backdrop",
+                        onclick: move |_| is_unit_menu_open.set(false),
+                    }
+                    div { class: "toolbar-menu unit-export-menu",
+                        a {
+                            href: export_href(&campaign_id, "", Some(selected)),
+                            onclick: move |_| is_unit_menu_open.set(false),
+                            "Download as HTML"
+                        }
+                        if can_export_with_chrome {
+                            a {
+                                href: export_href(&campaign_id, ".pdf", Some(selected)),
+                                onclick: move |_| is_unit_menu_open.set(false),
+                                "Download as PDF"
+                            }
+                            a {
+                                href: png_export_href(&campaign_id, Some(selected)),
+                                download: ad_download_name(&campaign_id, selected, "png"),
+                                onclick: move |_| is_unit_menu_open.set(false),
+                                "Download as PNG"
+                            }
+                        } else {
+                            a {
+                                "aria-disabled": "true",
+                                title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                                "Download as PDF"
+                            }
+                            a {
+                                "aria-disabled": "true",
+                                title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                                "Download as PNG"
+                            }
+                        }
+                    }
+                }
             }
         }
     }

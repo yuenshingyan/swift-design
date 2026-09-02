@@ -759,10 +759,10 @@ fn frame_download_name(social_id: &str, index: usize, extension: &str) -> String
     format!("{social_id}-frame-{}.{extension}", index + 1)
 }
 
-/// The social toolbar's export group: a scope toggle when the social
-/// has more than one frame, then the HTML file, the Chrome-backed
-/// PDF, and the PNG export. The scope picks the frame on screen or
-/// every frame; scoped, the PNG link downloads that frame's image.
+/// The social toolbar's export group and, with more than one frame,
+/// the frame menu beside it. The group always exports the whole
+/// social; the menu downloads the frame on screen in one format,
+/// with no mode to forget.
 #[component]
 fn SocialExportGroup(
     social_id: String,
@@ -770,59 +770,75 @@ fn SocialExportGroup(
     frame_count: usize,
     can_export_with_chrome: bool,
 ) -> Element {
-    let mut is_scoped = use_signal(|| false);
-    let only = (is_scoped() && frame_count > 1).then_some(selected);
+    let mut is_unit_menu_open = use_signal(|| false);
     let number = selected + 1;
-    let html_title = if only.is_some() {
-        "Export the frame on screen as one HTML file"
-    } else {
-        "Export as one HTML file"
-    };
-    let pdf_title = if only.is_some() {
-        "Export the frame on screen as a one-page PDF"
-    } else {
-        "Export as a PDF, one sheet per frame"
-    };
-    let png_title = if only.is_some() {
-        "Download the frame on screen as a PNG"
-    } else {
-        "Export as a zip of one PNG per frame"
-    };
     rsx! {
         div { class: "export-group",
-            if frame_count > 1 {
-                button {
-                    class: if only.is_none() { "button scope-choice open" } else { "button scope-choice" },
-                    title: "Export every frame",
-                    onclick: move |_| is_scoped.set(false),
-                    "All frames"
-                }
-                button {
-                    class: if only.is_some() { "button scope-choice open" } else { "button scope-choice" },
-                    title: "Export only the frame on screen",
-                    onclick: move |_| is_scoped.set(true),
-                    "Frame {number}"
-                }
-            }
             a {
                 class: "button",
-                href: export_href(&social_id, "", only),
-                title: "{html_title}",
+                href: export_href(&social_id, "", None),
+                title: "Export as one HTML file",
                 span { dangerous_inner_html: icons::DOWNLOAD }
                 "HTML"
             }
             ChromeExportLink {
-                href: export_href(&social_id, ".pdf", only),
+                href: export_href(&social_id, ".pdf", None),
                 label: "PDF",
-                title: pdf_title,
+                title: "Export as a PDF, one sheet per frame",
                 is_enabled: can_export_with_chrome,
             }
             ChromeExportLink {
-                href: png_export_href(&social_id, only),
+                href: png_export_href(&social_id, None),
                 label: "PNG",
-                title: png_title,
+                title: "Export as a zip of one PNG per frame",
                 is_enabled: can_export_with_chrome,
-                download: only.map(|index| frame_download_name(&social_id, index, "png")),
+            }
+        }
+        if frame_count > 1 {
+            div { class: "unit-export",
+                button {
+                    title: "Download only the frame on screen",
+                    onclick: move |_| is_unit_menu_open.set(!is_unit_menu_open()),
+                    span { dangerous_inner_html: icons::DOWNLOAD }
+                    "Frame {number}"
+                }
+                if is_unit_menu_open() {
+                    div {
+                        class: "menu-backdrop",
+                        onclick: move |_| is_unit_menu_open.set(false),
+                    }
+                    div { class: "toolbar-menu unit-export-menu",
+                        a {
+                            href: export_href(&social_id, "", Some(selected)),
+                            onclick: move |_| is_unit_menu_open.set(false),
+                            "Download as HTML"
+                        }
+                        if can_export_with_chrome {
+                            a {
+                                href: export_href(&social_id, ".pdf", Some(selected)),
+                                onclick: move |_| is_unit_menu_open.set(false),
+                                "Download as PDF"
+                            }
+                            a {
+                                href: png_export_href(&social_id, Some(selected)),
+                                download: frame_download_name(&social_id, selected, "png"),
+                                onclick: move |_| is_unit_menu_open.set(false),
+                                "Download as PNG"
+                            }
+                        } else {
+                            a {
+                                "aria-disabled": "true",
+                                title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                                "Download as PDF"
+                            }
+                            a {
+                                "aria-disabled": "true",
+                                title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                                "Download as PNG"
+                            }
+                        }
+                    }
+                }
             }
         }
     }

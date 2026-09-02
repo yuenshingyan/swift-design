@@ -788,10 +788,10 @@ fn sheet_download_name(print_id: &str, index: usize, extension: &str) -> String 
     format!("{print_id}-sheet-{}.{extension}", index + 1)
 }
 
-/// The print toolbar's export group: a scope toggle when the print
-/// has more than one sheet, then the HTML file, the Chrome-backed
-/// PDF, and the PNG export. The scope picks the sheet on screen or
-/// every sheet; scoped, the PNG link downloads that sheet's image.
+/// The print toolbar's export group and, with more than one sheet,
+/// the sheet menu beside it. The group always exports the whole
+/// print; the menu downloads the sheet on screen in one format,
+/// with no mode to forget.
 #[component]
 fn PrintExportGroup(
     print_id: String,
@@ -799,59 +799,75 @@ fn PrintExportGroup(
     sheet_count: usize,
     can_export_with_chrome: bool,
 ) -> Element {
-    let mut is_scoped = use_signal(|| false);
-    let only = (is_scoped() && sheet_count > 1).then_some(selected);
+    let mut is_unit_menu_open = use_signal(|| false);
     let number = selected + 1;
-    let html_title = if only.is_some() {
-        "Export the sheet on screen as one HTML file"
-    } else {
-        "Export as one HTML file"
-    };
-    let pdf_title = if only.is_some() {
-        "Export the sheet on screen as a one-page PDF"
-    } else {
-        "Export as a PDF for the print shop, one page per sheet"
-    };
-    let png_title = if only.is_some() {
-        "Download the sheet on screen as a PNG"
-    } else {
-        "Export as a zip of one PNG per sheet"
-    };
     rsx! {
         div { class: "export-group",
-            if sheet_count > 1 {
-                button {
-                    class: if only.is_none() { "button scope-choice open" } else { "button scope-choice" },
-                    title: "Export every sheet",
-                    onclick: move |_| is_scoped.set(false),
-                    "All sheets"
-                }
-                button {
-                    class: if only.is_some() { "button scope-choice open" } else { "button scope-choice" },
-                    title: "Export only the sheet on screen",
-                    onclick: move |_| is_scoped.set(true),
-                    "Sheet {number}"
-                }
-            }
             a {
                 class: "button",
-                href: export_href(&print_id, "", only),
-                title: "{html_title}",
+                href: export_href(&print_id, "", None),
+                title: "Export as one HTML file",
                 span { dangerous_inner_html: icons::DOWNLOAD }
                 "HTML"
             }
             ChromeExportLink {
-                href: export_href(&print_id, ".pdf", only),
+                href: export_href(&print_id, ".pdf", None),
                 label: "PDF",
-                title: pdf_title,
+                title: "Export as a PDF for the print shop, one page per sheet",
                 is_enabled: can_export_with_chrome,
             }
             ChromeExportLink {
-                href: png_export_href(&print_id, only),
+                href: png_export_href(&print_id, None),
                 label: "PNG",
-                title: png_title,
+                title: "Export as a zip of one PNG per sheet",
                 is_enabled: can_export_with_chrome,
-                download: only.map(|index| sheet_download_name(&print_id, index, "png")),
+            }
+        }
+        if sheet_count > 1 {
+            div { class: "unit-export",
+                button {
+                    title: "Download only the sheet on screen",
+                    onclick: move |_| is_unit_menu_open.set(!is_unit_menu_open()),
+                    span { dangerous_inner_html: icons::DOWNLOAD }
+                    "Sheet {number}"
+                }
+                if is_unit_menu_open() {
+                    div {
+                        class: "menu-backdrop",
+                        onclick: move |_| is_unit_menu_open.set(false),
+                    }
+                    div { class: "toolbar-menu unit-export-menu",
+                        a {
+                            href: export_href(&print_id, "", Some(selected)),
+                            onclick: move |_| is_unit_menu_open.set(false),
+                            "Download as HTML"
+                        }
+                        if can_export_with_chrome {
+                            a {
+                                href: export_href(&print_id, ".pdf", Some(selected)),
+                                onclick: move |_| is_unit_menu_open.set(false),
+                                "Download as PDF"
+                            }
+                            a {
+                                href: png_export_href(&print_id, Some(selected)),
+                                download: sheet_download_name(&print_id, selected, "png"),
+                                onclick: move |_| is_unit_menu_open.set(false),
+                                "Download as PNG"
+                            }
+                        } else {
+                            a {
+                                "aria-disabled": "true",
+                                title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                                "Download as PDF"
+                            }
+                            a {
+                                "aria-disabled": "true",
+                                title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                                "Download as PNG"
+                            }
+                        }
+                    }
+                }
             }
         }
     }
