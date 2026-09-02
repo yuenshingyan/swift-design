@@ -249,6 +249,9 @@ editingStyle.textContent = `
 [data-swift-design-handle='s'] { left: 50%; top: 100%; cursor: ns-resize; }
 [data-swift-design-handle='sw'] { left: 0; top: 100%; cursor: nesw-resize; }
 [data-swift-design-handle='w'] { left: 0; top: 50%; cursor: ew-resize; }
+.swift-design-guide { position: fixed; z-index: 8; display: none; pointer-events: none; background: #E0457B; }
+.swift-design-guide[data-swift-design-axis='x'] { width: 1px; top: 0; bottom: 0; }
+.swift-design-guide[data-swift-design-axis='y'] { height: 1px; left: 0; right: 0; }
 `;
 document.head.appendChild(editingStyle);
 const menu = document.createElement('div');
@@ -266,6 +269,23 @@ handleBox.className = 'swift-design-handles';
   handleBox.appendChild(handle);
 });
 document.body.appendChild(handleBox);
+// One vertical and one horizontal guide line for snapping, on the
+// body like the menu and the handles.
+const guides = {};
+['x', 'y'].forEach((axis) => {
+  const guide = document.createElement('div');
+  guide.className = 'swift-design-guide';
+  guide.setAttribute('data-swift-design-axis', axis);
+  document.body.appendChild(guide);
+  guides[axis] = guide;
+});
+function setGuide(axis, position) {
+  const guide = guides[axis];
+  if (position === null) { guide.style.display = 'none'; return; }
+  guide.style.display = 'block';
+  if (axis === 'x') { guide.style.left = position + 'px'; } else { guide.style.top = position + 'px'; }
+}
+function hideGuides() { setGuide('x', null); setGuide('y', null); }
 function hideMenu() { menu.style.display = 'none'; menu.innerHTML = ''; }
 document.addEventListener('click', hideMenu);
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape') { hideMenu(); if (document.activeElement) { document.activeElement.blur(); } } });
@@ -544,9 +564,40 @@ function applyAction(root, element, action, value) {
 }
 const DRAG_THRESHOLD = 4;
 const RESIZE_MINIMUM = 16;
+const SNAP_THRESHOLD = 6;
+const SNAP_SIBLING_LIMIT = 24;
 let drag = null;
 let resize = null;
 let isClickSuppressed = false;
+// The snap targets for one gesture: the screen-pixel positions of the
+// root's edges and centers plus the siblings' edges and centers.
+// Cached at the first move, because a translate never reflows them.
+function snapLinesOf(root, element) {
+  const vertical = [];
+  const horizontal = [];
+  const add = (rect) => {
+    vertical.push(rect.left, rect.left + rect.width / 2, rect.right);
+    horizontal.push(rect.top, rect.top + rect.height / 2, rect.bottom);
+  };
+  add(root.getBoundingClientRect());
+  const siblings = element.parentElement ? Array.from(element.parentElement.children) : [];
+  siblings.filter((node) => node !== element).slice(0, SNAP_SIBLING_LIMIT).forEach((node) => add(node.getBoundingClientRect()));
+  return { vertical, horizontal };
+}
+// The nearest line within the threshold of any moving edge, as the
+// screen-pixel correction to add to the pointer delta.
+function snapAdjust(lines, edges) {
+  let best = null;
+  edges.forEach((edge) => {
+    lines.forEach((line) => {
+      const distance = line - edge;
+      if (Math.abs(distance) <= SNAP_THRESHOLD && (!best || Math.abs(distance) < Math.abs(best.distance))) {
+        best = { distance, line };
+      }
+    });
+  });
+  return best;
+}
 // Positions the bounding box with the handles over the primary
 // selected node, or hides it. The overlay is fixed and the rect is
 // viewport-relative, so the two always agree, whatever scrolls.
@@ -591,7 +642,28 @@ function startResize(event, handle) {
     scaleX: base.width ? rect.width / base.width : fallback,
     scaleY: base.height ? rect.height / base.height : fallback,
     ratio: base.height ? base.width / base.height : 1,
+    snapLines: snapLinesOf(root, selected),
+    startRect: rect,
   };
+}
+// The active edge snaps in screen pixels before the scale division,
+// like a move; the correction returns as an adjusted pointer delta.
+function snappedResizeDeltas(event) {
+  const handle = resize.handle;
+  const rect = resize.startRect;
+  let pointerDx = event.clientX - resize.x;
+  let pointerDy = event.clientY - resize.y;
+  let verticalSnap = null;
+  let horizontalSnap = null;
+  if (handle.includes('e')) { verticalSnap = snapAdjust(resize.snapLines.vertical, [rect.right + pointerDx]); }
+  if (handle.includes('w')) { verticalSnap = snapAdjust(resize.snapLines.vertical, [rect.left + pointerDx]); }
+  if (handle.includes('s')) { horizontalSnap = snapAdjust(resize.snapLines.horizontal, [rect.bottom + pointerDy]); }
+  if (handle.includes('n')) { horizontalSnap = snapAdjust(resize.snapLines.horizontal, [rect.top + pointerDy]); }
+  if (verticalSnap) { pointerDx += verticalSnap.distance; }
+  if (horizontalSnap) { pointerDy += horizontalSnap.distance; }
+  setGuide('x', verticalSnap ? verticalSnap.line : null);
+  setGuide('y', horizontalSnap ? horizontalSnap.line : null);
+  return { dx: pointerDx / resize.scaleX, dy: pointerDy / resize.scaleY };
 }
 function applyResize(event) {
   event.preventDefault();
@@ -599,8 +671,9 @@ function applyResize(event) {
   resize.moved = true;
   hideMenu();
   const handle = resize.handle;
-  const dx = (event.clientX - resize.x) / resize.scaleX;
-  const dy = (event.clientY - resize.y) / resize.scaleY;
+  const deltas = snappedResizeDeltas(event);
+  const dx = deltas.dx;
+  const dy = deltas.dy;
   let width = resize.baseWidth;
   let height = resize.baseHeight;
   let shiftX = 0;
@@ -635,6 +708,7 @@ function endResize(save) {
   if (!resize) { return; }
   const finished = resize;
   resize = null;
+  hideGuides();
   if (!finished.moved) { return; }
   isClickSuppressed = true;
   if (save) { postHtml(finished.root, true); }
@@ -650,6 +724,7 @@ function endDrag(save) {
   if (!drag) { return; }
   const finished = drag;
   drag = null;
+  hideGuides();
   if (!finished.moved) { return; }
   finished.root.removeAttribute('data-swift-design-dragging');
   isClickSuppressed = true;
@@ -664,14 +739,27 @@ document.addEventListener('pointermove', (event) => {
     if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) { return; }
     drag.moved = true;
     recordSnapshot(drag.root);
+    drag.snapLines = snapLinesOf(drag.root, drag.element);
+    drag.startRect = drag.element.getBoundingClientRect();
     drag.root.setAttribute('data-swift-design-dragging', '');
     hideMenu();
     select(drag.element);
   }
   event.preventDefault();
+  // The snap correction is applied to the screen-pixel delta, before
+  // the scale division, so the snapped edge lands exactly on the line.
+  let snappedDx = dx;
+  let snappedDy = dy;
+  const rect = drag.startRect;
+  const verticalSnap = snapAdjust(drag.snapLines.vertical, [rect.left + dx, rect.left + rect.width / 2 + dx, rect.right + dx]);
+  const horizontalSnap = snapAdjust(drag.snapLines.horizontal, [rect.top + dy, rect.top + rect.height / 2 + dy, rect.bottom + dy]);
+  if (verticalSnap) { snappedDx += verticalSnap.distance; }
+  if (horizontalSnap) { snappedDy += horizontalSnap.distance; }
+  setGuide('x', verticalSnap ? verticalSnap.line : null);
+  setGuide('y', horizontalSnap ? horizontalSnap.line : null);
   // Screen pixels divided by the root's scale give canvas pixels.
-  const x = Math.round(drag.base.x + dx / drag.scale);
-  const y = Math.round(drag.base.y + dy / drag.scale);
+  const x = Math.round(drag.base.x + snappedDx / drag.scale);
+  const y = Math.round(drag.base.y + snappedDy / drag.scale);
   drag.element.style.translate = x + 'px ' + y + 'px';
   updateHandles();
 }, { passive: false });
@@ -1374,6 +1462,15 @@ mod tests {
         assert!(EDITING_SCRIPT.contains("NUDGE_SAVE_DELAY_MS"));
         assert!(EDITING_SCRIPT.contains("ArrowUp"));
         assert!(EDITING_SCRIPT.contains("isNudgeActive"));
+    }
+
+    #[test]
+    fn snap_guides_ship_with_the_editing_script() {
+        assert!(EDITING_SCRIPT.contains("swift-design-guide"));
+        assert!(EDITING_SCRIPT.contains("SNAP_THRESHOLD = 6"));
+        assert!(EDITING_SCRIPT.contains("SNAP_SIBLING_LIMIT = 24"));
+        assert!(EDITING_SCRIPT.contains("snapLinesOf"));
+        assert!(EDITING_SCRIPT.contains("hideGuides"));
     }
 
     #[test]
