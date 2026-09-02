@@ -690,6 +690,8 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .export-group .button:focus-visible { outline-offset: -2px; }
 .export-group .export-cell { display: flex; }
 .export-group .button[aria-disabled='true'] { color: #B4B0A7; pointer-events: none; }
+.export-group .export-scope { margin: 0.1875rem; align-self: center; }
+.export-scope .canvas-tab { padding: 0.2rem 0.6rem; }
 .toolbar-more { width: 2rem; height: 2rem; padding: 0; display: flex;
   align-items: center; justify-content: center; font-size: 0.9rem; letter-spacing: 0.05em; }
 .menu-backdrop { position: fixed; inset: 0; z-index: 5; }
