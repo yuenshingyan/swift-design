@@ -417,6 +417,8 @@ function select(element, isAdditive) {
   document.querySelectorAll('[data-swift-design-selected]').forEach((node) => node.removeAttribute('data-swift-design-selected'));
   selection.forEach((node) => node.setAttribute('data-swift-design-selected', ''));
   selected = selection.length ? selection[selection.length - 1] : null;
+  // A nudge burst belongs to one node; a new selection ends it.
+  isNudgeActive = false;
   updateHandles();
   if (!element) { return; }
   const root = rootOf(element);
@@ -679,6 +681,31 @@ window.addEventListener('blur', () => { endResize(true); endDrag(true); });
 // Scroll does not bubble, so the reposition listens in capture.
 document.addEventListener('scroll', updateHandles, true);
 window.addEventListener('resize', updateHandles);
+// An arrow key nudges the selected node by one canvas pixel, ten with
+// Shift. With nothing selected the arrows still turn the page.
+const NUDGE_STEP = 1;
+const NUDGE_SHIFT_STEP = 10;
+const NUDGE_SAVE_DELAY_MS = 400;
+let nudgeTimer = null;
+let isNudgeActive = false;
+document.addEventListener('keydown', (event) => {
+  if (!selected || !selected.isConnected || selected === rootOf(selected)) { return; }
+  if (event.target && event.target.isContentEditable) { return; }
+  const deltas = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+  const delta = deltas[event.key];
+  if (!delta) { return; }
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const root = rootOf(selected);
+  // One undo snapshot and one save per burst of keys.
+  if (!isNudgeActive) { recordSnapshot(root); isNudgeActive = true; }
+  const step = event.shiftKey ? NUDGE_SHIFT_STEP : NUDGE_STEP;
+  const base = translateOf(selected);
+  selected.style.translate = (base.x + delta[0] * step) + 'px ' + (base.y + delta[1] * step) + 'px';
+  updateHandles();
+  clearTimeout(nudgeTimer);
+  nudgeTimer = setTimeout(() => { isNudgeActive = false; postHtml(root, true); }, NUDGE_SAVE_DELAY_MS);
+}, true);
 document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
   const screen = screenIndexOf(root);
   root.addEventListener('pointerdown', (event) => {
@@ -1338,6 +1365,15 @@ mod tests {
         assert!(EDITING_SCRIPT.contains("stopImmediatePropagation"));
         assert!(EDITING_SCRIPT.contains("event.shiftKey"));
         assert!(EDITING_SCRIPT.contains("redo()"));
+    }
+
+    #[test]
+    fn arrow_keys_nudge_the_selected_node() {
+        assert!(EDITING_SCRIPT.contains("NUDGE_STEP = 1"));
+        assert!(EDITING_SCRIPT.contains("NUDGE_SHIFT_STEP = 10"));
+        assert!(EDITING_SCRIPT.contains("NUDGE_SAVE_DELAY_MS"));
+        assert!(EDITING_SCRIPT.contains("ArrowUp"));
+        assert!(EDITING_SCRIPT.contains("isNudgeActive"));
     }
 
     #[test]
