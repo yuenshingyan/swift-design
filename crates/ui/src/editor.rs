@@ -112,6 +112,10 @@ pub(crate) struct NodeStyles {
     #[serde(default)]
     pub(crate) src: String,
     #[serde(default)]
+    pub(crate) width: String,
+    #[serde(default)]
+    pub(crate) height: String,
+    #[serde(default)]
     pub(crate) is_leaf: bool,
 }
 
@@ -1353,6 +1357,26 @@ pub(crate) fn NodeInspector(
                         oninput: {
                             let command = command.clone();
                             move |event| on_apply.call(command("padding", event.value()))
+                        },
+                    }
+                }
+                label {
+                    "Width"
+                    input {
+                        value: "{node.styles.width}",
+                        oninput: {
+                            let command = command.clone();
+                            move |event| on_apply.call(command("width", event.value()))
+                        },
+                    }
+                }
+                label {
+                    "Height"
+                    input {
+                        value: "{node.styles.height}",
+                        oninput: {
+                            let command = command.clone();
+                            move |event| on_apply.call(command("height", event.value()))
                         },
                     }
                 }
