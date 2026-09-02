@@ -330,7 +330,7 @@ function setGuide(axis, position) {
   if (axis === 'x') { guide.style.left = position + 'px'; } else { guide.style.top = position + 'px'; }
 }
 function hideGuides() { setGuide('x', null); setGuide('y', null); }
-function hideMenu() { menu.style.display = 'none'; menu.innerHTML = ''; }
+function hideMenu() { menu.style.display = 'none'; menu.innerHTML = ''; updateHandles(); }
 document.addEventListener('click', hideMenu);
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape') { hideMenu(); if (document.activeElement) { document.activeElement.blur(); } } });
 
@@ -538,6 +538,7 @@ function showMenu(x, y, items) {
     menu.appendChild(button);
   });
   menu.style.display = 'block';
+  toolbar.style.display = 'none';
   const width = menu.offsetWidth, height = menu.offsetHeight;
   menu.style.left = Math.min(x, window.innerWidth - width - 8) + 'px';
   menu.style.top = Math.min(y, window.innerHeight - height - 8) + 'px';
@@ -666,9 +667,13 @@ function updateHandles() {
 }
 // Docks the toolbar above the bounding box, below it when the top is
 // clipped, and hides it while a gesture runs so it never sits under
-// the pointer.
+// the pointer. The context menu repeats the toolbar's actions, so the
+// two never show together: the menu wins while it is open.
 function updateToolbar(rect) {
-  if ((drag && drag.moved) || resize || rotate) { toolbar.style.display = 'none'; return; }
+  if ((drag && drag.moved) || resize || rotate || menu.style.display === 'block') {
+    toolbar.style.display = 'none';
+    return;
+  }
   toolbar.style.display = 'flex';
   // 34 clears the rotate handle, which floats 24 px above the box.
   let top = rect.top - toolbar.offsetHeight - 34;
