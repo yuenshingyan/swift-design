@@ -932,6 +932,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                             screen: selected(),
                             node: selected_node(),
                             on_apply: move |command: NodeCommand| apply.call(command),
+                            scope: artifact_project(&design_id),
                         }
                         div { class: "sheet-section",
                             div { class: "head", "Design" }
@@ -1246,6 +1247,16 @@ pub(crate) fn node_reference(unit: &str, screen_index: usize, node: &SelectedNod
     }
 }
 
+/// The picker entries for an image node: the session's image uploads
+/// as `/uploads/{name}` paths.
+fn image_upload_paths(uploads: &[api::UploadSummary]) -> Vec<String> {
+    uploads
+        .iter()
+        .filter(|upload| upload.is_image)
+        .map(|upload| format!("/uploads/{}", upload.name))
+        .collect()
+}
+
 /// The selected node's quick fields. Every change is sent into the
 /// preview, which applies it and posts the screen's HTML back.
 #[component]
@@ -1253,7 +1264,14 @@ pub(crate) fn NodeInspector(
     screen: usize,
     node: Option<SelectedNode>,
     on_apply: EventHandler<NodeCommand>,
+    scope: String,
 ) -> Element {
+    // The hook runs before the empty-state return, so the hook count
+    // stays the same whether a node is selected or not.
+    let uploads = use_resource(move || {
+        let scope = scope.clone();
+        async move { api::fetch_uploads(&scope).await.unwrap_or_default() }
+    });
     let Some(node) = node else {
         return rsx! {
             div { class: "sheet-section",
@@ -1381,8 +1399,27 @@ pub(crate) fn NodeInspector(
                     }
                 }
                 if node.tag == "img" {
+                    if let Some(images) = uploads.read().as_deref().map(image_upload_paths) {
+                        if !images.is_empty() {
+                            div { class: "upload-picker",
+                                for image in images {
+                                    button {
+                                        class: if node.styles.src == image { "selected" } else { "" },
+                                        title: "{image}",
+                                        onclick: {
+                                            let command = command.clone();
+                                            let image = image.clone();
+                                            move |_| on_apply.call(command("src", image.clone()))
+                                        },
+                                        img { src: "{image}" }
+                                        span { class: "upload-name", "{image}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     label {
-                        "Image source: pick a file under Uploads, or type a /uploads/… path"
+                        "Image source: click a file, or type a /uploads/… path"
                         input {
                             value: "{node.styles.src}",
                             oninput: {
@@ -1846,11 +1883,30 @@ mod tests {
     use crate::editor::{
         MONO_FONTS, NodeStyles, PreviewMode, SelectedNode, SelectionEntry, TEXT_FONTS,
         ThumbnailState, default_screen, effect_uses_motion, field_count, first_heading,
-        font_options, history_label, move_screen, navigation_target, node_reference, optional,
-        outline_entry, outline_title, page_reference, preview_stage_class, screen_label,
-        selection_paths, selection_reference, strip_summary, strip_tags, thumbnail_class,
-        toggle_pin,
+        font_options, history_label, image_upload_paths, move_screen, navigation_target,
+        node_reference, optional, outline_entry, outline_title, page_reference,
+        preview_stage_class, screen_label, selection_paths, selection_reference, strip_summary,
+        strip_tags, thumbnail_class, toggle_pin,
     };
+
+    #[test]
+    fn only_image_uploads_become_picker_entries() {
+        let uploads = vec![
+            crate::api::UploadSummary {
+                name: "hero.png".to_owned(),
+                size_bytes: 10,
+                content_type: "image/png".to_owned(),
+                is_image: true,
+            },
+            crate::api::UploadSummary {
+                name: "notes.txt".to_owned(),
+                size_bytes: 10,
+                content_type: "text/plain".to_owned(),
+                is_image: false,
+            },
+        ];
+        assert_eq!(image_upload_paths(&uploads), vec!["/uploads/hero.png"]);
+    }
 
     #[test]
     fn play_mode_asks_the_render_for_no_editing_script() {

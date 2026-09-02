@@ -677,6 +677,7 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                             screen: selected(),
                             node: selected_node(),
                             on_apply: move |command: NodeCommand| apply.call(command),
+                            scope: artifact_project(&social_id),
                         }
                         div { class: "sheet-section",
                             div { class: "head", "Social" }

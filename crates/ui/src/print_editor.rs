@@ -678,6 +678,7 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                             screen: selected(),
                             node: selected_node(),
                             on_apply: move |command: NodeCommand| apply.call(command),
+                            scope: artifact_project(&print_id),
                         }
                         div { class: "sheet-section",
                             div { class: "head", "Print" }

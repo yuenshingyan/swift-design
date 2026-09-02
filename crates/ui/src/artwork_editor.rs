@@ -677,6 +677,7 @@ fn LoadedArtworkEditor(artwork_id: String, initial: Artwork, on_back: EventHandl
                             screen: selected(),
                             node: selected_node(),
                             on_apply: move |command: NodeCommand| apply.call(command),
+                            scope: artifact_project(&artwork_id),
                         }
                         div { class: "sheet-section",
                             div { class: "head", "Artwork" }

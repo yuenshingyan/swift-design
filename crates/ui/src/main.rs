@@ -753,6 +753,14 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
   align-items: center; }
 .inspector-empty .glyph { display: flex; color: var(--faint); flex: none; }
 .inspector-hint { margin: 0; font-size: 0.78rem; line-height: 1.5; color: var(--muted); }
+.upload-picker { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.4rem; }
+.upload-picker button { padding: 0; border: 1px solid var(--line-soft); border-radius: 6px;
+  overflow: hidden; background: #FFFFFF; cursor: pointer; box-shadow: none; }
+.upload-picker button.selected { border-color: var(--teal); outline: 2px solid var(--teal);
+  outline-offset: -2px; }
+.upload-picker img { display: block; width: 100%; height: 3.2rem; object-fit: cover; }
+.upload-picker .upload-name { display: block; padding: 0.15rem 0.3rem; font-size: 0.62rem;
+  color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .color-list { border: 1px solid var(--hairline); border-radius: 9px; overflow: hidden; }
 .color-list .color-field { display: flex; flex-direction: row; align-items: center;
   gap: 0.625rem; padding: 0.625rem 0.75rem; cursor: pointer; }

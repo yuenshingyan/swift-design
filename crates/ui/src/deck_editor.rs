@@ -676,6 +676,7 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                             screen: selected(),
                             node: selected_node(),
                             on_apply: move |command: NodeCommand| apply.call(command),
+                            scope: artifact_project(&deck_id),
                         }
                         div { class: "sheet-section",
                             div { class: "head", "Deck" }

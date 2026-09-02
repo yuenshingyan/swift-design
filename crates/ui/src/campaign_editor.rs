@@ -677,6 +677,7 @@ fn LoadedCampaignEditor(
                             screen: selected(),
                             node: selected_node(),
                             on_apply: move |command: NodeCommand| apply.call(command),
+                            scope: artifact_project(&campaign_id),
                         }
                         div { class: "sheet-section",
                             div { class: "head", "Campaign" }

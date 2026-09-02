@@ -733,6 +733,7 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                             screen: selected(),
                             node: selected_node(),
                             on_apply: move |command: NodeCommand| apply.call(command),
+                            scope: artifact_project(&mailing_id),
                         }
                         div { class: "sheet-section",
                             div { class: "head", "Mailing" }
