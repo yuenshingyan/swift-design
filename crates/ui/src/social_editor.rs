@@ -791,21 +791,17 @@ fn SocialExportGroup(
     rsx! {
         div { class: "export-group",
             if frame_count > 1 {
-                div { class: "canvas-tabs export-scope", role: "tablist",
-                    button {
-                        role: "tab",
-                        class: if only.is_none() { "canvas-tab open" } else { "canvas-tab" },
-                        title: "Export every frame",
-                        onclick: move |_| is_scoped.set(false),
-                        "All frames"
-                    }
-                    button {
-                        role: "tab",
-                        class: if only.is_some() { "canvas-tab open" } else { "canvas-tab" },
-                        title: "Export only the frame on screen",
-                        onclick: move |_| is_scoped.set(true),
-                        "Frame {number}"
-                    }
+                button {
+                    class: if only.is_none() { "button scope-choice open" } else { "button scope-choice" },
+                    title: "Export every frame",
+                    onclick: move |_| is_scoped.set(false),
+                    "All frames"
+                }
+                button {
+                    class: if only.is_some() { "button scope-choice open" } else { "button scope-choice" },
+                    title: "Export only the frame on screen",
+                    onclick: move |_| is_scoped.set(true),
+                    "Frame {number}"
                 }
             }
             a {

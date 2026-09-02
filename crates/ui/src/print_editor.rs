@@ -820,21 +820,17 @@ fn PrintExportGroup(
     rsx! {
         div { class: "export-group",
             if sheet_count > 1 {
-                div { class: "canvas-tabs export-scope", role: "tablist",
-                    button {
-                        role: "tab",
-                        class: if only.is_none() { "canvas-tab open" } else { "canvas-tab" },
-                        title: "Export every sheet",
-                        onclick: move |_| is_scoped.set(false),
-                        "All sheets"
-                    }
-                    button {
-                        role: "tab",
-                        class: if only.is_some() { "canvas-tab open" } else { "canvas-tab" },
-                        title: "Export only the sheet on screen",
-                        onclick: move |_| is_scoped.set(true),
-                        "Sheet {number}"
-                    }
+                button {
+                    class: if only.is_none() { "button scope-choice open" } else { "button scope-choice" },
+                    title: "Export every sheet",
+                    onclick: move |_| is_scoped.set(false),
+                    "All sheets"
+                }
+                button {
+                    class: if only.is_some() { "button scope-choice open" } else { "button scope-choice" },
+                    title: "Export only the sheet on screen",
+                    onclick: move |_| is_scoped.set(true),
+                    "Sheet {number}"
                 }
             }
             a {

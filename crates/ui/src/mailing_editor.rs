@@ -865,21 +865,17 @@ fn MailingExportGroup(
     rsx! {
         div { class: "export-group",
             if email_count > 1 {
-                div { class: "canvas-tabs export-scope", role: "tablist",
-                    button {
-                        role: "tab",
-                        class: if only.is_none() { "canvas-tab open" } else { "canvas-tab" },
-                        title: "Export every email",
-                        onclick: move |_| is_scoped.set(false),
-                        "All emails"
-                    }
-                    button {
-                        role: "tab",
-                        class: if only.is_some() { "canvas-tab open" } else { "canvas-tab" },
-                        title: "Export only the email on screen",
-                        onclick: move |_| is_scoped.set(true),
-                        "Email {number}"
-                    }
+                button {
+                    class: if only.is_none() { "button scope-choice open" } else { "button scope-choice" },
+                    title: "Export every email",
+                    onclick: move |_| is_scoped.set(false),
+                    "All emails"
+                }
+                button {
+                    class: if only.is_some() { "button scope-choice open" } else { "button scope-choice" },
+                    title: "Export only the email on screen",
+                    onclick: move |_| is_scoped.set(true),
+                    "Email {number}"
                 }
             }
             a {

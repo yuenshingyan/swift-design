@@ -684,14 +684,15 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .export-group .button { border: 0; border-radius: 0; box-shadow: none; background: transparent;
   padding: 0.4375rem 0.6875rem; font-size: 0.78rem; color: var(--ink-2);
   display: inline-flex; align-items: center; gap: 0.375rem; }
-.export-group .button:first-child { color: var(--ink); }
+.export-group a.button:first-of-type { color: var(--ink); }
 .export-group .button span { display: flex; }
 .export-group .button:hover { background: var(--subtle); border-color: transparent; }
 .export-group .button:focus-visible { outline-offset: -2px; }
 .export-group .export-cell { display: flex; }
 .export-group .button[aria-disabled='true'] { color: #B4B0A7; pointer-events: none; }
-.export-group .export-scope { margin: 0.1875rem; align-self: center; }
-.export-scope .canvas-tab { padding: 0.2rem 0.6rem; }
+.export-group .scope-choice { font-family: var(--mono); font-size: 0.72rem; color: var(--faint); }
+.export-group .scope-choice.open { background: var(--sunken); color: var(--ink); }
+.export-group .scope-choice.open:hover { background: var(--sunken); }
 .toolbar-more { width: 2rem; height: 2rem; padding: 0; display: flex;
   align-items: center; justify-content: center; font-size: 0.9rem; letter-spacing: 0.05em; }
 .menu-backdrop { position: fixed; inset: 0; z-index: 5; }
