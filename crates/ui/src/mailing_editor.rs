@@ -18,8 +18,8 @@ use crate::chat::DesignChat;
 use crate::editor::{
     APPLY_TO_PREVIEW, HistorySection, NodeCommand, NodeInspector, PREVIEW_LISTENER, PreviewMessage,
     STRIP_TILE_HEIGHT_REM, SelectedNode, SelectionEntry, ThemeForm, ThumbnailState, fragment_label,
-    move_screen, node_reference, optional, outline_entry, page_reference, schedule_save,
-    selection_of, selection_paths, selection_reference, strip_summary, thumbnail_class, toggle_pin,
+    move_screen, node_reference, optional, outline_entry, page_reference, pin_reference,
+    schedule_save, selection_of, selection_paths, strip_summary, thumbnail_class, toggle_pin,
 };
 use crate::icons;
 use crate::settings::artifact_project;
@@ -215,17 +215,8 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                 }
                 "swift-design-select" if message.screen < mailing.peek().emails.len() => {
                     selected.set(message.screen);
-                    let node = SelectedNode::from_message(&message);
-                    let entries = selection_of(&message);
-                    if node.is_some() {
-                        chat_context.set(Some(selection_reference(
-                            "email",
-                            message.screen,
-                            &entries,
-                        )));
-                    }
-                    selection.set(entries);
-                    selected_node.set(node);
+                    selection.set(selection_of(&message));
+                    selected_node.set(SelectedNode::from_message(&message));
                 }
                 "swift-design-html" => {
                     let Some(html) = message.html else {
@@ -272,6 +263,14 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                     _ => {}
                 },
                 "swift-design-action" => match message.action.as_deref() {
+                    Some("pin") => {
+                        selected.set(message.screen);
+                        chat_context.set(Some(pin_reference(
+                            "email",
+                            message.screen,
+                            &selection_of(&message),
+                        )));
+                    }
                     Some("ask") => {
                         selected.set(message.screen);
                         chat_context.set(Some(match SelectedNode::from_message(&message) {
@@ -527,7 +526,7 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                             span { "The email as a reader sees it · switch to Edit to select a node" }
                         } else {
                             span {
-                                "Click a node to reference it in the chat and edit its text · ⌘-click adds more · ⌘-click a tile to pin emails"
+                                "Click a node to select it and edit its text · ⌘-click adds more · right-click and Pin to chat references it · ⌘-click a tile to pin emails"
                             }
                             span { class: "dot", "·" }
                             span { "right-click for quick edits" }
