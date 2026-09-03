@@ -462,7 +462,7 @@ let selected = null;
 // A plain click selects one node. A click with the command key (or
 // control) adds the node to the selection, or removes it again. The
 // last node clicked is the primary one: the inspector shows it, and
-// the chat names every node in the selection.
+// Pin to chat in the context menu names every node in the selection.
 let selection = [];
 function brief(element) {
   return {
@@ -966,7 +966,9 @@ document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
       return;
     }
     const element = editableTarget(event.target);
-    select(element);
+    // A right-click on a node already in the selection keeps the
+    // selection, so Pin to chat can pin every node in it.
+    if (selection.indexOf(element) < 0) { select(element); }
     const act = (action, value) => () => { recordSnapshot(root); if (applyAction(root, element, action, value)) { postHtml(root, true); } };
     const items = [];
     if (hasOwnText(element)) {
@@ -986,6 +988,7 @@ document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
     items.push({ label: 'Move backward', run: act('backward') });
     items.push({ label: 'Duplicate', run: act('duplicate') });
     items.push('-');
+    items.push({ label: 'Pin to chat', run: () => post(Object.assign({ type: 'swift-design-action', screen, action: 'pin', selection: selection.map(brief) }, describe(element))) });
     items.push({ label: 'Ask AI about this', run: () => post(Object.assign({ type: 'swift-design-action', screen, action: 'ask' }, describe(element))) });
     items.push({ label: 'Properties…', run: () => post(Object.assign({ type: 'swift-design-action', screen, action: 'properties' }, describe(element))) });
     items.push('-');
@@ -1642,6 +1645,10 @@ mod tests {
         // A command-click adds a node to the selection.
         assert!(editable.contains("event.metaKey || event.ctrlKey"));
         assert!(editable.contains("selection: selection.map(brief)"));
+        // Pinning to the chat is a context-menu choice, not a side
+        // effect of a click.
+        assert!(editable.contains("Pin to chat"));
+        assert!(editable.contains("action: 'pin'"));
         assert!(editable.contains("reset-position"));
         assert!(editable.contains("reset-size"));
         // The plain render carries none of the editing overlays.
