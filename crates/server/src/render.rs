@@ -693,10 +693,18 @@ function baseSizeOf(element) {
   }
   return { width: element.offsetWidth, height: element.offsetHeight };
 }
+// Without capture the document stops getting moves the moment the
+// pointer crosses the preview's edge, and the gesture goes dead until
+// the pointer comes back. Capture keeps the moves coming to the page.
+function capturePointer(event) {
+  if (!event.target.setPointerCapture) { return; }
+  try { event.target.setPointerCapture(event.pointerId); } catch (error) {}
+}
 function startResize(event, handle) {
   if (event.button !== 0 || !selected) { return; }
   event.preventDefault();
   event.stopPropagation();
+  capturePointer(event);
   const root = rootOf(selected);
   const base = baseSizeOf(selected);
   const rect = selected.getBoundingClientRect();
@@ -771,7 +779,31 @@ function applyResize(event) {
     const y = Math.round(resize.baseTranslate.y + shiftY);
     resize.element.style.translate = x + 'px ' + y + 'px';
   }
+  correctResizeAnchor();
   updateHandles();
+}
+// Layout decides where a new width goes: a centered or right-anchored
+// node grows to the left when only the east handle moved. The
+// correction measures where the edge opposite the handle actually
+// landed and moves the difference into `translate`, so that edge
+// stays put whatever the layout does. A rotated node resizes around
+// its center, so it is left alone.
+function correctResizeAnchor() {
+  if (rotationOf(resize.element)) { return; }
+  const rect = resize.element.getBoundingClientRect();
+  const start = resize.startRect;
+  const handle = resize.handle;
+  let dx = 0;
+  let dy = 0;
+  if (handle.includes('e')) { dx = start.left - rect.left; }
+  if (handle.includes('w')) { dx = start.right - rect.right; }
+  if (handle.includes('s')) { dy = start.top - rect.top; }
+  if (handle.includes('n')) { dy = start.bottom - rect.bottom; }
+  if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) { return; }
+  const base = translateOf(resize.element);
+  const x = Math.round(base.x + dx / resize.scaleX);
+  const y = Math.round(base.y + dy / resize.scaleY);
+  resize.element.style.translate = x + 'px ' + y + 'px';
 }
 function endResize(save) {
   if (!resize) { return; }
@@ -797,6 +829,7 @@ function startRotate(event) {
   if (event.button !== 0 || !selected) { return; }
   event.preventDefault();
   event.stopPropagation();
+  capturePointer(event);
   const rect = selected.getBoundingClientRect();
   const center = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
   rotate = {
@@ -1622,6 +1655,11 @@ mod tests {
         assert!(EDITING_SCRIPT.contains("Reset size"));
         // The overlay lives on the body, outside the serialized root.
         assert!(EDITING_SCRIPT.contains("document.body.appendChild(handleBox)"));
+        // The gesture survives the pointer leaving the preview frame,
+        // and the edge opposite the handle stays anchored whatever the
+        // layout does with the new size.
+        assert!(EDITING_SCRIPT.contains("setPointerCapture"));
+        assert!(EDITING_SCRIPT.contains("function correctResizeAnchor"));
     }
 
     #[test]
