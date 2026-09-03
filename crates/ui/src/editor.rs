@@ -88,14 +88,53 @@ document.addEventListener('pointercancel', endDrag);
 window.addEventListener('blur', endDrag);
 ";
 
-/// Posts one command from the inspector into the preview iframe.
+/// Posts one command from the inspector into the preview iframe. Only
+/// the live pane of the double-buffered preview carries `true`.
 pub(crate) const APPLY_TO_PREVIEW: &str = "\
 const message = await dioxus.recv();
-const frame = document.querySelector('iframe[data-preview]');
+const frame = document.querySelector('iframe[data-preview=true]');
 if (frame && frame.contentWindow) {
   frame.contentWindow.postMessage(message, window.location.origin);
 }
 ";
+
+/// The pane addresses of the double-buffered preview: the document on
+/// screen, then the incoming one while it still loads.
+pub(crate) fn preview_panes(loaded_address: &str, address: &str) -> Vec<String> {
+    if loaded_address == address {
+        return vec![address.to_owned()];
+    }
+    vec![loaded_address.to_owned(), address.to_owned()]
+}
+
+/// The main preview, double-buffered. A changed address loads in an
+/// invisible pane of the same size and swaps in once loaded, so a mode
+/// switch or a save never flashes a half-rendered page. The panes are
+/// keyed by address: a swap only retargets attributes and never moves
+/// or reloads an iframe.
+#[component]
+pub(crate) fn PreviewFrame(title: String, ratio: String, src: String) -> Element {
+    let mut loaded_src = use_signal(|| src.clone());
+    rsx! {
+        div { class: "preview-swap",
+            for pane_src in preview_panes(&loaded_src(), &src) {
+                iframe {
+                    key: "{pane_src}",
+                    title: "{title}",
+                    class: if pane_src == loaded_src() { "" } else { "preview-loading" },
+                    "data-preview": if pane_src == loaded_src() { "true" } else { "false" },
+                    tabindex: if pane_src == loaded_src() { "0" } else { "-1" },
+                    style: "aspect-ratio: {ratio}",
+                    src: "{pane_src}",
+                    onload: {
+                        let pane_src = pane_src.clone();
+                        move |_| loaded_src.set(pane_src.clone())
+                    },
+                }
+            }
+        }
+    }
+}
 
 /// The computed styles of the selected node, as the preview reports
 /// them.
@@ -715,10 +754,9 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                         p { class: "error", "{message}" }
                     }
                     div { class: stage_class,
-                        iframe {
+                        PreviewFrame {
                             title: "Design preview",
-                            style: "aspect-ratio: {ratio}",
-                            "data-preview": "true",
+                            ratio: "{ratio}",
                             src: "/designs/{design_id}/render?version={preview_version()}{mode().render_query()}&screen={selected() + 1}",
                         }
                     }
@@ -1893,9 +1931,21 @@ mod tests {
         ThumbnailState, default_screen, effect_uses_motion, field_count, first_heading,
         font_options, history_label, image_upload_paths, move_screen, navigation_target,
         node_reference, optional, outline_entry, outline_title, page_reference, pin_reference,
-        preview_stage_class, screen_label, selection_paths, selection_reference, strip_summary,
-        strip_tags, thumbnail_class, toggle_pin,
+        preview_panes, preview_stage_class, screen_label, selection_paths, selection_reference,
+        strip_summary, strip_tags, thumbnail_class, toggle_pin,
     };
+
+    #[test]
+    fn preview_panes_keep_the_loaded_document_while_the_next_loads() {
+        assert_eq!(
+            preview_panes("/designs/a/render", "/designs/a/render"),
+            vec!["/designs/a/render"]
+        );
+        assert_eq!(
+            preview_panes("/designs/a/render", "/designs/a/render?editable=true"),
+            vec!["/designs/a/render", "/designs/a/render?editable=true"]
+        );
+    }
 
     #[test]
     fn only_image_uploads_become_picker_entries() {
