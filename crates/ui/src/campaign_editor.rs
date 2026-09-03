@@ -15,10 +15,11 @@ use crate::api;
 use crate::canvas::{frame_width_rem, is_narrow_canvas};
 use crate::chat::DesignChat;
 use crate::editor::{
-    APPLY_TO_PREVIEW, HistorySection, NodeCommand, NodeInspector, PREVIEW_LISTENER, PreviewMessage,
-    STRIP_TILE_HEIGHT_REM, SelectedNode, SelectionEntry, ThemeForm, ThumbnailState, fragment_label,
-    move_screen, node_reference, optional, outline_entry, page_reference, pin_reference,
-    schedule_save, selection_of, selection_paths, strip_summary, thumbnail_class, toggle_pin,
+    APPLY_TO_PREVIEW, HistorySection, NodeCommand, NodeInspector, PREVIEW_LISTENER, PreviewFrame,
+    PreviewMessage, STRIP_TILE_HEIGHT_REM, SelectedNode, SelectionEntry, ThemeForm, ThumbnailState,
+    fragment_label, move_screen, node_reference, optional, outline_entry, page_reference,
+    pin_reference, schedule_save, selection_of, selection_paths, strip_summary, thumbnail_class,
+    toggle_pin,
 };
 use crate::icons;
 use crate::settings::artifact_project;
@@ -462,10 +463,9 @@ fn LoadedCampaignEditor(
                     // phone canvas, without the bezel; a leaderboard
                     // or a mobile banner fills the width instead.
                     div { class: "{stage_class}",
-                        iframe {
+                        PreviewFrame {
                             title: "Campaign preview",
-                            "data-preview": "true",
-                            style: "aspect-ratio: {ad_ratio}",
+                            ratio: "{ad_ratio}",
                             src: "/campaigns/{campaign_id}/render?version={preview_version()}{mode().render_query()}&ad={selected() + 1}",
                         }
                     }
