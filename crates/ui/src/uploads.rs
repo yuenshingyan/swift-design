@@ -343,6 +343,55 @@ fn is_collapsed(count: usize) -> bool {
     count >= ATTACHMENT_COLLAPSE_THRESHOLD
 }
 
+/// True when the list offers the `×` that removes every file at once.
+/// One file has its own `×` already.
+fn has_remove_all(count: usize) -> bool {
+    count > 1
+}
+
+/// The uploads no sent prompt has carried yet. The composer chips show
+/// only these, so a sent prompt leaves the composer clean.
+pub(crate) fn pending_uploads(
+    uploads: &[api::UploadSummary],
+    sent_names: &[String],
+) -> Vec<api::UploadSummary> {
+    uploads
+        .iter()
+        .filter(|upload| !sent_names.contains(&upload.name))
+        .cloned()
+        .collect()
+}
+
+/// A `×` that deletes every attached file in one click. A failure
+/// stops the sweep and surfaces the server's message; the files
+/// already deleted stay deleted.
+#[component]
+fn RemoveAllButton(
+    names: Vec<String>,
+    on_changed: EventHandler<()>,
+    on_error: EventHandler<String>,
+) -> Element {
+    rsx! {
+        button {
+            class: "attachment-remove attachment-remove-all",
+            title: "Remove all files",
+            onclick: move |_| {
+                let names = names.clone();
+                spawn(async move {
+                    for name in names {
+                        if let Err(message) = api::delete_upload(&name).await {
+                            on_error.call(message);
+                            break;
+                        }
+                    }
+                    on_changed.call(());
+                });
+            },
+            "×"
+        }
+    }
+}
+
 /// The attached source files as chips: name, size, and a `×` that
 /// deletes the upload. `on_changed` fires after a delete so the caller
 /// refreshes its list. Renders nothing for an empty list. From
@@ -358,6 +407,7 @@ pub fn AttachmentChips(
     if uploads.is_empty() {
         return rsx! {};
     }
+    let names: Vec<String> = uploads.iter().map(|upload| upload.name.clone()).collect();
     if is_collapsed(uploads.len()) {
         return rsx! {
             div { class: "brief-attachments",
@@ -373,24 +423,39 @@ pub fn AttachmentChips(
                         dangerous_inner_html: icons::CHEVRON_DOWN,
                     }
                 }
+                RemoveAllButton { names, on_changed, on_error }
             }
             if is_open() {
-                AttachmentList { uploads, on_changed, on_error }
+                AttachmentList {
+                    uploads,
+                    has_remove_all: false,
+                    on_changed,
+                    on_error,
+                }
             }
         };
     }
     rsx! {
-        AttachmentList { uploads, on_changed, on_error }
+        AttachmentList {
+            uploads,
+            has_remove_all: has_remove_all(names.len()),
+            on_changed,
+            on_error,
+        }
     }
 }
 
-/// The chip list itself, one chip per upload.
+/// The chip list itself, one chip per upload. With `has_remove_all`
+/// the list ends in the `×` that deletes every file; the collapsed
+/// view keeps that `×` beside its summary button instead.
 #[component]
 fn AttachmentList(
     uploads: Vec<api::UploadSummary>,
+    has_remove_all: bool,
     on_changed: EventHandler<()>,
     on_error: EventHandler<String>,
 ) -> Element {
+    let names: Vec<String> = uploads.iter().map(|upload| upload.name.clone()).collect();
     rsx! {
         ul { class: "brief-attachments",
             for upload in uploads {
@@ -414,6 +479,11 @@ fn AttachmentList(
                         },
                         "×"
                     }
+                }
+            }
+            if has_remove_all {
+                li { class: "attachment-clear-all",
+                    RemoveAllButton { names, on_changed, on_error }
                 }
             }
         }
@@ -441,6 +511,29 @@ mod tests {
         assert!(!is_collapsed(3));
         assert!(is_collapsed(4));
         assert!(is_collapsed(40));
+    }
+
+    #[test]
+    fn remove_all_needs_more_than_one_file() {
+        assert!(!has_remove_all(0));
+        assert!(!has_remove_all(1));
+        assert!(has_remove_all(2));
+    }
+
+    #[test]
+    fn pending_uploads_drop_the_files_a_prompt_carried() {
+        let upload = |name: &str| api::UploadSummary {
+            name: name.to_owned(),
+            size_bytes: 1,
+            content_type: String::new(),
+            is_image: false,
+        };
+        let uploads = vec![upload("brief.pdf"), upload("logo.png")];
+        let sent = vec!["brief.pdf".to_owned()];
+        let pending = pending_uploads(&uploads, &sent);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].name, "logo.png");
+        assert!(pending_uploads(&uploads, &[]).len() == 2);
     }
 
     #[test]
