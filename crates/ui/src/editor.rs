@@ -193,7 +193,7 @@ pub(crate) struct PreviewMessage {
     /// True when the change should be saved at once.
     #[serde(default)]
     pub(crate) save: bool,
-    /// The menu action: `ask`, `properties`, or `delete-screen`.
+    /// The menu action: `pin`, `ask`, `properties`, or `delete-screen`.
     #[serde(default)]
     pub(crate) action: Option<String>,
     /// Screens to move by, on navigate messages: 1 or -1.
@@ -202,8 +202,8 @@ pub(crate) struct PreviewMessage {
     /// The screen to open, on a navigate message from a screen link.
     #[serde(default)]
     pub(crate) target: Option<usize>,
-    /// Every node selected, on select messages, the primary one last.
-    /// A command-click adds to it.
+    /// Every node selected, on select and pin messages, the primary
+    /// one last. A command-click adds to it.
     #[serde(default)]
     pub(crate) selection: Vec<SelectionEntry>,
 }
@@ -276,6 +276,15 @@ pub(crate) fn selection_reference(
         })
         .collect();
     format!("[{unit} {}, nodes {}]", screen_index + 1, nodes.join("; "))
+}
+
+/// The chat reference the Pin to chat menu item sets: every node in
+/// the selection, or the bare unit when the message names no node.
+pub(crate) fn pin_reference(unit: &str, screen_index: usize, entries: &[SelectionEntry]) -> String {
+    if entries.is_empty() {
+        return format!("[{unit} {}]", screen_index + 1);
+    }
+    selection_reference(unit, screen_index, entries)
 }
 
 /// The node the user selected in the preview.
@@ -436,17 +445,8 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                 }
                 "swift-design-select" if message.screen < design.peek().screens.len() => {
                     selected.set(message.screen);
-                    let node = SelectedNode::from_message(&message);
-                    let entries = selection_of(&message);
-                    if node.is_some() {
-                        chat_context.set(Some(selection_reference(
-                            "screen",
-                            message.screen,
-                            &entries,
-                        )));
-                    }
-                    selection.set(entries);
-                    selected_node.set(node);
+                    selection.set(selection_of(&message));
+                    selected_node.set(SelectedNode::from_message(&message));
                 }
                 "swift-design-html" => {
                     let Some(html) = message.html else {
@@ -493,6 +493,14 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                     _ => {}
                 },
                 "swift-design-action" => match message.action.as_deref() {
+                    Some("pin") => {
+                        selected.set(message.screen);
+                        chat_context.set(Some(pin_reference(
+                            "screen",
+                            message.screen,
+                            &selection_of(&message),
+                        )));
+                    }
                     Some("ask") => {
                         selected.set(message.screen);
                         chat_context.set(Some(match SelectedNode::from_message(&message) {
@@ -721,7 +729,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                             }
                         } else {
                             span {
-                                "Click a node to reference it in the chat and edit its text · ⌘-click adds more · ⌘-click a tile to pin pages"
+                                "Click a node to select it and edit its text · ⌘-click adds more · right-click and Pin to chat references it · ⌘-click a tile to pin pages"
                             }
                             span { class: "dot", "·" }
                             span { "right-click for quick edits" }
@@ -1884,7 +1892,7 @@ mod tests {
         MONO_FONTS, NodeStyles, PreviewMode, SelectedNode, SelectionEntry, TEXT_FONTS,
         ThumbnailState, default_screen, effect_uses_motion, field_count, first_heading,
         font_options, history_label, image_upload_paths, move_screen, navigation_target,
-        node_reference, optional, outline_entry, outline_title, page_reference,
+        node_reference, optional, outline_entry, outline_title, page_reference, pin_reference,
         preview_stage_class, screen_label, selection_paths, selection_reference, strip_summary,
         strip_tags, thumbnail_class, toggle_pin,
     };
@@ -2103,6 +2111,21 @@ mod tests {
             vec!["0/2".to_owned(), "0/1".to_owned()]
         );
         assert_eq!(selection_paths(&[], "0/2"), vec!["0/2".to_owned()]);
+    }
+
+    #[test]
+    fn a_pin_reference_names_the_selection_or_the_bare_unit() {
+        let entries = vec![SelectionEntry {
+            path: "0/1".to_owned(),
+            tag: "h2".to_owned(),
+            classes: "title".to_owned(),
+            text: "Hello".to_owned(),
+        }];
+        assert_eq!(
+            pin_reference("slide", 3, &entries),
+            "[slide 4, node 0/1 <h2.title>: Hello]"
+        );
+        assert_eq!(pin_reference("slide", 3, &[]), "[slide 4]");
     }
 
     #[test]
