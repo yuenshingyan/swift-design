@@ -232,6 +232,8 @@ editingStyle.textContent = `
   background: transparent; color: inherit; font: inherit; padding: 0.4rem 0.7rem;
   border-radius: 5px; cursor: pointer; }
 .swift-design-menu button:hover { background: #F1EFEA; }
+.swift-design-menu button[data-swift-design-danger] { color: #C0392B; }
+.swift-design-menu button[data-swift-design-danger]:hover { background: #FBEDEB; }
 .swift-design-menu hr { border: 0; border-top: 1px solid #EAE7E1; margin: 0.25rem 0; }
 .swift-design-menu label { display: flex; align-items: center; gap: 0.6rem;
   padding: 0.3rem 0.7rem; cursor: pointer; }
@@ -497,6 +499,7 @@ function showMenu(x, y, items) {
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = item.label;
+    if (item.isDanger) { button.setAttribute('data-swift-design-danger', ''); }
     button.addEventListener('click', (event) => { event.stopPropagation(); hideMenu(); item.run(); });
     menu.appendChild(button);
   });
@@ -937,7 +940,7 @@ document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
         { label: 'Ask AI about this screen', run: () => post({ type: 'swift-design-action', screen, action: 'ask', path: null }) },
         { label: 'Properties…', run: () => post({ type: 'swift-design-action', screen, action: 'properties', path: null }) },
         '-',
-        { label: 'Delete screen', run: () => post({ type: 'swift-design-action', screen, action: 'delete-screen', path: null }) },
+        { label: 'Delete screen', isDanger: true, run: () => post({ type: 'swift-design-action', screen, action: 'delete-screen', path: null }) },
       ]);
       return;
     }
@@ -965,10 +968,9 @@ document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
     items.push({ label: 'Duplicate', run: act('duplicate') });
     items.push('-');
     items.push({ label: 'Pin to chat', run: () => post(Object.assign({ type: 'swift-design-action', screen, action: 'pin', selection: selection.map(brief) }, describe(element))) });
-    items.push({ label: 'Ask AI about this', run: () => post(Object.assign({ type: 'swift-design-action', screen, action: 'ask' }, describe(element))) });
     items.push({ label: 'Properties…', run: () => post(Object.assign({ type: 'swift-design-action', screen, action: 'properties' }, describe(element))) });
     items.push('-');
-    items.push({ label: 'Delete', run: act('delete') });
+    items.push({ label: 'Delete', isDanger: true, run: act('delete') });
     showMenu(event.clientX, event.clientY, items);
   });
 });
@@ -1628,6 +1630,13 @@ mod tests {
         // effect of a click.
         assert!(editable.contains("Pin to chat"));
         assert!(editable.contains("action: 'pin'"));
+        // Pin to chat covers the node case; only the screen-level Ask
+        // AI item remains.
+        assert!(editable.contains("Ask AI about this screen"));
+        assert!(!editable.contains("'Ask AI about this'"));
+        // The destructive items are marked, and the mark styles them.
+        assert!(editable.contains("isDanger: true"));
+        assert!(editable.contains("data-swift-design-danger"));
         assert!(editable.contains("reset-position"));
         assert!(editable.contains("reset-size"));
         // The plain render carries none of the editing overlays.
