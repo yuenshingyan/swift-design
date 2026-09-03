@@ -15,11 +15,11 @@ use crate::api;
 use crate::canvas::frame_width_rem;
 use crate::chat::DesignChat;
 use crate::editor::{
-    APPLY_TO_PREVIEW, HistorySection, NodeCommand, NodeInspector, PREVIEW_LISTENER, PreviewMessage,
-    STRIP_TILE_HEIGHT_REM, SelectedNode, SelectionEntry, ThemeForm, ThumbnailState, TransitionForm,
-    fragment_label, move_screen, node_reference, optional, outline_entry, page_reference,
-    pin_reference, schedule_save, selection_of, selection_paths, strip_summary, thumbnail_class,
-    toggle_pin,
+    APPLY_TO_PREVIEW, HistorySection, NodeCommand, NodeInspector, PREVIEW_LISTENER, PreviewFrame,
+    PreviewMessage, STRIP_TILE_HEIGHT_REM, SelectedNode, SelectionEntry, ThemeForm, ThumbnailState,
+    TransitionForm, fragment_label, move_screen, node_reference, optional, outline_entry,
+    page_reference, pin_reference, schedule_save, selection_of, selection_paths, strip_summary,
+    thumbnail_class, toggle_pin,
 };
 use crate::icons;
 use crate::settings::artifact_project;
@@ -451,13 +451,12 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                         p { class: "error", "{message}" }
                     }
                     div { class: "preview-stage",
-                        iframe {
+                        PreviewFrame {
                             title: "Deck preview",
-                            "data-preview": "true",
                             // Without the ratio the iframe falls back to
                             // its default height and the slide sits in a
                             // band of the deck's own background.
-                            style: "aspect-ratio: {deck_ratio}",
+                            ratio: "{deck_ratio}",
                             src: "/decks/{deck_id}/render?version={preview_version()}{mode().render_query()}&slide={selected() + 1}",
                         }
                     }
