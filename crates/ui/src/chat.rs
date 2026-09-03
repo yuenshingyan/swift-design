@@ -13,7 +13,7 @@ use crate::chat_controls::{ModelChip, SendButton, with_effort};
 use crate::prompt_history::{PromptHistory, prompt_entries};
 use crate::settings::{SettingsPanel, artifact_project, pause_briefly};
 use crate::status::{RunStatusCard, phase_name};
-use crate::uploads::{AttachButton, AttachmentChips, PasteUploads};
+use crate::uploads::{AttachButton, AttachmentChips, PasteUploads, pending_uploads};
 
 /// Scrolls the conversation to its newest message. Runs after the
 /// thread renders, when the message count changes.
@@ -117,6 +117,12 @@ pub fn DesignChat(
     };
     let mut was_running = use_signal(|| false);
     let mut uploads = use_signal(Vec::<api::UploadSummary>::new);
+    // The files a prompt already carried. The chips show only the
+    // files attached since, so a sent prompt leaves a clean composer;
+    // the files themselves stay in the session's uploads. The first
+    // listing seeds the set, because whatever the editor opens on went
+    // out with an earlier prompt.
+    let mut sent_upload_names = use_signal(|| Option::<Vec<String>>::None);
     let refresh_uploads = use_callback({
         // The chat belongs to one session, so it shows that session's
         // source files and no other's.
@@ -125,6 +131,10 @@ pub fn DesignChat(
             let session_id = session_id.clone();
             spawn(async move {
                 if let Ok(listing) = api::fetch_uploads(&session_id).await {
+                    if sent_upload_names.peek().is_none() {
+                        let names = listing.iter().map(|upload| upload.name.clone()).collect();
+                        sent_upload_names.set(Some(names));
+                    }
                     uploads.set(listing);
                 }
             });
@@ -233,6 +243,14 @@ pub fn DesignChat(
             let session_id = session_id.clone();
             draft.set(String::new());
             comments.set(Vec::new());
+            // The attached files go out with this prompt and leave the
+            // composer.
+            let sent_names = uploads
+                .peek()
+                .iter()
+                .map(|upload| upload.name.clone())
+                .collect();
+            sent_upload_names.set(Some(sent_names));
             history.write().reset();
             context.set(None);
             // The pins were for this message. The next one starts clean.
@@ -441,7 +459,7 @@ pub fn DesignChat(
                     on_error: move |message| error.set(Some(message)),
                 }
                 AttachmentChips {
-                    uploads: uploads(),
+                    uploads: pending_uploads(&uploads(), &sent_upload_names().unwrap_or_default()),
                     on_changed: move |_| refresh_uploads.call(()),
                     on_error: move |message| error.set(Some(message)),
                 }
