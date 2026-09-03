@@ -866,6 +866,12 @@ div.brief-attachments:has(+ ul.brief-attachments) { padding-bottom: 0.4rem; }
 .preview-stage iframe { display: block; width: 100%; border: 0; border-radius: var(--r-primary);
   background: var(--raised); box-shadow: 0 20px 44px -30px rgba(21,24,28,.6), 0 0 0 1px #DAD7D0; }
 .preview-stage.narrow iframe { width: auto; height: 70vh; max-width: 100%; }
+/* The double-buffered preview: both panes share one grid cell, and the
+   loading one sits invisible on top until its document is ready. */
+.preview-swap { display: grid; width: 100%; }
+.preview-stage.narrow .preview-swap { width: auto; }
+.preview-swap iframe { grid-area: 1 / 1; }
+.preview-swap iframe.preview-loading { opacity: 0; pointer-events: none; }
 .preview-stage.phone { padding: 1.75rem; border-radius: var(--r-card); background-color: var(--sunken);
   background-image: radial-gradient(circle, var(--line-soft) 1px, transparent 1.5px);
   background-size: 1rem 1rem; }
