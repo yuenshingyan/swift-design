@@ -15,10 +15,11 @@ use crate::api;
 use crate::canvas::frame_width_rem;
 use crate::chat::DesignChat;
 use crate::editor::{
-    APPLY_TO_PREVIEW, HistorySection, NodeCommand, NodeInspector, PREVIEW_LISTENER, PreviewMessage,
-    STRIP_TILE_HEIGHT_REM, SelectedNode, SelectionEntry, ThemeForm, ThumbnailState, fragment_label,
-    move_screen, node_reference, optional, outline_entry, page_reference, pin_reference,
-    schedule_save, selection_of, selection_paths, strip_summary, thumbnail_class, toggle_pin,
+    APPLY_TO_PREVIEW, HistorySection, NodeCommand, NodeInspector, PREVIEW_LISTENER, PreviewFrame,
+    PreviewMessage, STRIP_TILE_HEIGHT_REM, SelectedNode, SelectionEntry, ThemeForm, ThumbnailState,
+    fragment_label, move_screen, node_reference, optional, outline_entry, page_reference,
+    pin_reference, schedule_save, selection_of, selection_paths, strip_summary, thumbnail_class,
+    toggle_pin,
 };
 use crate::icons;
 use crate::settings::artifact_project;
@@ -459,10 +460,9 @@ fn LoadedDocumentEditor(
                     // A page is taller than wide, so the stage limits it
                     // by height like a phone canvas, without the bezel.
                     div { class: "preview-stage narrow",
-                        iframe {
+                        PreviewFrame {
                             title: "Document preview",
-                            "data-preview": "true",
-                            style: "aspect-ratio: {page_ratio}",
+                            ratio: "{page_ratio}",
                             src: "/documents/{document_id}/render?version={preview_version()}{mode().render_query()}&page={selected() + 1}",
                         }
                     }
