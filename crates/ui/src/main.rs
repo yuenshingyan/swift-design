@@ -852,6 +852,8 @@ button.device-choice.picked { border-color: var(--ink); background: var(--subtle
 .attachment-summary-count { font-weight: 600; }
 .attachment-summary-chevron { transition: transform 120ms ease; }
 .attachment-summary.open .attachment-summary-chevron { transform: rotate(180deg); }
+.attachment-remove-all { align-self: center; }
+.attachment-clear-all { display: flex; align-items: center; }
 div.brief-attachments:has(+ ul.brief-attachments) { padding-bottom: 0.4rem; }
 
 /* Preview pane */
