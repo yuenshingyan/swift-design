@@ -7,6 +7,7 @@
 //! through `/events`.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use design_model::{BriefQuestionSet, Design, QuestionSetError, validate_question_set};
 
@@ -19,7 +20,9 @@ use crate::edit_focus::{
 };
 use crate::events::ChangeNotifier;
 use crate::instructions::DEMO_RULES;
-use crate::model_client::{LogSink, ModelClient, ModelConfiguration, TextSink, UsageSink};
+use crate::model_client::{
+    ImageShape, LogSink, ModelClient, ModelConfiguration, TextSink, UsageSink,
+};
 use crate::planner::{
     ANSWERED_QUESTION_LIMIT, app_question_set, conversation_note, parse_plan, planner_input,
     planner_prompt, recent_conversation,
@@ -92,12 +95,49 @@ pub(crate) enum GenerationTask {
     },
 }
 
+/// Maximum generated rasters across one run.
+const GENERATED_RASTER_BUDGET: usize = 3;
+
+/// The shared owner, budget, and batch gate for generated media in one run.
+#[derive(Clone)]
+pub(crate) struct MediaScope {
+    owner: String,
+    remaining: Arc<std::sync::atomic::AtomicUsize>,
+    batch_gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl MediaScope {
+    /// Creates a full generated-raster budget for one upload owner.
+    fn new(owner: &str) -> Self {
+        Self {
+            owner: owner.to_owned(),
+            remaining: Arc::new(std::sync::atomic::AtomicUsize::new(GENERATED_RASTER_BUDGET)),
+            batch_gate: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    /// Atomically reserves raster slots. A failed generation does not refund them.
+    fn reserve(&self, count: usize) -> Result<(), String> {
+        self.remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(count)
+            })
+            .map(|_| ())
+            .map_err(|remaining| {
+                format!(
+                    "generated raster budget exceeded: this run allows {GENERATED_RASTER_BUDGET} images and has {remaining} remaining, but this batch requests {count}"
+                )
+            })
+    }
+}
+
 /// The request, the answers, and the options one run works from.
 #[derive(Clone)]
 pub(crate) struct GenerationContext {
     pub(crate) request: SessionRequest,
     pub(crate) options: RunOptions,
     pub(crate) session_id: String,
+    pub(crate) media_scope: MediaScope,
 }
 
 impl GenerationContext {
@@ -592,6 +632,7 @@ impl GenerationEngine {
             },
             options: session.options.clone(),
             session_id: session_id.to_owned(),
+            media_scope: MediaScope::new(session_id),
         };
         let run_id = self
             .sessions
@@ -1546,6 +1587,7 @@ impl GenerationEngine {
         let request = ArtifactRequest {
             effort,
             label,
+            media_scope: Some(context.media_scope.clone()),
             parse: Box::new(move |content| {
                 crate::patch::apply_patch(&original, crate::patch::parse_patch(content)?)
             }),
@@ -1826,6 +1868,7 @@ impl GenerationEngine {
                 let request = ArtifactRequest {
                     effort: context.effort().to_owned(),
                     label: format!("{label} chunk {}", position + 1),
+                    media_scope: Some(context.media_scope.clone()),
                     parse: Box::new(move |content| apply_continuation(&original, content)),
                     progress: None,
                     live: Some(Arc::new(move |text: &str| {
@@ -1889,6 +1932,7 @@ impl GenerationEngine {
         let polish_context = ArtifactRequest {
             effort: context.effort().to_owned(),
             label: label.clone(),
+            media_scope: None,
             parse: Box::new(parse_design),
             progress: Some(Arc::new(move |fraction: f32| {
                 let polished = ((fraction - DRAFT_SHARE) / (1.0 - DRAFT_SHARE)).clamp(0.0, 1.0);
@@ -2177,6 +2221,7 @@ impl GenerationEngine {
         let context = ArtifactRequest {
             effort: request.context.effort().to_owned(),
             label: format!("candidate {}", request.candidate_number),
+            media_scope: Some(request.context.media_scope.clone()),
             parse: Box::new(parse_design),
             progress: Some(Arc::clone(progress)),
             live: Some(Arc::new(move |text: &str| {
@@ -2205,7 +2250,8 @@ impl GenerationEngine {
 
     /// Sends `messages`, parses the artifact reply, and repairs it through
     /// fix rounds until it validates. A reply that asks for a blocking
-    /// detail stops the run with a clarification.
+    /// detail stops the run with a clarification. An eligible request may
+    /// generate one bounded batch of raster assets before the artifact.
     pub(crate) async fn request_valid<T: Validated>(
         &self,
         client: &reqwest::Client,
@@ -2216,7 +2262,17 @@ impl GenerationEngine {
         let label = &context.label;
         let fix_round_limit = fix_round_limit(&context.effort);
         let effort = writing_effort(&context.effort);
-        for round in 0..=fix_round_limit {
+        let media_scope = context
+            .media_scope
+            .as_ref()
+            .filter(|_| self.uploads.is_some() && self.model.can_generate_images());
+        if media_scope.is_some() {
+            append_media_capability(&mut messages);
+        }
+        let mut round = 0usize;
+        let mut has_generated_assets = false;
+        let mut is_media_phase = true;
+        loop {
             log(&format!("{label}: requesting (round {})", round + 1));
             let started = std::time::Instant::now();
             let content = self
@@ -2232,6 +2288,82 @@ impl GenerationEngine {
                 started.elapsed().as_secs_f32(),
                 content.len()
             ));
+            if let Some(scope) = media_scope {
+                match parse_raster_asset_request_set(&content) {
+                    RasterAssetRequestParse::Valid(requests)
+                        if is_media_phase && !has_generated_assets =>
+                    {
+                        log(&format!(
+                            "{label}: generating {} requested image{}",
+                            requests.asset_requests.len(),
+                            if requests.asset_requests.len() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        ));
+                        if let Err(problem) = scope.reserve(requests.asset_requests.len()) {
+                            log(&format!("{label}: {problem}"));
+                            messages.push(serde_json::json!({
+                                "role": "assistant",
+                                "content": content,
+                            }));
+                            messages.push(serde_json::json!({
+                                "role": "user",
+                                "content": format!(
+                                    "No more raster images can be generated in this run ({problem}). Continue the original task with HTML, CSS, inline SVG, or the uploads already available. Reply with only the originally requested JSON."
+                                ),
+                            }));
+                            has_generated_assets = true;
+                            continue;
+                        }
+                        let paths = self
+                            .generate_requested_assets(client, scope, &requests)
+                            .await
+                            .map_err(|error| {
+                                GenerationStop::Failed(format!(
+                                    "{label}: generated media failed: {error}"
+                                ))
+                            })?;
+                        messages.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": content,
+                        }));
+                        messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": generated_media_message(&paths),
+                        }));
+                        has_generated_assets = true;
+                        continue;
+                    }
+                    RasterAssetRequestParse::Valid(_) => {
+                        let problem = if has_generated_assets {
+                            "only one asset request batch is allowed"
+                        } else {
+                            "an asset request is allowed only before the first artifact reply"
+                        };
+                        log(&format!("{label}: {problem}"));
+                        push_media_correction(&mut messages, content, problem);
+                        round += 1;
+                        if round > fix_round_limit {
+                            break;
+                        }
+                        continue;
+                    }
+                    RasterAssetRequestParse::Malformed(problem) => {
+                        log(&format!("{label}: invalid asset request: {problem}"));
+                        push_media_correction(&mut messages, content, &problem);
+                        round += 1;
+                        if round > fix_round_limit {
+                            break;
+                        }
+                        continue;
+                    }
+                    RasterAssetRequestParse::NotAssetRequest => {
+                        is_media_phase = false;
+                    }
+                }
+            }
             // A valid clarification request stops the run at once.
             if let Some(result) = clarification_request(&content) {
                 match result {
@@ -2247,7 +2379,7 @@ impl GenerationEngine {
                     }
                 }
             }
-            match (context.parse)(&content) {
+            let correction = match (context.parse)(&content) {
                 Ok(artifact) => {
                     let errors = artifact.problems();
                     if errors.is_empty() {
@@ -2256,38 +2388,68 @@ impl GenerationEngine {
                     }
                     let error_lines: Vec<String> = errors.iter().map(ToString::to_string).collect();
                     log(&format!("{label}: {} validation errors", error_lines.len()));
-                    messages.push(serde_json::json!({
-                        "role": "assistant",
-                        "content": content,
-                    }));
-                    messages.push(serde_json::json!({
-                        "role": "user",
-                        "content": format!(
-                            "The result failed validation:\n{}\n\
-                             Fix every error. Reply with only the corrected JSON in the same format as before.",
-                            error_lines.join("\n")
-                        ),
-                    }));
+                    format!(
+                        "The result failed validation:\n{}\n\
+                         Fix every error. Reply with only the corrected JSON in the same format as before.",
+                        error_lines.join("\n")
+                    )
                 }
                 Err(parse_error) => {
                     log(&format!("{label}: {parse_error}"));
-                    messages.push(serde_json::json!({
-                        "role": "assistant",
-                        "content": content,
-                    }));
-                    messages.push(serde_json::json!({
-                        "role": "user",
-                        "content": format!(
-                            "That reply could not be applied ({parse_error}). \
-                             Reply with only the JSON in the same format as before.",
-                        ),
-                    }));
+                    format!(
+                        "That reply could not be applied ({parse_error}). \
+                         Reply with only the JSON in the same format as before."
+                    )
                 }
+            };
+            messages.push(serde_json::json!({
+                "role": "assistant",
+                "content": content,
+            }));
+            messages.push(serde_json::json!({
+                "role": "user",
+                "content": correction,
+            }));
+            round += 1;
+            if round > fix_round_limit {
+                break;
             }
         }
         Err(GenerationStop::Failed(format!(
             "{label} still fails after {fix_round_limit} fix rounds"
         )))
+    }
+
+    /// Generates and stores one validated raster asset request set.
+    async fn generate_requested_assets(
+        &self,
+        client: &reqwest::Client,
+        scope: &MediaScope,
+        requests: &RasterAssetRequestSet,
+    ) -> Result<Vec<String>, String> {
+        let _batch_guard = scope.batch_gate.lock().await;
+        let uploads = self
+            .uploads
+            .as_ref()
+            .ok_or_else(|| "upload storage is unavailable".to_owned())?;
+        let mut paths = Vec::with_capacity(requests.asset_requests.len());
+        for request in &requests.asset_requests {
+            let bytes = self
+                .model
+                .generate_image(client, &request.prompt, request.shape.into())
+                .await
+                .map_err(|error| {
+                    format!("image `{}` could not be generated: {error}", request.name)
+                })?;
+            let file_name = format!("generated-{}.png", request.name);
+            let stored = uploads
+                .save_unique(&scope.owner, &file_name, &bytes)
+                .await
+                .map_err(|error| format!("image `{}` could not be saved: {error}", request.name))?
+                .ok_or_else(|| format!("image `{}` has no safe file name", request.name))?;
+            paths.push(format!("/uploads/{stored}"));
+        }
+        Ok(paths)
     }
 
     /// Reports each request's token usage to `sink`.
@@ -2854,6 +3016,146 @@ pub(crate) fn continue_chunks(start: usize, planned: usize) -> Vec<ContinueChunk
         .collect()
 }
 
+/// The raster request protocol offered to artifact-writing calls.
+const MEDIA_CAPABILITY: &str = "Image generation is available. Before the requested artifact JSON, you may request one image batch by replying with exactly {\"asset_requests\":[{\"name\":\"short-kebab-name\",\"prompt\":\"what to render\",\"shape\":\"square|landscape|portrait\"}]}. Use 1 to 3 requests. The whole run can generate at most 3 images across all artifact requests. Use a lowercase kebab name of at most 48 characters and a prompt of at most 2000 characters. After you receive exact /uploads paths, continue the original task and use those paths. If no generated image is needed, reply with the originally requested JSON now.";
+
+/// One model request for generated raster media.
+#[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RasterAssetRequest {
+    name: String,
+    prompt: String,
+    shape: RasterAssetShape,
+}
+
+/// One bounded batch of generated raster media.
+#[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RasterAssetRequestSet {
+    asset_requests: Vec<RasterAssetRequest>,
+}
+
+/// The supported generated raster aspect ratios.
+#[derive(Clone, Copy, Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum RasterAssetShape {
+    Square,
+    Landscape,
+    Portrait,
+}
+
+impl From<RasterAssetShape> for ImageShape {
+    fn from(shape: RasterAssetShape) -> Self {
+        match shape {
+            RasterAssetShape::Square => Self::Square,
+            RasterAssetShape::Landscape => Self::Landscape,
+            RasterAssetShape::Portrait => Self::Portrait,
+        }
+    }
+}
+
+/// Whether a reply is an asset request, malformed protocol JSON, or an
+/// ordinary artifact reply.
+#[derive(Debug, PartialEq, Eq)]
+enum RasterAssetRequestParse {
+    NotAssetRequest,
+    Valid(RasterAssetRequestSet),
+    Malformed(String),
+}
+
+/// Appends the generated-media protocol to the existing system content.
+fn append_media_capability(messages: &mut [serde_json::Value]) {
+    let Some(content) = messages
+        .iter_mut()
+        .find(|message| message["role"] == "system")
+        .and_then(|message| message.get_mut("content"))
+        .and_then(|content| content.as_str())
+    else {
+        return;
+    };
+    let extended = format!("{content}\n{MEDIA_CAPABILITY}");
+    if let Some(system) = messages
+        .iter_mut()
+        .find(|message| message["role"] == "system")
+    {
+        system["content"] = serde_json::Value::String(extended);
+    }
+}
+
+/// Parses and validates the exact generated-media request protocol.
+fn parse_raster_asset_request_set(content: &str) -> RasterAssetRequestParse {
+    let value: serde_json::Value = match serde_json::from_str(content.trim()) {
+        Ok(value) => value,
+        Err(error) if content.contains("asset_requests") => {
+            return RasterAssetRequestParse::Malformed(format!("invalid JSON: {error}"));
+        }
+        Err(_) => return RasterAssetRequestParse::NotAssetRequest,
+    };
+    let is_asset_request = value
+        .as_object()
+        .is_some_and(|object| object.contains_key("asset_requests"));
+    if !is_asset_request {
+        return RasterAssetRequestParse::NotAssetRequest;
+    }
+    let requests: RasterAssetRequestSet = match serde_json::from_value(value) {
+        Ok(requests) => requests,
+        Err(error) => return RasterAssetRequestParse::Malformed(error.to_string()),
+    };
+    if !(1..=3).contains(&requests.asset_requests.len()) {
+        return RasterAssetRequestParse::Malformed(
+            "asset_requests must contain 1 to 3 requests".to_owned(),
+        );
+    }
+    for request in &requests.asset_requests {
+        if !is_safe_asset_name(&request.name) {
+            return RasterAssetRequestParse::Malformed(format!(
+                "asset name `{}` must be 1 to 48 lowercase letters, digits, or single hyphens",
+                request.name
+            ));
+        }
+        let prompt_length = request.prompt.chars().count();
+        if request.prompt.trim().is_empty() || prompt_length > 2000 {
+            return RasterAssetRequestParse::Malformed(format!(
+                "asset `{}` prompt must contain 1 to 2000 characters",
+                request.name
+            ));
+        }
+    }
+    RasterAssetRequestParse::Valid(requests)
+}
+
+/// True when `name` is a short lowercase kebab-like file-name stem.
+fn is_safe_asset_name(name: &str) -> bool {
+    let mut parts = name.split('-');
+    !name.is_empty()
+        && name.len() <= 48
+        && parts.all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
+}
+
+/// Adds an invalid-protocol reply and a bounded correction request.
+fn push_media_correction(messages: &mut Vec<serde_json::Value>, content: String, problem: &str) {
+    messages.push(serde_json::json!({ "role": "assistant", "content": content }));
+    messages.push(serde_json::json!({
+        "role": "user",
+        "content": format!(
+            "The asset request is invalid ({problem}). Reply with exactly the asset_requests JSON described by the system message, or continue the original task by replying with only its requested JSON."
+        ),
+    }));
+}
+
+/// Tells the model which generated files to use in its original task.
+fn generated_media_message(paths: &[String]) -> String {
+    format!(
+        "The generated media is ready at these exact paths:\n- {}\nContinue the original task. Reply with only the originally requested JSON and use these paths where appropriate. Do not request another asset batch.",
+        paths.join("\n- ")
+    )
+}
+
 /// The system prompt: role, rules, schema, the clarification protocol,
 /// and one example design.
 fn system_prompt() -> String {
@@ -2989,6 +3291,9 @@ impl Validated for design_model::Artwork {
 pub(crate) struct ArtifactRequest<'request, T> {
     pub(crate) effort: String,
     pub(crate) label: String,
+    /// The run scope that may own one generated-media batch. `None` for
+    /// polish and fix work, which must not start paid generation.
+    pub(crate) media_scope: Option<MediaScope>,
     pub(crate) parse: ReplyParser<'request, T>,
     /// Where this request reports its share of the turn: `DRAFT_SHARE`
     /// once the draft validates, then up to 1.0 over the polish rounds.
@@ -3406,11 +3711,12 @@ mod tests {
     use super::edit_targets;
 
     use super::{
-        ATTACHMENT_TEXT_LIMIT_BYTES, ATTACHMENT_TEXT_TOTAL_LIMIT_BYTES, Attachments,
-        GenerationContext, GenerationEngine, GenerationOutcome, ProgressGroup, ProgressSink,
-        UploadAttachment, answers_since_last_write, candidate_plans, edit_prompt,
-        focused_design_json, system_prompt, text_of, trailing_continue_ids,
-        user_content_with_attachments,
+        ATTACHMENT_TEXT_LIMIT_BYTES, ATTACHMENT_TEXT_TOTAL_LIMIT_BYTES, ArtifactRequest,
+        Attachments, GenerationContext, GenerationEngine, GenerationOutcome, MediaScope,
+        ProgressGroup, ProgressSink, RasterAssetRequestParse, UploadAttachment,
+        answers_since_last_write, append_media_capability, candidate_plans, edit_prompt,
+        focused_design_json, generated_media_message, parse_design, parse_raster_asset_request_set,
+        system_prompt, text_of, trailing_continue_ids, user_content_with_attachments,
     };
     use crate::designs::DesignStore;
     use crate::edit_focus::EditInput;
@@ -3515,6 +3821,235 @@ mod tests {
         assert!(prompt.contains("The request and the answers are authoritative"));
         assert!(prompt.contains("needs_clarification"));
         assert!(prompt.contains("\"viewport\""));
+    }
+
+    #[test]
+    fn raster_asset_requests_are_exact_and_bounded() {
+        let valid = r#"{"asset_requests":[{"name":"hero-photo","prompt":"A quiet harbor at dawn","shape":"landscape"}]}"#;
+        let RasterAssetRequestParse::Valid(requests) = parse_raster_asset_request_set(valid) else {
+            panic!("expected a valid request");
+        };
+        assert_eq!(requests.asset_requests[0].name, "hero-photo");
+
+        for malformed in [
+            r#"{"asset_requests":[]}"#,
+            r#"{"asset_requests":[{"name":"Hero.png","prompt":"x","shape":"square"}]}"#,
+            r#"{"asset_requests":[{"name":"hero","prompt":" ","shape":"portrait"}]}"#,
+            r#"{"asset_requests":[{"name":"hero","prompt":"x","shape":"wide"}]}"#,
+            r#"{"asset_requests":[{"name":"hero","prompt":"x","shape":"square","extra":true}]}"#,
+            r#"{"asset_requests":[],"extra":true}"#,
+            r#"{"asset_requests": [}"#,
+        ] {
+            assert!(
+                matches!(
+                    parse_raster_asset_request_set(malformed),
+                    RasterAssetRequestParse::Malformed(_)
+                ),
+                "{malformed}"
+            );
+        }
+        assert!(matches!(
+            parse_raster_asset_request_set(r#"{"title":"ordinary artifact"}"#),
+            RasterAssetRequestParse::NotAssetRequest
+        ));
+        let long_prompt = "x".repeat(2001);
+        let long = format!(
+            r#"{{"asset_requests":[{{"name":"hero","prompt":"{long_prompt}","shape":"square"}}]}}"#
+        );
+        assert!(matches!(
+            parse_raster_asset_request_set(&long),
+            RasterAssetRequestParse::Malformed(_)
+        ));
+    }
+
+    #[test]
+    fn cloned_media_scopes_share_the_run_wide_budget() {
+        let scope = MediaScope::new("talk");
+        let second_request = scope.clone();
+        assert!(Arc::ptr_eq(&scope.remaining, &second_request.remaining));
+        assert!(Arc::ptr_eq(&scope.batch_gate, &second_request.batch_gate));
+        scope.reserve(2).unwrap();
+        second_request.reserve(1).unwrap();
+        let error = scope.reserve(1).unwrap_err();
+        assert!(error.contains("budget exceeded"));
+        assert!(error.contains("0 remaining"));
+    }
+
+    #[test]
+    fn media_capability_extends_the_existing_system_message() {
+        let mut messages = vec![
+            serde_json::json!({ "role": "system", "content": "Original rules." }),
+            serde_json::json!({ "role": "user", "content": "Build it." }),
+        ];
+        append_media_capability(&mut messages);
+        let system = messages[0]["content"].as_str().unwrap();
+        assert!(system.starts_with("Original rules.\n"));
+        assert!(system.contains(r#"{"asset_requests":[{"name":"short-kebab-name"#));
+        assert!(system.contains("Use 1 to 3 requests"));
+        assert_eq!(messages[1]["content"], "Build it.");
+    }
+
+    #[test]
+    fn generated_media_message_lists_exact_upload_paths() {
+        let paths = vec![
+            "/uploads/generated-hero.png".to_owned(),
+            "/uploads/generated-hero-2.png".to_owned(),
+        ];
+        let message = generated_media_message(&paths);
+        assert!(message.contains("- /uploads/generated-hero.png"));
+        assert!(message.contains("- /uploads/generated-hero-2.png"));
+        assert!(message.contains("Do not request another asset batch"));
+    }
+
+    #[tokio::test]
+    async fn generated_uploads_remain_visible_on_later_turns() {
+        let server = FakeModelServer::start().await;
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let uploads = crate::uploads::UploadStore::new(directory.path().join("uploads"));
+        uploads.save("talk", "source.txt", b"source").await.unwrap();
+        uploads
+            .save("talk", "generated-hero.png", b"generated")
+            .await
+            .unwrap();
+        let attachments = engine(&server, &designs, &sessions)
+            .with_uploads(uploads)
+            .load_attachments("talk", &silent_log())
+            .await;
+        assert_eq!(attachments.files.len(), 2);
+        assert_eq!(attachments.files[0].name, "generated-hero.png");
+        assert_eq!(attachments.files[1].name, "source.txt");
+    }
+
+    #[tokio::test]
+    async fn malformed_asset_requests_retry_without_generating() {
+        let server = FakeModelServer::start().await;
+        for _ in 0..3 {
+            server.push_text(r#"{"asset_requests":[]}"#);
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let uploads = crate::uploads::UploadStore::new(directory.path().join("uploads"));
+        let mut configuration = server.configuration();
+        configuration.image = Some(crate::model_client::ImageConfiguration {
+            url: "http://127.0.0.1:9/images".to_owned(),
+            model: "unused-image".to_owned(),
+            api_key: "unused-key".to_owned(),
+        });
+        let engine = GenerationEngine::new(
+            configuration,
+            designs,
+            sessions,
+            None,
+            "http://127.0.0.1:3000".to_owned(),
+            ChangeNotifier::new(),
+        )
+        .with_uploads(uploads.clone());
+        let context = ArtifactRequest {
+            effort: "low".to_owned(),
+            label: "candidate 1".to_owned(),
+            media_scope: Some(MediaScope::new("talk")),
+            parse: Box::new(parse_design),
+            progress: None,
+            live: None,
+        };
+        let messages = vec![
+            serde_json::json!({ "role": "system", "content": "Return a design." }),
+            serde_json::json!({ "role": "user", "content": "Build it." }),
+        ];
+        let client = crate::model_client::ModelClient::build_http_client().unwrap();
+        let result = engine
+            .request_valid(&client, messages, &context, &silent_log())
+            .await;
+        let Err(super::GenerationStop::Failed(message)) = result else {
+            panic!("expected bounded failure");
+        };
+        assert!(message.contains("2 fix rounds"));
+        assert_eq!(server.requests().len(), 3);
+        assert!(
+            server.requests()[1]
+                .to_string()
+                .contains("asset request is invalid")
+        );
+        assert!(uploads.list("talk").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_asset_request_generates_saves_and_resumes_the_artifact() {
+        let image_application = axum::Router::new().route(
+            "/images",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "data": [{ "b64_json": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAAAAAA" }]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let image_address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, image_application).await;
+        });
+
+        let server = FakeModelServer::start().await;
+        server.push_text(
+            r#"{"asset_requests":[{"name":"hero-photo","prompt":"A quiet harbor at dawn","shape":"landscape"}]}"#,
+        );
+        server.push_text(SAMPLE_DESIGN);
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let uploads = crate::uploads::UploadStore::new(directory.path().join("uploads"));
+        let mut configuration = server.configuration();
+        configuration.image = Some(crate::model_client::ImageConfiguration {
+            url: format!("http://{image_address}/images"),
+            model: "fake-image".to_owned(),
+            api_key: "fake-key".to_owned(),
+        });
+        let engine = GenerationEngine::new(
+            configuration,
+            designs,
+            sessions,
+            None,
+            "http://127.0.0.1:3000".to_owned(),
+            ChangeNotifier::new(),
+        )
+        .with_uploads(uploads.clone());
+        let context = ArtifactRequest {
+            effort: "low".to_owned(),
+            label: "candidate 1".to_owned(),
+            media_scope: Some(MediaScope::new("talk")),
+            parse: Box::new(parse_design),
+            progress: None,
+            live: None,
+        };
+        let messages = vec![
+            serde_json::json!({ "role": "system", "content": "Return a design." }),
+            serde_json::json!({ "role": "user", "content": "Build it." }),
+        ];
+        let client = crate::model_client::ModelClient::build_http_client().unwrap();
+        let design = engine
+            .request_valid(&client, messages, &context, &silent_log())
+            .await
+            .map_err(super::stop_to_string)
+            .unwrap();
+        assert_eq!(design.title, "Swift Design Overview");
+        let generated = uploads.list("talk").await.unwrap();
+        assert_eq!(generated.len(), 1);
+        assert_eq!(generated[0].name, "generated-hero-photo.png");
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0]
+                .to_string()
+                .contains("Image generation is available")
+        );
+        assert!(
+            requests[1]
+                .to_string()
+                .contains("/uploads/generated-hero-photo.png")
+        );
     }
 
     #[tokio::test]
@@ -3998,6 +4533,7 @@ mod tests {
             },
             options: session.options.clone(),
             session_id: "talk".to_owned(),
+            media_scope: MediaScope::new("talk"),
         };
         let engine = engine(&server, &designs, &sessions);
         let press = |id: &str| ChatMessage::continue_request("Finish it.", id);

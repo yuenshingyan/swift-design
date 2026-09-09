@@ -235,6 +235,9 @@ pub struct StoredSettings {
     /// API key, when the user authenticated with one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// API key used only for image generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_api_key: Option<String>,
     /// Login tokens, when the user authenticated with a login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<StoredOauth>,
@@ -468,6 +471,9 @@ struct SettingsRequest {
     /// API key, when authenticating with one.
     #[serde(default)]
     api_key: Option<String>,
+    /// Image API key update. Omitted preserves it and an empty value clears it.
+    #[serde(default)]
+    image_api_key: Option<String>,
 }
 
 /// Body of `POST /settings/login/complete`.
@@ -480,6 +486,31 @@ struct LoginCompleteRequest {
     model: Option<String>,
 }
 
+/// Applies the image key update semantics of `PUT /settings`.
+fn updated_image_api_key(requested: Option<String>, existing: Option<String>) -> Option<String> {
+    match requested {
+        None => existing,
+        Some(key) if key.trim().is_empty() => None,
+        Some(key) => Some(key.trim().to_owned()),
+    }
+}
+
+/// Returns the public image generation status without exposing its key.
+fn image_generation_summary(current: Option<&StoredSettings>) -> serde_json::Value {
+    let configuration = match current {
+        Some(settings) => crate::model_client::image_configuration_from_settings(settings),
+        None => crate::model_client::image_configuration_from_environment(),
+    };
+    let model = configuration
+        .as_ref()
+        .map(|configuration| configuration.model.clone())
+        .unwrap_or_else(crate::model_client::configured_image_model);
+    serde_json::json!({
+        "configured": configuration.is_some(),
+        "model": model,
+    })
+}
+
 /// Returns the catalog, the current choice, and `has_chrome`: true when
 /// Chrome or Chromium was found, so screen images and PDF export work.
 async fn get_settings(State(store): State<SettingsStore>) -> Response {
@@ -487,6 +518,7 @@ async fn get_settings(State(store): State<SettingsStore>) -> Response {
         Ok(current) => current,
         Err(error) => return api_error::internal_error(&error),
     };
+    let image_generation = image_generation_summary(current.as_ref());
     Json(serde_json::json!({
         "providers": CATALOG,
         "current": current.map(|settings| serde_json::json!({
@@ -494,12 +526,13 @@ async fn get_settings(State(store): State<SettingsStore>) -> Response {
             "model": settings.model,
             "auth": settings.auth_method(),
         })),
+        "image_generation": image_generation,
         "has_chrome": crate::screenshots::find_chrome().is_some(),
     }))
     .into_response()
 }
 
-/// Saves a provider and model with an optional API key.
+/// Saves a provider and model with optional chat and image API keys.
 async fn put_settings(
     State(store): State<SettingsStore>,
     State(notifier): State<ChangeNotifier>,
@@ -526,11 +559,20 @@ async fn put_settings(
             Vec::new(),
         );
     }
-    let existing = store.read().await.ok().flatten();
+    let existing = match store.read().await {
+        Ok(existing) => existing,
+        Err(error) => return api_error::internal_error(&error),
+    };
     let api_key = request.api_key.filter(|key| !key.trim().is_empty());
     let keeps_credentials = existing
         .as_ref()
         .is_some_and(|settings| settings.provider == provider.name);
+    let image_api_key = updated_image_api_key(
+        request.image_api_key,
+        existing
+            .as_ref()
+            .and_then(|settings| settings.image_api_key.clone()),
+    );
     let settings = StoredSettings {
         provider: provider.name.to_owned(),
         model: request.model.trim().to_owned(),
@@ -539,6 +581,7 @@ async fn put_settings(
                 .then(|| existing.as_ref()?.api_key.clone())
                 .flatten()
         }),
+        image_api_key,
         oauth: if keeps_credentials {
             existing.and_then(|settings| settings.oauth)
         } else {
@@ -604,10 +647,15 @@ async fn complete_login(
         .model
         .filter(|model| !model.trim().is_empty())
         .unwrap_or_else(|| "claude-sonnet-5".to_owned());
+    let image_api_key = match store.read().await {
+        Ok(existing) => existing.and_then(|settings| settings.image_api_key),
+        Err(error) => return api_error::internal_error(&error),
+    };
     let settings = StoredSettings {
         provider: "anthropic".to_owned(),
         model,
         api_key: None,
+        image_api_key,
         oauth: Some(oauth),
     };
     match store.write(&settings).await {
@@ -804,14 +852,23 @@ async fn openrouter_login_callback(
             );
         }
     };
-    let model = match store.read().await {
-        Ok(Some(stored)) if stored.provider == "openrouter" => stored.model,
-        _ => "google/gemini-2.5-flash".to_owned(),
+    let (model, image_api_key) = match store.read().await {
+        Ok(Some(stored)) => {
+            let model = if stored.provider == "openrouter" {
+                stored.model
+            } else {
+                "google/gemini-2.5-flash".to_owned()
+            };
+            (model, stored.image_api_key)
+        }
+        Ok(None) => ("google/gemini-2.5-flash".to_owned(), None),
+        Err(error) => return api_error::internal_error(&error),
     };
     let settings = StoredSettings {
         provider: "openrouter".to_owned(),
         model,
         api_key: Some(key),
+        image_api_key,
         oauth: None,
     };
     match store.write(&settings).await {
@@ -1022,31 +1079,39 @@ async fn run_openai_callback_listener(
         });
     let outcome = match code {
         Some(code) if !code.is_empty() => match exchange_openai_code(&code, &verifier).await {
-            Ok(oauth) => {
-                let model = match store.read().await {
-                    Ok(Some(stored))
-                        if stored.provider == "openai"
-                            && CHATGPT_LOGIN_MODELS.contains(&stored.model.as_str()) =>
-                    {
-                        stored.model
+            Ok(oauth) => match store.read().await {
+                Ok(stored) => {
+                    let (model, image_api_key) = match stored {
+                        Some(stored) => {
+                            let model = if stored.provider == "openai"
+                                && CHATGPT_LOGIN_MODELS.contains(&stored.model.as_str())
+                            {
+                                stored.model
+                            } else {
+                                CHATGPT_LOGIN_MODELS[0].to_owned()
+                            };
+                            (model, stored.image_api_key)
+                        }
+                        None => (CHATGPT_LOGIN_MODELS[0].to_owned(), None),
+                    };
+                    let settings = StoredSettings {
+                        provider: "openai".to_owned(),
+                        model,
+                        api_key: None,
+                        image_api_key,
+                        oauth: Some(oauth),
+                    };
+                    match store.write(&settings).await {
+                        Ok(()) => {
+                            notifier.notify();
+                            tracing::info!("chatgpt login completed");
+                            Ok(())
+                        }
+                        Err(error) => Err(error.to_string()),
                     }
-                    _ => CHATGPT_LOGIN_MODELS[0].to_owned(),
-                };
-                let settings = StoredSettings {
-                    provider: "openai".to_owned(),
-                    model,
-                    api_key: None,
-                    oauth: Some(oauth),
-                };
-                match store.write(&settings).await {
-                    Ok(()) => {
-                        notifier.notify();
-                        tracing::info!("chatgpt login completed");
-                        Ok(())
-                    }
-                    Err(error) => Err(error.to_string()),
                 }
-            }
+                Err(error) => Err(format!("cannot preserve the image API key: {error}")),
+            },
             Err(message) => Err(message),
         },
         _ => Err("the callback carried no code".to_owned()),
@@ -1077,9 +1142,15 @@ async fn run_openai_callback_listener(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use axum::Json;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+
+    use crate::events::ChangeNotifier;
     use crate::settings::{
-        CATALOG, StoredOauth, StoredSettings, anthropic_authorize_url, base64_url_encode,
-        is_login_expiring, pkce_pair, unix_now_seconds,
+        CATALOG, SettingsRequest, SettingsStore, StoredOauth, StoredSettings,
+        anthropic_authorize_url, base64_url_encode, image_generation_summary, is_login_expiring,
+        pkce_pair, put_settings, unix_now_seconds, updated_image_api_key,
     };
 
     #[test]
@@ -1146,6 +1217,7 @@ mod tests {
             provider: "ollama".to_owned(),
             model: "llama3.1".to_owned(),
             api_key: None,
+            image_api_key: None,
             oauth: None,
         };
         assert_eq!(settings.auth_method(), "none");
@@ -1159,6 +1231,97 @@ mod tests {
         });
         assert_eq!(settings.auth_method(), "login");
         assert!(!is_login_expiring(settings.oauth.as_ref().unwrap()));
+    }
+
+    #[test]
+    fn image_key_updates_preserve_replace_and_clear() {
+        assert_eq!(
+            updated_image_api_key(None, Some("old".to_owned())).as_deref(),
+            Some("old")
+        );
+        assert_eq!(
+            updated_image_api_key(Some(" new ".to_owned()), Some("old".to_owned())).as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            updated_image_api_key(Some("  ".to_owned()), Some("old".to_owned())),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn put_settings_preserves_replaces_and_clears_the_image_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(
+            directory.path().join("settings.json"),
+            "127.0.0.1:3000".to_owned(),
+        );
+        store
+            .write(&StoredSettings {
+                provider: "ollama".to_owned(),
+                model: "llama3.1".to_owned(),
+                api_key: None,
+                image_api_key: Some("old".to_owned()),
+                oauth: None,
+            })
+            .await
+            .unwrap();
+        for (requested, expected) in [
+            (None, Some("old")),
+            (Some("new".to_owned()), Some("new")),
+            (Some(String::new()), None),
+        ] {
+            let response = put_settings(
+                State(store.clone()),
+                State(ChangeNotifier::new()),
+                Json(SettingsRequest {
+                    provider: "ollama".to_owned(),
+                    model: "llama3.1".to_owned(),
+                    api_key: None,
+                    image_api_key: requested,
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(
+                store
+                    .read()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .image_api_key
+                    .as_deref(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn stored_settings_round_trip_the_image_key_but_public_status_does_not() {
+        let settings = StoredSettings {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet-5".to_owned(),
+            api_key: Some("chat-secret".to_owned()),
+            image_api_key: Some("image-secret".to_owned()),
+            oauth: None,
+        };
+        let serialized = serde_json::to_string(&settings).unwrap();
+        let restored: StoredSettings = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored.image_api_key.as_deref(), Some("image-secret"));
+        let summary = image_generation_summary(Some(&restored));
+        assert_eq!(summary["configured"], true);
+        assert_eq!(summary["model"], "gpt-image-1");
+        assert!(!summary.to_string().contains("image-secret"));
+    }
+
+    #[test]
+    fn old_settings_without_an_image_key_still_deserialize() {
+        let settings: StoredSettings = serde_json::from_value(serde_json::json!({
+            "provider": "ollama",
+            "model": "llama3.1"
+        }))
+        .unwrap();
+        assert!(settings.image_api_key.is_none());
     }
 
     #[test]

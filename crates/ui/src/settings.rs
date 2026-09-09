@@ -95,6 +95,16 @@ fn first_choice(rows: &[ModelRow]) -> Option<String> {
         .map(|row| row.id.clone())
 }
 
+/// Returns the requested image key update. `None` preserves the key,
+/// and an empty string explicitly clears it.
+fn image_api_key_update(value: &str, is_clear_requested: bool) -> Option<String> {
+    if is_clear_requested {
+        return Some(String::new());
+    }
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
 /// Every signal the three setup steps share.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct SetupState {
@@ -106,6 +116,12 @@ pub(crate) struct SetupState {
     api_key: Signal<String>,
     /// True while the key field shows the key as plain text.
     is_key_shown: Signal<bool>,
+    /// The separate OpenAI API key the user typed for generated images.
+    image_api_key: Signal<String>,
+    /// True while the image key field shows the key as plain text.
+    is_image_key_shown: Signal<bool>,
+    /// True when saving should explicitly clear the image API key.
+    is_image_key_clear_requested: Signal<bool>,
     /// True once the provider answered a request made with the key.
     is_key_verified: Signal<bool>,
     /// The chosen model id.
@@ -150,6 +166,21 @@ impl SetupState {
     /// True while the key field shows the key as plain text.
     fn is_key_shown(&self) -> bool {
         (self.is_key_shown)()
+    }
+
+    /// The separate OpenAI API key typed for generated images.
+    fn image_api_key(&self) -> String {
+        (self.image_api_key)()
+    }
+
+    /// True while the image key field shows the key as plain text.
+    fn is_image_key_shown(&self) -> bool {
+        (self.is_image_key_shown)()
+    }
+
+    /// True when saving should explicitly clear the image API key.
+    fn is_image_key_clear_requested(&self) -> bool {
+        (self.is_image_key_clear_requested)()
     }
 
     /// True once the provider answered a request made with the key.
@@ -215,6 +246,9 @@ impl SetupState {
             provider_name: use_signal(|| "google".to_owned()),
             api_key: use_signal(String::new),
             is_key_shown: use_signal(|| false),
+            image_api_key: use_signal(String::new),
+            is_image_key_shown: use_signal(|| false),
+            is_image_key_clear_requested: use_signal(|| false),
             is_key_verified: use_signal(|| false),
             model: use_signal(String::new),
             custom_model: use_signal(String::new),
@@ -611,6 +645,72 @@ fn AccessStep(state: SetupState, provider: api::CatalogProvider) -> Element {
     }
 }
 
+/// Lets the user replace or explicitly clear the generated-image key.
+#[component]
+fn ImageGenerationField(state: SetupState, is_configured: bool, model: String) -> Element {
+    let mut state = state;
+    let is_clear_requested = state.is_image_key_clear_requested();
+
+    rsx! {
+        div { class: "field",
+            div { class: "field-heading",
+                span { "OpenAI API key for generated images (optional)" }
+                span { class: "model-count", "{model}" }
+            }
+            div { class: "key-field",
+                input {
+                    r#type: if state.is_image_key_shown() { "text" } else { "password" },
+                    placeholder: if is_clear_requested { "Key will be cleared" } else if is_configured { "Configured — leave blank to keep" } else { "Paste an OpenAI platform API key" },
+                    value: "{state.image_api_key()}",
+                    disabled: is_clear_requested,
+                    oninput: move |event| {
+                        state.image_api_key.set(event.value());
+                        state.is_image_key_clear_requested.set(false);
+                    },
+                }
+                button {
+                    class: "link-button",
+                    disabled: is_clear_requested,
+                    onclick: move |_| state.is_image_key_shown.toggle(),
+                    if state.is_image_key_shown() {
+                        "Hide"
+                    } else {
+                        "Show"
+                    }
+                }
+            }
+        }
+        if is_clear_requested {
+            p { class: "key-status",
+                "Image key will be cleared when you save."
+                button {
+                    class: "link-button",
+                    onclick: move |_| state.is_image_key_clear_requested.set(false),
+                    "Undo"
+                }
+            }
+        } else if is_configured {
+            p { class: "key-status",
+                "✓ image generation configured"
+                button {
+                    class: "link-button",
+                    onclick: move |_| {
+                        state.image_api_key.set(String::new());
+                        state.is_image_key_shown.set(false);
+                        state.is_image_key_clear_requested.set(true);
+                    },
+                    "Clear key"
+                }
+            }
+        }
+        p { class: "lede",
+            "ChatGPT login does not cover image API usage. Generated images require an "
+            "OpenAI platform API key. You may paste the same OpenAI platform key that you "
+            "use for text."
+        }
+    }
+}
+
 /// Step 3: pick the model, then save.
 #[component]
 fn ModelStep(
@@ -622,6 +722,14 @@ fn ModelStep(
 ) -> Element {
     let mut state = state;
     let live_count = state.loaded_models().len();
+    let (is_image_configured, image_model) = settings()
+        .map(|view| {
+            (
+                view.image_generation.configured,
+                view.image_generation.model.clone(),
+            )
+        })
+        .unwrap_or_else(|| (false, "OpenAI image model".to_owned()));
 
     let has_saved_credentials = settings()
         .and_then(|view| view.current)
@@ -638,10 +746,14 @@ fn ModelStep(
             custom.trim().to_owned()
         };
         let key = state.api_key();
+        let image_api_key =
+            image_api_key_update(&state.image_api_key(), state.is_image_key_clear_requested());
         state.is_busy.set(true);
         spawn(async move {
             let key = (!key.trim().is_empty()).then_some(key);
-            match api::save_settings(&provider, &model, key.as_deref()).await {
+            let image_key = image_api_key.as_deref();
+            let saved = api::save_settings(&provider, &model, key.as_deref(), image_key).await;
+            match saved {
                 Ok(()) => {
                     is_configuring.set(false);
                     state.message.set(None);
@@ -715,6 +827,12 @@ fn ModelStep(
                 }
             }
         }
+        div { class: "settings-divider", "optional image generation" }
+        ImageGenerationField {
+            state,
+            is_configured: is_image_configured,
+            model: image_model,
+        }
         div { class: "settings-actions",
             button { class: "primary", disabled: state.is_busy(), onclick: save,
                 "Start using Swift Design"
@@ -734,7 +852,9 @@ fn ModelStep(
 #[cfg(test)]
 mod tests {
     use crate::api::CatalogModel;
-    use crate::settings::{ModelRow, artifact_project, model_rows, stepped_screen};
+    use crate::settings::{
+        ModelRow, artifact_project, image_api_key_update, model_rows, stepped_screen,
+    };
 
     fn catalog() -> Vec<CatalogModel> {
         vec![
@@ -767,6 +887,17 @@ mod tests {
     fn artifact_projects_strip_candidate_suffixes() {
         assert_eq!(artifact_project("talk-candidate-2"), "talk");
         assert_eq!(artifact_project("talk"), "talk");
+    }
+
+    #[test]
+    fn image_key_updates_preserve_replace_and_clear() {
+        assert_eq!(image_api_key_update("", false), None);
+        assert_eq!(image_api_key_update("  ", false), None);
+        assert_eq!(
+            image_api_key_update("  image-key  ", false).as_deref(),
+            Some("image-key")
+        );
+        assert_eq!(image_api_key_update("image-key", true).as_deref(), Some(""));
     }
 
     #[test]

@@ -30,7 +30,7 @@ const SHARED_RULES: [&str; 6] = [
     "Use the theme through CSS variables: `--background`, `--text`, `--accent`, `--muted`, `--heading-font`, `--body-font`, `--mono-font`. Write other colors as #rrggbb.",
     "The server loads the theme fonts from Google Fonts. Base styles: text is 32px in the body font and text color, headings use the heading font with margin 0, paragraphs and lists have margin 0, images are block and max-width 100%.",
     "Allowed HTML: headings, text, lists, tables, `<img>`, inline `<svg>`, `<pre><code>`, `<blockquote>`, `<a>`, `<details>` with `<summary>`, `<label>`, and `<input>` with type `checkbox` or `radio`. Close every tag. Do not write `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, `<form>`, `<button>`, `<select>`, `<textarea>`, other input types, media, comments, on* attributes, javascript: URLs, or data: URLs.",
-    "Images: `<img src='/uploads/{name}'>` for files in GET /uploads?session={id}. Use no other image source. Draw charts, icons, and shapes as inline SVG or CSS.",
+    "Choose the composition of each unit. Use HTML and CSS for an editable layout. For a raster composition, use one `<img>` that fills the canvas and points to a file from GET /uploads?session={id} or to an exact generated-media path. For an SVG composition, use one inline `<svg>` with a `viewBox` that fills the canvas. You may mix composition types between units. Use no other image source. Keep important text in HTML or SVG unless the request requires raster text.",
     "Keep html under 20,000 characters and css under 10,000 characters. Use single quotes for HTML attribute values inside the JSON string.",
 ];
 
@@ -88,6 +88,7 @@ pub const DOCUMENT_RULES: &[&str] = &[
     SHARED_RULES[5],
     "Write the document as a reader reads it: a title on the first page, then sections in order, with headings, paragraphs, lists, and tables. Put sources, intent, and handoff remarks in notes. The renderer does not show notes on the page.",
     "A document is read, not clicked. Do not write links between pages, `<details>`, `<input>`, or any control.",
+    "DOCX export omits inline SVG. Use HTML or a raster upload instead of an SVG-only page when the Word export matters.",
     "A document has no `transition` field.",
 ];
 
@@ -153,6 +154,7 @@ pub const MAILING_RULES: &[&str] = &[
     "Keep the branding the same on every email: the same fonts, the same palette, the same header, and the same footer, so the sequence reads as one sender.",
     "End every email with a footer in muted small type: the sender name, a postal address line, and an unsubscribe line as a plain `<a>` link.",
     "An email is read in an inbox, not clicked between. Do not write links between emails, `<details>`, `<input>`, or any control. Write a web address that is not a call to action as plain text.",
+    "Email clients do not reliably show inline SVG or data URI images. Use an HTML composition with hosted raster images when the email-client HTML export matters. Use SVG-first and raster-first compositions for preview, PDF, and PNG output.",
     "A mailing has no `transition` field.",
 ];
 
@@ -928,6 +930,26 @@ mod tests {
         let deck = DECK_RULES.join("\n");
         assert!(!deck.contains("#screen-"));
         assert!(deck.contains("`<input>` with type `checkbox` or `radio`"));
+    }
+
+    #[test]
+    fn every_kind_offers_html_raster_and_svg_compositions() {
+        for rules in [
+            DEMO_RULES,
+            DECK_RULES,
+            DOCUMENT_RULES,
+            SOCIAL_RULES,
+            PRINT_RULES,
+            MAILING_RULES,
+            CAMPAIGN_RULES,
+            ARTWORK_RULES,
+        ] {
+            let rules = rules.join("\n");
+            assert!(rules.contains("editable layout"));
+            assert!(rules.contains("raster composition"));
+            assert!(rules.contains("SVG composition"));
+            assert!(rules.contains("generated-media path"));
+        }
     }
 
     #[test]

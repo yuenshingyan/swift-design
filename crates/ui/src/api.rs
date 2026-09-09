@@ -1995,6 +1995,15 @@ pub struct CurrentSettings {
     pub auth: String,
 }
 
+/// The image generation status, without its stored API key.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct ImageGenerationSettings {
+    /// True when generated images have credentials.
+    pub configured: bool,
+    /// The OpenAI image model the server uses.
+    pub model: String,
+}
+
 /// Response of `GET /settings`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct SettingsView {
@@ -2002,12 +2011,14 @@ pub struct SettingsView {
     pub providers: Vec<CatalogProvider>,
     /// The current choice, when one was made.
     pub current: Option<CurrentSettings>,
+    /// The image generation status.
+    pub image_generation: ImageGenerationSettings,
     /// True when the server found Chrome.
     #[serde(default)]
     pub has_chrome: bool,
 }
 
-/// Fetches the model catalog and the current choice.
+/// Fetches the model catalog, current choice, and image status.
 pub async fn fetch_settings() -> Result<SettingsView, String> {
     get_json("/settings").await
 }
@@ -2017,20 +2028,26 @@ pub async fn fetch_settings() -> Result<SettingsView, String> {
 struct SettingsRequest<'value> {
     provider: &'value str,
     model: &'value str,
+    #[serde(skip_serializing_if = "Option::is_none")]
     api_key: Option<&'value str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_api_key: Option<&'value str>,
 }
 
-/// Saves the model choice with an optional API key.
+/// Saves the model choice with optional chat and image API key updates.
+/// An omitted image key preserves it, and an empty image key clears it.
 pub async fn save_settings(
     provider: &str,
     model: &str,
     api_key: Option<&str>,
+    image_api_key: Option<&str>,
 ) -> Result<(), String> {
     let builder = Request::put("/settings")
         .json(&SettingsRequest {
             provider,
             model,
             api_key,
+            image_api_key,
         })
         .map_err(|error| error.to_string())?;
     send_checked(builder, "PUT /settings").await.map(|_| ())

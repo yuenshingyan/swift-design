@@ -103,9 +103,9 @@ pub(crate) fn ModelChip(
         };
         anchor.set(None);
         spawn(async move {
-            // Same provider, no key: the server keeps the stored
-            // credentials and only the model changes.
-            match api::save_settings(&provider, &model, None).await {
+            // Same provider, no keys: the server keeps the stored chat
+            // and image credentials and only the model changes.
+            match api::save_settings(&provider, &model, None, None).await {
                 Ok(()) => error.set(None),
                 Err(message) => error.set(Some(message)),
             }
@@ -324,6 +324,10 @@ mod tests {
                 model: model.to_owned(),
                 auth: "api_key".to_owned(),
             }),
+            image_generation: api::ImageGenerationSettings {
+                configured: true,
+                model: "gpt-image-1.5".to_owned(),
+            },
             has_chrome: false,
         }
     }

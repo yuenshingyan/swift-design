@@ -10,6 +10,9 @@
 
 use std::sync::Arc;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
+
 use crate::settings::SettingsStore;
 
 /// Longest time to wait for one model response.
@@ -20,6 +23,21 @@ pub(crate) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// sends nothing meanwhile, and a long deck streams for longer than any
 /// fixed total. A total cap surfaced as `error decoding response body`.
 pub(crate) const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Default OpenAI-compatible image generation endpoint.
+const DEFAULT_IMAGE_API_URL: &str = "https://api.openai.com/v1/images/generations";
+/// Default image generation model.
+const DEFAULT_IMAGE_MODEL: &str = "gpt-image-1";
+/// Largest generated raster accepted from a provider.
+const MAX_GENERATED_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+/// Largest JSON response that can hold one maximum-sized base64 image.
+const MAX_IMAGE_RESPONSE_BYTES: usize = MAX_GENERATED_IMAGE_BYTES.div_ceil(3) * 4 + 64 * 1024;
+/// Largest width or height accepted for a generated raster.
+const MAX_GENERATED_IMAGE_SIDE: u32 = 8192;
+/// Largest pixel count accepted for a generated raster.
+const MAX_GENERATED_IMAGE_PIXELS: u64 = 32_000_000;
+/// Bytes through the complete first PNG chunk.
+const PNG_HEADER_BYTES: usize = 33;
 
 /// One LLM provider: a chat endpoint plus its key environment variables.
 struct Provider {
@@ -98,6 +116,39 @@ pub enum WireFormat {
     ChatGptResponses,
 }
 
+/// One resolved OpenAI-compatible image generation endpoint.
+#[derive(Clone)]
+pub struct ImageConfiguration {
+    /// Image generation endpoint.
+    pub url: String,
+    /// Image model identifier.
+    pub model: String,
+    /// API key for image requests.
+    pub api_key: String,
+}
+
+/// The aspect ratio requested for one generated image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageShape {
+    /// A 1024 by 1024 image.
+    Square,
+    /// A 1536 by 1024 image.
+    Landscape,
+    /// A 1024 by 1536 image.
+    Portrait,
+}
+
+impl ImageShape {
+    /// Returns the image API size for this shape.
+    fn size(self) -> &'static str {
+        match self {
+            Self::Square => "1024x1024",
+            Self::Landscape => "1536x1024",
+            Self::Portrait => "1024x1536",
+        }
+    }
+}
+
 /// The resolved model configuration for built-in runs.
 #[derive(Clone)]
 pub struct ModelConfiguration {
@@ -111,6 +162,8 @@ pub struct ModelConfiguration {
     pub wire: WireFormat,
     /// Model identifier sent to the provider.
     pub model: String,
+    /// Image generation endpoint, when an API key is available.
+    pub image: Option<ImageConfiguration>,
 }
 
 /// The context window of `model` in tokens, from its name. Unknown
@@ -141,6 +194,54 @@ pub(crate) fn provider_chat_url(name: &str) -> Option<&'static str> {
         .map(|provider| provider.chat_url)
 }
 
+/// Builds an image configuration from one API key.
+fn image_configuration(api_key: String) -> ImageConfiguration {
+    let url = std::env::var("SWIFT_DESIGN_IMAGE_API_URL")
+        .or_else(|_| std::env::var("SWIFT_DESIGN_IMAGE_URL"))
+        .unwrap_or_else(|_| DEFAULT_IMAGE_API_URL.to_owned());
+    let model = configured_image_model();
+    ImageConfiguration {
+        url,
+        model,
+        api_key,
+    }
+}
+
+/// Returns the configured image model or its default.
+pub(crate) fn configured_image_model() -> String {
+    std::env::var("SWIFT_DESIGN_IMAGE_MODEL").unwrap_or_else(|_| DEFAULT_IMAGE_MODEL.to_owned())
+}
+
+/// Chooses only a dedicated stored or environment image key.
+fn resolved_image_api_key(stored: Option<&str>, environment: Option<String>) -> Option<String> {
+    stored
+        .filter(|key| !key.trim().is_empty())
+        .map(str::to_owned)
+        .or_else(|| environment.filter(|key| !key.trim().is_empty()))
+}
+
+/// Reads the dedicated image API key from the environment.
+fn image_api_key_from_environment() -> Option<String> {
+    std::env::var("SWIFT_DESIGN_IMAGE_API_KEY").ok()
+}
+
+/// Reads the image configuration from environment variables.
+pub(crate) fn image_configuration_from_environment() -> Option<ImageConfiguration> {
+    let api_key = resolved_image_api_key(None, image_api_key_from_environment())?;
+    Some(image_configuration(api_key))
+}
+
+/// Reads the image configuration from stored settings.
+pub(crate) fn image_configuration_from_settings(
+    settings: &crate::settings::StoredSettings,
+) -> Option<ImageConfiguration> {
+    let api_key = resolved_image_api_key(
+        settings.image_api_key.as_deref(),
+        image_api_key_from_environment(),
+    )?;
+    Some(image_configuration(api_key))
+}
+
 /// Reads the model configuration from the environment. `None` when the
 /// chosen provider needs a key and none of its environment variables
 /// are set.
@@ -157,6 +258,7 @@ pub fn configured_model() -> Option<ModelConfiguration> {
             },
             wire: WireFormat::OpenAiChat,
             model: std::env::var("SWIFT_DESIGN_MODEL").unwrap_or(provider_name),
+            image: image_configuration_from_environment(),
         });
     }
     let provider = PROVIDERS
@@ -179,6 +281,7 @@ pub fn configured_model() -> Option<ModelConfiguration> {
         wire: WireFormat::OpenAiChat,
         model: std::env::var("SWIFT_DESIGN_MODEL")
             .unwrap_or_else(|_| provider.default_model.to_owned()),
+        image: image_configuration_from_environment(),
     })
 }
 
@@ -196,6 +299,7 @@ pub fn configuration_from_settings(
             auth: ProviderAuth::AnthropicLogin(oauth.access_token.clone()),
             wire: WireFormat::AnthropicMessages,
             model: settings.model.clone(),
+            image: image_configuration_from_settings(settings),
         });
     }
     if let Some(oauth) = &settings.oauth
@@ -217,6 +321,7 @@ pub fn configuration_from_settings(
             },
             wire: WireFormat::ChatGptResponses,
             model,
+            image: image_configuration_from_settings(settings),
         });
     }
     let provider = PROVIDERS
@@ -233,6 +338,7 @@ pub fn configuration_from_settings(
         auth,
         wire: WireFormat::OpenAiChat,
         model: settings.model.clone(),
+        image: image_configuration_from_settings(settings),
     })
 }
 
@@ -302,6 +408,59 @@ impl ModelClient {
     /// The context window of the configured model, in tokens.
     pub fn context_window(&self) -> u64 {
         context_window(&self.configuration.model)
+    }
+
+    /// True when this client has an image endpoint and API key.
+    pub fn can_generate_images(&self) -> bool {
+        self.configuration.image.is_some()
+    }
+
+    /// Generates one PNG raster with the configured image endpoint.
+    pub async fn generate_image(
+        &self,
+        client: &reqwest::Client,
+        prompt: &str,
+        shape: ImageShape,
+    ) -> Result<Vec<u8>, String> {
+        let configuration = self
+            .configuration
+            .image
+            .as_ref()
+            .ok_or_else(|| "image generation is not configured".to_owned())?;
+        let body = serde_json::json!({
+            "model": configuration.model,
+            "prompt": prompt,
+            "size": shape.size(),
+        });
+        let response = tokio::time::timeout(
+            IDLE_TIMEOUT,
+            client
+                .post(&configuration.url)
+                .bearer_auth(&configuration.api_key)
+                .json(&body)
+                .send(),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "image generation response headers did not arrive within {} s",
+                IDLE_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|error| format!("image generation request failed: {error}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            // Provider bodies can repeat the prompt or authorization data.
+            // A run error is browser-visible, so report the status only.
+            return Err(format!("image generation endpoint returned {status}"));
+        }
+        let text = read_bounded_response(response, MAX_IMAGE_RESPONSE_BYTES).await?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| format!("image generation response is invalid JSON: {error}"))?;
+        let encoded = value["data"][0]["b64_json"]
+            .as_str()
+            .ok_or_else(|| "image generation response has no data[0].b64_json string".to_owned())?;
+        decode_generated_image(encoded, MAX_GENERATED_IMAGE_BYTES, "20 MB")
     }
 
     /// An HTTP client with the connect timeout every run shares. The
@@ -532,6 +691,99 @@ impl ModelClient {
             sink(usage);
         }
     }
+}
+
+/// Reads a response as UTF-8 without retaining more than `maximum` bytes.
+async fn read_bounded_response(
+    mut response: reqwest::Response,
+    maximum: usize,
+) -> Result<String, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > maximum as u64)
+    {
+        return Err(format!(
+            "image generation response exceeds the {maximum} byte response limit"
+        ));
+    }
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = match tokio::time::timeout(IDLE_TIMEOUT, response.chunk()).await {
+            Ok(Ok(Some(chunk))) => chunk,
+            Ok(Ok(None)) => break,
+            Ok(Err(error)) => {
+                return Err(format!(
+                    "reading the image generation response failed: {error}"
+                ));
+            }
+            Err(_) => {
+                return Err(format!(
+                    "image generation response went silent for {} s",
+                    IDLE_TIMEOUT.as_secs()
+                ));
+            }
+        };
+        if bytes.len().saturating_add(chunk.len()) > maximum {
+            return Err(format!(
+                "image generation response exceeds the {maximum} byte response limit"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| format!("image generation response is not UTF-8: {error}"))
+}
+
+/// Decodes one base64 PNG and applies a byte limit before and after the
+/// decode.
+fn decode_generated_image(
+    encoded: &str,
+    maximum: usize,
+    limit_label: &str,
+) -> Result<Vec<u8>, String> {
+    let maximum_encoded = maximum.div_ceil(3) * 4;
+    if encoded.len() > maximum_encoded {
+        return Err(format!("generated image exceeds the {limit_label} limit"));
+    }
+    let bytes = BASE64
+        .decode(encoded)
+        .map_err(|error| format!("image generation response has invalid base64 data: {error}"))?;
+    if bytes.len() > maximum {
+        return Err(format!("generated image exceeds the {limit_label} limit"));
+    }
+    validate_generated_png(&bytes)?;
+    Ok(bytes)
+}
+
+/// Validates the signature and complete IHDR of one generated PNG.
+fn validate_generated_png(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() < PNG_HEADER_BYTES {
+        return Err("image generation response has an incomplete PNG header".to_owned());
+    }
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err("image generation response is not a PNG file".to_owned());
+    }
+    let ihdr_length = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    if ihdr_length != 13 || &bytes[12..16] != b"IHDR" {
+        return Err("image generation response does not start with a valid IHDR chunk".to_owned());
+    }
+    let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    if width == 0 || height == 0 {
+        return Err("generated PNG width and height must be nonzero".to_owned());
+    }
+    if width > MAX_GENERATED_IMAGE_SIDE || height > MAX_GENERATED_IMAGE_SIDE {
+        return Err(format!(
+            "generated PNG dimensions {width}x{height} exceed the {MAX_GENERATED_IMAGE_SIDE} pixel side limit"
+        ));
+    }
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > MAX_GENERATED_IMAGE_PIXELS {
+        return Err(format!(
+            "generated PNG dimensions {width}x{height} exceed the {MAX_GENERATED_IMAGE_PIXELS} pixel limit"
+        ));
+    }
+    Ok(())
 }
 
 /// Why one send of a request failed.
@@ -861,11 +1113,193 @@ fn parse_chatgpt_stream(stream_text: &str) -> Result<(String, Option<TokenUsage>
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::cell::Cell;
+    use std::sync::{Arc, Mutex};
+
+    use axum::Router;
+    use axum::extract::State;
+    use axum::http::HeaderMap;
+    use axum::routing::post;
+    use base64::Engine;
+
+    use crate::settings::StoredSettings;
 
     use super::{
-        ChatFailure, StreamState, TokenUsage, WireFormat, chatgpt_responses_body, context_window,
-        parse_chatgpt_stream, parse_usage, stream_line, with_one_retry,
+        ChatFailure, ImageConfiguration, ImageShape, ModelClient, ModelConfiguration, ProviderAuth,
+        StreamState, TokenUsage, WireFormat, chatgpt_responses_body, configuration_from_settings,
+        context_window, decode_generated_image, image_api_key_from_environment,
+        parse_chatgpt_stream, parse_usage, resolved_image_api_key, stream_line, with_one_retry,
     };
+
+    #[derive(Clone, Default)]
+    struct ImageRequestState {
+        requests: Arc<Mutex<Vec<(HeaderMap, serde_json::Value)>>>,
+    }
+
+    fn fake_png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".to_vec();
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(b"\x08\x06\x00\x00\x00\x00\x00\x00\x00");
+        bytes
+    }
+
+    async fn image_response(
+        State(state): State<ImageRequestState>,
+        headers: HeaderMap,
+        axum::Json(body): axum::Json<serde_json::Value>,
+    ) -> axum::Json<serde_json::Value> {
+        state.requests.lock().unwrap().push((headers, body));
+        axum::Json(serde_json::json!({
+            "data": [{
+                "b64_json": base64::engine::general_purpose::STANDARD.encode(fake_png(1, 1))
+            }]
+        }))
+    }
+
+    #[tokio::test]
+    async fn image_generation_posts_the_requested_shape_and_decodes_png() {
+        let state = ImageRequestState::default();
+        let router = Router::new()
+            .route("/images", post(image_response))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let client = ModelClient::new(
+            ModelConfiguration {
+                provider: "fake".to_owned(),
+                chat_url: format!("http://{address}/chat"),
+                auth: ProviderAuth::None,
+                wire: WireFormat::OpenAiChat,
+                model: "fake-chat".to_owned(),
+                image: Some(ImageConfiguration {
+                    url: format!("http://{address}/images"),
+                    model: "fake-image".to_owned(),
+                    api_key: "secret-image-key".to_owned(),
+                }),
+            },
+            None,
+        );
+        assert!(client.can_generate_images());
+        let png = client
+            .generate_image(
+                &ModelClient::build_http_client().unwrap(),
+                "paint a harbor",
+                ImageShape::Landscape,
+            )
+            .await
+            .unwrap();
+        assert_eq!(png, fake_png(1, 1));
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].1["model"], "fake-image");
+        assert_eq!(requests[0].1["prompt"], "paint a harbor");
+        assert_eq!(requests[0].1["size"], "1536x1024");
+        assert!(requests[0].1.get("response_format").is_none());
+        assert_eq!(requests[0].0["authorization"], "Bearer secret-image-key");
+    }
+
+    #[test]
+    fn image_shapes_use_the_supported_api_sizes() {
+        assert_eq!(ImageShape::Square.size(), "1024x1024");
+        assert_eq!(ImageShape::Landscape.size(), "1536x1024");
+        assert_eq!(ImageShape::Portrait.size(), "1024x1536");
+    }
+
+    #[test]
+    fn generated_images_must_have_bounded_png_dimensions() {
+        let png = base64::engine::general_purpose::STANDARD.encode(fake_png(1024, 1024));
+        assert!(decode_generated_image(&png, 100, "100 byte").is_ok());
+
+        let mut too_large = fake_png(1, 1);
+        too_large.push(0);
+        let too_large = base64::engine::general_purpose::STANDARD.encode(too_large);
+        assert!(
+            decode_generated_image(&too_large, 33, "33 byte")
+                .unwrap_err()
+                .contains("33 byte limit")
+        );
+        for invalid in [
+            b"not a png".to_vec(),
+            b"\x89PNG\r\n\x1a\n".to_vec(),
+            fake_png(0, 1),
+            fake_png(8193, 1),
+            fake_png(8000, 5000),
+        ] {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(invalid);
+            assert!(decode_generated_image(&encoded, 100, "100 byte").is_err());
+        }
+        let mut wrong_signature = fake_png(1, 1);
+        wrong_signature[0] = 0;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(wrong_signature);
+        assert!(
+            decode_generated_image(&encoded, 100, "100 byte")
+                .unwrap_err()
+                .contains("not a PNG")
+        );
+        let mut wrong_length = fake_png(1, 1);
+        wrong_length[11] = 12;
+        let mut wrong_type = fake_png(1, 1);
+        wrong_type[12..16].copy_from_slice(b"IDAT");
+        for wrong_chunk in [wrong_length, wrong_type] {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(wrong_chunk);
+            assert!(
+                decode_generated_image(&encoded, 100, "100 byte")
+                    .unwrap_err()
+                    .contains("IHDR")
+            );
+        }
+        assert!(
+            decode_generated_image("%%%", 100, "100 byte")
+                .unwrap_err()
+                .contains("base64")
+        );
+    }
+
+    #[test]
+    fn image_keys_are_explicit_and_stored_keys_override_the_environment() {
+        assert_eq!(resolved_image_api_key(None, None), None);
+        assert_eq!(
+            resolved_image_api_key(None, Some("environment-image-key".to_owned())).as_deref(),
+            Some("environment-image-key")
+        );
+        assert_eq!(
+            resolved_image_api_key(
+                Some("stored-image-key"),
+                Some("environment-image-key".to_owned())
+            )
+            .as_deref(),
+            Some("stored-image-key")
+        );
+
+        let mut settings = StoredSettings {
+            provider: "openai".to_owned(),
+            model: "gpt-5.4-mini".to_owned(),
+            api_key: Some("text-platform-key".to_owned()),
+            image_api_key: None,
+            oauth: None,
+        };
+        let expected_environment_key =
+            image_api_key_from_environment().filter(|key| !key.trim().is_empty());
+        assert_eq!(
+            configuration_from_settings(&settings)
+                .unwrap()
+                .image
+                .map(|image| image.api_key),
+            expected_environment_key
+        );
+        settings.image_api_key = Some("stored-image-key".to_owned());
+        assert_eq!(
+            configuration_from_settings(&settings)
+                .unwrap()
+                .image
+                .unwrap()
+                .api_key,
+            "stored-image-key"
+        );
+    }
 
     #[tokio::test]
     async fn a_dropped_reply_is_sent_once_more() {

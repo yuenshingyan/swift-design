@@ -12,9 +12,10 @@
 //! only its own session's files, so a file attached to one project never
 //! reaches another project's prompt.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path as FilePath, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::http::{StatusCode, header};
@@ -37,12 +38,15 @@ pub const DRAFT_SCOPE: &str = "_draft";
 /// The file that records which scope owns each upload.
 const OWNERS_FILE: &str = "owners.json";
 
+/// Counter behind temporary upload names.
+static NEXT_UPLOAD_WRITE: AtomicU64 = AtomicU64::new(0);
+
 /// Filesystem-backed upload storage: one sanitized file name per upload,
 /// plus the scope that owns it.
 #[derive(Clone)]
 pub struct UploadStore {
     directory: PathBuf,
-    /// Serializes the read-modify-write of `owners.json`.
+    /// Serializes name selection, byte writes, and owner updates.
     owners_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -101,14 +105,44 @@ impl UploadStore {
         file_name: &str,
         bytes: &[u8],
     ) -> anyhow::Result<Option<String>> {
+        self.save_with_mode(scope, file_name, bytes, false).await
+    }
+
+    /// Saves `bytes` under a fresh name, including when the same scope
+    /// already owns the requested name.
+    pub async fn save_unique(
+        &self,
+        scope: &str,
+        file_name: &str,
+        bytes: &[u8],
+    ) -> anyhow::Result<Option<String>> {
+        self.save_with_mode(scope, file_name, bytes, true).await
+    }
+
+    /// Saves bytes with either replacement or unique-name semantics.
+    async fn save_with_mode(
+        &self,
+        scope: &str,
+        file_name: &str,
+        bytes: &[u8],
+        is_unique: bool,
+    ) -> anyhow::Result<Option<String>> {
         let Some(wanted) = sanitize_file_name(file_name) else {
             return Ok(None);
         };
         let _guard = self.owners_lock.lock().await;
         let mut owners = self.owners().await;
-        let name = free_name(&wanted, scope, &owners);
+        let stored: HashSet<String> = self.stored_names().await.into_iter().collect();
+        let availability = NameAvailability {
+            scope,
+            owners: &owners,
+            stored: &stored,
+            is_unique,
+        };
+        let name = free_name(&wanted, &availability)
+            .ok_or_else(|| anyhow::anyhow!("no free upload name remains for `{wanted}`"))?;
         tokio::fs::create_dir_all(&self.directory).await?;
-        tokio::fs::write(self.directory.join(&name), bytes).await?;
+        write_bytes_atomically(&self.directory.join(&name), bytes).await?;
         owners.insert(name.clone(), scope.to_owned());
         self.write_owners(&owners).await?;
         Ok(Some(name))
@@ -301,23 +335,63 @@ fn is_in_scope(name: &str, scope: &str, owners: &HashMap<String, String>) -> boo
     }
 }
 
-/// `wanted`, or `wanted-2`, `wanted-3` and so on when another scope
-/// already holds that name. A scope overwrites its own file.
-fn free_name(wanted: &str, scope: &str, owners: &HashMap<String, String>) -> String {
-    if owners.get(wanted).is_none_or(|owner| owner == scope) {
-        return wanted.to_owned();
+/// Atomically writes upload bytes without exposing a partial file.
+///
+/// `files::write_atomically` accepts text only. Uploads can contain
+/// arbitrary binary data, so this uses the same temporary-and-rename
+/// protocol for bytes.
+async fn write_bytes_atomically(path: &FilePath, bytes: &[u8]) -> anyhow::Result<()> {
+    let ticket = NEXT_UPLOAD_WRITE.fetch_add(1, Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("upload");
+    let temporary = path.with_file_name(format!(".{name}.{ticket}.writing"));
+    tokio::fs::write(&temporary, bytes).await?;
+    if let Err(error) = tokio::fs::rename(&temporary, path).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+/// The occupied names and replacement policy of one save.
+struct NameAvailability<'a> {
+    scope: &'a str,
+    owners: &'a HashMap<String, String>,
+    stored: &'a HashSet<String>,
+    is_unique: bool,
+}
+
+impl NameAvailability<'_> {
+    /// True when `candidate` can be used under this save mode.
+    fn can_use(&self, candidate: &str) -> bool {
+        if self.is_unique {
+            return !self.owners.contains_key(candidate) && !self.stored.contains(candidate);
+        }
+        match self.owners.get(candidate) {
+            Some(owner) => owner == self.scope,
+            None => !self.stored.contains(candidate) || self.scope == DRAFT_SCOPE,
+        }
+    }
+}
+
+/// Returns `wanted`, or its first free numbered form.
+fn free_name(wanted: &str, availability: &NameAvailability<'_>) -> Option<String> {
+    if availability.can_use(wanted) {
+        return Some(wanted.to_owned());
     }
     let (stem, extension) = match wanted.rsplit_once('.') {
         Some((stem, extension)) => (stem, format!(".{extension}")),
         None => (wanted, String::new()),
     };
-    for number in 2..1000 {
+    for number in 2..=u32::MAX {
         let candidate = format!("{stem}-{number}{extension}");
-        if owners.get(&candidate).is_none_or(|owner| owner == scope) {
-            return candidate;
+        if availability.can_use(&candidate) {
+            return Some(candidate);
         }
     }
-    wanted.to_owned()
+    None
 }
 
 /// True for names `sanitize_file_name` can produce. Blocks traversal in
@@ -586,6 +660,58 @@ mod tests {
         let again = store.save("talk", "readme.md", b"three").await.unwrap();
         assert_eq!(again.as_deref(), Some("readme.md"));
         assert_eq!(store.read("readme.md").await.unwrap().unwrap(), b"three");
+    }
+
+    #[tokio::test]
+    async fn ordinary_saves_replace_files_in_the_same_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = UploadStore::new(directory.path().to_path_buf());
+        store.save("talk", "image.png", b"one").await.unwrap();
+        store.save("talk", "image.png", b"two").await.unwrap();
+        assert_eq!(store.read("image.png").await.unwrap().unwrap(), b"two");
+    }
+
+    #[tokio::test]
+    async fn unique_saves_never_overwrite_files_in_the_same_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = UploadStore::new(directory.path().to_path_buf());
+        let first = store
+            .save_unique("talk", "generated.png", b"one")
+            .await
+            .unwrap();
+        let second = store
+            .save_unique("talk", "generated.png", b"two")
+            .await
+            .unwrap();
+        assert_eq!(first.as_deref(), Some("generated.png"));
+        assert_eq!(second.as_deref(), Some("generated-2.png"));
+        assert_eq!(store.read("generated.png").await.unwrap().unwrap(), b"one");
+        assert_eq!(
+            store.read("generated-2.png").await.unwrap().unwrap(),
+            b"two"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_unique_saves_choose_different_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = UploadStore::new(directory.path().to_path_buf());
+        let first_store = store.clone();
+        let second_store = store.clone();
+        let (first, second) = tokio::join!(
+            first_store.save_unique("talk", "generated.png", b"one"),
+            second_store.save_unique("talk", "generated.png", b"two"),
+        );
+        let first = first.unwrap().unwrap();
+        let second = second.unwrap().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(store.list("talk").await.unwrap().len(), 2);
+        let temporary_files: Vec<String> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".writing"))
+            .collect();
+        assert!(temporary_files.is_empty());
     }
 
     #[tokio::test]

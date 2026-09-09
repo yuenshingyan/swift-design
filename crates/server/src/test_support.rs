@@ -434,6 +434,7 @@ impl FakeModelServer {
             auth: ProviderAuth::None,
             wire: WireFormat::OpenAiChat,
             model: "fake-model".to_owned(),
+            image: None,
         }
     }
 }

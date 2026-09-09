@@ -274,6 +274,7 @@ impl GenerationEngine {
         let context = ArtifactRequest {
             effort: request.context.effort().to_owned(),
             label: format!("candidate {}", request.candidate_number),
+            media_scope: Some(request.context.media_scope.clone()),
             parse: Box::new(parse_deck),
             progress: Some(Arc::clone(progress)),
             live: Some(Arc::new(move |text: &str| {
@@ -450,6 +451,7 @@ impl GenerationEngine {
         let request = ArtifactRequest {
             effort,
             label,
+            media_scope: Some(context.media_scope.clone()),
             parse: Box::new(move |content| {
                 crate::deck_patch::apply_patch(&original, crate::deck_patch::parse_patch(content)?)
             }),
@@ -554,6 +556,7 @@ impl GenerationEngine {
         let polish_context = ArtifactRequest {
             effort: context.effort().to_owned(),
             label: label.clone(),
+            media_scope: None,
             parse: Box::new(parse_deck),
             progress: Some(Arc::new(move |fraction: f32| {
                 let polished = ((fraction - DRAFT_SHARE) / (1.0 - DRAFT_SHARE)).clamp(0.0, 1.0);
@@ -671,6 +674,7 @@ impl GenerationEngine {
         let request = ArtifactRequest {
             effort: context.effort().to_owned(),
             label: format!("continue chunk {}", position + 1),
+            media_scope: Some(context.media_scope.clone()),
             parse: Box::new(move |content| apply_deck_continuation(&original, content)),
             progress: None,
             live: Some(Arc::new(move |text: &str| {
