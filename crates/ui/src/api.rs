@@ -2028,11 +2028,13 @@ pub struct CurrentSettings {
 /// The image generation status, without its stored API key.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct ImageGenerationSettings {
+    /// The independently selected image provider.
+    pub provider: String,
     /// True when generated images have credentials.
     pub configured: bool,
-    /// The OpenAI image model the server uses.
+    /// The image model the server uses.
     pub model: String,
-    /// Credential source: ChatGPT subscription or OpenAI platform API key.
+    /// Credential source, such as a ChatGPT subscription or an API key.
     #[serde(default)]
     pub source: Option<String>,
 }
@@ -2042,6 +2044,8 @@ pub struct ImageGenerationSettings {
 pub struct SettingsView {
     /// The model catalog.
     pub providers: Vec<CatalogProvider>,
+    /// The image provider catalog, separate from text models.
+    pub image_providers: Vec<CatalogProvider>,
     /// The current choice, when one was made.
     pub current: Option<CurrentSettings>,
     /// The image generation status.
@@ -2066,6 +2070,9 @@ pub struct SettingsRequest<'value> {
     /// Text credentials. Omitted preserves credentials for the same provider.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<&'value str>,
+    /// Image provider update. Omitted preserves the independent choice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_provider: Option<&'value str>,
     /// Image key update. Omitted preserves it; empty clears it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_api_key: Option<&'value str>,
@@ -2081,6 +2088,28 @@ pub async fn save_settings(request: &SettingsRequest<'_>) -> Result<(), String> 
         .json(request)
         .map_err(|error| error.to_string())?;
     send_checked(builder, "PUT /settings").await.map(|_| ())
+}
+
+/// Body of `PUT /settings/images`. Use an empty string to clear a value.
+#[derive(Debug, Serialize)]
+pub struct ImageSettingsRequest<'value> {
+    /// Independent image provider name.
+    pub provider: &'value str,
+    /// Omitted preserves the key; empty clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<&'value str>,
+    /// Omitted preserves the model; empty resets it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<&'value str>,
+}
+
+/// Saves image settings without changing the text provider or model.
+pub async fn save_image_settings(request: &ImageSettingsRequest<'_>) -> Result<(), String> {
+    let builder = Request::put("/settings/images")
+        .json(request)
+        .map_err(|error| error.to_string())?;
+    let response = send_checked(builder, "PUT /settings/images").await;
+    response.map(|_| ())
 }
 
 /// Body of `POST /settings/models`.
@@ -2105,14 +2134,21 @@ pub async fn fetch_provider_models(
 /// Body of `POST /settings/image-models`.
 #[derive(Debug, Serialize)]
 struct ImageModelsRequest<'value> {
+    provider: &'value str,
     #[serde(skip_serializing_if = "Option::is_none")]
     image_api_key: Option<&'value str>,
 }
 
-/// Lists compatible image models directly from OpenAI with dedicated image credentials.
-pub async fn fetch_image_models(image_api_key: Option<&str>) -> Result<Vec<String>, String> {
+/// Lists compatible models from the selected image provider with image credentials only.
+pub async fn fetch_image_models(
+    provider: &str,
+    image_api_key: Option<&str>,
+) -> Result<Vec<String>, String> {
     let builder = Request::post("/settings/image-models")
-        .json(&ImageModelsRequest { image_api_key })
+        .json(&ImageModelsRequest {
+            provider,
+            image_api_key,
+        })
         .map_err(|error| error.to_string())?;
     let response = send_checked(builder, "POST /settings/image-models").await?;
     response.json().await.map_err(|error| error.to_string())
@@ -2149,6 +2185,11 @@ pub async fn start_openai_login() -> Result<String, String> {
     start_login_at("/settings/login/openai/start").await
 }
 
+/// Starts a ChatGPT login for images without changing the text choice.
+pub async fn start_image_openai_login() -> Result<String, String> {
+    start_login_at("/settings/images/login/openai/start").await
+}
+
 /// Body of `POST /settings/login/complete`.
 #[derive(Debug, Serialize)]
 struct LoginCompleteRequest<'value> {
@@ -2171,8 +2212,8 @@ mod tests {
     use design_model::{Format, STORY_VIEWPORT};
 
     use crate::api::{
-        ImageModelsRequest, SessionOptions, SettingsRequest, SocialSummary, VARIATION_LIMIT,
-        generated_media_policy_body, generated_media_policy_path,
+        ImageModelsRequest, ImageSettingsRequest, SessionOptions, SettingsRequest, SocialSummary,
+        VARIATION_LIMIT, generated_media_policy_body, generated_media_policy_path,
     };
 
     #[test]
@@ -2181,11 +2222,15 @@ mod tests {
             provider: "openai",
             model: "text-model",
             api_key: None,
+            image_provider: None,
             image_api_key: None,
             image_model: None,
         };
+        assert_eq!(request.image_provider, None);
         assert_eq!(request.image_api_key, None);
         assert_eq!(request.image_model, None);
+        request.image_provider = Some("google");
+        assert_eq!(request.provider, "openai");
         for value in ["", "gpt-image-exact"] {
             request.image_model = Some(value);
             assert_eq!(request.image_model, Some(value));
@@ -2200,13 +2245,35 @@ mod tests {
     }
 
     #[test]
+    fn independent_image_requests_preserve_replace_and_clear() {
+        let mut request = ImageSettingsRequest {
+            provider: "google",
+            api_key: None,
+            model: None,
+        };
+        assert_eq!(request.api_key, None);
+        assert_eq!(request.model, None);
+        for value in ["image-value", ""] {
+            request.api_key = Some(value);
+            request.model = Some(value);
+            assert_eq!(request.api_key, Some(value));
+            assert_eq!(request.model, Some(value));
+            assert_eq!(request.provider, "google");
+        }
+    }
+
+    #[test]
     fn image_discovery_requests_never_include_text_credentials_or_models() {
         let saved = ImageModelsRequest {
+            provider: "google",
             image_api_key: None,
         };
         let typed = ImageModelsRequest {
+            provider: "openrouter",
             image_api_key: Some("image-key"),
         };
+        assert_eq!(saved.provider, "google");
+        assert_eq!(typed.provider, "openrouter");
         assert_eq!(saved.image_api_key, None);
         assert_eq!(typed.image_api_key, Some("image-key"));
     }

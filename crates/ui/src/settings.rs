@@ -142,8 +142,15 @@ fn image_model_update(selected: Option<String>) -> Option<String> {
 
 /// The credential source for one image model lookup. Never display this value.
 #[derive(Clone, PartialEq, Eq)]
-enum ImageModelSource {
-    Configured,
+struct ImageModelSource {
+    provider: String,
+    credentials: ImageCredentials,
+}
+
+/// Identifies the key or saved credential source without displaying it.
+#[derive(Clone, PartialEq, Eq)]
+enum ImageCredentials {
+    Configured(String),
     Typed(String),
 }
 
@@ -156,18 +163,24 @@ struct ImageModelLookup {
 
 /// Returns no source while the key is absent or marked for clearing.
 fn image_model_source(
+    provider: &str,
     key: &str,
-    is_configured: bool,
+    configured_source: Option<&str>,
     is_clear_requested: bool,
 ) -> Option<ImageModelSource> {
-    if is_clear_requested {
+    if is_clear_requested || provider == "chatgpt" {
         return None;
     }
     let key = key.trim();
-    if !key.is_empty() {
-        return Some(ImageModelSource::Typed(key.to_owned()));
-    }
-    is_configured.then_some(ImageModelSource::Configured)
+    let credentials = if key.is_empty() {
+        ImageCredentials::Configured(configured_source?.to_owned())
+    } else {
+        ImageCredentials::Typed(key.to_owned())
+    };
+    Some(ImageModelSource {
+        provider: provider.to_owned(),
+        credentials,
+    })
 }
 
 /// Hides retained results while a new lookup or a same-source reload is pending.
@@ -191,7 +204,9 @@ pub(crate) struct SetupState {
     api_key: Signal<String>,
     /// True while the key field shows the key as plain text.
     is_key_shown: Signal<bool>,
-    /// The separate OpenAI API key the user typed for generated images.
+    /// The independent image provider override. None uses the saved choice.
+    image_provider: Signal<Option<String>>,
+    /// The separate API key the user typed for generated images.
     image_api_key: Signal<String>,
     /// The separate image model update. None preserves the saved choice.
     image_model: Signal<Option<String>>,
@@ -247,7 +262,7 @@ impl SetupState {
         (self.is_key_shown)()
     }
 
-    /// The separate OpenAI API key typed for generated images.
+    /// The separate API key typed for generated images.
     fn image_api_key(&self) -> String {
         (self.image_api_key)()
     }
@@ -325,6 +340,7 @@ impl SetupState {
             provider_name: use_signal(|| "google".to_owned()),
             api_key: use_signal(String::new),
             is_key_shown: use_signal(|| false),
+            image_provider: use_signal(|| None),
             image_api_key: use_signal(String::new),
             image_model: use_signal(|| None),
             is_custom_image_model_open: use_signal(|| false),
@@ -342,6 +358,16 @@ impl SetupState {
             is_busy: use_signal(|| false),
             is_advance_requested: use_signal(|| false),
         }
+    }
+
+    /// Drops unsaved image credentials and models when the image provider changes.
+    fn reset_for_new_image_provider(&mut self, name: String) {
+        self.image_provider.set(Some(name));
+        self.image_api_key.set(String::new());
+        self.image_model.set(None);
+        self.is_custom_image_model_open.set(false);
+        self.is_image_key_shown.set(false);
+        self.is_image_key_clear_requested.set(false);
     }
 
     /// Clears everything the old provider decided.
@@ -726,22 +752,168 @@ fn AccessStep(state: SetupState, provider: api::CatalogProvider) -> Element {
     }
 }
 
-/// Lets the user replace or explicitly clear the generated-image key.
+/// Distinguishes API providers from the ChatGPT subscription in the selector.
+fn image_provider_label(provider: &api::CatalogProvider) -> String {
+    match provider.name.as_str() {
+        "openai" => "OpenAI API".to_owned(),
+        "google" => "Google API".to_owned(),
+        _ => provider.label.clone(),
+    }
+}
+
+/// Uses saved status only for the selected image provider.
+fn image_provider_status(
+    provider: &api::CatalogProvider,
+    saved: &api::ImageGenerationSettings,
+) -> api::ImageGenerationSettings {
+    if provider.name == saved.provider {
+        return saved.clone();
+    }
+    api::ImageGenerationSettings {
+        provider: provider.name.clone(),
+        configured: false,
+        model: provider
+            .models
+            .first()
+            .map(|model| model.id.clone())
+            .unwrap_or_default(),
+        source: None,
+    }
+}
+
+/// Selects an image provider independently of the text provider.
 #[component]
-fn ImageGenerationField(
+fn ImageGenerationField(state: SetupState, settings: Signal<Option<api::SettingsView>>) -> Element {
+    let mut state = state;
+    let Some(view) = settings() else {
+        return rsx! {
+            p { "Loading image settings…" }
+        };
+    };
+    let name = (state.image_provider)().unwrap_or_else(|| view.image_generation.provider.clone());
+    let Some(provider) = view
+        .image_providers
+        .iter()
+        .find(|provider| provider.name == name)
+        .cloned()
+    else {
+        return rsx! {
+            p { class: "error", "Image provider is not available." }
+        };
+    };
+    let status = image_provider_status(&provider, &view.image_generation);
+    let provider_for_save = name.clone();
+    let save_images = move |_| {
+        let provider = provider_for_save.clone();
+        let api_key =
+            image_api_key_update(&state.image_api_key(), state.is_image_key_clear_requested());
+        let model = image_model_update((state.image_model)());
+        state.is_busy.set(true);
+        spawn(async move {
+            let request = api::ImageSettingsRequest {
+                provider: &provider,
+                api_key: api_key.as_deref(),
+                model: model.as_deref(),
+            };
+            match api::save_image_settings(&request).await {
+                Ok(()) => state.message.set(None),
+                Err(message) => state.message.set(Some(message)),
+            }
+            state.is_busy.set(false);
+        });
+    };
+    rsx! {
+        div { class: "field",
+            span { class: "field-label", "Image provider" }
+            Select {
+                value: name.clone(),
+                options: view.image_providers
+                    .iter()
+                    .map(|provider| (provider.name.clone(), image_provider_label(provider)))
+                    .collect::<Vec<_>>(),
+                on_change: move |name| state.reset_for_new_image_provider(name),
+            }
+        }
+        ImageProviderFields { state, provider, status }
+        div { class: "settings-actions",
+            button {
+                disabled: state.is_busy(),
+                onclick: save_images,
+                "Save image settings"
+            }
+            span { class: "agent-log", "Leaves the text provider and model unchanged." }
+        }
+    }
+}
+
+/// Starts only the image-scoped ChatGPT login. Text settings stay untouched.
+#[component]
+fn ImageChatGptLogin(is_configured: bool) -> Element {
+    let mut is_busy = use_signal(|| false);
+    let mut login_url = use_signal(|| None::<String>);
+    let mut message = use_signal(|| None::<String>);
+    let connect = move |_| {
+        let _ = document::eval("window.open('', 'swiftDesignImageLogin');");
+        is_busy.set(true);
+        spawn(async move {
+            let started = api::start_image_openai_login().await;
+            match started {
+                Ok(url) => {
+                    let opener = document::eval(
+                        "const url = await dioxus.recv(); window.open(url, 'swiftDesignImageLogin');",
+                    );
+                    let _ = opener.send(url.clone());
+                    login_url.set(Some(url));
+                    message.set(None);
+                }
+                Err(error) => message.set(Some(error)),
+            }
+            is_busy.set(false);
+        });
+    };
+    rsx! {
+        if is_configured {
+            p { class: "key-status", "✓ generated images use your ChatGPT subscription" }
+            button { class: "link-button", disabled: is_busy(), onclick: connect, "Reconnect ChatGPT" }
+        } else {
+            button { class: "primary", disabled: is_busy(), onclick: connect, "Connect ChatGPT" }
+            if let Some(url) = login_url() {
+                p { class: "agent-log",
+                    "Finish in the new tab. "
+                    a {
+                        href: url,
+                        target: "_blank",
+                        rel: "noopener noreferrer",
+                        "Open ChatGPT login"
+                    }
+                }
+            }
+        }
+        if let Some(error) = message() {
+            p { class: "error", "{error}" }
+        }
+    }
+}
+
+/// Edits the selected image provider's credentials and model.
+#[component]
+fn ImageProviderFields(
     state: SetupState,
-    is_configured: bool,
-    model: String,
-    source_name: Option<String>,
+    provider: api::CatalogProvider,
+    status: api::ImageGenerationSettings,
 ) -> Element {
     let mut state = state;
-    let is_chatgpt_subscription = source_name.as_deref() == Some("chatgpt_subscription");
-    let is_api_key_configured = source_name.as_deref() == Some("api_key");
+    let is_chatgpt_subscription = provider.name == "chatgpt";
+    let is_configured = status.configured;
+    let model = status.model.clone();
     let is_clear_requested = state.is_image_key_clear_requested();
-    let source = use_memo(use_reactive!(|is_configured| {
+    let source = use_memo(use_reactive!(|status| {
         image_model_source(
+            &status.provider,
             &state.image_api_key(),
-            is_configured,
+            status
+                .configured
+                .then_some(status.source.as_deref().unwrap_or("configured")),
             state.is_image_key_clear_requested(),
         )
     }));
@@ -749,15 +921,15 @@ fn ImageGenerationField(
         let source = source();
         async move {
             let source = source?;
-            let key = match &source {
-                ImageModelSource::Typed(key) => {
+            let key = match &source.credentials {
+                ImageCredentials::Typed(key) => {
                     // Debounce typed keys. A changed resource cancels the previous request.
                     pause_briefly().await;
                     Some(key.as_str())
                 }
-                ImageModelSource::Configured => None,
+                ImageCredentials::Configured(_) => None,
             };
-            let result = api::fetch_image_models(key).await;
+            let result = api::fetch_image_models(&source.provider, key).await;
             Some(ImageModelLookup { source, result })
         }
     });
@@ -777,58 +949,64 @@ fn ImageGenerationField(
     let selected = (state.image_model)();
     let options = image_model_options(&live, &model, selected.as_deref());
     let value = selected.unwrap_or_else(|| model.clone());
+    let provider_for_key = provider.name.clone();
+    let provider_for_custom_model = provider.name.clone();
+    let provider_for_model = provider.name.clone();
 
     rsx! {
-        div { class: "field",
-            div { class: "field-heading",
-                span { "OpenAI platform API key (optional fallback)" }
-                span { class: "model-count", "{model}" }
-            }
-            div { class: "key-field",
-                input {
-                    r#type: if state.is_image_key_shown() { "text" } else { "password" },
-                    placeholder: if is_clear_requested { "Key will be cleared" } else if is_api_key_configured { "Configured — leave blank to keep" } else if is_chatgpt_subscription { "Optional platform API key" } else { "Paste an OpenAI platform API key" },
-                    value: "{state.image_api_key()}",
-                    disabled: is_clear_requested,
-                    oninput: move |event| {
-                        state.image_api_key.set(event.value());
-                        state.is_image_key_clear_requested.set(false);
-                    },
+        if is_chatgpt_subscription {
+            ImageChatGptLogin { is_configured }
+        } else {
+            div { class: "field",
+                div { class: "field-heading",
+                    span { "{provider.label} API key" }
+                    span { class: "model-count", "{model}" }
                 }
-                button {
-                    class: "link-button",
-                    disabled: is_clear_requested,
-                    onclick: move |_| state.is_image_key_shown.toggle(),
-                    if state.is_image_key_shown() {
-                        "Hide"
-                    } else {
-                        "Show"
+                div { class: "key-field",
+                    input {
+                        r#type: if state.is_image_key_shown() { "text" } else { "password" },
+                        placeholder: if is_clear_requested { "Key will be cleared".to_owned() } else if is_configured { "Configured — leave blank to keep".to_owned() } else { format!("Paste your {} API key", provider.label) },
+                        value: "{state.image_api_key()}",
+                        disabled: is_clear_requested,
+                        oninput: move |event| {
+                            state.image_provider.set(Some(provider_for_key.clone()));
+                            state.image_api_key.set(event.value());
+                            state.is_image_key_clear_requested.set(false);
+                        },
+                    }
+                    button {
+                        class: "link-button",
+                        disabled: is_clear_requested,
+                        onclick: move |_| state.is_image_key_shown.toggle(),
+                        if state.is_image_key_shown() {
+                            "Hide"
+                        } else {
+                            "Show"
+                        }
                     }
                 }
             }
-        }
-        if is_clear_requested {
-            p { class: "key-status",
-                "Image key will be cleared when you save."
-                button {
-                    class: "link-button",
-                    onclick: move |_| state.is_image_key_clear_requested.set(false),
-                    "Undo"
+            if is_clear_requested {
+                p { class: "key-status",
+                    "Image key will be cleared when you save."
+                    button {
+                        class: "link-button",
+                        onclick: move |_| state.is_image_key_clear_requested.set(false),
+                        "Undo"
+                    }
                 }
-            }
-        } else if is_chatgpt_subscription {
-            p { class: "key-status", "✓ generated images use your ChatGPT subscription" }
-        } else if is_configured {
-            p { class: "key-status",
-                "✓ generated images use an OpenAI platform API key"
-                button {
-                    class: "link-button",
-                    onclick: move |_| {
-                        state.image_api_key.set(String::new());
-                        state.is_image_key_shown.set(false);
-                        state.is_image_key_clear_requested.set(true);
-                    },
-                    "Clear key"
+            } else if is_configured {
+                p { class: "key-status",
+                    "✓ generated images use {provider.label}"
+                    button {
+                        class: "link-button",
+                        onclick: move |_| {
+                            state.image_api_key.set(String::new());
+                            state.is_image_key_shown.set(false);
+                            state.is_image_key_clear_requested.set(true);
+                        },
+                        "Clear key"
+                    }
                 }
             }
         }
@@ -845,13 +1023,18 @@ fn ImageGenerationField(
                 }
             }
             if is_chatgpt_subscription {
-                p { class: "key-status", "{model} · selected by ChatGPT" }
+                p { class: "key-status", "gpt-image-2 · fixed for ChatGPT" }
             } else if (state.is_custom_image_model_open)() {
                 input {
                     aria_label: "Exact image model id",
-                    placeholder: "Exact GPT Image model id",
+                    placeholder: "Exact image model id",
                     value: "{value}",
-                    oninput: move |event| state.image_model.set(Some(event.value())),
+                    oninput: move |event| {
+                        state
+                            .image_provider
+                            .set(Some(provider_for_custom_model.clone()));
+                        state.image_model.set(Some(event.value()));
+                    },
                 }
                 button {
                     class: "link-button",
@@ -862,7 +1045,10 @@ fn ImageGenerationField(
                 Select {
                     value: value.clone(),
                     options,
-                    on_change: move |id| state.image_model.set(Some(id)),
+                    on_change: move |id| {
+                        state.image_provider.set(Some(provider_for_model.clone()));
+                        state.image_model.set(Some(id));
+                    },
                 }
                 button {
                     class: "link-button",
@@ -880,14 +1066,15 @@ fn ImageGenerationField(
         }
         p { class: "lede",
             if is_chatgpt_subscription {
-                "Generated images use your ChatGPT subscription through OpenAI's official "
-                "Codex image endpoint. Your subscription limits apply. The platform key is "
-                "only a fallback for a different text provider."
+                "Generated images use your ChatGPT subscription. Your subscription limits apply."
+            } else if provider.name == "google" {
+                "Use a Google AI Studio API key for generated images. Google API charges apply."
+            } else if provider.name == "openrouter" {
+                "Use an OpenRouter API key for generated images. OpenRouter credits pay for image requests."
             } else {
-                "Sign in with ChatGPT as the OpenAI provider to use your subscription. "
-                "Otherwise, generated images need an OpenAI platform API key. Image and "
-                "text models remain separate."
+                "Use an OpenAI platform API key for generated images. OpenAI API charges apply."
             }
+            " Image and text providers, credentials, and models stay separate."
         }
     }
 }
@@ -903,15 +1090,6 @@ fn ModelStep(
 ) -> Element {
     let mut state = state;
     let live_count = state.loaded_models().len();
-    let (is_image_configured, image_model, image_source) = settings()
-        .map(|view| {
-            (
-                view.image_generation.configured,
-                view.image_generation.model.clone(),
-                view.image_generation.source.clone(),
-            )
-        })
-        .unwrap_or_else(|| (false, "OpenAI image model".to_owned(), None));
 
     let has_saved_credentials = settings()
         .and_then(|view| view.current)
@@ -928,6 +1106,8 @@ fn ModelStep(
             custom.trim().to_owned()
         };
         let key = state.api_key();
+        let image_provider = (state.image_provider)()
+            .or_else(|| settings().map(|view| view.image_generation.provider));
         let image_api_key =
             image_api_key_update(&state.image_api_key(), state.is_image_key_clear_requested());
         let image_model = image_model_update((state.image_model)());
@@ -938,6 +1118,7 @@ fn ModelStep(
                 provider: &provider,
                 model: &model,
                 api_key: key.as_deref(),
+                image_provider: image_provider.as_deref(),
                 image_api_key: image_api_key.as_deref(),
                 image_model: image_model.as_deref(),
             };
@@ -1017,17 +1198,13 @@ fn ModelStep(
             }
         }
         div { class: "settings-divider", "optional image generation" }
-        ImageGenerationField {
-            state,
-            is_configured: is_image_configured,
-            model: image_model,
-            source_name: image_source,
-        }
+        ImageGenerationField { state, settings }
         div { class: "settings-actions",
             button { class: "primary", disabled: state.is_busy(), onclick: save,
                 "Start using Swift Design"
             }
             button {
+                disabled: state.is_busy(),
                 onclick: move |_| {
                     state.message.set(None);
                     state.step.set(if needs_access_step { 2 } else { 1 });
@@ -1041,12 +1218,15 @@ fn ModelStep(
 
 #[cfg(test)]
 mod tests {
+    use crate::api;
     use crate::api::CatalogModel;
     use crate::settings::{
-        ImageModelLookup, ImageModelSource, ModelRow, artifact_project, current_image_model_result,
-        image_api_key_update, image_model_options, image_model_source, image_model_update,
-        model_rows, stepped_screen,
+        ImageCredentials, ImageModelLookup, ModelRow, SetupState, artifact_project,
+        current_image_model_result, image_api_key_update, image_model_options, image_model_source,
+        image_model_update, image_provider_label, image_provider_status, model_rows,
+        stepped_screen,
     };
+    use dioxus::prelude::*;
 
     fn catalog() -> Vec<CatalogModel> {
         vec![
@@ -1094,28 +1274,39 @@ mod tests {
 
     #[test]
     fn image_lookup_identity_tracks_the_trimmed_key_or_configured_source() {
-        assert!(image_model_source("", false, false).is_none());
-        assert!(image_model_source("  ", false, false).is_none());
-        assert!(image_model_source("key", true, true).is_none());
-        assert!(matches!(
-            image_model_source("  ", true, false),
-            Some(ImageModelSource::Configured)
-        ));
-        for is_configured in [false, true] {
-            assert!(matches!(
-                image_model_source(" key ", is_configured, false),
-                Some(ImageModelSource::Typed(key)) if key == "key"
-            ));
+        assert!(image_model_source("google", "", None, false).is_none());
+        assert!(image_model_source("google", "  ", None, false).is_none());
+        assert!(image_model_source("google", "key", Some("api_key"), true).is_none());
+        assert!(
+            image_model_source("chatgpt", "key", Some("chatgpt_subscription"), false).is_none()
+        );
+        let saved =
+            image_model_source("google", "  ", Some("api_key"), false).expect("saved key source");
+        assert!(
+            matches!(saved.credentials, ImageCredentials::Configured(source) if source == "api_key")
+        );
+        for source in [None, Some("api_key")] {
+            let typed =
+                image_model_source("google", " key ", source, false).expect("typed key source");
+            assert_eq!(typed.provider, "google");
+            assert!(matches!(typed.credentials, ImageCredentials::Typed(key) if key == "key"));
         }
     }
 
     #[test]
     fn image_lookup_results_and_errors_only_belong_to_the_current_source() {
-        let sources = [
-            ImageModelSource::Configured,
-            ImageModelSource::Typed("first-key".to_owned()),
-            ImageModelSource::Typed("second-key".to_owned()),
-        ];
+        let sources = ["openai", "google", "openrouter"]
+            .into_iter()
+            .flat_map(|provider| {
+                [
+                    image_model_source(provider, "", Some("api_key"), false).expect("saved key"),
+                    image_model_source(provider, "", Some("environment"), false)
+                        .expect("environment key"),
+                    image_model_source(provider, "first-key", None, false).expect("first key"),
+                    image_model_source(provider, "second-key", None, false).expect("second key"),
+                ]
+            })
+            .collect::<Vec<_>>();
         for source in &sources {
             for result in [
                 Ok(vec!["gpt-image-live".to_owned()]),
@@ -1135,6 +1326,71 @@ mod tests {
                 assert!(current_image_model_result(Some(source), None, true).is_none());
             }
         }
+    }
+
+    #[test]
+    fn image_provider_status_never_borrows_another_providers_model_or_credentials() {
+        let provider = api::CatalogProvider {
+            name: "google".to_owned(),
+            label: "Google".to_owned(),
+            models: catalog(),
+            needs_api_key: true,
+            supports_login: false,
+        };
+        let mut saved = api::ImageGenerationSettings {
+            provider: "openai".to_owned(),
+            configured: true,
+            model: "old-image-model".to_owned(),
+            source: Some("api_key".to_owned()),
+        };
+        for (name, label) in [
+            ("chatgpt", "ChatGPT subscription"),
+            ("openai", "OpenAI API"),
+            ("google", "Google API"),
+            ("openrouter", "OpenRouter"),
+        ] {
+            let entry = api::CatalogProvider {
+                name: name.to_owned(),
+                label: label.to_owned(),
+                ..provider.clone()
+            };
+            assert_eq!(image_provider_label(&entry), label);
+        }
+        let status = image_provider_status(&provider, &saved);
+        assert!(!status.configured);
+        assert_eq!(status.source, None);
+        assert_eq!(status.model, "flash");
+        saved.provider = "google".to_owned();
+        assert_eq!(image_provider_status(&provider, &saved), saved);
+    }
+
+    #[test]
+    fn changing_image_provider_drops_unsaved_secrets_but_keeps_text_choices() {
+        fn app() -> Element {
+            let mut state = SetupState::new();
+            state.provider_name.set("openai".to_owned());
+            state.api_key.set("text-key".to_owned());
+            state.model.set("text-model".to_owned());
+            state.image_api_key.set("old-image-key".to_owned());
+            state.image_model.set(Some("old-image-model".to_owned()));
+            state.is_image_key_shown.set(true);
+            state.is_image_key_clear_requested.set(true);
+            state.is_custom_image_model_open.set(true);
+            state.reset_for_new_image_provider("google".to_owned());
+            assert_eq!((state.image_provider)().as_deref(), Some("google"));
+            assert_eq!(state.image_api_key(), "");
+            assert_eq!((state.image_model)(), None);
+            assert!(!state.is_image_key_shown());
+            assert!(!state.is_image_key_clear_requested());
+            assert!(!(state.is_custom_image_model_open)());
+            assert_eq!(state.provider_name(), "openai");
+            assert_eq!(state.api_key(), "text-key");
+            assert_eq!(state.model(), "text-model");
+            rsx! {
+                div {}
+            }
+        }
+        VirtualDom::new(app).rebuild_in_place();
     }
 
     #[test]

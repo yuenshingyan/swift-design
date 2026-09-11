@@ -108,6 +108,7 @@ pub(crate) fn ModelChip(
                 provider: &provider,
                 model: &model,
                 api_key: None,
+                image_provider: None,
                 image_api_key: None,
                 image_model: None,
             };
@@ -331,13 +332,38 @@ mod tests {
                 model: model.to_owned(),
                 auth: "api_key".to_owned(),
             }),
+            image_providers: vec![api::CatalogProvider {
+                name: "google".to_owned(),
+                label: "Google".to_owned(),
+                models: vec![api::CatalogModel {
+                    id: "google-image-model".to_owned(),
+                    description: "Image generation".to_owned(),
+                    is_recommended: true,
+                }],
+                needs_api_key: true,
+                supports_login: false,
+            }],
             image_generation: api::ImageGenerationSettings {
+                provider: "google".to_owned(),
                 configured: true,
-                model: "gpt-image-1.5".to_owned(),
+                model: "google-image-model".to_owned(),
                 source: Some("api_key".to_owned()),
             },
             has_chrome: false,
         }
+    }
+
+    #[test]
+    fn model_chip_ignores_image_provider_models_and_status() {
+        let mut settings = view(Some("gpt-5"));
+        let models = menu_models(Some(&settings));
+        assert!(!models.contains(&settings.image_generation.model));
+        settings.image_generation.provider = "chatgpt".to_owned();
+        settings.image_generation.model = "gpt-image-2".to_owned();
+        settings.image_generation.source = Some("chatgpt_subscription".to_owned());
+        assert_eq!(menu_models(Some(&settings)), models);
+        settings.image_generation.configured = false;
+        assert_eq!(menu_models(Some(&settings)), models);
     }
 
     #[test]

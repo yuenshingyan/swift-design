@@ -6,8 +6,13 @@
 //! renaming it over the target closes the window: a reader sees either
 //! the old file or the new one, never a half-written one.
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(unix)]
+use tokio::io::AsyncWriteExt;
 
 /// Counter behind each temporary name, so two writers to one path
 /// cannot pick the same temporary file.
@@ -31,8 +36,24 @@ fn temporary_path(path: &Path) -> PathBuf {
 /// The temporary file is removed when the rename fails, so a failed
 /// write leaves nothing behind.
 pub async fn write_atomically(path: &Path, contents: &str) -> anyhow::Result<()> {
+    write_atomically_with_privacy(path, contents, false).await
+}
+
+/// Writes `contents` atomically with owner-only permissions on Unix.
+pub async fn write_atomically_private(path: &Path, contents: &str) -> anyhow::Result<()> {
+    write_atomically_with_privacy(path, contents, true).await
+}
+
+async fn write_atomically_with_privacy(
+    path: &Path,
+    contents: &str,
+    is_private: bool,
+) -> anyhow::Result<()> {
     let temporary = temporary_path(path);
-    tokio::fs::write(&temporary, contents).await?;
+    if let Err(error) = write_temporary(&temporary, contents, is_private).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error);
+    }
     if let Err(error) = tokio::fs::rename(&temporary, path).await {
         let _ = tokio::fs::remove_file(&temporary).await;
         return Err(error.into());
@@ -40,10 +61,33 @@ pub async fn write_atomically(path: &Path, contents: &str) -> anyhow::Result<()>
     Ok(())
 }
 
+#[cfg(unix)]
+async fn write_temporary(path: &Path, contents: &str, is_private: bool) -> anyhow::Result<()> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    if is_private {
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).await?;
+    file.write_all(contents.as_bytes()).await?;
+    file.flush().await?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn write_temporary(path: &Path, contents: &str, _is_private: bool) -> anyhow::Result<()> {
+    tokio::fs::write(path, contents).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    #[cfg(unix)]
+    use super::write_atomically_private;
     use super::{temporary_path, write_atomically};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
     #[tokio::test]
@@ -60,6 +104,20 @@ mod tests {
             names.push(entry.file_name().to_string_lossy().into_owned());
         }
         assert_eq!(names, vec!["design.json"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_private_write_is_never_world_readable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        write_atomically_private(&path, "secret").await.unwrap();
+        let mode = tokio::fs::metadata(path)
+            .await
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0);
     }
 
     #[test]

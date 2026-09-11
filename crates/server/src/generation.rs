@@ -619,8 +619,14 @@ impl GenerationEngine {
     }
 
     /// Renews an expiring login and persists the new tokens.
-    async fn refresh_login_if_needed(&mut self, log: &LogSink) -> Result<(), String> {
-        self.model.refresh_login_if_needed(log).await
+    async fn refresh_login_if_needed(
+        &mut self,
+        log: &LogSink,
+        should_refresh_images: bool,
+    ) -> Result<(), String> {
+        self.model
+            .refresh_login_if_needed(log, should_refresh_images)
+            .await
     }
 
     /// Short label for the studio: `google/gemini-2.5-flash`.
@@ -642,7 +648,6 @@ impl GenerationEngine {
         session_id: &str,
         log: LogSink,
     ) -> Result<GenerationOutcome, String> {
-        self.refresh_login_if_needed(&log).await?;
         let session = self
             .sessions
             .read(session_id)
@@ -655,6 +660,10 @@ impl GenerationEngine {
                 session.state
             ));
         }
+        let should_refresh_images =
+            MediaScope::new(session_id, session.artifact_kind, &session.options).is_some();
+        self.refresh_login_if_needed(&log, should_refresh_images)
+            .await?;
         let answered = self
             .sessions
             .answered_questions(session_id)
@@ -4043,6 +4052,8 @@ mod tests {
         set_up_session(&sessions, "A landing page.").await;
         let mut configuration = server.configuration();
         configuration.image = Some(crate::model_client::ImageConfiguration {
+            provider: "openai".to_owned(),
+            wire: crate::model_client::ImageWireFormat::OpenAiImages,
             url: images.configuration().chat_url,
             model: "unused-image".to_owned(),
             auth: crate::model_client::ImageAuth::ApiKey("configured-key".to_owned()),
@@ -4081,6 +4092,8 @@ mod tests {
         let uploads = crate::uploads::UploadStore::new(directory.path().join("uploads"));
         let mut configuration = server.configuration();
         configuration.image = Some(crate::model_client::ImageConfiguration {
+            provider: "openai".to_owned(),
+            wire: crate::model_client::ImageWireFormat::OpenAiImages,
             url: "http://127.0.0.1:9/images".to_owned(),
             model: "unused-image".to_owned(),
             auth: crate::model_client::ImageAuth::ApiKey("unused-key".to_owned()),
@@ -4150,6 +4163,8 @@ mod tests {
         let uploads = crate::uploads::UploadStore::new(directory.path().join("uploads"));
         let mut configuration = server.configuration();
         configuration.image = Some(crate::model_client::ImageConfiguration {
+            provider: "openai".to_owned(),
+            wire: crate::model_client::ImageWireFormat::OpenAiImages,
             url: format!("http://{image_address}/images"),
             model: "fake-image".to_owned(),
             auth: crate::model_client::ImageAuth::ApiKey("fake-key".to_owned()),

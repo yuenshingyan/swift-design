@@ -28,6 +28,14 @@ pub(crate) const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 const DEFAULT_IMAGE_API_URL: &str = "https://api.openai.com/v1/images/generations";
 /// Image generation endpoint served to ChatGPT-authenticated Codex clients.
 const CHATGPT_IMAGE_API_URL: &str = "https://chatgpt.com/backend-api/codex/images/generations";
+/// Google image generation API root.
+const GOOGLE_IMAGE_API_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+/// OpenRouter image generation endpoint.
+const OPENROUTER_IMAGE_API_URL: &str = "https://openrouter.ai/api/v1/images";
+/// Default Google image model.
+const GOOGLE_IMAGE_MODEL: &str = "gemini-2.5-flash-image";
+/// Default OpenRouter image model.
+const OPENROUTER_IMAGE_MODEL: &str = "google/gemini-2.5-flash-image";
 /// Default image generation model for API-key requests.
 const DEFAULT_IMAGE_MODEL: &str = "gpt-image-1";
 /// Default image generation model for ChatGPT subscription requests.
@@ -123,15 +131,35 @@ pub enum WireFormat {
 /// Authentication for one resolved image generation endpoint.
 #[derive(Clone)]
 pub enum ImageAuth {
-    /// Use a dedicated OpenAI platform API key.
+    /// Use a dedicated image provider API key.
     ApiKey(String),
-    /// Use the active ChatGPT login and its subscription allowance.
-    ChatGptSubscription,
+    /// Use a separate ChatGPT login and its subscription allowance.
+    ChatGptSubscription {
+        /// Bearer token for image requests.
+        access_token: String,
+        /// ChatGPT account id for image requests.
+        account_id: String,
+    },
 }
 
-/// One resolved OpenAI-compatible image generation endpoint.
+/// The request and response format of an image endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageWireFormat {
+    /// OpenAI images, including ChatGPT subscription images.
+    OpenAiImages,
+    /// Gemini generateContent with inline image data.
+    GoogleGenerateContent,
+    /// OpenRouter images with base64 image data.
+    OpenRouterImages,
+}
+
+/// One resolved image generation endpoint.
 #[derive(Clone)]
 pub struct ImageConfiguration {
+    /// Image provider id, independent of the text provider.
+    pub provider: String,
+    /// Request and response format of the image endpoint.
+    pub wire: ImageWireFormat,
     /// Image generation endpoint.
     pub url: String,
     /// Image model identifier.
@@ -140,18 +168,108 @@ pub struct ImageConfiguration {
     pub auth: ImageAuth,
 }
 
+impl ImageConfiguration {
+    /// Builds the request fields for this image endpoint.
+    fn request_body(&self, prompt: &str, shape: ImageShape) -> serde_json::Value {
+        match self.wire {
+            ImageWireFormat::OpenAiImages => {
+                let mut body = serde_json::json!({
+                    "model": self.model,
+                    "prompt": prompt,
+                    "size": shape.size(),
+                });
+                if matches!(self.auth, ImageAuth::ChatGptSubscription { .. }) {
+                    body["background"] = serde_json::json!("auto");
+                    body["quality"] = serde_json::json!("auto");
+                }
+                body
+            }
+            ImageWireFormat::GoogleGenerateContent => serde_json::json!({
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "responseModalities": ["IMAGE"],
+                    "imageConfig": {"aspectRatio": shape.aspect_ratio()},
+                },
+            }),
+            ImageWireFormat::OpenRouterImages => serde_json::json!({
+                "model": self.model,
+                "prompt": prompt,
+                "aspect_ratio": shape.aspect_ratio(),
+                "output_format": "png",
+            }),
+        }
+    }
+
+    /// Adds the image credential without reading the text credential.
+    fn authenticated_request(
+        &self,
+        client: &reqwest::Client,
+    ) -> Result<reqwest::RequestBuilder, String> {
+        let request = client.post(&self.url);
+        match &self.auth {
+            ImageAuth::ApiKey(api_key) => Ok(match self.wire {
+                ImageWireFormat::GoogleGenerateContent => request.header("x-goog-api-key", api_key),
+                _ => request.bearer_auth(api_key),
+            }),
+            ImageAuth::ChatGptSubscription {
+                access_token,
+                account_id,
+            } => {
+                let turn_id = crate::sessions::new_session_id()
+                    .map_err(|error| format!("could not create an image turn id: {error}"))?;
+                Ok(request
+                    .bearer_auth(access_token)
+                    .header("chatgpt-account-id", account_id)
+                    .header("originator", "codex_cli_rs")
+                    .header("x-codex-image-turn-id", turn_id))
+            }
+        }
+    }
+}
+
+/// Reads one encoded image from the provider response.
+fn encoded_image(value: &serde_json::Value, wire: ImageWireFormat) -> Result<&str, String> {
+    match wire {
+        ImageWireFormat::OpenAiImages | ImageWireFormat::OpenRouterImages => {
+            value["data"][0]["b64_json"].as_str().ok_or_else(|| {
+                "image generation response has no data[0].b64_json string".to_owned()
+            })
+        }
+        ImageWireFormat::GoogleGenerateContent => value["candidates"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|candidate| candidate["content"]["parts"].as_array())
+            .flatten()
+            .find_map(|part| part["inlineData"]["data"].as_str())
+            .ok_or_else(|| {
+                "image generation response has no candidates content parts inlineData data string"
+                    .to_owned()
+            }),
+    }
+}
+
 /// The aspect ratio requested for one generated image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageShape {
-    /// A 1024 by 1024 image.
+    /// A 1:1 image.
     Square,
-    /// A 1536 by 1024 image.
+    /// A 3:2 image.
     Landscape,
-    /// A 1024 by 1536 image.
+    /// A 2:3 image.
     Portrait,
 }
 
 impl ImageShape {
+    /// Returns the image aspect ratio for this shape.
+    fn aspect_ratio(self) -> &'static str {
+        match self {
+            Self::Square => "1:1",
+            Self::Landscape => "3:2",
+            Self::Portrait => "2:3",
+        }
+    }
+
     /// Returns the image API size for this shape.
     fn size(self) -> &'static str {
         match self {
@@ -207,30 +325,107 @@ pub(crate) fn provider_chat_url(name: &str) -> Option<&'static str> {
         .map(|provider| provider.chat_url)
 }
 
-/// Builds an image configuration from one API key.
-fn image_configuration(api_key: String, model: String) -> ImageConfiguration {
-    let url = std::env::var("SWIFT_DESIGN_IMAGE_API_URL")
-        .or_else(|_| std::env::var("SWIFT_DESIGN_IMAGE_URL"))
-        .unwrap_or_else(|_| DEFAULT_IMAGE_API_URL.to_owned());
-    ImageConfiguration {
+/// Builds an image configuration from one dedicated API key.
+fn image_configuration(
+    provider: &str,
+    api_key: String,
+    model: String,
+) -> Option<ImageConfiguration> {
+    let (url, wire) = match provider {
+        "openai" => (
+            std::env::var("SWIFT_DESIGN_IMAGE_API_URL")
+                .or_else(|_| std::env::var("SWIFT_DESIGN_IMAGE_URL"))
+                .unwrap_or_else(|_| DEFAULT_IMAGE_API_URL.to_owned()),
+            ImageWireFormat::OpenAiImages,
+        ),
+        "google" => {
+            let model = google_image_model_name(&model)?;
+            (
+                format!("{GOOGLE_IMAGE_API_URL}/{model}:generateContent"),
+                ImageWireFormat::GoogleGenerateContent,
+            )
+        }
+        "openrouter" => (
+            OPENROUTER_IMAGE_API_URL.to_owned(),
+            ImageWireFormat::OpenRouterImages,
+        ),
+        _ => return None,
+    };
+    Some(ImageConfiguration {
+        provider: provider.to_owned(),
+        wire,
         url,
         model,
         auth: ImageAuth::ApiKey(api_key),
-    }
+    })
 }
 
-/// Builds an image configuration backed by the active ChatGPT subscription.
-fn chatgpt_image_configuration(_settings: &crate::settings::StoredSettings) -> ImageConfiguration {
-    ImageConfiguration {
+/// Returns a Google Gemini model name that is safe to place in an API path.
+fn google_image_model_name(model: &str) -> Option<&str> {
+    let model = model.strip_prefix("models/").unwrap_or(model);
+    (!model.is_empty()
+        && model.starts_with("gemini-")
+        && model.contains("image")
+        && model
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
+    .then_some(model)
+}
+
+/// Builds an image configuration from a separate ChatGPT credential.
+fn chatgpt_image_configuration(oauth: &crate::settings::StoredOauth) -> Option<ImageConfiguration> {
+    let account_id = oauth
+        .account_id
+        .as_ref()
+        .filter(|id| !id.trim().is_empty())?;
+    if oauth.access_token.trim().is_empty() {
+        return None;
+    }
+    Some(ImageConfiguration {
+        provider: "chatgpt".to_owned(),
+        wire: ImageWireFormat::OpenAiImages,
         url: CHATGPT_IMAGE_API_URL.to_owned(),
         model: CHATGPT_IMAGE_MODEL.to_owned(),
-        auth: ImageAuth::ChatGptSubscription,
+        auth: ImageAuth::ChatGptSubscription {
+            access_token: oauth.access_token.clone(),
+            account_id: account_id.clone(),
+        },
+    })
+}
+
+/// Reads the image provider without consulting the text provider.
+fn image_provider_from_environment() -> String {
+    std::env::var("SWIFT_DESIGN_IMAGE_PROVIDER").unwrap_or_else(|_| "openai".to_owned())
+}
+
+/// Returns the default model for an image provider.
+fn default_image_model(provider: &str) -> &'static str {
+    match provider {
+        "chatgpt" => CHATGPT_IMAGE_MODEL,
+        "google" => GOOGLE_IMAGE_MODEL,
+        "openrouter" => OPENROUTER_IMAGE_MODEL,
+        _ => DEFAULT_IMAGE_MODEL,
     }
 }
 
-/// Returns the configured image model or its default.
+/// Returns the configured image model or its provider default.
 pub(crate) fn configured_image_model() -> String {
-    std::env::var("SWIFT_DESIGN_IMAGE_MODEL").unwrap_or_else(|_| DEFAULT_IMAGE_MODEL.to_owned())
+    image_model_for_provider(&image_provider_from_environment(), None)
+}
+
+/// Resolves an image model and keeps the ChatGPT model fixed.
+fn image_model_for_provider(provider: &str, stored: Option<&str>) -> String {
+    if provider == "chatgpt" {
+        return CHATGPT_IMAGE_MODEL.to_owned();
+    }
+    stored.map(str::to_owned).unwrap_or_else(|| {
+        if provider == image_provider_from_environment() {
+            std::env::var("SWIFT_DESIGN_IMAGE_MODEL")
+                .unwrap_or_else(|_| default_image_model(provider).to_owned())
+        } else {
+            default_image_model(provider).to_owned()
+        }
+    })
 }
 
 /// Chooses only a dedicated stored or environment image key.
@@ -252,21 +447,26 @@ pub(crate) fn image_api_key_from_environment() -> Option<String> {
 /// Reads the image configuration from environment variables.
 pub(crate) fn image_configuration_from_environment() -> Option<ImageConfiguration> {
     let api_key = resolved_image_api_key(None, image_api_key_from_environment())?;
-    Some(image_configuration(api_key, configured_image_model()))
+    image_configuration(
+        &image_provider_from_environment(),
+        api_key,
+        configured_image_model(),
+    )
 }
 
 /// Returns the stored image model, or the configured default without requiring a key.
 pub(crate) fn image_model_from_settings(settings: &crate::settings::StoredSettings) -> String {
-    settings
-        .image_model
-        .clone()
-        .unwrap_or_else(configured_image_model)
+    image_model_for_provider(
+        &image_provider_from_settings(settings),
+        settings.image_model.as_deref(),
+    )
 }
 
-/// Reads the image configuration from stored settings.
-pub(crate) fn image_configuration_from_settings(
-    settings: &crate::settings::StoredSettings,
-) -> Option<ImageConfiguration> {
+/// Resolves the explicit image provider before the legacy subscription choice.
+fn image_provider_from_settings(settings: &crate::settings::StoredSettings) -> String {
+    if let Some(provider) = &settings.image_provider {
+        return provider.clone();
+    }
     if settings.provider == "openai"
         && settings.oauth.as_ref().is_some_and(|oauth| {
             oauth
@@ -275,16 +475,31 @@ pub(crate) fn image_configuration_from_settings(
                 .is_some_and(|account_id| !account_id.trim().is_empty())
         })
     {
-        return Some(chatgpt_image_configuration(settings));
+        return "chatgpt".to_owned();
     }
-    let api_key = resolved_image_api_key(
-        settings.image_api_key.as_deref(),
-        image_api_key_from_environment(),
-    )?;
-    Some(image_configuration(
-        api_key,
-        image_model_from_settings(settings),
-    ))
+    if settings.image_api_key.is_some() {
+        return "openai".to_owned();
+    }
+    image_provider_from_environment()
+}
+
+/// Reads image credentials without using the text authentication configuration.
+pub(crate) fn image_configuration_from_settings(
+    settings: &crate::settings::StoredSettings,
+) -> Option<ImageConfiguration> {
+    let provider = image_provider_from_settings(settings);
+    if provider == "chatgpt" {
+        let legacy_oauth = (settings.provider == "openai")
+            .then_some(settings.oauth.as_ref())
+            .flatten();
+        let oauth = settings.chatgpt_oauth.as_ref().or(legacy_oauth)?;
+        return chatgpt_image_configuration(oauth);
+    }
+    let environment_key = (provider == image_provider_from_environment())
+        .then(image_api_key_from_environment)
+        .flatten();
+    let api_key = resolved_image_api_key(settings.image_api_key.as_deref(), environment_key)?;
+    image_configuration(&provider, api_key, image_model_from_settings(settings))
 }
 
 /// Reads the model configuration from the environment. `None` when the
@@ -482,33 +697,8 @@ impl ModelClient {
             .image
             .as_ref()
             .ok_or_else(|| "image generation is not configured".to_owned())?;
-        let mut body = serde_json::json!({
-            "model": configuration.model,
-            "prompt": prompt,
-            "size": shape.size(),
-        });
-        let mut request = client.post(&configuration.url);
-        match &configuration.auth {
-            ImageAuth::ApiKey(api_key) => request = request.bearer_auth(api_key),
-            ImageAuth::ChatGptSubscription => {
-                let ProviderAuth::ChatGptLogin {
-                    access_token,
-                    account_id,
-                } = &self.configuration.auth
-                else {
-                    return Err("ChatGPT image generation needs an active ChatGPT login".to_owned());
-                };
-                body["background"] = serde_json::Value::String("auto".to_owned());
-                body["quality"] = serde_json::Value::String("auto".to_owned());
-                let turn_id = crate::sessions::new_session_id()
-                    .map_err(|error| format!("could not create an image turn id: {error}"))?;
-                request = request
-                    .bearer_auth(access_token)
-                    .header("chatgpt-account-id", account_id)
-                    .header("originator", "codex_cli_rs")
-                    .header("x-codex-image-turn-id", turn_id);
-            }
-        }
+        let body = configuration.request_body(prompt, shape);
+        let request = configuration.authenticated_request(client)?;
         let response = tokio::time::timeout(IDLE_TIMEOUT, request.json(&body).send())
             .await
             .map_err(|_| {
@@ -522,14 +712,15 @@ impl ModelClient {
         if !status.is_success() {
             // Provider bodies can repeat the prompt or authorization data.
             // A run error is browser-visible, so report the status only.
-            return Err(format!("image generation endpoint returned {status}"));
+            return Err(format!(
+                "{} image generation endpoint returned {status}",
+                configuration.provider
+            ));
         }
         let text = read_bounded_response(response, MAX_IMAGE_RESPONSE_BYTES).await?;
         let value: serde_json::Value = serde_json::from_str(&text)
             .map_err(|error| format!("image generation response is invalid JSON: {error}"))?;
-        let encoded = value["data"][0]["b64_json"]
-            .as_str()
-            .ok_or_else(|| "image generation response has no data[0].b64_json string".to_owned())?;
+        let encoded = encoded_image(&value, configuration.wire)?;
         decode_generated_image(encoded, MAX_GENERATED_IMAGE_BYTES, "20 MB")
     }
 
@@ -542,54 +733,147 @@ impl ModelClient {
             .map_err(|error| error.to_string())
     }
 
-    /// Renews an expiring login and persists the new tokens.
-    pub async fn refresh_login_if_needed(&mut self, log: &LogSink) -> Result<(), String> {
-        let Some(settings_store) = &self.settings else {
+    /// Renews expiring text and image logins and persists the new tokens.
+    pub async fn refresh_login_if_needed(
+        &mut self,
+        log: &LogSink,
+        should_refresh_images: bool,
+    ) -> Result<(), String> {
+        let Some(settings_store) = self.settings.clone() else {
             return Ok(());
         };
-        let is_login = matches!(
-            self.configuration.auth,
-            ProviderAuth::AnthropicLogin(_) | ProviderAuth::ChatGptLogin { .. }
-        );
-        if !is_login {
-            return Ok(());
-        }
         let Ok(Some(mut stored)) = settings_store.read().await else {
             return Ok(());
         };
-        let Some(oauth) = stored.oauth.clone() else {
-            return Ok(());
+        let previous = stored.clone();
+        let text_changed = self.refresh_text_login(&mut stored, log).await?;
+        let image_changed = if should_refresh_images {
+            match self.refresh_image_login(&mut stored, log).await {
+                Ok(is_changed) => is_changed,
+                Err(_) => {
+                    log("the image login could not refresh; reconnect it before generating images");
+                    false
+                }
+            }
+        } else {
+            false
         };
-        if !crate::settings::is_login_expiring(&oauth) {
+        if !text_changed && !image_changed {
             return Ok(());
         }
-        log("refreshing the login");
-        let refreshed = match &self.configuration.auth {
+        persist_refreshed_logins(&settings_store, &previous, &stored).await
+    }
+
+    async fn refresh_text_login(
+        &mut self,
+        stored: &mut crate::settings::StoredSettings,
+        log: &LogSink,
+    ) -> Result<bool, String> {
+        let Some(oauth) = stored.oauth.clone() else {
+            return Ok(false);
+        };
+        if !crate::settings::is_login_expiring(&oauth) {
+            return Ok(false);
+        }
+        match &self.configuration.auth {
             ProviderAuth::AnthropicLogin(_) => {
+                log("refreshing the text login");
                 let refreshed = crate::settings::refresh_login(&oauth.refresh_token).await?;
                 self.configuration.auth =
                     ProviderAuth::AnthropicLogin(refreshed.access_token.clone());
-                refreshed
+                stored.oauth = Some(refreshed);
+                Ok(true)
             }
-            _ => {
-                let refreshed =
+            ProviderAuth::ChatGptLogin { .. } => {
+                log("refreshing the ChatGPT login");
+                let mut refreshed =
                     crate::settings::refresh_chatgpt_login(&oauth.refresh_token).await?;
-                self.configuration.auth = ProviderAuth::ChatGptLogin {
-                    access_token: refreshed.access_token.clone(),
-                    account_id: refreshed
-                        .account_id
-                        .clone()
-                        .or(oauth.account_id)
-                        .unwrap_or_default(),
-                };
-                refreshed
+                refreshed.account_id = refreshed.account_id.or(oauth.account_id);
+                self.set_text_chatgpt_auth(&refreshed);
+                let shares_image_login = stored
+                    .chatgpt_oauth
+                    .as_ref()
+                    .is_some_and(|image| image.refresh_token == oauth.refresh_token)
+                    || (stored.chatgpt_oauth.is_none()
+                        && stored.provider == "openai"
+                        && self.has_chatgpt_image_configuration());
+                if shares_image_login {
+                    stored.chatgpt_oauth = Some(refreshed.clone());
+                    self.set_image_chatgpt_auth(&refreshed);
+                }
+                stored.oauth = Some(refreshed);
+                Ok(true)
             }
+            _ => Ok(false),
+        }
+    }
+
+    async fn refresh_image_login(
+        &mut self,
+        stored: &mut crate::settings::StoredSettings,
+        log: &LogSink,
+    ) -> Result<bool, String> {
+        let is_subscription = self
+            .configuration
+            .image
+            .as_ref()
+            .is_some_and(|image| matches!(image.auth, ImageAuth::ChatGptSubscription { .. }));
+        if !is_subscription {
+            return Ok(false);
+        }
+        let legacy = (stored.provider == "openai")
+            .then_some(stored.oauth.as_ref())
+            .flatten();
+        let Some(oauth) = stored.chatgpt_oauth.clone().or_else(|| legacy.cloned()) else {
+            return Ok(false);
         };
-        stored.oauth = Some(refreshed);
-        settings_store
-            .write(&stored)
-            .await
-            .map_err(|error| error.to_string())
+        if !crate::settings::is_login_expiring(&oauth) {
+            return Ok(false);
+        }
+        log("refreshing the image login");
+        let mut refreshed = crate::settings::refresh_chatgpt_login(&oauth.refresh_token).await?;
+        refreshed.account_id = refreshed.account_id.or(oauth.account_id);
+        self.set_image_chatgpt_auth(&refreshed);
+        if stored.provider == "openai"
+            && stored
+                .oauth
+                .as_ref()
+                .is_some_and(|text| text.refresh_token == oauth.refresh_token)
+        {
+            stored.oauth = Some(refreshed.clone());
+            self.set_text_chatgpt_auth(&refreshed);
+        }
+        stored.chatgpt_oauth = Some(refreshed);
+        Ok(true)
+    }
+
+    fn set_text_chatgpt_auth(&mut self, oauth: &crate::settings::StoredOauth) {
+        self.configuration.auth = ProviderAuth::ChatGptLogin {
+            access_token: oauth.access_token.clone(),
+            account_id: oauth.account_id.clone().unwrap_or_default(),
+        };
+    }
+
+    fn has_chatgpt_image_configuration(&self) -> bool {
+        self.configuration.image.as_ref().is_some_and(|image| {
+            image.provider == "chatgpt"
+                && matches!(image.auth, ImageAuth::ChatGptSubscription { .. })
+        })
+    }
+
+    fn set_image_chatgpt_auth(&mut self, oauth: &crate::settings::StoredOauth) {
+        let Some(image) = &mut self.configuration.image else {
+            return;
+        };
+        if image.provider != "chatgpt"
+            || !matches!(image.auth, ImageAuth::ChatGptSubscription { .. })
+        {
+            return;
+        }
+        image.auth = ImageAuth::ChatGptSubscription {
+            access_token: oauth.access_token.clone(),
+            account_id: oauth.account_id.clone().unwrap_or_default(),
+        };
     }
 
     /// One model request in the endpoint's wire format. Returns the
@@ -759,6 +1043,49 @@ impl ModelClient {
     fn report_usage(&self, usage: Option<TokenUsage>) {
         if let (Some(sink), Some(usage)) = (&self.usage_sink, usage) {
             sink(usage);
+        }
+    }
+}
+
+/// Saves refreshed tokens without overwriting concurrent settings or login changes.
+async fn persist_refreshed_logins(
+    store: &SettingsStore,
+    previous: &crate::settings::StoredSettings,
+    refreshed: &crate::settings::StoredSettings,
+) -> Result<(), String> {
+    store
+        .mutate(|current| {
+            apply_oauth_refresh(current, previous.oauth.as_ref(), refreshed.oauth.as_ref());
+            apply_oauth_refresh(
+                current,
+                previous.chatgpt_oauth.as_ref(),
+                refreshed.chatgpt_oauth.as_ref(),
+            );
+            Ok(())
+        })
+        .await
+        .map(|_| ())
+        .map_err(|_| "cannot save refreshed login settings".to_owned())
+}
+
+/// Updates only slots that still hold the login whose tokens were refreshed.
+fn apply_oauth_refresh(
+    current: &mut crate::settings::StoredSettings,
+    previous: Option<&crate::settings::StoredOauth>,
+    refreshed: Option<&crate::settings::StoredOauth>,
+) {
+    let (Some(previous), Some(refreshed)) = (previous, refreshed) else {
+        return;
+    };
+    if previous == refreshed {
+        return;
+    }
+    for slot in [&mut current.oauth, &mut current.chatgpt_oauth] {
+        if slot
+            .as_ref()
+            .is_some_and(|oauth| oauth.refresh_token == previous.refresh_token)
+        {
+            *slot = Some(refreshed.clone());
         }
     }
 }
@@ -1191,14 +1518,14 @@ mod tests {
     use axum::routing::post;
     use base64::Engine;
 
-    use crate::settings::{StoredOauth, StoredSettings};
+    use crate::settings::{SettingsStore, StoredOauth, StoredSettings};
 
     use super::{
-        ChatFailure, ImageAuth, ImageConfiguration, ImageShape, ModelClient, ModelConfiguration,
-        ProviderAuth, StreamState, TokenUsage, WireFormat, chatgpt_responses_body,
-        configuration_from_settings, context_window, decode_generated_image,
-        image_api_key_from_environment, parse_chatgpt_stream, parse_usage, resolved_image_api_key,
-        stream_line, with_one_retry,
+        ChatFailure, ImageAuth, ImageConfiguration, ImageShape, ImageWireFormat, ModelClient,
+        ModelConfiguration, ProviderAuth, StreamState, TokenUsage, WireFormat, apply_oauth_refresh,
+        chatgpt_responses_body, configuration_from_settings, context_window,
+        decode_generated_image, image_api_key_from_environment, parse_chatgpt_stream, parse_usage,
+        persist_refreshed_logins, resolved_image_api_key, stream_line, with_one_retry,
     };
 
     #[derive(Clone, Default)]
@@ -1219,7 +1546,19 @@ mod tests {
         headers: HeaderMap,
         axum::Json(body): axum::Json<serde_json::Value>,
     ) -> axum::Json<serde_json::Value> {
+        let is_google = body.get("contents").is_some();
         state.requests.lock().unwrap().push((headers, body));
+        if is_google {
+            return axum::Json(serde_json::json!({
+                "candidates": [{"content": {"parts": [
+                    {"text": "Generated image"},
+                    {"inlineData": {
+                        "mimeType": "image/png",
+                        "data": base64::engine::general_purpose::STANDARD.encode(fake_png(1, 1)),
+                    }},
+                ]}}],
+            }));
+        }
         axum::Json(serde_json::json!({
             "data": [{
                 "b64_json": base64::engine::general_purpose::STANDARD.encode(fake_png(1, 1))
@@ -1246,6 +1585,8 @@ mod tests {
                 wire: WireFormat::OpenAiChat,
                 model: "fake-chat".to_owned(),
                 image: Some(ImageConfiguration {
+                    provider: "openai".to_owned(),
+                    wire: super::ImageWireFormat::OpenAiImages,
                     url: format!("http://{address}/images"),
                     model: "fake-image".to_owned(),
                     auth: ImageAuth::ApiKey("secret-image-key".to_owned()),
@@ -1285,18 +1626,20 @@ mod tests {
         });
         let client = ModelClient::new(
             ModelConfiguration {
-                provider: "openai".to_owned(),
+                provider: "anthropic".to_owned(),
                 chat_url: format!("http://{address}/chat"),
-                auth: ProviderAuth::ChatGptLogin {
-                    access_token: "subscription-token".to_owned(),
-                    account_id: "account-123".to_owned(),
-                },
-                wire: WireFormat::ChatGptResponses,
+                auth: ProviderAuth::AnthropicLogin("text-token".to_owned()),
+                wire: WireFormat::AnthropicMessages,
                 model: "gpt-text".to_owned(),
                 image: Some(ImageConfiguration {
+                    provider: "chatgpt".to_owned(),
+                    wire: super::ImageWireFormat::OpenAiImages,
                     url: format!("http://{address}/images"),
                     model: "gpt-image-2".to_owned(),
-                    auth: ImageAuth::ChatGptSubscription,
+                    auth: ImageAuth::ChatGptSubscription {
+                        access_token: "subscription-token".to_owned(),
+                        account_id: "account-123".to_owned(),
+                    },
                 }),
             },
             None,
@@ -1324,10 +1667,147 @@ mod tests {
     }
 
     #[test]
-    fn image_shapes_use_the_supported_api_sizes() {
-        assert_eq!(ImageShape::Square.size(), "1024x1024");
-        assert_eq!(ImageShape::Landscape.size(), "1536x1024");
-        assert_eq!(ImageShape::Portrait.size(), "1024x1536");
+    fn image_shapes_use_provider_specific_request_fields() {
+        for (shape, size, ratio) in [
+            (ImageShape::Square, "1024x1024", "1:1"),
+            (ImageShape::Landscape, "1536x1024", "3:2"),
+            (ImageShape::Portrait, "1024x1536", "2:3"),
+        ] {
+            assert_eq!(shape.size(), size);
+            assert_eq!(shape.aspect_ratio(), ratio);
+            for provider in ["openai", "google", "openrouter"] {
+                let model = if provider == "google" {
+                    "gemini-test-image"
+                } else {
+                    "image-model"
+                };
+                let configuration =
+                    super::image_configuration(provider, "image-key".to_owned(), model.to_owned())
+                        .unwrap();
+                let body = configuration.request_body("paint a harbor", shape);
+                let expected = match provider {
+                    "google" => serde_json::json!({
+                        "contents": [{"parts": [{"text": "paint a harbor"}]}],
+                        "generationConfig": {
+                            "responseModalities": ["IMAGE"],
+                            "imageConfig": {"aspectRatio": ratio},
+                        },
+                    }),
+                    "openrouter" => serde_json::json!({
+                        "model": "image-model",
+                        "prompt": "paint a harbor",
+                        "aspect_ratio": ratio,
+                        "output_format": "png",
+                    }),
+                    _ => serde_json::json!({
+                        "model": "image-model", "prompt": "paint a harbor", "size": size,
+                    }),
+                };
+                assert_eq!(body, expected);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn google_and_openrouter_images_use_their_own_wire_and_key() {
+        let state = ImageRequestState::default();
+        let router = Router::new()
+            .route("/images", post(image_response))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        for provider in ["google", "openrouter"] {
+            let mut image = super::image_configuration(
+                provider,
+                "image-key".to_owned(),
+                super::default_image_model(provider).to_owned(),
+            )
+            .unwrap();
+            image.url = format!("http://{address}/images");
+            let client = ModelClient::new(
+                ModelConfiguration {
+                    provider: "openai".to_owned(),
+                    chat_url: "unused".to_owned(),
+                    auth: ProviderAuth::ChatGptLogin {
+                        access_token: "text-token".to_owned(),
+                        account_id: "text-account".to_owned(),
+                    },
+                    wire: WireFormat::ChatGptResponses,
+                    model: "text-model".to_owned(),
+                    image: Some(image),
+                },
+                None,
+            );
+            let png = client
+                .generate_image(
+                    &ModelClient::build_http_client().unwrap(),
+                    "paint a harbor",
+                    ImageShape::Landscape,
+                )
+                .await
+                .unwrap();
+            assert_eq!(png, fake_png(1, 1));
+        }
+        server.abort();
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let (google_headers, google_body) = &requests[0];
+        assert_eq!(google_headers["x-goog-api-key"], "image-key");
+        assert!(!google_headers.contains_key("authorization"));
+        assert!(!google_headers.contains_key("chatgpt-account-id"));
+        assert_eq!(
+            google_body["contents"][0]["parts"][0]["text"],
+            "paint a harbor"
+        );
+        assert_eq!(
+            google_body["generationConfig"]["imageConfig"]["aspectRatio"],
+            "3:2"
+        );
+        let (router_headers, router_body) = &requests[1];
+        assert_eq!(router_headers["authorization"], "Bearer image-key");
+        assert!(!router_headers.contains_key("x-goog-api-key"));
+        assert!(!router_headers.contains_key("chatgpt-account-id"));
+        assert_eq!(router_body["model"], "google/gemini-2.5-flash-image");
+        assert_eq!(router_body["prompt"], "paint a harbor");
+        assert_eq!(router_body["aspect_ratio"], "3:2");
+    }
+
+    #[test]
+    fn image_responses_require_inline_base64_and_validate_png_on_every_wire() {
+        for wire in [
+            ImageWireFormat::OpenAiImages,
+            ImageWireFormat::GoogleGenerateContent,
+            ImageWireFormat::OpenRouterImages,
+        ] {
+            for missing in [
+                serde_json::json!({}),
+                serde_json::json!({
+                    "data": [{"url": "https://example.com/image.png"}],
+                    "candidates": [{"content": {"parts": [{"text": "no image"}]}}],
+                }),
+            ] {
+                assert!(super::encoded_image(&missing, wire).is_err());
+            }
+            for bytes in [fake_png(1, 1), fake_png(8193, 1), b"not a png".to_vec()] {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let response = if wire == ImageWireFormat::GoogleGenerateContent {
+                    serde_json::json!({"candidates": [{"content": {"parts": [
+                        {"text": "image"}, {"inlineData": {"data": encoded}}
+                    ]}}]})
+                } else {
+                    serde_json::json!({"data": [{"b64_json": encoded}]})
+                };
+                let actual = super::encoded_image(&response, wire).unwrap();
+                assert_eq!(actual, encoded);
+                assert_eq!(
+                    decode_generated_image(actual, 100, "100 byte").is_ok(),
+                    bytes == fake_png(1, 1)
+                );
+            }
+        }
     }
 
     #[test]
@@ -1400,9 +1880,11 @@ mod tests {
             provider: "openai".to_owned(),
             model: "gpt-5.4-mini".to_owned(),
             api_key: Some("text-platform-key".to_owned()),
+            image_provider: Some("openai".to_owned()),
             image_api_key: None,
             image_model: None,
             oauth: None,
+            ..StoredSettings::default()
         };
         let expected_environment_key =
             image_api_key_from_environment().filter(|key| !key.trim().is_empty());
@@ -1432,13 +1914,14 @@ mod tests {
             provider: "openai".to_owned(),
             model: "gpt-text".to_owned(),
             api_key: Some("text-key".to_owned()),
+            image_provider: Some("openai".to_owned()),
             image_api_key: Some("image-key".to_owned()),
             ..StoredSettings::default()
         };
         let configuration = configuration_from_settings(&settings).unwrap();
         assert_eq!(
             configuration.image.unwrap().model,
-            super::configured_image_model()
+            super::image_model_for_provider("openai", None)
         );
         settings.image_model = Some("gpt-image-custom".to_owned());
         let configuration = configuration_from_settings(&settings).unwrap();
@@ -1456,6 +1939,7 @@ mod tests {
         let settings = StoredSettings {
             provider: "openai".to_owned(),
             model: "stored-text".to_owned(),
+            image_provider: Some("openai".to_owned()),
             image_api_key: Some("stored-image-key".to_owned()),
             image_model: Some("gpt-image-custom".to_owned()),
             ..StoredSettings::default()
@@ -1491,6 +1975,7 @@ mod tests {
             provider: "openai".to_owned(),
             model: "stored-text".to_owned(),
             api_key: Some("stored-text-key".to_owned()),
+            image_provider: Some("openai".to_owned()),
             image_api_key: Some("stored-image-key".to_owned()),
             image_model: Some("gpt-image-custom".to_owned()),
             ..StoredSettings::default()
@@ -1509,6 +1994,7 @@ mod tests {
             let mut settings = StoredSettings {
                 provider: provider.to_owned(),
                 model: "login-text".to_owned(),
+                image_provider: (provider == "anthropic").then(|| "openai".to_owned()),
                 image_model: Some("gpt-image-custom".to_owned()),
                 oauth: Some(StoredOauth {
                     access_token: "oauth-access-token".to_owned(),
@@ -1521,7 +2007,7 @@ mod tests {
             let configuration = super::configuration_with_fallback(&settings, || None).unwrap();
             if provider == "openai" {
                 let image = configuration.image.unwrap();
-                assert!(matches!(image.auth, ImageAuth::ChatGptSubscription));
+                assert!(matches!(image.auth, ImageAuth::ChatGptSubscription { .. }));
                 assert_eq!(image.model, "gpt-image-2");
                 assert_eq!(image.url, super::CHATGPT_IMAGE_API_URL);
             } else {
@@ -1540,7 +2026,7 @@ mod tests {
             let configuration = super::configuration_with_fallback(&settings, || None).unwrap();
             let image = configuration.image.unwrap();
             if provider == "openai" {
-                assert!(matches!(image.auth, ImageAuth::ChatGptSubscription));
+                assert!(matches!(image.auth, ImageAuth::ChatGptSubscription { .. }));
             } else {
                 assert!(
                     matches!(image.auth, ImageAuth::ApiKey(key) if key == "dedicated-image-key")
@@ -1555,6 +2041,305 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn image_providers_have_distinct_endpoints_wires_and_defaults() {
+        for (provider, model, wire) in [
+            ("openai", "gpt-image-1", ImageWireFormat::OpenAiImages),
+            (
+                "google",
+                "gemini-2.5-flash-image",
+                ImageWireFormat::GoogleGenerateContent,
+            ),
+            (
+                "openrouter",
+                "google/gemini-2.5-flash-image",
+                ImageWireFormat::OpenRouterImages,
+            ),
+        ] {
+            assert_eq!(super::default_image_model(provider), model);
+            let image =
+                super::image_configuration(provider, "key".to_owned(), model.to_owned()).unwrap();
+            assert_eq!(image.provider, provider);
+            assert_eq!(image.wire, wire);
+            assert_eq!(image.model, model);
+            let expected_url = match provider {
+                "google" => format!("{}/{model}:generateContent", super::GOOGLE_IMAGE_API_URL),
+                "openrouter" => super::OPENROUTER_IMAGE_API_URL.to_owned(),
+                _ => std::env::var("SWIFT_DESIGN_IMAGE_API_URL")
+                    .or_else(|_| std::env::var("SWIFT_DESIGN_IMAGE_URL"))
+                    .unwrap_or_else(|_| super::DEFAULT_IMAGE_API_URL.to_owned()),
+            };
+            assert_eq!(image.url, expected_url);
+        }
+        assert_eq!(super::default_image_model("chatgpt"), "gpt-image-2");
+        for provider in ["chatgpt", "unknown"] {
+            assert!(
+                super::image_configuration(provider, "key".to_owned(), "model".to_owned())
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn image_environment_uses_dedicated_provider_key_and_model_variables() {
+        let provider =
+            std::env::var("SWIFT_DESIGN_IMAGE_PROVIDER").unwrap_or_else(|_| "openai".to_owned());
+        assert_eq!(super::image_provider_from_environment(), provider);
+        let expected_model = if provider == "chatgpt" {
+            "gpt-image-2".to_owned()
+        } else {
+            std::env::var("SWIFT_DESIGN_IMAGE_MODEL")
+                .unwrap_or_else(|_| super::default_image_model(&provider).to_owned())
+        };
+        assert_eq!(super::configured_image_model(), expected_model);
+        let key = resolved_image_api_key(None, image_api_key_from_environment());
+        let image = super::image_configuration_from_environment();
+        if let Some(key) = key
+            && matches!(provider.as_str(), "openai" | "google" | "openrouter")
+        {
+            let image = image.unwrap();
+            assert_eq!(image.provider, provider);
+            assert_eq!(image.model, expected_model);
+            assert!(matches!(image.auth, ImageAuth::ApiKey(actual) if actual == key));
+        } else {
+            assert!(image.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn refreshed_logins_preserve_concurrent_text_and_image_updates() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path().join("settings.json"), String::new());
+        let previous = StoredSettings {
+            provider: "openai".to_owned(),
+            model: "old-text".to_owned(),
+            oauth: Some(image_oauth("old-access", Some("account"))),
+            ..StoredSettings::default()
+        };
+        store
+            .mutate(|settings| {
+                *settings = previous.clone();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut refreshed = previous.clone();
+        let oauth = refreshed.oauth.as_mut().unwrap();
+        oauth.access_token = "refreshed-access".to_owned();
+        oauth.refresh_token = "rotated-refresh".to_owned();
+        let update = store.mutate(|current| {
+            current.provider = "google".to_owned();
+            current.model = "new-text".to_owned();
+            current.api_key = Some("new-text-key".to_owned());
+            current.chatgpt_oauth = current.oauth.take();
+            current.image_provider = Some("openrouter".to_owned());
+            current.image_api_key = Some("new-image-key".to_owned());
+            current.image_model = Some("new-image".to_owned());
+            Ok(())
+        });
+        let (updated, persisted) = tokio::join!(
+            update,
+            persist_refreshed_logins(&store, &previous, &refreshed)
+        );
+        updated.unwrap();
+        persisted.unwrap();
+        let saved = store.read().await.unwrap().unwrap();
+        assert_eq!(saved.provider, "google");
+        assert_eq!(saved.model, "new-text");
+        assert_eq!(saved.api_key.as_deref(), Some("new-text-key"));
+        assert_eq!(saved.image_provider.as_deref(), Some("openrouter"));
+        assert_eq!(saved.image_api_key.as_deref(), Some("new-image-key"));
+        assert_eq!(saved.image_model.as_deref(), Some("new-image"));
+        assert!(saved.oauth.is_none());
+        assert_eq!(saved.chatgpt_oauth, refreshed.oauth);
+    }
+
+    #[tokio::test]
+    async fn stale_refresh_persistence_preserves_newer_and_cleared_logins() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path().join("settings.json"), String::new());
+        let previous = StoredSettings {
+            oauth: Some(image_oauth("old", None)),
+            chatgpt_oauth: Some(image_oauth("old", None)),
+            ..StoredSettings::default()
+        };
+        let mut refreshed = previous.clone();
+        refreshed.oauth.as_mut().unwrap().access_token = "refreshed".to_owned();
+        refreshed.chatgpt_oauth = refreshed.oauth.clone();
+        let mut newer = image_oauth("new-login", None);
+        newer.refresh_token = "new-login-refresh".to_owned();
+        for replacement in [None, Some(newer)] {
+            store
+                .mutate(|current| {
+                    current.oauth = replacement.clone();
+                    current.chatgpt_oauth = replacement.clone();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            persist_refreshed_logins(&store, &previous, &refreshed)
+                .await
+                .unwrap();
+            let saved = store.read().await.unwrap().unwrap();
+            assert_eq!(saved.oauth, replacement);
+            assert_eq!(saved.chatgpt_oauth, replacement);
+        }
+    }
+
+    #[test]
+    fn oauth_refresh_changes_only_matching_slots_and_ignores_unchanged_snapshots() {
+        let previous = image_oauth("old", None);
+        let refreshed = image_oauth("refreshed", None);
+        let mut independent = image_oauth("independent", None);
+        independent.refresh_token = "independent-refresh".to_owned();
+        let mut current = StoredSettings {
+            oauth: Some(previous.clone()),
+            chatgpt_oauth: Some(independent.clone()),
+            ..StoredSettings::default()
+        };
+        apply_oauth_refresh(&mut current, Some(&previous), Some(&refreshed));
+        assert_eq!(current.oauth, Some(refreshed.clone()));
+        assert_eq!(current.chatgpt_oauth, Some(independent));
+        apply_oauth_refresh(&mut current, Some(&previous), Some(&previous));
+        apply_oauth_refresh(&mut current, None, Some(&refreshed));
+        apply_oauth_refresh(&mut current, Some(&previous), None);
+        assert_eq!(current.oauth, Some(refreshed.clone()));
+        current.chatgpt_oauth = Some(previous.clone());
+        apply_oauth_refresh(&mut current, Some(&previous), Some(&refreshed));
+        assert_eq!(current.chatgpt_oauth, Some(refreshed));
+    }
+
+    #[tokio::test]
+    async fn refresh_persistence_errors_hide_storage_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path().to_owned(), String::new());
+        let error = persist_refreshed_logins(
+            &store,
+            &StoredSettings::default(),
+            &StoredSettings::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "cannot save refreshed login settings");
+        assert!(!error.contains(&directory.path().to_string_lossy().to_string()));
+    }
+
+    fn image_oauth(access_token: &str, account_id: Option<&str>) -> StoredOauth {
+        StoredOauth {
+            access_token: access_token.to_owned(),
+            refresh_token: "refresh-token".to_owned(),
+            expires_at_unix_seconds: u64::MAX,
+            account_id: account_id.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn explicit_key_image_providers_override_legacy_chatgpt_for_every_text_provider() {
+        for text_provider in ["openai", "anthropic", "google", "ollama"] {
+            for image_provider in ["openai", "google", "openrouter"] {
+                let settings = StoredSettings {
+                    provider: text_provider.to_owned(),
+                    model: "text-model".to_owned(),
+                    api_key: Some("text-key".to_owned()),
+                    oauth: Some(image_oauth("text-token", Some("text-account"))),
+                    image_provider: Some(image_provider.to_owned()),
+                    image_api_key: Some("flat-image-key".to_owned()),
+                    image_model: Some(if image_provider == "google" {
+                        "gemini-custom-image".to_owned()
+                    } else {
+                        "custom-image-model".to_owned()
+                    }),
+                    chatgpt_oauth: Some(image_oauth("image-token", Some("image-account"))),
+                };
+                let configuration = configuration_from_settings(&settings).unwrap();
+                assert_eq!(configuration.provider, text_provider);
+                assert_eq!(configuration.model, "text-model");
+                let image = configuration.image.unwrap();
+                assert_eq!(image.provider, image_provider);
+                let expected_model = if image_provider == "google" {
+                    "gemini-custom-image"
+                } else {
+                    "custom-image-model"
+                };
+                assert_eq!(image.model, expected_model);
+                assert!(matches!(image.auth, ImageAuth::ApiKey(key) if key == "flat-image-key"));
+            }
+        }
+    }
+
+    #[test]
+    fn selected_chatgpt_uses_its_own_login_then_the_legacy_login() {
+        for text_provider in ["openai", "anthropic", "google", "ollama"] {
+            let mut settings = StoredSettings {
+                provider: text_provider.to_owned(),
+                model: "text-model".to_owned(),
+                api_key: Some("text-key".to_owned()),
+                oauth: Some(image_oauth("legacy-token", Some("legacy-account"))),
+                image_provider: Some("chatgpt".to_owned()),
+                image_api_key: Some("ignored-key".to_owned()),
+                image_model: Some("ignored-model".to_owned()),
+                chatgpt_oauth: Some(image_oauth("image-token", Some("image-account"))),
+            };
+            let configuration = configuration_from_settings(&settings).unwrap();
+            assert_eq!(configuration.provider, text_provider);
+            let image = configuration.image.unwrap();
+            assert_eq!(image.provider, "chatgpt");
+            assert_eq!(image.model, "gpt-image-2");
+            assert_eq!(super::image_model_from_settings(&settings), "gpt-image-2");
+            assert!(
+                matches!(image.auth, ImageAuth::ChatGptSubscription { access_token, account_id }
+                if access_token == "image-token" && account_id == "image-account")
+            );
+            settings.chatgpt_oauth = None;
+            let legacy = super::image_configuration_from_settings(&settings);
+            if text_provider == "openai" {
+                assert!(legacy.is_some());
+            } else {
+                assert!(legacy.is_none());
+            }
+            settings.oauth = None;
+            assert!(super::image_configuration_from_settings(&settings).is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_image_selection_requires_openai_text_and_a_chatgpt_account() {
+        for provider in ["openai", "anthropic", "google"] {
+            for account in [None, Some(""), Some(" "), Some("account")] {
+                let settings = StoredSettings {
+                    provider: provider.to_owned(),
+                    oauth: Some(image_oauth("token", account)),
+                    ..StoredSettings::default()
+                };
+                let expected = if provider == "openai" && account == Some("account") {
+                    "chatgpt".to_owned()
+                } else {
+                    super::image_provider_from_environment()
+                };
+                assert_eq!(super::image_provider_from_settings(&settings), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_image_selections_and_incomplete_chatgpt_credentials_are_not_configured() {
+        for oauth in [
+            image_oauth("", Some("account")),
+            image_oauth("token", None),
+            image_oauth("token", Some(" ")),
+        ] {
+            assert!(super::chatgpt_image_configuration(&oauth).is_none());
+        }
+        let settings = StoredSettings {
+            provider: "openai".to_owned(),
+            image_provider: Some("unknown".to_owned()),
+            image_api_key: Some("image-key".to_owned()),
+            oauth: Some(image_oauth("legacy-token", Some("legacy-account"))),
+            ..StoredSettings::default()
+        };
+        assert!(super::image_configuration_from_settings(&settings).is_none());
     }
 
     #[test]

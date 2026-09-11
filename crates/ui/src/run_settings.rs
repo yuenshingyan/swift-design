@@ -996,7 +996,7 @@ fn AppearanceQuestions(options: api::SessionOptions, picks: Picks, pick: Pick) -
                             is_suggested: is_still_suggested(&options, &picks(), axis.key),
                             hint: is_media
                                 .then_some(
-                                    "Supporting images and raster-first choices can generate up to 3 images in this run. ChatGPT allowance limits or platform API charges may apply.",
+                                    "Supporting images and raster-first choices can generate up to 3 images in this run. Your image provider's subscription limits or API charges may apply.",
                                 ),
                             on_pick: move |value: String| pick.call((axis.key.to_owned(), value)),
                         }
@@ -1838,12 +1838,11 @@ mod tests {
         for (_, label) in GENERATED_MEDIA {
             assert_eq!(text.iter().filter(|value| **value == label).count(), 1);
         }
-        assert!(
-            text.iter()
-                .any(|value| value.contains("up to 3 images in this run")
-                    && value
-                        .contains("ChatGPT allowance limits or platform API charges may apply"))
-        );
+        assert!(text.iter().any(|value| {
+            value.contains("up to 3 images in this run")
+                && value
+                    .contains("Your image provider's subscription limits or API charges may apply")
+        }));
     }
 
     fn class_count(mutations: &[Mutation], prefix: &str) -> usize {
