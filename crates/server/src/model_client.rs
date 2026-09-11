@@ -26,8 +26,12 @@ pub(crate) const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 
 /// Default OpenAI-compatible image generation endpoint.
 const DEFAULT_IMAGE_API_URL: &str = "https://api.openai.com/v1/images/generations";
-/// Default image generation model.
+/// Image generation endpoint served to ChatGPT-authenticated Codex clients.
+const CHATGPT_IMAGE_API_URL: &str = "https://chatgpt.com/backend-api/codex/images/generations";
+/// Default image generation model for API-key requests.
 const DEFAULT_IMAGE_MODEL: &str = "gpt-image-1";
+/// Default image generation model for ChatGPT subscription requests.
+const CHATGPT_IMAGE_MODEL: &str = "gpt-image-2";
 /// Largest generated raster accepted from a provider.
 const MAX_GENERATED_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 /// Largest JSON response that can hold one maximum-sized base64 image.
@@ -116,6 +120,15 @@ pub enum WireFormat {
     ChatGptResponses,
 }
 
+/// Authentication for one resolved image generation endpoint.
+#[derive(Clone)]
+pub enum ImageAuth {
+    /// Use a dedicated OpenAI platform API key.
+    ApiKey(String),
+    /// Use the active ChatGPT login and its subscription allowance.
+    ChatGptSubscription,
+}
+
 /// One resolved OpenAI-compatible image generation endpoint.
 #[derive(Clone)]
 pub struct ImageConfiguration {
@@ -123,8 +136,8 @@ pub struct ImageConfiguration {
     pub url: String,
     /// Image model identifier.
     pub model: String,
-    /// API key for image requests.
-    pub api_key: String,
+    /// Authentication for image requests.
+    pub auth: ImageAuth,
 }
 
 /// The aspect ratio requested for one generated image.
@@ -162,7 +175,7 @@ pub struct ModelConfiguration {
     pub wire: WireFormat,
     /// Model identifier sent to the provider.
     pub model: String,
-    /// Image generation endpoint, when an API key is available.
+    /// Image generation endpoint, when subscription or API credentials are available.
     pub image: Option<ImageConfiguration>,
 }
 
@@ -202,7 +215,16 @@ fn image_configuration(api_key: String, model: String) -> ImageConfiguration {
     ImageConfiguration {
         url,
         model,
-        api_key,
+        auth: ImageAuth::ApiKey(api_key),
+    }
+}
+
+/// Builds an image configuration backed by the active ChatGPT subscription.
+fn chatgpt_image_configuration(_settings: &crate::settings::StoredSettings) -> ImageConfiguration {
+    ImageConfiguration {
+        url: CHATGPT_IMAGE_API_URL.to_owned(),
+        model: CHATGPT_IMAGE_MODEL.to_owned(),
+        auth: ImageAuth::ChatGptSubscription,
     }
 }
 
@@ -245,6 +267,16 @@ pub(crate) fn image_model_from_settings(settings: &crate::settings::StoredSettin
 pub(crate) fn image_configuration_from_settings(
     settings: &crate::settings::StoredSettings,
 ) -> Option<ImageConfiguration> {
+    if settings.provider == "openai"
+        && settings.oauth.as_ref().is_some_and(|oauth| {
+            oauth
+                .account_id
+                .as_deref()
+                .is_some_and(|account_id| !account_id.trim().is_empty())
+        })
+    {
+        return Some(chatgpt_image_configuration(settings));
+    }
     let api_key = resolved_image_api_key(
         settings.image_api_key.as_deref(),
         image_api_key_from_environment(),
@@ -433,7 +465,7 @@ impl ModelClient {
         context_window(&self.configuration.model)
     }
 
-    /// True when this client has an image endpoint and API key.
+    /// True when this client has an authenticated image endpoint.
     pub fn can_generate_images(&self) -> bool {
         self.configuration.image.is_some()
     }
@@ -450,27 +482,42 @@ impl ModelClient {
             .image
             .as_ref()
             .ok_or_else(|| "image generation is not configured".to_owned())?;
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": configuration.model,
             "prompt": prompt,
             "size": shape.size(),
         });
-        let response = tokio::time::timeout(
-            IDLE_TIMEOUT,
-            client
-                .post(&configuration.url)
-                .bearer_auth(&configuration.api_key)
-                .json(&body)
-                .send(),
-        )
-        .await
-        .map_err(|_| {
-            format!(
-                "image generation response headers did not arrive within {} s",
-                IDLE_TIMEOUT.as_secs()
-            )
-        })?
-        .map_err(|error| format!("image generation request failed: {error}"))?;
+        let mut request = client.post(&configuration.url);
+        match &configuration.auth {
+            ImageAuth::ApiKey(api_key) => request = request.bearer_auth(api_key),
+            ImageAuth::ChatGptSubscription => {
+                let ProviderAuth::ChatGptLogin {
+                    access_token,
+                    account_id,
+                } = &self.configuration.auth
+                else {
+                    return Err("ChatGPT image generation needs an active ChatGPT login".to_owned());
+                };
+                body["background"] = serde_json::Value::String("auto".to_owned());
+                body["quality"] = serde_json::Value::String("auto".to_owned());
+                let turn_id = crate::sessions::new_session_id()
+                    .map_err(|error| format!("could not create an image turn id: {error}"))?;
+                request = request
+                    .bearer_auth(access_token)
+                    .header("chatgpt-account-id", account_id)
+                    .header("originator", "codex_cli_rs")
+                    .header("x-codex-image-turn-id", turn_id);
+            }
+        }
+        let response = tokio::time::timeout(IDLE_TIMEOUT, request.json(&body).send())
+            .await
+            .map_err(|_| {
+                format!(
+                    "image generation response headers did not arrive within {} s",
+                    IDLE_TIMEOUT.as_secs()
+                )
+            })?
+            .map_err(|error| format!("image generation request failed: {error}"))?;
         let status = response.status();
         if !status.is_success() {
             // Provider bodies can repeat the prompt or authorization data.
@@ -1147,10 +1194,11 @@ mod tests {
     use crate::settings::{StoredOauth, StoredSettings};
 
     use super::{
-        ChatFailure, ImageConfiguration, ImageShape, ModelClient, ModelConfiguration, ProviderAuth,
-        StreamState, TokenUsage, WireFormat, chatgpt_responses_body, configuration_from_settings,
-        context_window, decode_generated_image, image_api_key_from_environment,
-        parse_chatgpt_stream, parse_usage, resolved_image_api_key, stream_line, with_one_retry,
+        ChatFailure, ImageAuth, ImageConfiguration, ImageShape, ModelClient, ModelConfiguration,
+        ProviderAuth, StreamState, TokenUsage, WireFormat, chatgpt_responses_body,
+        configuration_from_settings, context_window, decode_generated_image,
+        image_api_key_from_environment, parse_chatgpt_stream, parse_usage, resolved_image_api_key,
+        stream_line, with_one_retry,
     };
 
     #[derive(Clone, Default)]
@@ -1200,7 +1248,7 @@ mod tests {
                 image: Some(ImageConfiguration {
                     url: format!("http://{address}/images"),
                     model: "fake-image".to_owned(),
-                    api_key: "secret-image-key".to_owned(),
+                    auth: ImageAuth::ApiKey("secret-image-key".to_owned()),
                 }),
             },
             None,
@@ -1222,6 +1270,57 @@ mod tests {
         assert_eq!(requests[0].1["size"], "1536x1024");
         assert!(requests[0].1.get("response_format").is_none());
         assert_eq!(requests[0].0["authorization"], "Bearer secret-image-key");
+    }
+
+    #[tokio::test]
+    async fn chatgpt_subscription_images_use_codex_auth_and_request_fields() {
+        let state = ImageRequestState::default();
+        let router = Router::new()
+            .route("/images", post(image_response))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let client = ModelClient::new(
+            ModelConfiguration {
+                provider: "openai".to_owned(),
+                chat_url: format!("http://{address}/chat"),
+                auth: ProviderAuth::ChatGptLogin {
+                    access_token: "subscription-token".to_owned(),
+                    account_id: "account-123".to_owned(),
+                },
+                wire: WireFormat::ChatGptResponses,
+                model: "gpt-text".to_owned(),
+                image: Some(ImageConfiguration {
+                    url: format!("http://{address}/images"),
+                    model: "gpt-image-2".to_owned(),
+                    auth: ImageAuth::ChatGptSubscription,
+                }),
+            },
+            None,
+        );
+
+        client
+            .generate_image(
+                &ModelClient::build_http_client().unwrap(),
+                "paint a harbor",
+                ImageShape::Portrait,
+            )
+            .await
+            .unwrap();
+
+        let requests = state.requests.lock().unwrap();
+        let (headers, body) = &requests[0];
+        assert_eq!(headers["authorization"], "Bearer subscription-token");
+        assert_eq!(headers["chatgpt-account-id"], "account-123");
+        assert_eq!(headers["originator"], "codex_cli_rs");
+        assert!(headers.get("x-codex-image-turn-id").is_some());
+        assert_eq!(body["model"], "gpt-image-2");
+        assert_eq!(body["size"], "1024x1536");
+        assert_eq!(body["background"], "auto");
+        assert_eq!(body["quality"], "auto");
     }
 
     #[test]
@@ -1307,22 +1406,24 @@ mod tests {
         };
         let expected_environment_key =
             image_api_key_from_environment().filter(|key| !key.trim().is_empty());
-        assert_eq!(
-            configuration_from_settings(&settings)
-                .unwrap()
-                .image
-                .map(|image| image.api_key),
-            expected_environment_key
-        );
+        let environment_auth = configuration_from_settings(&settings)
+            .unwrap()
+            .image
+            .map(|image| image.auth);
+        match (environment_auth, expected_environment_key) {
+            (Some(ImageAuth::ApiKey(actual)), Some(expected)) => assert_eq!(actual, expected),
+            (None, None) => {}
+            _ => panic!("environment image authentication did not match"),
+        }
         settings.image_api_key = Some("stored-image-key".to_owned());
-        assert_eq!(
+        assert!(matches!(
             configuration_from_settings(&settings)
                 .unwrap()
                 .image
                 .unwrap()
-                .api_key,
-            "stored-image-key"
-        );
+                .auth,
+            ImageAuth::ApiKey(key) if key == "stored-image-key"
+        ));
     }
 
     #[test]
@@ -1380,7 +1481,7 @@ mod tests {
             matches!(configuration.auth, ProviderAuth::ApiKey(key) if key == "environment-text-key")
         );
         let image = configuration.image.unwrap();
-        assert_eq!(image.api_key, "stored-image-key");
+        assert!(matches!(image.auth, ImageAuth::ApiKey(key) if key == "stored-image-key"));
         assert_eq!(image.model, "gpt-image-custom");
     }
 
@@ -1403,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_text_credentials_never_supply_image_authentication() {
+    fn chatgpt_login_supplies_subscription_images_but_other_oauth_does_not() {
         for provider in ["openai", "anthropic"] {
             let mut settings = StoredSettings {
                 provider: provider.to_owned(),
@@ -1418,15 +1519,41 @@ mod tests {
                 ..StoredSettings::default()
             };
             let configuration = super::configuration_with_fallback(&settings, || None).unwrap();
-            assert_eq!(
-                configuration.image.map(|image| image.api_key),
-                image_api_key_from_environment().filter(|key| !key.trim().is_empty())
-            );
+            if provider == "openai" {
+                let image = configuration.image.unwrap();
+                assert!(matches!(image.auth, ImageAuth::ChatGptSubscription));
+                assert_eq!(image.model, "gpt-image-2");
+                assert_eq!(image.url, super::CHATGPT_IMAGE_API_URL);
+            } else {
+                let expected =
+                    image_api_key_from_environment().filter(|key| !key.trim().is_empty());
+                let actual = configuration.image.map(|image| image.auth);
+                match (actual, expected) {
+                    (Some(ImageAuth::ApiKey(actual)), Some(expected)) => {
+                        assert_eq!(actual, expected);
+                    }
+                    (None, None) => {}
+                    _ => panic!("OAuth image authentication did not match"),
+                }
+            }
             settings.image_api_key = Some("dedicated-image-key".to_owned());
             let configuration = super::configuration_with_fallback(&settings, || None).unwrap();
             let image = configuration.image.unwrap();
-            assert_eq!(image.api_key, "dedicated-image-key");
-            assert_eq!(image.model, "gpt-image-custom");
+            if provider == "openai" {
+                assert!(matches!(image.auth, ImageAuth::ChatGptSubscription));
+            } else {
+                assert!(
+                    matches!(image.auth, ImageAuth::ApiKey(key) if key == "dedicated-image-key")
+                );
+            }
+            assert_eq!(
+                image.model,
+                if provider == "openai" {
+                    "gpt-image-2"
+                } else {
+                    "gpt-image-custom"
+                }
+            );
         }
     }
 

@@ -334,6 +334,7 @@ mod tests {
             image_generation: api::ImageGenerationSettings {
                 configured: true,
                 model: "gpt-image-1.5".to_owned(),
+                source: Some("api_key".to_owned()),
             },
             has_chrome: false,
         }

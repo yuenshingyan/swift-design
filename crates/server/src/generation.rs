@@ -4045,7 +4045,7 @@ mod tests {
         configuration.image = Some(crate::model_client::ImageConfiguration {
             url: images.configuration().chat_url,
             model: "unused-image".to_owned(),
-            api_key: "configured-key".to_owned(),
+            auth: crate::model_client::ImageAuth::ApiKey("configured-key".to_owned()),
         });
         let engine = GenerationEngine::new(
             configuration,
@@ -4083,7 +4083,7 @@ mod tests {
         configuration.image = Some(crate::model_client::ImageConfiguration {
             url: "http://127.0.0.1:9/images".to_owned(),
             model: "unused-image".to_owned(),
-            api_key: "unused-key".to_owned(),
+            auth: crate::model_client::ImageAuth::ApiKey("unused-key".to_owned()),
         });
         let engine = GenerationEngine::new(
             configuration,
@@ -4152,7 +4152,7 @@ mod tests {
         configuration.image = Some(crate::model_client::ImageConfiguration {
             url: format!("http://{image_address}/images"),
             model: "fake-image".to_owned(),
-            api_key: "fake-key".to_owned(),
+            auth: crate::model_client::ImageAuth::ApiKey("fake-key".to_owned()),
         });
         let engine = GenerationEngine::new(
             configuration,

@@ -728,8 +728,15 @@ fn AccessStep(state: SetupState, provider: api::CatalogProvider) -> Element {
 
 /// Lets the user replace or explicitly clear the generated-image key.
 #[component]
-fn ImageGenerationField(state: SetupState, is_configured: bool, model: String) -> Element {
+fn ImageGenerationField(
+    state: SetupState,
+    is_configured: bool,
+    model: String,
+    source_name: Option<String>,
+) -> Element {
     let mut state = state;
+    let is_chatgpt_subscription = source_name.as_deref() == Some("chatgpt_subscription");
+    let is_api_key_configured = source_name.as_deref() == Some("api_key");
     let is_clear_requested = state.is_image_key_clear_requested();
     let source = use_memo(use_reactive!(|is_configured| {
         image_model_source(
@@ -774,13 +781,13 @@ fn ImageGenerationField(state: SetupState, is_configured: bool, model: String) -
     rsx! {
         div { class: "field",
             div { class: "field-heading",
-                span { "OpenAI API key for generated images (optional)" }
+                span { "OpenAI platform API key (optional fallback)" }
                 span { class: "model-count", "{model}" }
             }
             div { class: "key-field",
                 input {
                     r#type: if state.is_image_key_shown() { "text" } else { "password" },
-                    placeholder: if is_clear_requested { "Key will be cleared" } else if is_configured { "Configured — leave blank to keep" } else { "Paste an OpenAI platform API key" },
+                    placeholder: if is_clear_requested { "Key will be cleared" } else if is_api_key_configured { "Configured — leave blank to keep" } else if is_chatgpt_subscription { "Optional platform API key" } else { "Paste an OpenAI platform API key" },
                     value: "{state.image_api_key()}",
                     disabled: is_clear_requested,
                     oninput: move |event| {
@@ -809,9 +816,11 @@ fn ImageGenerationField(state: SetupState, is_configured: bool, model: String) -
                     "Undo"
                 }
             }
+        } else if is_chatgpt_subscription {
+            p { class: "key-status", "✓ generated images use your ChatGPT subscription" }
         } else if is_configured {
             p { class: "key-status",
-                "✓ image generation configured"
+                "✓ generated images use an OpenAI platform API key"
                 button {
                     class: "link-button",
                     onclick: move |_| {
@@ -826,14 +835,18 @@ fn ImageGenerationField(state: SetupState, is_configured: bool, model: String) -
         div { class: "field",
             div { class: "field-heading",
                 span { "Image model" }
-                button {
-                    class: "link-button",
-                    disabled: current_source.is_none(),
-                    onclick: move |_| models.restart(),
-                    "Reload"
+                if !is_chatgpt_subscription {
+                    button {
+                        class: "link-button",
+                        disabled: current_source.is_none(),
+                        onclick: move |_| models.restart(),
+                        "Reload"
+                    }
                 }
             }
-            if (state.is_custom_image_model_open)() {
+            if is_chatgpt_subscription {
+                p { class: "key-status", "{model} · selected by ChatGPT" }
+            } else if (state.is_custom_image_model_open)() {
                 input {
                     aria_label: "Exact image model id",
                     placeholder: "Exact GPT Image model id",
@@ -857,18 +870,24 @@ fn ImageGenerationField(state: SetupState, is_configured: bool, model: String) -
                     "Use an exact image model id"
                 }
             }
-            if let Some(Err(message)) = result {
-                p { class: "error", "{message}" }
-            } else if is_loading {
-                p { class: "agent-log", "Loading image models…" }
+            if !is_chatgpt_subscription {
+                if let Some(Err(message)) = result {
+                    p { class: "error", "{message}" }
+                } else if is_loading {
+                    p { class: "agent-log", "Loading image models…" }
+                }
             }
         }
         p { class: "lede",
-            "The live image model list comes from OpenAI. The current generator supports "
-            "GPT Image-family IDs (gpt-image-*). Image and text models are separate. "
-            "ChatGPT login does not cover image API usage. Generated images require an "
-            "OpenAI platform API key. You may paste the same OpenAI platform key that you "
-            "use for text."
+            if is_chatgpt_subscription {
+                "Generated images use your ChatGPT subscription through OpenAI's official "
+                "Codex image endpoint. Your subscription limits apply. The platform key is "
+                "only a fallback for a different text provider."
+            } else {
+                "Sign in with ChatGPT as the OpenAI provider to use your subscription. "
+                "Otherwise, generated images need an OpenAI platform API key. Image and "
+                "text models remain separate."
+            }
         }
     }
 }
@@ -884,14 +903,15 @@ fn ModelStep(
 ) -> Element {
     let mut state = state;
     let live_count = state.loaded_models().len();
-    let (is_image_configured, image_model) = settings()
+    let (is_image_configured, image_model, image_source) = settings()
         .map(|view| {
             (
                 view.image_generation.configured,
                 view.image_generation.model.clone(),
+                view.image_generation.source.clone(),
             )
         })
-        .unwrap_or_else(|| (false, "OpenAI image model".to_owned()));
+        .unwrap_or_else(|| (false, "OpenAI image model".to_owned(), None));
 
     let has_saved_credentials = settings()
         .and_then(|view| view.current)
@@ -1001,6 +1021,7 @@ fn ModelStep(
             state,
             is_configured: is_image_configured,
             model: image_model,
+            source_name: image_source,
         }
         div { class: "settings-actions",
             button { class: "primary", disabled: state.is_busy(), onclick: save,

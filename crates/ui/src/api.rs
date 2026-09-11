@@ -2032,6 +2032,9 @@ pub struct ImageGenerationSettings {
     pub configured: bool,
     /// The OpenAI image model the server uses.
     pub model: String,
+    /// Credential source: ChatGPT subscription or OpenAI platform API key.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 /// Response of `GET /settings`.

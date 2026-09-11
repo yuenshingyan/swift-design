@@ -996,7 +996,7 @@ fn AppearanceQuestions(options: api::SessionOptions, picks: Picks, pick: Pick) -
                             is_suggested: is_still_suggested(&options, &picks(), axis.key),
                             hint: is_media
                                 .then_some(
-                                    "Supporting images and raster-first choices can generate up to 3 images in this run. Charges may apply.",
+                                    "Supporting images and raster-first choices can generate up to 3 images in this run. ChatGPT allowance limits or platform API charges may apply.",
                                 ),
                             on_pick: move |value: String| pick.call((axis.key.to_owned(), value)),
                         }
@@ -1841,7 +1841,8 @@ mod tests {
         assert!(
             text.iter()
                 .any(|value| value.contains("up to 3 images in this run")
-                    && value.contains("Charges may apply"))
+                    && value
+                        .contains("ChatGPT allowance limits or platform API charges may apply"))
         );
     }
 

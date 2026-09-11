@@ -520,12 +520,21 @@ fn image_generation_summary(current: Option<&StoredSettings>) -> serde_json::Val
         Some(settings) => crate::model_client::image_configuration_from_settings(settings),
         None => crate::model_client::image_configuration_from_environment(),
     };
-    let model = current
-        .map(crate::model_client::image_model_from_settings)
+    let model = configuration
+        .as_ref()
+        .map(|configuration| configuration.model.clone())
+        .or_else(|| current.map(crate::model_client::image_model_from_settings))
         .unwrap_or_else(crate::model_client::configured_image_model);
+    let source = configuration
+        .as_ref()
+        .map(|configuration| match &configuration.auth {
+            crate::model_client::ImageAuth::ApiKey(_) => "api_key",
+            crate::model_client::ImageAuth::ChatGptSubscription => "chatgpt_subscription",
+        });
     serde_json::json!({
         "configured": configuration.is_some(),
         "model": model,
+        "source": source,
     })
 }
 
@@ -735,7 +744,7 @@ struct ImageModelsRequest {
 /// The official OpenAI model-list endpoint, independent of generation URL overrides.
 const OPENAI_IMAGE_MODELS_URL: &str = "https://api.openai.com/v1/models";
 
-/// Selects only dedicated image credentials, never text keys or OAuth tokens.
+/// Selects dedicated image credentials for OpenAI platform model discovery.
 fn image_models_authentication(
     requested: Option<&str>,
     stored: Option<&StoredSettings>,
@@ -747,12 +756,10 @@ fn image_models_authentication(
     );
     crate::model_client::resolved_image_api_key(requested, saved)
         .map(ModelAuthentication::ApiKey)
-        .ok_or_else(|| {
-            "enter an OpenAI image API key first; ChatGPT login cannot list image models".to_owned()
-        })
+        .ok_or_else(|| "enter an OpenAI platform API key to list platform image models".to_owned())
 }
 
-/// Lists compatible image models using only the dedicated image credentials.
+/// Lists the subscription image model or compatible platform image models.
 async fn list_image_models(
     State(store): State<SettingsStore>,
     Json(request): Json<ImageModelsRequest>,
@@ -769,6 +776,17 @@ async fn list_image_models(
             Err(error) => return api_error::internal_error(&error),
         }
     };
+    if !has_requested_key
+        && let Some(configuration) = stored
+            .as_ref()
+            .and_then(crate::model_client::image_configuration_from_settings)
+        && matches!(
+            configuration.auth,
+            crate::model_client::ImageAuth::ChatGptSubscription
+        )
+    {
+        return Json(vec![configuration.model]).into_response();
+    }
     let authentication = image_models_authentication(
         request.image_api_key.as_deref(),
         stored.as_ref(),
@@ -1557,6 +1575,30 @@ mod tests {
     }
 
     #[test]
+    fn chatgpt_login_reports_subscription_image_generation() {
+        let settings = StoredSettings {
+            provider: "openai".to_owned(),
+            model: "gpt-text".to_owned(),
+            oauth: Some(StoredOauth {
+                access_token: "oauth-secret".to_owned(),
+                refresh_token: "refresh-secret".to_owned(),
+                expires_at_unix_seconds: u64::MAX,
+                account_id: Some("account-123".to_owned()),
+            }),
+            ..StoredSettings::default()
+        };
+
+        assert_eq!(
+            image_generation_summary(Some(&settings)),
+            serde_json::json!({
+                "configured": true,
+                "model": "gpt-image-2",
+                "source": "chatgpt_subscription"
+            })
+        );
+    }
+
+    #[test]
     fn old_settings_without_an_image_key_still_deserialize() {
         let settings: StoredSettings = serde_json::from_value(serde_json::json!({
             "provider": "ollama",
@@ -1617,9 +1659,13 @@ mod tests {
             assert_eq!(saved.image_model.as_deref(), expected);
             assert_eq!(saved.image_api_key.as_deref(), Some("image-secret"));
             assert_eq!(saved.oauth.is_some(), provider == "openai");
-            let expected_model = expected
-                .map(str::to_owned)
-                .unwrap_or_else(crate::model_client::configured_image_model);
+            let expected_model = if provider == "openai" {
+                "gpt-image-2".to_owned()
+            } else {
+                expected
+                    .map(str::to_owned)
+                    .unwrap_or_else(crate::model_client::configured_image_model)
+            };
             assert_eq!(
                 image_generation_summary(Some(&saved))["model"],
                 expected_model
@@ -1677,7 +1723,11 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
             value["image_generation"],
-            serde_json::json!({"configured": true, "model": "gpt-image-custom"})
+            serde_json::json!({
+                "configured": true,
+                "model": "gpt-image-custom",
+                "source": "api_key"
+            })
         );
         assert!(!body.contains("image-secret"));
         let (status, body) = crate::test_support::send(
@@ -1767,7 +1817,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn image_model_route_uses_saved_or_typed_image_key_without_oauth() {
+    async fn image_model_route_uses_the_subscription_or_an_explicit_platform_key() {
         let directory = tempfile::tempdir().unwrap();
         let store = SettingsStore::new(
             directory.path().join("settings.json"),
@@ -1787,20 +1837,36 @@ mod tests {
             })
             .await
             .unwrap();
-        // Invalid header bytes fail locally. OAuth would instead make a network request.
-        for image_api_key in [None, Some("typed\nsecret".to_owned())] {
-            let response = list_image_models(
-                State(store.clone()),
-                Json(ImageModelsRequest { image_api_key }),
-            )
-            .await;
-            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-            let body = axum::body::to_bytes(response.into_body(), 4096)
-                .await
-                .unwrap();
-            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(value["error"]["message"], "request to openai failed");
-        }
+
+        let response = list_image_models(
+            State(store.clone()),
+            Json(ImageModelsRequest {
+                image_api_key: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!(["gpt-image-2"])
+        );
+
+        let response = list_image_models(
+            State(store),
+            Json(ImageModelsRequest {
+                image_api_key: Some("typed\nsecret".to_owned()),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["message"], "request to openai failed");
     }
 
     #[tokio::test]
