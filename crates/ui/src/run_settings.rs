@@ -10,15 +10,16 @@
 
 use std::collections::HashMap;
 
+use dioxus::prelude::*;
+
 use design_model::{
     AD_COUNT_LIMIT, AD_KINDS, AD_SIZES, AUDIENCES, AnsweredQuestion, ArtifactKind, COLOR_MODES,
     COVER_COUNT_LIMIT, COVER_KINDS, COVER_SIZES, CUSTOM_ANSWER_LIMIT, DATA_STATES, DECK_SCENARIOS,
     DECK_VARIETY_LEVELS, DEMO_SCOPES, DOCUMENT_KINDS, EMAIL_COUNT_LIMIT, EMAIL_FORMATS,
-    EMAIL_KINDS, EVIDENCE_STYLES, FIDELITIES, FORMATS, FRAME_COUNT_LIMIT, ORIENTATIONS,
-    PAGE_COUNT_LIMIT, PAPERS, PLATFORMS, POST_GOALS, PRINT_KINDS, PRINT_SIZES, PRODUCT_KINDS,
-    SHEET_COUNT_LIMIT, SLIDE_DENSITIES, TONES, Viewport, WorkflowState,
+    EMAIL_KINDS, EVIDENCE_STYLES, FIDELITIES, FORMATS, FRAME_COUNT_LIMIT, GENERATED_MEDIA,
+    ORIENTATIONS, PAGE_COUNT_LIMIT, PAPERS, PLATFORMS, POST_GOALS, PRINT_KINDS, PRINT_SIZES,
+    PRODUCT_KINDS, SHEET_COUNT_LIMIT, SLIDE_DENSITIES, TONES, Viewport, WorkflowState,
 };
-use dioxus::prelude::*;
 
 use crate::api;
 use crate::chat_controls::CountChips;
@@ -291,6 +292,22 @@ struct Axis {
     choices: &'static [(&'static str, &'static str)],
 }
 
+/// The shared appearance questions, in the order they are shown.
+fn appearance_axes() -> [Axis; 2] {
+    [
+        Axis {
+            key: "color_mode",
+            label: "How should the colors read?",
+            choices: &COLOR_MODES,
+        },
+        Axis {
+            key: "generated_media",
+            label: "Generated media",
+            choices: &GENERATED_MEDIA,
+        },
+    ]
+}
+
 /// The app-owned questions for `kind`, in the order they are shown.
 ///
 /// These recur in every session, so the app asks them from a fixed list
@@ -299,11 +316,6 @@ struct Axis {
 fn axes_for(kind: ArtifactKind) -> Vec<Axis> {
     match kind {
         ArtifactKind::Demo => vec![
-            Axis {
-                key: "color_mode",
-                label: "How should the colors read?",
-                choices: &COLOR_MODES,
-            },
             Axis {
                 key: "scope",
                 label: "How much should I build?",
@@ -327,9 +339,8 @@ fn axes_for(kind: ArtifactKind) -> Vec<Axis> {
         ],
         // The audience and the tone are a deck's questions: a deck
         // speaks to a room. A demo's request already says what the
-        // product is. A deck draws its colors card beside the scenario
-        // card, and its evidence card last, so `DeckQuestions` draws
-        // both.
+        // product is. A deck draws its shared appearance cards and
+        // its evidence card in `DeckQuestions`.
         ArtifactKind::Deck => vec![
             Axis {
                 key: "audience",
@@ -536,8 +547,9 @@ pub(crate) fn app_answers(
     kind: ArtifactKind,
     options: &api::SessionOptions,
 ) -> Vec<AnsweredQuestion> {
-    let mut entries: Vec<AnsweredQuestion> = axes_for(kind)
-        .iter()
+    let mut entries: Vec<AnsweredQuestion> = appearance_axes()
+        .into_iter()
+        .chain(axes_for(kind))
         .map(|axis| {
             recorded(
                 axis.label,
@@ -556,11 +568,6 @@ pub(crate) fn app_answers(
             entries.push(canvas_record(&options.platforms));
         }
         ArtifactKind::Deck => {
-            entries.push(recorded(
-                "How should the colors read?",
-                options.color_mode.as_deref(),
-                &fixed_choices(&COLOR_MODES),
-            ));
             entries.push(recorded(
                 "What scenario is the deck for?",
                 options.scenario.as_deref(),
@@ -592,11 +599,6 @@ pub(crate) fn app_answers(
         }
         ArtifactKind::Document => {
             entries.push(recorded(
-                "How should the colors read?",
-                options.color_mode.as_deref(),
-                &fixed_choices(&COLOR_MODES),
-            ));
-            entries.push(recorded(
                 "How different should the candidates be?",
                 Some(&options.variety),
                 &variety_choices(),
@@ -618,11 +620,6 @@ pub(crate) fn app_answers(
             ));
         }
         ArtifactKind::Social => {
-            entries.push(recorded(
-                "How should the colors read?",
-                options.color_mode.as_deref(),
-                &fixed_choices(&COLOR_MODES),
-            ));
             entries.push(recorded(
                 "How different should the candidates be?",
                 Some(&options.variety),
@@ -649,11 +646,6 @@ pub(crate) fn app_answers(
         }
         ArtifactKind::Print => {
             entries.push(recorded(
-                "How should the colors read?",
-                options.color_mode.as_deref(),
-                &fixed_choices(&COLOR_MODES),
-            ));
-            entries.push(recorded(
                 "How different should the candidates be?",
                 Some(&options.variety),
                 &variety_choices(),
@@ -678,11 +670,6 @@ pub(crate) fn app_answers(
             ));
         }
         ArtifactKind::Mailing => {
-            entries.push(recorded(
-                "How should the colors read?",
-                options.color_mode.as_deref(),
-                &fixed_choices(&COLOR_MODES),
-            ));
             entries.push(recorded(
                 "How different should the candidates be?",
                 Some(&options.variety),
@@ -709,11 +696,6 @@ pub(crate) fn app_answers(
         }
         ArtifactKind::Campaign => {
             entries.push(recorded(
-                "How should the colors read?",
-                options.color_mode.as_deref(),
-                &fixed_choices(&COLOR_MODES),
-            ));
-            entries.push(recorded(
                 "How different should the candidates be?",
                 Some(&options.variety),
                 &variety_choices(),
@@ -735,11 +717,6 @@ pub(crate) fn app_answers(
             ));
         }
         ArtifactKind::Artwork => {
-            entries.push(recorded(
-                "How should the colors read?",
-                options.color_mode.as_deref(),
-                &fixed_choices(&COLOR_MODES),
-            ));
             entries.push(recorded(
                 "How different should the candidates be?",
                 Some(&options.variety),
@@ -808,6 +785,7 @@ fn axis_value(options: &api::SessionOptions, key: &str) -> Option<String> {
         "audience" => options.audience.clone(),
         "tone" => options.tone.clone(),
         "color_mode" => options.color_mode.clone(),
+        "generated_media" => options.generated_media.clone(),
         "scope" => options.scope.clone(),
         "product_kind" => options.product_kind.clone(),
         "data_state" => options.data_state.clone(),
@@ -844,6 +822,7 @@ fn with_axis(options: &api::SessionOptions, key: &str, value: String) -> api::Se
         "audience" => next.audience = picked,
         "tone" => next.tone = picked,
         "color_mode" => next.color_mode = picked,
+        "generated_media" => next.generated_media = picked,
         "scope" => next.scope = picked,
         "product_kind" => next.product_kind = picked,
         "data_state" => next.data_state = picked,
@@ -928,6 +907,26 @@ type Picks = Signal<HashMap<String, String>>;
 /// The callback that records a pick as (card key, value).
 type Pick = Callback<(String, String)>;
 
+/// The save selected by a setup-card pick.
+#[derive(Debug, PartialEq)]
+enum PickSave<'value> {
+    GeneratedMedia(&'value str),
+    Options(&'value api::SessionOptions),
+}
+
+fn pick_save<'value>(
+    key: &str,
+    value: &'value str,
+    options: &api::SessionOptions,
+    next: &'value api::SessionOptions,
+) -> Option<PickSave<'value>> {
+    // Always send explicit consent, even when an earlier pick is still in flight.
+    if key == "generated_media" {
+        return Some(PickSave::GeneratedMedia(value));
+    }
+    (next != options).then_some(PickSave::Options(next))
+}
+
 /// The picks made on this page, and the callback that records one and
 /// saves the options. A card reads its pick from the map, so it shows
 /// the choice at once instead of waiting for the session to poll back,
@@ -940,19 +939,72 @@ fn use_setup_picks(
 ) -> (Picks, Pick) {
     let mut picks = use_signal(HashMap::<String, String>::new);
     let pick = use_callback(move |(key, value): (String, String)| {
-        picks.write().insert(key, value);
+        picks.write().insert(key.clone(), value.clone());
         let next = with_picks(&options, &picks());
-        if next == options {
-            return;
-        }
+        let options = options.clone();
         let id = session_id.clone();
         spawn(async move {
-            if let Err(message) = api::save_session_options(&id, &next).await {
+            let result = match pick_save(&key, &value, &options, &next) {
+                Some(PickSave::GeneratedMedia(value)) => {
+                    api::save_generated_media_policy(&id, value).await
+                }
+                Some(PickSave::Options(options)) => api::save_session_options(&id, options).await,
+                None => return,
+            };
+            if let Err(message) = result {
                 on_error.call(message);
             }
         });
     });
     (picks, pick)
+}
+
+/// The local pick takes precedence over saved options, including a saved media policy.
+fn appearance_value(
+    options: &api::SessionOptions,
+    picks: &HashMap<String, String>,
+    key: &str,
+) -> Option<String> {
+    let current = picks.get(key).cloned().or_else(|| axis_value(options, key));
+    if key == "generated_media" {
+        return Some(
+            current
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "none".to_owned()),
+        );
+    }
+    current
+}
+
+/// The shared color and media cards use the same picks and save as the setup page.
+#[component]
+fn AppearanceQuestions(options: api::SessionOptions, picks: Picks, pick: Pick) -> Element {
+    rsx! {
+        div { class: "question-pair",
+            for axis in appearance_axes() {
+                {
+                    let current = appearance_value(&options, &picks(), axis.key);
+                    let is_media = axis.key == "generated_media";
+                    rsx! {
+                        ChoiceCard {
+                            key: "{axis.key}",
+                            label: axis.label,
+                            current,
+                            choices: fixed_choices(axis.choices),
+                            allows_custom: !is_media,
+                            allows_judgment: !is_media,
+                            is_suggested: is_still_suggested(&options, &picks(), axis.key),
+                            hint: is_media
+                                .then_some(
+                                    "Supporting images and raster-first choices can generate up to 3 images in this run. Charges may apply.",
+                                ),
+                            on_pick: move |value: String| pick.call((axis.key.to_owned(), value)),
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The app's own questions for this kind, as cards of chips.
@@ -965,6 +1017,9 @@ pub(crate) fn SharedQuestions(
 ) -> Element {
     let (picks, pick) = use_setup_picks(session_id, options.clone(), on_error);
     rsx! {
+        if kind == ArtifactKind::Demo {
+            AppearanceQuestions { options: options.clone(), picks, pick }
+        }
         for axis in axes_for(kind) {
             {
                 // A pick on this page shows first. Otherwise a stored
@@ -1205,32 +1260,18 @@ pub(crate) fn DeckQuestions(
     let suggested = |key: &str, value: Option<String>| {
         value.filter(|_| is_still_suggested(&options, &picks(), key))
     };
-    let colors =
-        shown("color_mode").or_else(|| suggested("color_mode", options.color_mode.clone()));
     let evidence = shown("evidence_style")
         .or_else(|| suggested("evidence_style", options.evidence_style.clone()));
-    let is_colors_suggested = suggested("color_mode", options.color_mode.clone()).is_some();
     let is_evidence_suggested =
         suggested("evidence_style", options.evidence_style.clone()).is_some();
     rsx! {
-        // The two long cards share one row, each at half width, so
-        // they cost one row between them instead of two.
-        div { class: "question-pair",
-            ChoiceCard {
-                label: "How should the colors read?",
-                current: colors,
-                choices: fixed_choices(&COLOR_MODES),
-                is_suggested: is_colors_suggested,
-                allows_custom: true,
-                on_pick: move |value: String| pick.call(("color_mode".to_owned(), value)),
-            }
-            ChoiceCard {
-                label: "What scenario is the deck for?",
-                current: shown("scenario"),
-                choices: scenario_choices(),
-                allows_custom: true,
-                on_pick: move |value: String| pick.call(("scenario".to_owned(), value)),
-            }
+        AppearanceQuestions { options, picks, pick }
+        ChoiceCard {
+            label: "What scenario is the deck for?",
+            current: shown("scenario"),
+            choices: scenario_choices(),
+            allows_custom: true,
+            on_pick: move |value: String| pick.call(("scenario".to_owned(), value)),
         }
         ChoiceCard {
             label: "How different should the candidates be?",
@@ -1279,23 +1320,12 @@ pub(crate) fn DocumentQuestions(
     let suggested = |key: &str, value: Option<String>| {
         value.filter(|_| is_still_suggested(&options, &picks(), key))
     };
-    let colors =
-        shown("color_mode").or_else(|| suggested("color_mode", options.color_mode.clone()));
     let evidence = shown("evidence_style")
         .or_else(|| suggested("evidence_style", options.evidence_style.clone()));
-    let is_colors_suggested = suggested("color_mode", options.color_mode.clone()).is_some();
     let is_evidence_suggested =
         suggested("evidence_style", options.evidence_style.clone()).is_some();
     rsx! {
-        ChoiceCard {
-            label: "How should the colors read?",
-            current: colors,
-            choices: fixed_choices(&COLOR_MODES),
-            is_wide: true,
-            is_suggested: is_colors_suggested,
-            allows_custom: true,
-            on_pick: move |value: String| pick.call(("color_mode".to_owned(), value)),
-        }
+        AppearanceQuestions { options, picks, pick }
         ChoiceCard {
             label: "How different should the candidates be?",
             current: shown("variety"),
@@ -1343,23 +1373,12 @@ pub(crate) fn SocialQuestions(
     let suggested = |key: &str, value: Option<String>| {
         value.filter(|_| is_still_suggested(&options, &picks(), key))
     };
-    let colors =
-        shown("color_mode").or_else(|| suggested("color_mode", options.color_mode.clone()));
     let evidence = shown("evidence_style")
         .or_else(|| suggested("evidence_style", options.evidence_style.clone()));
-    let is_colors_suggested = suggested("color_mode", options.color_mode.clone()).is_some();
     let is_evidence_suggested =
         suggested("evidence_style", options.evidence_style.clone()).is_some();
     rsx! {
-        ChoiceCard {
-            label: "How should the colors read?",
-            current: colors,
-            choices: fixed_choices(&COLOR_MODES),
-            is_wide: true,
-            is_suggested: is_colors_suggested,
-            allows_custom: true,
-            on_pick: move |value: String| pick.call(("color_mode".to_owned(), value)),
-        }
+        AppearanceQuestions { options, picks, pick }
         ChoiceCard {
             label: "How different should the candidates be?",
             current: shown("variety"),
@@ -1407,23 +1426,12 @@ pub(crate) fn PrintQuestions(
     let suggested = |key: &str, value: Option<String>| {
         value.filter(|_| is_still_suggested(&options, &picks(), key))
     };
-    let colors =
-        shown("color_mode").or_else(|| suggested("color_mode", options.color_mode.clone()));
     let evidence = shown("evidence_style")
         .or_else(|| suggested("evidence_style", options.evidence_style.clone()));
-    let is_colors_suggested = suggested("color_mode", options.color_mode.clone()).is_some();
     let is_evidence_suggested =
         suggested("evidence_style", options.evidence_style.clone()).is_some();
     rsx! {
-        ChoiceCard {
-            label: "How should the colors read?",
-            current: colors,
-            choices: fixed_choices(&COLOR_MODES),
-            is_wide: true,
-            is_suggested: is_colors_suggested,
-            allows_custom: true,
-            on_pick: move |value: String| pick.call(("color_mode".to_owned(), value)),
-        }
+        AppearanceQuestions { options, picks, pick }
         ChoiceCard {
             label: "How different should the candidates be?",
             current: shown("variety"),
@@ -1471,23 +1479,12 @@ pub(crate) fn MailingQuestions(
     let suggested = |key: &str, value: Option<String>| {
         value.filter(|_| is_still_suggested(&options, &picks(), key))
     };
-    let colors =
-        shown("color_mode").or_else(|| suggested("color_mode", options.color_mode.clone()));
     let evidence = shown("evidence_style")
         .or_else(|| suggested("evidence_style", options.evidence_style.clone()));
-    let is_colors_suggested = suggested("color_mode", options.color_mode.clone()).is_some();
     let is_evidence_suggested =
         suggested("evidence_style", options.evidence_style.clone()).is_some();
     rsx! {
-        ChoiceCard {
-            label: "How should the colors read?",
-            current: colors,
-            choices: fixed_choices(&COLOR_MODES),
-            is_wide: true,
-            is_suggested: is_colors_suggested,
-            allows_custom: true,
-            on_pick: move |value: String| pick.call(("color_mode".to_owned(), value)),
-        }
+        AppearanceQuestions { options, picks, pick }
         ChoiceCard {
             label: "How different should the candidates be?",
             current: shown("variety"),
@@ -1533,23 +1530,12 @@ pub(crate) fn CampaignQuestions(
     let suggested = |key: &str, value: Option<String>| {
         value.filter(|_| is_still_suggested(&options, &picks(), key))
     };
-    let colors =
-        shown("color_mode").or_else(|| suggested("color_mode", options.color_mode.clone()));
     let evidence = shown("evidence_style")
         .or_else(|| suggested("evidence_style", options.evidence_style.clone()));
-    let is_colors_suggested = suggested("color_mode", options.color_mode.clone()).is_some();
     let is_evidence_suggested =
         suggested("evidence_style", options.evidence_style.clone()).is_some();
     rsx! {
-        ChoiceCard {
-            label: "How should the colors read?",
-            current: colors,
-            choices: fixed_choices(&COLOR_MODES),
-            is_wide: true,
-            is_suggested: is_colors_suggested,
-            allows_custom: true,
-            on_pick: move |value: String| pick.call(("color_mode".to_owned(), value)),
-        }
+        AppearanceQuestions { options, picks, pick }
         ChoiceCard {
             label: "How different should the candidates be?",
             current: shown("variety"),
@@ -1595,23 +1581,12 @@ pub(crate) fn ArtworkQuestions(
     let suggested = |key: &str, value: Option<String>| {
         value.filter(|_| is_still_suggested(&options, &picks(), key))
     };
-    let colors =
-        shown("color_mode").or_else(|| suggested("color_mode", options.color_mode.clone()));
     let evidence = shown("evidence_style")
         .or_else(|| suggested("evidence_style", options.evidence_style.clone()));
-    let is_colors_suggested = suggested("color_mode", options.color_mode.clone()).is_some();
     let is_evidence_suggested =
         suggested("evidence_style", options.evidence_style.clone()).is_some();
     rsx! {
-        ChoiceCard {
-            label: "How should the colors read?",
-            current: colors,
-            choices: fixed_choices(&COLOR_MODES),
-            is_wide: true,
-            is_suggested: is_colors_suggested,
-            allows_custom: true,
-            on_pick: move |value: String| pick.call(("color_mode".to_owned(), value)),
-        }
+        AppearanceQuestions { options, picks, pick }
         ChoiceCard {
             label: "How different should the candidates be?",
             current: shown("variety"),
@@ -1661,6 +1636,12 @@ fn ChoiceCard(
     /// True when the user may type an answer the chips do not carry.
     #[props(default)]
     allows_custom: bool,
+    /// True when the user may leave this choice to the agent.
+    #[props(default = true)]
+    allows_judgment: bool,
+    /// A short explanation below the choices.
+    #[props(default)]
+    hint: Option<&'static str>,
     /// True when the planner picked `current` from the request. The
     /// card says so, and the user can change it.
     #[props(default)]
@@ -1727,11 +1708,16 @@ fn ChoiceCard(
                         "Something else…"
                     }
                 }
-                button {
-                    class: if is_judgment { "option-chip skip selected" } else { "option-chip skip" },
-                    onclick: move |_| on_pick.call(String::new()),
-                    "Use your best judgment"
+                if allows_judgment {
+                    button {
+                        class: if is_judgment { "option-chip skip selected" } else { "option-chip skip" },
+                        onclick: move |_| on_pick.call(String::new()),
+                        "Use your best judgment"
+                    }
                 }
+            }
+            if let Some(hint) = hint {
+                p { class: "question-hint", "{hint}" }
             }
             if allows_custom && is_typing() {
                 div { class: "write-in-row",
@@ -1778,7 +1764,189 @@ fn typed_answer(current: Option<&str>, choices: &[(String, String)]) -> Option<S
 
 #[cfg(test)]
 mod tests {
+    use dioxus::dioxus_core::{AttributeValue, Mutation};
+
     use super::*;
+
+    fn setup_questions((kind, options): (ArtifactKind, api::SessionOptions)) -> Element {
+        rsx! {
+            SharedQuestions {
+                session_id: "test",
+                kind,
+                options: options.clone(),
+                on_error: |_| {},
+            }
+            if kind != ArtifactKind::Demo {
+                CanvasPicker {
+                    session_id: "test",
+                    kind,
+                    options,
+                    on_error: |_| {},
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_setup_page_renders_one_default_media_card_beside_color() {
+        for (kind, count) in [
+            (ArtifactKind::Demo, 6),
+            (ArtifactKind::Deck, 10),
+            (ArtifactKind::Document, 11),
+            (ArtifactKind::Social, 11),
+            (ArtifactKind::Print, 11),
+            (ArtifactKind::Mailing, 10),
+            (ArtifactKind::Campaign, 10),
+            (ArtifactKind::Artwork, 10),
+        ] {
+            let mut virtual_dom =
+                VirtualDom::new_with_props(setup_questions, (kind, api::SessionOptions::default()));
+            let mutations = virtual_dom.rebuild_to_vec();
+            assert_media_text(&mutations.edits);
+            assert_eq!(
+                class_count(&mutations.edits, "question-card app-question"),
+                count,
+                "{kind:?}"
+            );
+            assert_eq!(class_count(&mutations.edits, "option-chip selected"), 1);
+        }
+    }
+
+    fn assert_media_text(mutations: &[Mutation]) {
+        let text: Vec<&str> = mutations
+            .iter()
+            .filter_map(|edit| match edit {
+                Mutation::CreateTextNode { value, .. } => Some(value.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            text.iter()
+                .filter(|value| **value == "Generated media")
+                .count(),
+            1
+        );
+        let color = text
+            .iter()
+            .position(|value| *value == "How should the colors read?")
+            .expect("color card");
+        let media = text
+            .iter()
+            .position(|value| *value == "Generated media")
+            .expect("media card");
+        assert!(color < media);
+        for (_, label) in GENERATED_MEDIA {
+            assert_eq!(text.iter().filter(|value| **value == label).count(), 1);
+        }
+        assert!(
+            text.iter()
+                .any(|value| value.contains("up to 3 images in this run")
+                    && value.contains("Charges may apply"))
+        );
+    }
+
+    fn class_count(mutations: &[Mutation], prefix: &str) -> usize {
+        mutations
+            .iter()
+            .filter(|edit| {
+                matches!(edit,
+                    Mutation::SetAttribute { name: "class", value: AttributeValue::Text(value), .. }
+                        if value.starts_with(prefix)
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn every_kind_records_each_media_policy_once_with_the_updated_count() {
+        for (kind, count) in [
+            (ArtifactKind::Demo, 8),
+            (ArtifactKind::Deck, 10),
+            (ArtifactKind::Document, 11),
+            (ArtifactKind::Social, 11),
+            (ArtifactKind::Print, 11),
+            (ArtifactKind::Mailing, 10),
+            (ArtifactKind::Campaign, 10),
+            (ArtifactKind::Artwork, 10),
+        ] {
+            for (policy, label) in GENERATED_MEDIA {
+                let options = with_pick(&api::SessionOptions::default(), "generated_media", policy);
+                let entries = app_answers(kind, &options);
+                assert_eq!(entries.len(), count, "{kind:?}");
+                let media: Vec<_> = entries
+                    .iter()
+                    .filter(|entry| entry.question == "Generated media")
+                    .collect();
+                assert_eq!(media.len(), 1);
+                assert_eq!(media[0].answer, label);
+                assert!(!media[0].is_assumed);
+            }
+        }
+    }
+
+    #[test]
+    fn media_picks_use_the_axis_save_path_and_clear_suggestions() {
+        let options = api::SessionOptions {
+            suggested: vec!["generated_media".to_owned(), "color_mode".to_owned()],
+            ..Default::default()
+        };
+        for (policy, _) in GENERATED_MEDIA {
+            let next = with_pick(&options, "generated_media", policy);
+            assert_eq!(next.generated_media.as_deref(), Some(policy));
+            assert_eq!(
+                axis_value(&next, "generated_media").as_deref(),
+                Some(policy)
+            );
+            assert!(!is_suggested(&next, "generated_media"));
+            assert!(is_suggested(&next, "color_mode"));
+        }
+        assert_eq!(
+            with_pick(&options, "generated_media", "").generated_media,
+            None
+        );
+    }
+
+    #[test]
+    fn appearance_picks_show_immediately_and_survive_reload() {
+        let options = api::SessionOptions {
+            generated_media: Some("supporting".to_owned()),
+            color_mode: Some("dark".to_owned()),
+            ..Default::default()
+        };
+        let picks = HashMap::from([("generated_media".to_owned(), "raster_first".to_owned())]);
+        assert_eq!(
+            appearance_value(&options, &picks, "generated_media").as_deref(),
+            Some("raster_first")
+        );
+        assert_eq!(
+            appearance_value(&options, &HashMap::new(), "generated_media").as_deref(),
+            Some("supporting")
+        );
+        assert_eq!(
+            appearance_value(&options, &HashMap::new(), "color_mode").as_deref(),
+            Some("dark")
+        );
+        for value in [None, Some(String::new()), Some("none".to_owned())] {
+            let options = api::SessionOptions {
+                generated_media: value,
+                ..Default::default()
+            };
+            assert_eq!(
+                appearance_value(&options, &HashMap::new(), "generated_media").as_deref(),
+                Some("none")
+            );
+        }
+    }
+
+    #[test]
+    fn appearance_axes_share_one_compact_media_choice_list() {
+        let axes = appearance_axes();
+        assert_eq!(axes[0].key, "color_mode");
+        assert_eq!(axes[1].key, "generated_media");
+        assert_eq!(axes[1].choices, &GENERATED_MEDIA);
+        assert!(!is_wide_card(&fixed_choices(axes[1].choices)));
+        assert_eq!(axes[1].choices[0], ("none", "No generated images"));
+    }
 
     #[test]
     fn the_record_reads_a_preset_a_typed_answer_and_a_blank() {
@@ -2292,6 +2460,54 @@ mod tests {
     }
 
     #[test]
+    fn generated_media_picks_always_dispatch_only_the_explicit_consent() {
+        let options = api::SessionOptions::default();
+        for value in ["none", "supporting", "raster_first"] {
+            let picks = HashMap::from([
+                ("generated_media".to_owned(), value.to_owned()),
+                ("color_mode".to_owned(), "dark".to_owned()),
+            ]);
+            let next = with_picks(&options, &picks);
+            assert_eq!(
+                pick_save("generated_media", value, &options, &next),
+                Some(PickSave::GeneratedMedia(value))
+            );
+            assert_eq!(
+                appearance_value(&options, &picks, "generated_media").as_deref(),
+                Some(value)
+            );
+        }
+        // A quick opt-out must be sent even before the opt-in polls back.
+        assert_eq!(
+            pick_save("generated_media", "none", &options, &options),
+            Some(PickSave::GeneratedMedia("none"))
+        );
+    }
+
+    #[test]
+    fn other_picks_dispatch_whole_options_even_with_a_local_media_pick() {
+        let options = api::SessionOptions::default();
+        for (key, value) in [
+            ("color_mode", "dark"),
+            ("candidates", "2"),
+            ("slides", "10"),
+            ("paper", "a4"),
+            ("variety", "high"),
+        ] {
+            let picks = HashMap::from([
+                ("generated_media".to_owned(), "supporting".to_owned()),
+                (key.to_owned(), value.to_owned()),
+            ]);
+            let next = with_picks(&options, &picks);
+            assert_eq!(
+                pick_save(key, value, &options, &next),
+                Some(PickSave::Options(&next))
+            );
+        }
+        assert_eq!(pick_save("color_mode", "", &options, &options), None);
+    }
+
+    #[test]
     fn every_pick_on_the_page_lands_in_one_save() {
         let options = api::SessionOptions {
             suggested: vec!["color_mode".to_owned()],
@@ -2302,11 +2518,13 @@ mod tests {
             ("color_mode".to_owned(), "dark".to_owned()),
             ("variety".to_owned(), String::new()),
             ("slides".to_owned(), "10".to_owned()),
+            ("generated_media".to_owned(), "supporting".to_owned()),
         ]);
         let next = with_picks(&options, &picks);
         assert_eq!(next.color_mode, Some("dark".to_owned()));
         assert_eq!(next.variety, "medium");
         assert_eq!(next.slide_count, Some(10));
+        assert_eq!(next.generated_media.as_deref(), Some("supporting"));
         // A pick by the user is no longer a suggestion.
         assert!(next.suggested.is_empty());
         // No picks is no change.

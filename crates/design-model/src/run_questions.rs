@@ -55,6 +55,13 @@ pub const COLOR_MODES: [(&str, &str); 8] = [
     ("monochrome", "Black and white"),
 ];
 
+/// Which generated images a run may use, as (value, label).
+pub const GENERATED_MEDIA: [(&str, &str); 3] = [
+    ("none", "No generated images"),
+    ("supporting", "Supporting images, up to 3"),
+    ("raster_first", "Raster-first allowed, up to 3"),
+];
+
 /// What kind of product a demo shows, as (value, label). It decides the
 /// layout vocabulary: a dashboard and a storefront share no furniture.
 ///
@@ -296,11 +303,18 @@ pub struct AppAxis {
 }
 
 /// Every app-owned axis every kind asks.
-pub const SHARED_AXES: [AppAxis; 1] = [AppAxis {
-    key: "color_mode",
-    name: "Color mode",
-    choices: &COLOR_MODES,
-}];
+pub const SHARED_AXES: [AppAxis; 2] = [
+    AppAxis {
+        key: "color_mode",
+        name: "Color mode",
+        choices: &COLOR_MODES,
+    },
+    AppAxis {
+        key: "generated_media",
+        name: "Generated media",
+        choices: &GENERATED_MEDIA,
+    },
+];
 
 /// Every app-owned axis only a demo asks.
 pub const DEMO_AXES: [AppAxis; 4] = [
@@ -541,6 +555,7 @@ mod tests {
             demo,
             [
                 "Color mode",
+                "Generated media",
                 "Scope",
                 "Product kind",
                 "Screen data",
@@ -552,6 +567,7 @@ mod tests {
             deck,
             [
                 "Color mode",
+                "Generated media",
                 "Audience",
                 "Tone",
                 "Evidence",
@@ -565,6 +581,7 @@ mod tests {
             document,
             [
                 "Color mode",
+                "Generated media",
                 "Audience",
                 "Tone",
                 "Evidence",
@@ -580,6 +597,7 @@ mod tests {
             social,
             [
                 "Color mode",
+                "Generated media",
                 "Audience",
                 "Tone",
                 "Evidence",
@@ -595,6 +613,7 @@ mod tests {
             print,
             [
                 "Color mode",
+                "Generated media",
                 "Audience",
                 "Tone",
                 "Evidence",
@@ -610,6 +629,7 @@ mod tests {
             mailing,
             [
                 "Color mode",
+                "Generated media",
                 "Audience",
                 "Tone",
                 "Evidence",
@@ -624,6 +644,7 @@ mod tests {
             campaign,
             [
                 "Color mode",
+                "Generated media",
                 "Audience",
                 "Tone",
                 "Evidence",
@@ -638,6 +659,7 @@ mod tests {
             artwork,
             [
                 "Color mode",
+                "Generated media",
                 "Audience",
                 "Tone",
                 "Evidence",
@@ -645,6 +667,26 @@ mod tests {
                 "Cover size"
             ]
         );
+    }
+
+    #[test]
+    fn generated_media_has_the_fixed_choices_for_every_kind() {
+        let axis = axis_by_key("generated_media").expect("generated media axis");
+        assert_eq!(axis.name, "Generated media");
+        assert_eq!(
+            axis.choices,
+            [
+                ("none", "No generated images"),
+                ("supporting", "Supporting images, up to 3"),
+                ("raster_first", "Raster-first allowed, up to 3"),
+            ]
+        );
+        for kind in ArtifactKind::ALL {
+            assert!(app_axes(kind).any(|entry| entry == axis));
+        }
+        for (value, label) in axis.choices {
+            assert_eq!(axis_label(axis.name, value), Some(*label));
+        }
     }
 
     #[test]
@@ -754,6 +796,7 @@ mod tests {
             &AUDIENCES[..],
             &TONES[..],
             &COLOR_MODES[..],
+            &GENERATED_MEDIA[..],
             &DEMO_SCOPES[..],
             &PRODUCT_KINDS[..],
             &DATA_STATES[..],

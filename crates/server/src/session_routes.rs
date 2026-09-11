@@ -46,6 +46,10 @@ pub fn routes() -> Router<crate::AppState> {
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{id}", get(get_session).delete(delete_session))
         .route("/sessions/{id}/options", put(put_options))
+        .route(
+            "/sessions/{id}/options/generated-media",
+            put(put_generated_media),
+        )
         .route("/sessions/{id}/messages", post(post_message))
         .route("/sessions/{id}/question-set", put(put_question_set))
         .route("/sessions/{id}/answers", post(post_answers))
@@ -556,7 +560,8 @@ fn option_problem(options: &RunOptions) -> Option<String> {
     }
     // The app owns every axis, but the lists cannot cover every answer,
     // so a typed answer is accepted beside them. Only the shape is
-    // checked: the value goes into one prompt line.
+    // checked: the value goes into one prompt line. Unknown generated
+    // media answers are accepted but resolve to the disabled policy.
     for axis in ArtifactKind::ALL.into_iter().flat_map(app_axes) {
         if let Some(Some(value)) = options.axis(axis.key)
             && !axis.choices.iter().any(|(known, _)| known == value)
@@ -579,12 +584,12 @@ fn option_problem(options: &RunOptions) -> Option<String> {
     None
 }
 
-/// Replaces the run options.
+/// Replaces the run options except the paid-media consent.
 async fn put_options(
     State(sessions): State<SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path(id): Path<String>,
-    Json(options): Json<RunOptions>,
+    Json(mut options): Json<RunOptions>,
 ) -> Response {
     let session = match require_session(&sessions, &id).await {
         Ok(session) => session,
@@ -597,9 +602,60 @@ async fn put_options(
         return api_error::error_response(StatusCode::UNPROCESSABLE_ENTITY, &message, Vec::new());
     }
     match sessions
-        .update(&id, |session| session.options = options)
+        .update(&id, |session| {
+            if session.state != WorkflowState::Generating {
+                // Read consent under the write lock, not from a stale options save.
+                options.generated_media = session.options.generated_media.clone();
+                session.options = options;
+            }
+        })
         .await
     {
+        Ok(session) if session.state == WorkflowState::Generating => {
+            conflict("cannot change options while the session is generating")
+        }
+        Ok(_) => {
+            notifier.notify();
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(error) => session_error_response(&error),
+    }
+}
+
+/// Body of `PUT /sessions/{id}/options/generated-media`.
+#[derive(Debug, Deserialize)]
+struct GeneratedMediaRequest {
+    value: String,
+}
+
+/// Changes only the paid-media consent under the session write lock.
+async fn put_generated_media(
+    State(sessions): State<SessionStore>,
+    State(notifier): State<ChangeNotifier>,
+    Path(id): Path<String>,
+    Json(request): Json<GeneratedMediaRequest>,
+) -> Response {
+    if !matches!(
+        request.value.as_str(),
+        "none" | "supporting" | "raster_first"
+    ) {
+        return api_error::error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "generated_media must be none, supporting, or raster_first",
+            Vec::new(),
+        );
+    }
+    match sessions
+        .update(&id, |session| {
+            if session.state != WorkflowState::Generating {
+                session.options.generated_media = Some(request.value);
+            }
+        })
+        .await
+    {
+        Ok(session) if session.state == WorkflowState::Generating => {
+            conflict("cannot change options while the session is generating")
+        }
         Ok(_) => {
             notifier.notify();
             StatusCode::NO_CONTENT.into_response()
@@ -953,6 +1009,8 @@ mod tests {
 
     use crate::test_support::{send, test_application};
 
+    use super::*;
+
     /// Reads a session view.
     async fn view(application: &axum::Router, id: &str) -> serde_json::Value {
         let (status, body) =
@@ -965,6 +1023,264 @@ mod tests {
         let body = format!("{{\"id\":\"{id}\",\"request\":\"Design {id}.\"}}");
         let (status, _) = send(application.clone(), "POST", "/sessions", Some(&body)).await;
         assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[test]
+    fn generated_media_validates_fixed_and_custom_answers_safely() {
+        for value in ["none", "supporting", "raster_first", "Only product photos"] {
+            let options = RunOptions {
+                generated_media: Some(value.to_owned()),
+                ..RunOptions::default()
+            };
+            assert_eq!(option_problem(&options), None);
+            if value == "Only product photos" {
+                assert_eq!(options.generated_media_policy(), "none");
+            }
+        }
+        for value in [
+            "".to_owned(),
+            "two\nlines".to_owned(),
+            "x".repeat(CUSTOM_ANSWER_LIMIT + 1),
+        ] {
+            let options = RunOptions {
+                generated_media: Some(value),
+                ..RunOptions::default()
+            };
+            let problem = option_problem(&options).unwrap();
+            assert!(problem.contains("generated_media"));
+            assert!(problem.contains("none, supporting, raster_first"));
+        }
+    }
+
+    #[tokio::test]
+    async fn generated_media_defaults_to_disabled_in_every_session_kind() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        for kind in ArtifactKind::ALL {
+            let body = serde_json::json!({
+                "id": kind.as_str(),
+                "request": "A launch.",
+                "artifact_kind": kind,
+            })
+            .to_string();
+            let (status, body) = send(application.clone(), "POST", "/sessions", Some(&body)).await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            let session = view(&application, kind.as_str()).await;
+            assert_eq!(session["session"]["options"]["generated_media"], "none");
+        }
+    }
+
+    async fn save_generated_media(application: &axum::Router, value: &str) {
+        let body = serde_json::json!({"value": value}).to_string();
+        let (status, body) = send(
+            application.clone(),
+            "PUT",
+            "/sessions/talk/options/generated-media",
+            Some(&body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    }
+
+    #[tokio::test]
+    async fn generated_media_updates_only_consent_and_persists() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "talk").await;
+        let (status, body) = send(
+            application.clone(),
+            "PUT",
+            "/sessions/talk/options",
+            Some(r#"{"color_mode":"dark","variations":3,"platforms":["phone"],"suggested":["color_mode"]}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        let mut expected = view(&application, "talk").await["session"]["options"].clone();
+        for value in ["supporting", "raster_first", "none"] {
+            save_generated_media(&application, value).await;
+            expected["generated_media"] = serde_json::json!(value);
+            assert_eq!(
+                view(&application, "talk").await["session"]["options"],
+                expected
+            );
+            let reopened = test_application(&directory);
+            assert_eq!(
+                view(&reopened, "talk").await["session"]["options"],
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn generated_media_rejects_non_exact_and_missing_values() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "talk").await;
+        save_generated_media(&application, "supporting").await;
+        let expected = view(&application, "talk").await["session"]["options"].clone();
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!(1),
+        ]
+        .into_iter()
+        .chain(
+            [
+                "",
+                "Supporting",
+                "NONE",
+                "supporting ",
+                " raster_first",
+                "Only product photos",
+                "none\n",
+            ]
+            .map(serde_json::Value::from),
+        ) {
+            let body = serde_json::json!({"value": value}).to_string();
+            let (status, _) = send(
+                application.clone(),
+                "PUT",
+                "/sessions/talk/options/generated-media",
+                Some(&body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        }
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/sessions/talk/options/generated-media",
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            view(&application, "talk").await["session"]["options"],
+            expected
+        );
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/sessions/missing/options/generated-media",
+            Some(r#"{"value":"none"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn whole_options_cannot_restore_stale_paid_consent_in_either_direction() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "talk").await;
+        for policy in ["supporting", "raster_first", "none"] {
+            save_generated_media(&application, policy).await;
+            for stale in [Some("none"), Some("supporting"), Some("raster_first"), None] {
+                let mut options =
+                    serde_json::json!({"color_mode":"dark","variations":2,"platforms":["phone"]});
+                if let Some(stale) = stale {
+                    options["generated_media"] = serde_json::json!(stale);
+                }
+                let body = options.to_string();
+                let (status, body) = send(
+                    application.clone(),
+                    "PUT",
+                    "/sessions/talk/options",
+                    Some(&body),
+                )
+                .await;
+                assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+                let saved = view(&application, "talk").await;
+                let saved = &saved["session"]["options"];
+                assert_eq!(saved["generated_media"], policy);
+                assert_eq!(saved["variations"], 2);
+                assert_eq!(saved["platforms"], serde_json::json!(["phone"]));
+                assert_eq!(saved["color_mode"], "dark");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn simultaneous_option_saves_cannot_overwrite_paid_consent() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "talk").await;
+        for (previous, policy) in [("none", "supporting"), ("supporting", "none")] {
+            save_generated_media(&application, previous).await;
+            let stale = serde_json::json!({"generated_media": previous, "variations": 3, "platforms": ["phone"]}).to_string();
+            let (_, (status, body)) = tokio::join!(
+                save_generated_media(&application, policy),
+                send(
+                    application.clone(),
+                    "PUT",
+                    "/sessions/talk/options",
+                    Some(&stale)
+                ),
+            );
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+            let saved = view(&application, "talk").await;
+            assert_eq!(saved["session"]["options"]["generated_media"], policy);
+            assert_eq!(saved["session"]["options"]["variations"], 3);
+            assert_eq!(
+                saved["session"]["options"]["platforms"],
+                serde_json::json!(["phone"])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn generated_media_is_accepted_in_every_state_except_generating() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "talk").await;
+        let sessions = SessionStore::new(directory.path().join("data/sessions"));
+        for event in [
+            None,
+            Some(WorkflowEvent::QuestionsAsked),
+            Some(WorkflowEvent::GenerationStarted),
+            Some(WorkflowEvent::GenerationSucceeded),
+            Some(WorkflowEvent::RunStopped),
+            Some(WorkflowEvent::Recovered {
+                to: WorkflowState::Reviewing,
+            }),
+            Some(WorkflowEvent::RunFailed),
+        ] {
+            if let Some(event) = event {
+                sessions.apply("talk", event).await.unwrap();
+            }
+            let before = view(&application, "talk").await;
+            let is_generating = before["session"]["state"] == "generating";
+            let expected = if is_generating {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::NO_CONTENT
+            };
+            for value in ["none", "supporting", "raster_first"] {
+                let body = serde_json::json!({"value": value}).to_string();
+                let (status, body) = send(
+                    application.clone(),
+                    "PUT",
+                    "/sessions/talk/options/generated-media",
+                    Some(&body),
+                )
+                .await;
+                assert_eq!(status, expected, "{body}");
+            }
+            if is_generating {
+                let (status, _) = send(
+                    application.clone(),
+                    "PUT",
+                    "/sessions/talk/options",
+                    Some(r#"{"generated_media":"none","color_mode":"dark"}"#),
+                )
+                .await;
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(
+                    view(&application, "talk").await["session"]["options"],
+                    before["session"]["options"]
+                );
+            }
+        }
     }
 
     #[tokio::test]

@@ -278,7 +278,7 @@ impl GenerationEngine {
         let context = ArtifactRequest {
             effort: request.context.effort().to_owned(),
             label: format!("candidate {}", request.candidate_number),
-            media_scope: Some(request.context.media_scope.clone()),
+            media_scope: request.context.media_scope.clone(),
             parse: Box::new(parse_document),
             progress: Some(Arc::clone(progress)),
             live: Some(Arc::new(move |text: &str| {
@@ -465,7 +465,7 @@ impl GenerationEngine {
         let request = ArtifactRequest {
             effort,
             label,
-            media_scope: Some(context.media_scope.clone()),
+            media_scope: context.media_scope.clone(),
             parse: Box::new(move |content| {
                 crate::document_patch::apply_patch(
                     &original,
@@ -693,7 +693,7 @@ impl GenerationEngine {
         let request = ArtifactRequest {
             effort: context.effort().to_owned(),
             label: format!("continue chunk {}", position + 1),
-            media_scope: Some(context.media_scope.clone()),
+            media_scope: context.media_scope.clone(),
             parse: Box::new(move |content| apply_document_continuation(&original, content)),
             progress: None,
             live: Some(Arc::new(move |text: &str| {

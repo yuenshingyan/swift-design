@@ -238,6 +238,9 @@ pub struct StoredSettings {
     /// API key used only for image generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_api_key: Option<String>,
+    /// Chosen image model. None uses the configured default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_model: Option<String>,
     /// Login tokens, when the user authenticated with a login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<StoredOauth>,
@@ -448,6 +451,7 @@ pub fn routes() -> Router<crate::AppState> {
     Router::new()
         .route("/settings", get(get_settings).put(put_settings))
         .route("/settings/models", post(list_provider_models))
+        .route("/settings/image-models", post(list_image_models))
         .route("/settings/login/start", post(start_login))
         .route("/settings/login/complete", post(complete_login))
         .route(
@@ -474,6 +478,9 @@ struct SettingsRequest {
     /// Image API key update. Omitted preserves it and an empty value clears it.
     #[serde(default)]
     image_api_key: Option<String>,
+    /// Image model update. Omitted preserves it and empty resets the default.
+    #[serde(default)]
+    image_model: Option<String>,
 }
 
 /// Body of `POST /settings/login/complete`.
@@ -486,13 +493,25 @@ struct LoginCompleteRequest {
     model: Option<String>,
 }
 
-/// Applies the image key update semantics of `PUT /settings`.
-fn updated_image_api_key(requested: Option<String>, existing: Option<String>) -> Option<String> {
+/// Applies the optional image setting update semantics of `PUT /settings`.
+fn updated_image_setting(requested: Option<String>, existing: Option<String>) -> Option<String> {
     match requested {
         None => existing,
-        Some(key) if key.trim().is_empty() => None,
-        Some(key) => Some(key.trim().to_owned()),
+        Some(value) if value.trim().is_empty() => None,
+        Some(value) => Some(value.trim().to_owned()),
     }
+}
+
+/// Preserves image settings when a login replaces the text provider credentials.
+fn settings_after_login(
+    existing: Option<StoredSettings>,
+    mut choice: StoredSettings,
+) -> StoredSettings {
+    if let Some(existing) = existing {
+        choice.image_api_key = existing.image_api_key;
+        choice.image_model = existing.image_model;
+    }
+    choice
 }
 
 /// Returns the public image generation status without exposing its key.
@@ -501,9 +520,8 @@ fn image_generation_summary(current: Option<&StoredSettings>) -> serde_json::Val
         Some(settings) => crate::model_client::image_configuration_from_settings(settings),
         None => crate::model_client::image_configuration_from_environment(),
     };
-    let model = configuration
-        .as_ref()
-        .map(|configuration| configuration.model.clone())
+    let model = current
+        .map(crate::model_client::image_model_from_settings)
         .unwrap_or_else(crate::model_client::configured_image_model);
     serde_json::json!({
         "configured": configuration.is_some(),
@@ -567,11 +585,17 @@ async fn put_settings(
     let keeps_credentials = existing
         .as_ref()
         .is_some_and(|settings| settings.provider == provider.name);
-    let image_api_key = updated_image_api_key(
+    let image_api_key = updated_image_setting(
         request.image_api_key,
         existing
             .as_ref()
             .and_then(|settings| settings.image_api_key.clone()),
+    );
+    let image_model = updated_image_setting(
+        request.image_model,
+        existing
+            .as_ref()
+            .and_then(|settings| settings.image_model.clone()),
     );
     let settings = StoredSettings {
         provider: provider.name.to_owned(),
@@ -582,6 +606,7 @@ async fn put_settings(
                 .flatten()
         }),
         image_api_key,
+        image_model,
         oauth: if keeps_credentials {
             existing.and_then(|settings| settings.oauth)
         } else {
@@ -647,17 +672,19 @@ async fn complete_login(
         .model
         .filter(|model| !model.trim().is_empty())
         .unwrap_or_else(|| "claude-sonnet-5".to_owned());
-    let image_api_key = match store.read().await {
-        Ok(existing) => existing.and_then(|settings| settings.image_api_key),
+    let existing = match store.read().await {
+        Ok(existing) => existing,
         Err(error) => return api_error::internal_error(&error),
     };
-    let settings = StoredSettings {
-        provider: "anthropic".to_owned(),
-        model,
-        api_key: None,
-        image_api_key,
-        oauth: Some(oauth),
-    };
+    let settings = settings_after_login(
+        existing,
+        StoredSettings {
+            provider: "anthropic".to_owned(),
+            model,
+            oauth: Some(oauth),
+            ..StoredSettings::default()
+        },
+    );
     match store.write(&settings).await {
         Ok(()) => {
             notifier.notify();
@@ -695,6 +722,89 @@ struct ModelsRequest {
     /// API key to use. Falls back to the stored key for this provider.
     #[serde(default)]
     api_key: Option<String>,
+}
+
+/// Body of `POST /settings/image-models`.
+#[derive(Debug, Deserialize)]
+struct ImageModelsRequest {
+    /// Dedicated image key. Omitted uses the saved key or the environment.
+    #[serde(default)]
+    image_api_key: Option<String>,
+}
+
+/// The official OpenAI model-list endpoint, independent of generation URL overrides.
+const OPENAI_IMAGE_MODELS_URL: &str = "https://api.openai.com/v1/models";
+
+/// Selects only dedicated image credentials, never text keys or OAuth tokens.
+fn image_models_authentication(
+    requested: Option<&str>,
+    stored: Option<&StoredSettings>,
+    environment: Option<String>,
+) -> Result<ModelAuthentication, String> {
+    let saved = crate::model_client::resolved_image_api_key(
+        stored.and_then(|settings| settings.image_api_key.as_deref()),
+        environment,
+    );
+    crate::model_client::resolved_image_api_key(requested, saved)
+        .map(ModelAuthentication::ApiKey)
+        .ok_or_else(|| {
+            "enter an OpenAI image API key first; ChatGPT login cannot list image models".to_owned()
+        })
+}
+
+/// Lists compatible image models using only the dedicated image credentials.
+async fn list_image_models(
+    State(store): State<SettingsStore>,
+    Json(request): Json<ImageModelsRequest>,
+) -> Response {
+    let has_requested_key = request
+        .image_api_key
+        .as_deref()
+        .is_some_and(|key| !key.trim().is_empty());
+    let stored = if has_requested_key {
+        None
+    } else {
+        match store.read().await {
+            Ok(stored) => stored,
+            Err(error) => return api_error::internal_error(&error),
+        }
+    };
+    let authentication = image_models_authentication(
+        request.image_api_key.as_deref(),
+        stored.as_ref(),
+        crate::model_client::image_api_key_from_environment(),
+    );
+    let result = async {
+        let authentication = authentication?;
+        let client = models_client()?;
+        let models =
+            fetch_provider_models_at(&client, "openai", &authentication, OPENAI_IMAGE_MODELS_URL)
+                .await?;
+        compatible_image_models(models)
+    }
+    .await;
+    match result {
+        Ok(models) => Json(models).into_response(),
+        Err(message) => {
+            api_error::error_response(StatusCode::UNPROCESSABLE_ENTITY, &message, Vec::new())
+        }
+    }
+}
+
+/// Keeps only the GPT Image family supported by the current generation request.
+fn compatible_image_models(models: Vec<String>) -> Result<Vec<String>, String> {
+    let mut models: Vec<_> = models
+        .into_iter()
+        .filter(|id| id.starts_with("gpt-image-") && id.len() > "gpt-image-".len())
+        .collect();
+    models.sort();
+    models.dedup();
+    if models.is_empty() {
+        return Err(
+            "OpenAI returned no compatible GPT Image models for this image API key".to_owned(),
+        );
+    }
+    Ok(models)
 }
 
 /// Credentials for one provider-owned model-list request.
@@ -750,10 +860,7 @@ async fn fetch_provider_models(
     provider: &str,
     authentication: &ModelAuthentication,
 ) -> Result<Vec<String>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|_| "cannot prepare the model request".to_owned())?;
+    let client = models_client()?;
     let url = match (provider, authentication) {
         ("openai", ModelAuthentication::OAuth(_)) => chatgpt_models_url(),
         ("anthropic", _) => ANTHROPIC_MODELS_URL.to_owned(),
@@ -762,6 +869,15 @@ async fn fetch_provider_models(
             .replace("/chat/completions", "/models"),
     };
     fetch_provider_models_at(&client, provider, authentication, &url).await
+}
+
+/// Bounds model-list requests and refuses redirects away from the provider.
+fn models_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "cannot prepare the model request".to_owned())
 }
 
 /// Builds one authenticated provider-owned model-list request.
@@ -931,25 +1047,24 @@ async fn openrouter_login_callback(
             );
         }
     };
-    let (model, image_api_key) = match store.read().await {
-        Ok(Some(stored)) => {
-            let model = if stored.provider == "openrouter" {
-                stored.model
-            } else {
-                "google/gemini-2.5-flash".to_owned()
-            };
-            (model, stored.image_api_key)
-        }
-        Ok(None) => ("google/gemini-2.5-flash".to_owned(), None),
+    let existing = match store.read().await {
+        Ok(existing) => existing,
         Err(error) => return api_error::internal_error(&error),
     };
-    let settings = StoredSettings {
-        provider: "openrouter".to_owned(),
-        model,
-        api_key: Some(key),
-        image_api_key,
-        oauth: None,
-    };
+    let model = existing
+        .as_ref()
+        .filter(|stored| stored.provider == "openrouter")
+        .map(|stored| stored.model.clone())
+        .unwrap_or_else(|| "google/gemini-2.5-flash".to_owned());
+    let settings = settings_after_login(
+        existing,
+        StoredSettings {
+            provider: "openrouter".to_owned(),
+            model,
+            api_key: Some(key),
+            ..StoredSettings::default()
+        },
+    );
     match store.write(&settings).await {
         Ok(()) => {
             notifier.notify();
@@ -1158,25 +1273,22 @@ async fn run_openai_callback_listener(
         Some(code) if !code.is_empty() => match exchange_openai_code(&code, &verifier).await {
             Ok(oauth) => match store.read().await {
                 Ok(stored) => {
-                    let (model, image_api_key) = match stored {
-                        Some(stored) => {
-                            let model =
-                                if stored.provider == "openai" && !stored.model.trim().is_empty() {
-                                    stored.model
-                                } else {
-                                    CHATGPT_LOGIN_MODELS[0].to_owned()
-                                };
-                            (model, stored.image_api_key)
-                        }
-                        None => (CHATGPT_LOGIN_MODELS[0].to_owned(), None),
-                    };
-                    let settings = StoredSettings {
-                        provider: "openai".to_owned(),
-                        model,
-                        api_key: None,
-                        image_api_key,
-                        oauth: Some(oauth),
-                    };
+                    let model = stored
+                        .as_ref()
+                        .filter(|stored| {
+                            stored.provider == "openai" && !stored.model.trim().is_empty()
+                        })
+                        .map(|stored| stored.model.clone())
+                        .unwrap_or_else(|| CHATGPT_LOGIN_MODELS[0].to_owned());
+                    let settings = settings_after_login(
+                        stored,
+                        StoredSettings {
+                            provider: "openai".to_owned(),
+                            model,
+                            oauth: Some(oauth),
+                            ..StoredSettings::default()
+                        },
+                    );
                     match store.write(&settings).await {
                         Ok(()) => {
                             notifier.notify();
@@ -1186,7 +1298,7 @@ async fn run_openai_callback_listener(
                         Err(error) => Err(error.to_string()),
                     }
                 }
-                Err(error) => Err(format!("cannot preserve the image API key: {error}")),
+                Err(error) => Err(format!("cannot preserve image settings: {error}")),
             },
             Err(message) => Err(message),
         },
@@ -1225,11 +1337,13 @@ mod tests {
 
     use crate::events::ChangeNotifier;
     use crate::settings::{
-        CATALOG, ModelAuthentication, ModelsRequest, SettingsRequest, SettingsStore, StoredOauth,
-        StoredSettings, anthropic_authorize_url, base64_url_encode, chatgpt_models_url,
-        fetch_provider_models_at, image_generation_summary, is_login_expiring,
-        list_provider_models, parse_model_ids, pkce_pair, put_settings, unix_now_seconds,
-        updated_image_api_key,
+        CATALOG, ImageModelsRequest, ModelAuthentication, ModelsRequest, OPENAI_IMAGE_MODELS_URL,
+        SettingsRequest, SettingsStore, StoredOauth, StoredSettings, anthropic_authorize_url,
+        base64_url_encode, chatgpt_models_url, compatible_image_models, fetch_provider_models_at,
+        image_generation_summary, image_models_authentication, is_login_expiring,
+        list_image_models, list_provider_models, models_client, parse_model_ids, pkce_pair,
+        provider_models_request, put_settings, settings_after_login, unix_now_seconds,
+        updated_image_setting,
     };
 
     async fn fake_models_server(
@@ -1330,6 +1444,7 @@ mod tests {
             model: "llama3.1".to_owned(),
             api_key: None,
             image_api_key: None,
+            image_model: None,
             oauth: None,
         };
         assert_eq!(settings.auth_method(), "none");
@@ -1348,15 +1463,15 @@ mod tests {
     #[test]
     fn image_key_updates_preserve_replace_and_clear() {
         assert_eq!(
-            updated_image_api_key(None, Some("old".to_owned())).as_deref(),
+            updated_image_setting(None, Some("old".to_owned())).as_deref(),
             Some("old")
         );
         assert_eq!(
-            updated_image_api_key(Some(" new ".to_owned()), Some("old".to_owned())).as_deref(),
+            updated_image_setting(Some(" new ".to_owned()), Some("old".to_owned())).as_deref(),
             Some("new")
         );
         assert_eq!(
-            updated_image_api_key(Some("  ".to_owned()), Some("old".to_owned())),
+            updated_image_setting(Some("  ".to_owned()), Some("old".to_owned())),
             None
         );
     }
@@ -1374,6 +1489,7 @@ mod tests {
                 model: "llama3.1".to_owned(),
                 api_key: None,
                 image_api_key: Some("old".to_owned()),
+                image_model: Some("gpt-image-custom".to_owned()),
                 oauth: None,
             })
             .await
@@ -1391,10 +1507,15 @@ mod tests {
                     model: "llama3.1".to_owned(),
                     api_key: None,
                     image_api_key: requested,
+                    image_model: None,
                 }),
             )
             .await;
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(
+                store.read().await.unwrap().unwrap().image_model.as_deref(),
+                Some("gpt-image-custom")
+            );
             assert_eq!(
                 store
                     .read()
@@ -1415,6 +1536,7 @@ mod tests {
             model: "claude-sonnet-5".to_owned(),
             api_key: Some("chat-secret".to_owned()),
             image_api_key: Some("image-secret".to_owned()),
+            image_model: Some("gpt-image-custom".to_owned()),
             oauth: None,
         };
         let serialized = serde_json::to_string(&settings).unwrap();
@@ -1422,7 +1544,15 @@ mod tests {
         assert_eq!(restored.image_api_key.as_deref(), Some("image-secret"));
         let summary = image_generation_summary(Some(&restored));
         assert_eq!(summary["configured"], true);
-        assert_eq!(summary["model"], "gpt-image-1");
+        assert_eq!(summary["model"], "gpt-image-custom");
+        let without_key = StoredSettings {
+            image_api_key: None,
+            ..restored
+        };
+        assert_eq!(
+            image_generation_summary(Some(&without_key))["model"],
+            "gpt-image-custom"
+        );
         assert!(!summary.to_string().contains("image-secret"));
     }
 
@@ -1434,6 +1564,262 @@ mod tests {
         }))
         .unwrap();
         assert!(settings.image_api_key.is_none());
+        assert!(settings.image_model.is_none());
+    }
+
+    #[tokio::test]
+    async fn image_model_updates_survive_text_provider_changes_and_reset_to_default() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(
+            directory.path().join("settings.json"),
+            "127.0.0.1:3000".to_owned(),
+        );
+        store
+            .write(&StoredSettings {
+                provider: "openai".to_owned(),
+                model: "text-model".to_owned(),
+                image_api_key: Some("image-secret".to_owned()),
+                image_model: Some("gpt-image-saved".to_owned()),
+                oauth: Some(StoredOauth {
+                    access_token: "oauth-secret".to_owned(),
+                    refresh_token: "refresh-secret".to_owned(),
+                    expires_at_unix_seconds: u64::MAX,
+                    account_id: Some("account".to_owned()),
+                }),
+                ..StoredSettings::default()
+            })
+            .await
+            .unwrap();
+        for (provider, update, expected) in [
+            ("openai", None, Some("gpt-image-saved")),
+            ("ollama", None, Some("gpt-image-saved")),
+            (
+                "ollama",
+                Some(" gpt-image-custom "),
+                Some("gpt-image-custom"),
+            ),
+            ("ollama", Some("  "), None),
+        ] {
+            let response = put_settings(
+                State(store.clone()),
+                State(ChangeNotifier::new()),
+                Json(SettingsRequest {
+                    provider: provider.to_owned(),
+                    model: "new-text-model".to_owned(),
+                    api_key: None,
+                    image_api_key: None,
+                    image_model: update.map(str::to_owned),
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            let saved = store.read().await.unwrap().unwrap();
+            assert_eq!(saved.image_model.as_deref(), expected);
+            assert_eq!(saved.image_api_key.as_deref(), Some("image-secret"));
+            assert_eq!(saved.oauth.is_some(), provider == "openai");
+            let expected_model = expected
+                .map(str::to_owned)
+                .unwrap_or_else(crate::model_client::configured_image_model);
+            assert_eq!(
+                image_generation_summary(Some(&saved))["model"],
+                expected_model
+            );
+        }
+    }
+
+    #[test]
+    fn every_login_keeps_image_settings_while_replacing_text_credentials() {
+        for provider in ["anthropic", "openrouter", "openai"] {
+            let existing = StoredSettings {
+                provider: "old-provider".to_owned(),
+                model: "old-text-model".to_owned(),
+                api_key: Some("old-text-key".to_owned()),
+                image_api_key: Some("image-key".to_owned()),
+                image_model: Some("gpt-image-exact".to_owned()),
+                ..StoredSettings::default()
+            };
+            let choice = StoredSettings {
+                provider: provider.to_owned(),
+                model: "new-text-model".to_owned(),
+                api_key: (provider == "openrouter").then(|| "new-key".to_owned()),
+                oauth: (provider != "openrouter").then(|| StoredOauth {
+                    access_token: "new-access-token".to_owned(),
+                    refresh_token: "new-refresh-token".to_owned(),
+                    expires_at_unix_seconds: u64::MAX,
+                    account_id: Some("account".to_owned()),
+                }),
+                ..StoredSettings::default()
+            };
+            let fresh = settings_after_login(None, choice.clone());
+            assert!(fresh.image_model.is_none());
+            assert!(fresh.image_api_key.is_none());
+            let saved = settings_after_login(Some(existing), choice);
+            assert_eq!(saved.image_model.as_deref(), Some("gpt-image-exact"));
+            assert_eq!(saved.image_api_key.as_deref(), Some("image-key"));
+            assert_eq!(saved.provider, provider);
+            assert_eq!(saved.model, "new-text-model");
+            assert_eq!(saved.oauth.is_some(), provider != "openrouter");
+            assert_eq!(saved.api_key, fresh.api_key);
+        }
+    }
+
+    #[tokio::test]
+    async fn settings_routes_accept_image_model_updates_and_hide_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let application = crate::test_support::test_application(&directory);
+        let (status, _) = crate::test_support::send(application.clone(), "PUT", "/settings", Some(
+            r#"{"provider":"ollama","model":"text-model","image_api_key":"image-secret","image_model":" gpt-image-custom "}"#
+        )).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, body) =
+            crate::test_support::send(application.clone(), "GET", "/settings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            value["image_generation"],
+            serde_json::json!({"configured": true, "model": "gpt-image-custom"})
+        );
+        assert!(!body.contains("image-secret"));
+        let (status, body) = crate::test_support::send(
+            application,
+            "POST",
+            "/settings/image-models",
+            Some(r#"{"image_api_key":"invalid\nsecret"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!body.contains("secret"));
+        assert!(body.contains("request to openai failed"));
+    }
+
+    #[test]
+    fn settings_json_distinguishes_omitted_reset_and_selected_image_model() {
+        let mut value = serde_json::json!({"provider":"ollama", "model":"text-model"});
+        let request: SettingsRequest = serde_json::from_value(value.clone()).unwrap();
+        assert!(request.image_model.is_none());
+        assert!(request.image_api_key.is_none());
+        for model in ["", "gpt-image-exact"] {
+            value["image_model"] = serde_json::json!(model);
+            let request: SettingsRequest = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(request.image_model.as_deref(), Some(model));
+            assert!(request.image_api_key.is_none());
+        }
+    }
+
+    #[test]
+    fn image_models_filter_mixed_ids_and_report_no_compatible_models() {
+        let value = serde_json::json!({"data": [
+            {"id":"gpt-5"}, {"id":"dall-e-3"}, {"id":"gpt-image-1-mini"},
+            {"id":"gpt-image-1"}, {"id":"gpt-image-1"}, {"id":"chatgpt-image-latest"},
+            {"id":"gpt-image-"}, {"id":"vendor/gpt-image-1"}, {"id":"imagen-4"}
+        ]});
+        assert_eq!(
+            compatible_image_models(parse_model_ids(&value)).unwrap(),
+            ["gpt-image-1", "gpt-image-1-mini"]
+        );
+        let error = compatible_image_models(vec!["private-text-model".to_owned()]).unwrap_err();
+        assert!(error.contains("no compatible GPT Image models"));
+        assert!(!error.contains("private-text-model"));
+    }
+
+    #[test]
+    fn image_discovery_uses_only_dedicated_keys_in_priority_order() {
+        let mut stored = StoredSettings {
+            api_key: Some("text-secret".to_owned()),
+            oauth: Some(StoredOauth {
+                access_token: "oauth-secret".to_owned(),
+                refresh_token: "refresh".to_owned(),
+                expires_at_unix_seconds: u64::MAX,
+                account_id: Some("account".to_owned()),
+            }),
+            ..StoredSettings::default()
+        };
+        assert!(image_models_authentication(None, Some(&stored), None).is_err());
+        for (requested, saved, environment, expected) in [
+            (Some("typed"), Some("saved"), Some("environment"), "typed"),
+            (None, Some("saved"), Some("environment"), "saved"),
+            (Some("  "), None, Some("environment"), "environment"),
+        ] {
+            stored.image_api_key = saved.map(str::to_owned);
+            let authentication = image_models_authentication(
+                requested,
+                Some(&stored),
+                environment.map(str::to_owned),
+            )
+            .unwrap();
+            let request = provider_models_request(
+                &models_client().unwrap(),
+                "openai",
+                &authentication,
+                OPENAI_IMAGE_MODELS_URL,
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+            assert_eq!(request.url().as_str(), "https://api.openai.com/v1/models");
+            assert_eq!(
+                request.headers()["authorization"],
+                format!("Bearer {expected}")
+            );
+            assert!(!request.headers().contains_key("chatgpt-account-id"));
+            assert!(!request.headers().contains_key("openai-beta"));
+        }
+    }
+
+    #[tokio::test]
+    async fn image_model_route_uses_saved_or_typed_image_key_without_oauth() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(
+            directory.path().join("settings.json"),
+            "127.0.0.1:3000".to_owned(),
+        );
+        store
+            .write(&StoredSettings {
+                provider: "openai".to_owned(),
+                image_api_key: Some("invalid\nimage-key".to_owned()),
+                oauth: Some(StoredOauth {
+                    access_token: "oauth-secret".to_owned(),
+                    refresh_token: "refresh".to_owned(),
+                    expires_at_unix_seconds: u64::MAX,
+                    account_id: Some("account".to_owned()),
+                }),
+                ..StoredSettings::default()
+            })
+            .await
+            .unwrap();
+        // Invalid header bytes fail locally. OAuth would instead make a network request.
+        for image_api_key in [None, Some("typed\nsecret".to_owned())] {
+            let response = list_image_models(
+                State(store.clone()),
+                Json(ImageModelsRequest { image_api_key }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["error"]["message"], "request to openai failed");
+        }
+    }
+
+    #[tokio::test]
+    async fn live_image_discovery_filters_the_official_response_shape() {
+        let (url, request_task) = fake_models_server(
+            "/v1/models",
+            "200 OK",
+            r#"{"data":[{"id":"gpt-5"},{"id":"gpt-image-1"},{"id":"dall-e-3"}]}"#,
+        )
+        .await;
+        let authentication = image_models_authentication(Some("image-key"), None, None).unwrap();
+        let models =
+            fetch_provider_models_at(&models_client().unwrap(), "openai", &authentication, &url)
+                .await
+                .unwrap();
+        assert_eq!(compatible_image_models(models).unwrap(), ["gpt-image-1"]);
+        let request = request_task.await.unwrap().to_ascii_lowercase();
+        assert!(request.contains("authorization: bearer image-key\r\n"));
+        assert!(!request.contains("chatgpt-account-id"));
     }
 
     #[test]

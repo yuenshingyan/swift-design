@@ -200,6 +200,12 @@ pub struct SessionOptions {
     /// Light or dark, one of `COLOR_MODES`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_mode: Option<String>,
+    /// Which generated images the run may use. Defaults to no generated images.
+    #[serde(
+        default = "default_generated_media",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub generated_media: Option<String>,
     /// What kind of product a demo shows, one of `PRODUCT_KINDS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_kind: Option<String>,
@@ -306,6 +312,7 @@ impl Default for SessionOptions {
             tone: None,
             scope: None,
             color_mode: None,
+            generated_media: default_generated_media(),
             product_kind: None,
             data_state: None,
             fidelity: None,
@@ -335,6 +342,11 @@ impl Default for SessionOptions {
             suggested: Vec::new(),
         }
     }
+}
+
+/// The safe default for new sessions and responses without a media policy.
+fn default_generated_media() -> Option<String> {
+    Some("none".to_owned())
 }
 
 impl SessionOptions {
@@ -564,7 +576,7 @@ pub async fn send_session_answers(
         .map(|_| ())
 }
 
-/// Replaces the run options of one session. The server rejects a
+/// Replaces the run options except paid-media consent. The server rejects a
 /// variation count outside 1 to `VARIATION_LIMIT`, and any change while
 /// the session generates.
 pub async fn save_session_options(id: &str, options: &SessionOptions) -> Result<(), String> {
@@ -574,6 +586,24 @@ pub async fn save_session_options(id: &str, options: &SessionOptions) -> Result<
     send_checked(builder, "PUT /sessions/{id}/options")
         .await
         .map(|_| ())
+}
+
+/// The targeted paid-media consent body contains no other options.
+fn generated_media_policy_body(value: &str) -> HashMap<&str, &str> {
+    HashMap::from([("value", value)])
+}
+
+fn generated_media_policy_path(id: &str) -> String {
+    format!("/sessions/{id}/options/generated-media")
+}
+
+/// Saves only paid-media consent. The server rejects changes during generation.
+pub async fn save_generated_media_policy(id: &str, value: &str) -> Result<(), String> {
+    let builder = Request::put(&generated_media_policy_path(id))
+        .json(&generated_media_policy_body(value))
+        .map_err(|error| error.to_string())?;
+    let response = send_checked(builder, "PUT /sessions/{id}/options/generated-media").await;
+    response.map(|_| ())
 }
 
 /// Writes candidates now, without more questions.
@@ -2025,30 +2055,27 @@ pub async fn fetch_settings() -> Result<SettingsView, String> {
 
 /// Body of `PUT /settings`.
 #[derive(Debug, Serialize)]
-struct SettingsRequest<'value> {
-    provider: &'value str,
-    model: &'value str,
+pub struct SettingsRequest<'value> {
+    /// Text provider name.
+    pub provider: &'value str,
+    /// Text model id.
+    pub model: &'value str,
+    /// Text credentials. Omitted preserves credentials for the same provider.
     #[serde(skip_serializing_if = "Option::is_none")]
-    api_key: Option<&'value str>,
+    pub api_key: Option<&'value str>,
+    /// Image key update. Omitted preserves it; empty clears it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    image_api_key: Option<&'value str>,
+    pub image_api_key: Option<&'value str>,
+    /// Image model update. Omitted preserves it; empty resets the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_model: Option<&'value str>,
 }
 
 /// Saves the model choice with optional chat and image API key updates.
 /// An omitted image key preserves it, and an empty image key clears it.
-pub async fn save_settings(
-    provider: &str,
-    model: &str,
-    api_key: Option<&str>,
-    image_api_key: Option<&str>,
-) -> Result<(), String> {
+pub async fn save_settings(request: &SettingsRequest<'_>) -> Result<(), String> {
     let builder = Request::put("/settings")
-        .json(&SettingsRequest {
-            provider,
-            model,
-            api_key,
-            image_api_key,
-        })
+        .json(request)
         .map_err(|error| error.to_string())?;
     send_checked(builder, "PUT /settings").await.map(|_| ())
 }
@@ -2069,6 +2096,22 @@ pub async fn fetch_provider_models(
         .json(&ModelsRequest { provider, api_key })
         .map_err(|error| error.to_string())?;
     let response = send_checked(builder, "POST /settings/models").await?;
+    response.json().await.map_err(|error| error.to_string())
+}
+
+/// Body of `POST /settings/image-models`.
+#[derive(Debug, Serialize)]
+struct ImageModelsRequest<'value> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_api_key: Option<&'value str>,
+}
+
+/// Lists compatible image models directly from OpenAI with dedicated image credentials.
+pub async fn fetch_image_models(image_api_key: Option<&str>) -> Result<Vec<String>, String> {
+    let builder = Request::post("/settings/image-models")
+        .json(&ImageModelsRequest { image_api_key })
+        .map_err(|error| error.to_string())?;
+    let response = send_checked(builder, "POST /settings/image-models").await?;
     response.json().await.map_err(|error| error.to_string())
 }
 
@@ -2124,7 +2167,46 @@ pub async fn complete_login(code: &str, model: Option<&str>) -> Result<(), Strin
 mod tests {
     use design_model::{Format, STORY_VIEWPORT};
 
-    use crate::api::{SessionOptions, SocialSummary, VARIATION_LIMIT};
+    use crate::api::{
+        ImageModelsRequest, SessionOptions, SettingsRequest, SocialSummary, VARIATION_LIMIT,
+        generated_media_policy_body, generated_media_policy_path,
+    };
+
+    #[test]
+    fn settings_requests_keep_image_updates_separate_and_tri_state() {
+        let mut request = SettingsRequest {
+            provider: "openai",
+            model: "text-model",
+            api_key: None,
+            image_api_key: None,
+            image_model: None,
+        };
+        assert_eq!(request.image_api_key, None);
+        assert_eq!(request.image_model, None);
+        for value in ["", "gpt-image-exact"] {
+            request.image_model = Some(value);
+            assert_eq!(request.image_model, Some(value));
+            assert_eq!(request.image_api_key, None);
+            assert_eq!(request.model, "text-model");
+        }
+        for value in ["", "image-secret"] {
+            request.image_api_key = Some(value);
+            assert_eq!(request.image_api_key, Some(value));
+            assert_eq!(request.image_model, Some("gpt-image-exact"));
+        }
+    }
+
+    #[test]
+    fn image_discovery_requests_never_include_text_credentials_or_models() {
+        let saved = ImageModelsRequest {
+            image_api_key: None,
+        };
+        let typed = ImageModelsRequest {
+            image_api_key: Some("image-key"),
+        };
+        assert_eq!(saved.image_api_key, None);
+        assert_eq!(typed.image_api_key, Some("image-key"));
+    }
 
     #[test]
     fn a_social_summary_takes_its_canvas_from_the_format() {
@@ -2147,6 +2229,27 @@ mod tests {
         };
         assert!(!finished.is_preview());
         assert!(!finished.is_unfinished());
+    }
+
+    #[test]
+    fn generated_media_policy_uses_the_targeted_route_and_value_only_body() {
+        assert_eq!(
+            generated_media_policy_path("talk"),
+            "/sessions/talk/options/generated-media"
+        );
+        for value in ["none", "supporting", "raster_first"] {
+            let body = generated_media_policy_body(value);
+            assert_eq!(body.len(), 1);
+            assert_eq!(body.get("value"), Some(&value));
+        }
+    }
+
+    #[test]
+    fn generated_media_starts_disabled() {
+        assert_eq!(
+            SessionOptions::default().generated_media.as_deref(),
+            Some("none")
+        );
     }
 
     #[test]

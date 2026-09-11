@@ -195,11 +195,10 @@ pub(crate) fn provider_chat_url(name: &str) -> Option<&'static str> {
 }
 
 /// Builds an image configuration from one API key.
-fn image_configuration(api_key: String) -> ImageConfiguration {
+fn image_configuration(api_key: String, model: String) -> ImageConfiguration {
     let url = std::env::var("SWIFT_DESIGN_IMAGE_API_URL")
         .or_else(|_| std::env::var("SWIFT_DESIGN_IMAGE_URL"))
         .unwrap_or_else(|_| DEFAULT_IMAGE_API_URL.to_owned());
-    let model = configured_image_model();
     ImageConfiguration {
         url,
         model,
@@ -213,7 +212,10 @@ pub(crate) fn configured_image_model() -> String {
 }
 
 /// Chooses only a dedicated stored or environment image key.
-fn resolved_image_api_key(stored: Option<&str>, environment: Option<String>) -> Option<String> {
+pub(crate) fn resolved_image_api_key(
+    stored: Option<&str>,
+    environment: Option<String>,
+) -> Option<String> {
     stored
         .filter(|key| !key.trim().is_empty())
         .map(str::to_owned)
@@ -221,14 +223,22 @@ fn resolved_image_api_key(stored: Option<&str>, environment: Option<String>) -> 
 }
 
 /// Reads the dedicated image API key from the environment.
-fn image_api_key_from_environment() -> Option<String> {
+pub(crate) fn image_api_key_from_environment() -> Option<String> {
     std::env::var("SWIFT_DESIGN_IMAGE_API_KEY").ok()
 }
 
 /// Reads the image configuration from environment variables.
 pub(crate) fn image_configuration_from_environment() -> Option<ImageConfiguration> {
     let api_key = resolved_image_api_key(None, image_api_key_from_environment())?;
-    Some(image_configuration(api_key))
+    Some(image_configuration(api_key, configured_image_model()))
+}
+
+/// Returns the stored image model, or the configured default without requiring a key.
+pub(crate) fn image_model_from_settings(settings: &crate::settings::StoredSettings) -> String {
+    settings
+        .image_model
+        .clone()
+        .unwrap_or_else(configured_image_model)
 }
 
 /// Reads the image configuration from stored settings.
@@ -239,7 +249,10 @@ pub(crate) fn image_configuration_from_settings(
         settings.image_api_key.as_deref(),
         image_api_key_from_environment(),
     )?;
-    Some(image_configuration(api_key))
+    Some(image_configuration(
+        api_key,
+        image_model_from_settings(settings),
+    ))
 }
 
 /// Reads the model configuration from the environment. `None` when the
@@ -340,6 +353,16 @@ pub fn configuration_from_settings(
         model: settings.model.clone(),
         image: image_configuration_from_settings(settings),
     })
+}
+
+/// Resolves text settings with a fallback. Keep image settings independent of text credentials.
+pub(crate) fn configuration_with_fallback(
+    settings: &crate::settings::StoredSettings,
+    fallback: impl FnOnce() -> Option<ModelConfiguration>,
+) -> Option<ModelConfiguration> {
+    let mut configuration = configuration_from_settings(settings).or_else(fallback)?;
+    configuration.image = image_configuration_from_settings(settings);
+    Some(configuration)
 }
 
 /// Token counts of one model request, as the provider reported them.
@@ -1121,7 +1144,7 @@ mod tests {
     use axum::routing::post;
     use base64::Engine;
 
-    use crate::settings::StoredSettings;
+    use crate::settings::{StoredOauth, StoredSettings};
 
     use super::{
         ChatFailure, ImageConfiguration, ImageShape, ModelClient, ModelConfiguration, ProviderAuth,
@@ -1279,6 +1302,7 @@ mod tests {
             model: "gpt-5.4-mini".to_owned(),
             api_key: Some("text-platform-key".to_owned()),
             image_api_key: None,
+            image_model: None,
             oauth: None,
         };
         let expected_environment_key =
@@ -1299,6 +1323,121 @@ mod tests {
                 .api_key,
             "stored-image-key"
         );
+    }
+
+    #[test]
+    fn image_model_resolution_is_separate_from_text_and_falls_back_to_configuration() {
+        let mut settings = StoredSettings {
+            provider: "openai".to_owned(),
+            model: "gpt-text".to_owned(),
+            api_key: Some("text-key".to_owned()),
+            image_api_key: Some("image-key".to_owned()),
+            ..StoredSettings::default()
+        };
+        let configuration = configuration_from_settings(&settings).unwrap();
+        assert_eq!(
+            configuration.image.unwrap().model,
+            super::configured_image_model()
+        );
+        settings.image_model = Some("gpt-image-custom".to_owned());
+        let configuration = configuration_from_settings(&settings).unwrap();
+        assert_eq!(configuration.model, "gpt-text");
+        assert_eq!(configuration.image.unwrap().model, "gpt-image-custom");
+        settings.image_api_key = None;
+        assert_eq!(
+            super::image_model_from_settings(&settings),
+            "gpt-image-custom"
+        );
+    }
+
+    #[test]
+    fn fallback_text_configuration_keeps_stored_image_credentials_and_model() {
+        let settings = StoredSettings {
+            provider: "openai".to_owned(),
+            model: "stored-text".to_owned(),
+            image_api_key: Some("stored-image-key".to_owned()),
+            image_model: Some("gpt-image-custom".to_owned()),
+            ..StoredSettings::default()
+        };
+        assert!(configuration_from_settings(&settings).is_none());
+        // Inject the environment boundary instead of mutating process-global variables.
+        let configuration = super::configuration_with_fallback(&settings, || {
+            Some(ModelConfiguration {
+                provider: "environment-provider".to_owned(),
+                chat_url: "https://example.com/chat".to_owned(),
+                auth: ProviderAuth::ApiKey("environment-text-key".to_owned()),
+                wire: WireFormat::OpenAiChat,
+                model: "environment-text".to_owned(),
+                image: None,
+            })
+        })
+        .unwrap();
+        assert_eq!(configuration.provider, "environment-provider");
+        assert_eq!(configuration.chat_url, "https://example.com/chat");
+        assert_eq!(configuration.model, "environment-text");
+        assert!(matches!(configuration.wire, WireFormat::OpenAiChat));
+        assert!(
+            matches!(configuration.auth, ProviderAuth::ApiKey(key) if key == "environment-text-key")
+        );
+        let image = configuration.image.unwrap();
+        assert_eq!(image.api_key, "stored-image-key");
+        assert_eq!(image.model, "gpt-image-custom");
+    }
+
+    #[test]
+    fn stored_text_configuration_does_not_call_the_fallback() {
+        let settings = StoredSettings {
+            provider: "openai".to_owned(),
+            model: "stored-text".to_owned(),
+            api_key: Some("stored-text-key".to_owned()),
+            image_api_key: Some("stored-image-key".to_owned()),
+            image_model: Some("gpt-image-custom".to_owned()),
+            ..StoredSettings::default()
+        };
+        let configuration = super::configuration_with_fallback(&settings, || {
+            panic!("usable stored text credentials must not fall back")
+        })
+        .unwrap();
+        assert_eq!(configuration.model, "stored-text");
+        assert_eq!(configuration.image.unwrap().model, "gpt-image-custom");
+    }
+
+    #[test]
+    fn oauth_text_credentials_never_supply_image_authentication() {
+        for provider in ["openai", "anthropic"] {
+            let mut settings = StoredSettings {
+                provider: provider.to_owned(),
+                model: "login-text".to_owned(),
+                image_model: Some("gpt-image-custom".to_owned()),
+                oauth: Some(StoredOauth {
+                    access_token: "oauth-access-token".to_owned(),
+                    refresh_token: "oauth-refresh-token".to_owned(),
+                    expires_at_unix_seconds: u64::MAX,
+                    account_id: Some("account".to_owned()),
+                }),
+                ..StoredSettings::default()
+            };
+            let configuration = super::configuration_with_fallback(&settings, || None).unwrap();
+            assert_eq!(
+                configuration.image.map(|image| image.api_key),
+                image_api_key_from_environment().filter(|key| !key.trim().is_empty())
+            );
+            settings.image_api_key = Some("dedicated-image-key".to_owned());
+            let configuration = super::configuration_with_fallback(&settings, || None).unwrap();
+            let image = configuration.image.unwrap();
+            assert_eq!(image.api_key, "dedicated-image-key");
+            assert_eq!(image.model, "gpt-image-custom");
+        }
+    }
+
+    #[test]
+    fn image_settings_alone_do_not_supply_text_credentials() {
+        let settings = StoredSettings {
+            provider: "openai".to_owned(),
+            image_api_key: Some("stored-image-key".to_owned()),
+            ..StoredSettings::default()
+        };
+        assert!(super::configuration_with_fallback(&settings, || None).is_none());
     }
 
     #[tokio::test]

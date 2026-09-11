@@ -9,7 +9,9 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use design_model::{BriefQuestionSet, Design, QuestionSetError, validate_question_set};
+use design_model::{
+    ArtifactKind, BriefQuestionSet, Design, QuestionSetError, validate_question_set,
+};
 
 use crate::candidates::{candidate_id, next_candidate_number};
 use crate::concepts::{Concept, concept_input, concept_note, concept_prompt, parse_concepts};
@@ -98,21 +100,56 @@ pub(crate) enum GenerationTask {
 /// Maximum generated rasters across one run.
 const GENERATED_RASTER_BUDGET: usize = 3;
 
-/// The shared owner, budget, and batch gate for generated media in one run.
+/// The shared owner, policy, budget, and batch gate for generated media in one run.
 #[derive(Clone)]
 pub(crate) struct MediaScope {
     owner: String,
+    kind: ArtifactKind,
+    policy: &'static str,
     remaining: Arc<std::sync::atomic::AtomicUsize>,
     batch_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl MediaScope {
-    /// Creates a full generated-raster budget for one upload owner.
-    fn new(owner: &str) -> Self {
-        Self {
+    /// Creates a shared budget only when this run permits generated media.
+    fn new(owner: &str, kind: ArtifactKind, options: &RunOptions) -> Option<Self> {
+        let policy = options.generated_media_policy();
+        if !matches!(policy, "supporting" | "raster_first") {
+            return None;
+        }
+        Some(Self {
             owner: owner.to_owned(),
+            kind,
+            policy,
             remaining: Arc::new(std::sync::atomic::AtomicUsize::new(GENERATED_RASTER_BUDGET)),
             batch_gate: Arc::new(tokio::sync::Mutex::new(())),
+        })
+    }
+
+    /// Gives the composition limits for this run's policy and artifact kind.
+    fn instruction(&self) -> &'static str {
+        if self.policy == "supporting" {
+            return "The run chose generated_media: supporting. Generate supporting photos, illustrations, or textures only. Do not generate a full-canvas raster composition. Keep important text and layout in HTML or SVG.";
+        }
+        match self.kind {
+            ArtifactKind::Social
+            | ArtifactKind::Print
+            | ArtifactKind::Campaign
+            | ArtifactKind::Artwork => {
+                "The run chose generated_media: raster_first. You may generate a full-canvas raster composition for this kind. Use an exact generated-media path in an <img> that fills the canvas. Keep important text in HTML or SVG unless the request requires raster text."
+            }
+            ArtifactKind::Demo => {
+                "The run chose generated_media: raster_first. Raster may support the composition, but HTML/SVG remains primary because interaction matters. Do not generate a full-canvas raster composition. Keep controls and important text in HTML or SVG."
+            }
+            ArtifactKind::Deck => {
+                "The run chose generated_media: raster_first. Raster may support the composition, but HTML/SVG remains primary because editable text matters. Do not generate a full-canvas raster composition. Keep important text and layout in HTML or SVG."
+            }
+            ArtifactKind::Document => {
+                "The run chose generated_media: raster_first. Raster may support the composition, but HTML/SVG remains primary because editable text and DOCX compatibility matter. Do not generate a full-canvas raster composition. DOCX export omits inline SVG. Keep important text and layout in HTML when Word export matters."
+            }
+            ArtifactKind::Mailing => {
+                "The run chose generated_media: raster_first. Raster may support the composition, but HTML/SVG remains primary because email compatibility matters. Do not generate a full-canvas raster composition. Email clients do not reliably show inline SVG or data URI images. Keep important text and layout in HTML with hosted raster images when email-client HTML export matters."
+            }
         }
     }
 
@@ -137,7 +174,7 @@ pub(crate) struct GenerationContext {
     pub(crate) request: SessionRequest,
     pub(crate) options: RunOptions,
     pub(crate) session_id: String,
-    pub(crate) media_scope: MediaScope,
+    pub(crate) media_scope: Option<MediaScope>,
 }
 
 impl GenerationContext {
@@ -632,7 +669,7 @@ impl GenerationEngine {
             },
             options: session.options.clone(),
             session_id: session_id.to_owned(),
-            media_scope: MediaScope::new(session_id),
+            media_scope: MediaScope::new(session_id, session.artifact_kind, &session.options),
         };
         let run_id = self
             .sessions
@@ -1587,7 +1624,7 @@ impl GenerationEngine {
         let request = ArtifactRequest {
             effort,
             label,
-            media_scope: Some(context.media_scope.clone()),
+            media_scope: context.media_scope.clone(),
             parse: Box::new(move |content| {
                 crate::patch::apply_patch(&original, crate::patch::parse_patch(content)?)
             }),
@@ -1868,7 +1905,7 @@ impl GenerationEngine {
                 let request = ArtifactRequest {
                     effort: context.effort().to_owned(),
                     label: format!("{label} chunk {}", position + 1),
-                    media_scope: Some(context.media_scope.clone()),
+                    media_scope: context.media_scope.clone(),
                     parse: Box::new(move |content| apply_continuation(&original, content)),
                     progress: None,
                     live: Some(Arc::new(move |text: &str| {
@@ -2221,7 +2258,7 @@ impl GenerationEngine {
         let context = ArtifactRequest {
             effort: request.context.effort().to_owned(),
             label: format!("candidate {}", request.candidate_number),
-            media_scope: Some(request.context.media_scope.clone()),
+            media_scope: request.context.media_scope.clone(),
             parse: Box::new(parse_design),
             progress: Some(Arc::clone(progress)),
             live: Some(Arc::new(move |text: &str| {
@@ -2266,8 +2303,8 @@ impl GenerationEngine {
             .media_scope
             .as_ref()
             .filter(|_| self.uploads.is_some() && self.model.can_generate_images());
-        if media_scope.is_some() {
-            append_media_capability(&mut messages);
+        if let Some(scope) = media_scope {
+            append_media_capability(&mut messages, scope);
         }
         let mut round = 0usize;
         let mut has_generated_assets = false;
@@ -3064,7 +3101,7 @@ enum RasterAssetRequestParse {
 }
 
 /// Appends the generated-media protocol to the existing system content.
-fn append_media_capability(messages: &mut [serde_json::Value]) {
+fn append_media_capability(messages: &mut [serde_json::Value], scope: &MediaScope) {
     let Some(content) = messages
         .iter_mut()
         .find(|message| message["role"] == "system")
@@ -3073,7 +3110,7 @@ fn append_media_capability(messages: &mut [serde_json::Value]) {
     else {
         return;
     };
-    let extended = format!("{content}\n{MEDIA_CAPABILITY}");
+    let extended = format!("{content}\n{MEDIA_CAPABILITY}\n{}", scope.instruction());
     if let Some(system) = messages
         .iter_mut()
         .find(|message| message["role"] == "system")
@@ -3291,8 +3328,8 @@ impl Validated for design_model::Artwork {
 pub(crate) struct ArtifactRequest<'request, T> {
     pub(crate) effort: String,
     pub(crate) label: String,
-    /// The run scope that may own one generated-media batch. `None` for
-    /// polish and fix work, which must not start paid generation.
+    /// The run scope that may own one generated-media batch. `None` when
+    /// the run disables generated media, and for polish and fix work.
     pub(crate) media_scope: Option<MediaScope>,
     pub(crate) parse: ReplyParser<'request, T>,
     /// Where this request reports its share of the turn: `DRAFT_SHARE`
@@ -3706,7 +3743,7 @@ fn parse_design(content: &str) -> Result<Design, String> {
 mod tests {
     use std::sync::Arc;
 
-    use design_model::WorkflowState;
+    use design_model::{ArtifactKind, WorkflowState};
 
     use super::edit_targets;
 
@@ -3723,7 +3760,7 @@ mod tests {
     use crate::events::ChangeNotifier;
     use crate::model_client::LogSink;
     use crate::request::SessionRequest;
-    use crate::sessions::{ChatMessage, NewSession, SessionStore};
+    use crate::sessions::{ChatMessage, NewSession, RunOptions, SessionStore};
     use crate::test_support::{FakeModelServer, SAMPLE_DESIGN, low_effort_options};
 
     /// The planner reply that writes candidates.
@@ -3862,9 +3899,75 @@ mod tests {
         ));
     }
 
+    fn enabled_media_scope(kind: ArtifactKind, policy: &str) -> MediaScope {
+        let options = RunOptions {
+            generated_media: Some(policy.to_owned()),
+            ..RunOptions::default()
+        };
+        MediaScope::new("talk", kind, &options).unwrap()
+    }
+
+    #[test]
+    fn disabled_media_policies_never_create_a_scope() {
+        for kind in ArtifactKind::ALL {
+            assert!(MediaScope::new("talk", kind, &RunOptions::default()).is_none());
+            for policy in [None, Some("none"), Some(""), Some("unknown")] {
+                let options = RunOptions {
+                    generated_media: policy.map(str::to_owned),
+                    ..RunOptions::default()
+                };
+                assert!(MediaScope::new("talk", kind, &options).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn supporting_media_forbids_full_canvas_raster_for_every_kind() {
+        for kind in ArtifactKind::ALL {
+            let scope = enabled_media_scope(kind, "supporting");
+            let mut messages = vec![serde_json::json!({"role": "system", "content": "Rules."})];
+            append_media_capability(&mut messages, &scope);
+            let instruction = messages[0]["content"].as_str().unwrap();
+            assert!(instruction.contains("asset_requests"));
+            assert!(instruction.contains("generated_media: supporting"));
+            assert!(instruction.contains("supporting photos, illustrations, or textures only"));
+            assert!(instruction.contains("Do not generate a full-canvas raster composition"));
+            assert!(instruction.contains("Keep important text and layout in HTML or SVG"));
+        }
+    }
+
+    #[test]
+    fn raster_first_guidance_depends_on_the_artifact_kind() {
+        for kind in ArtifactKind::ALL {
+            let scope = enabled_media_scope(kind, "raster_first");
+            let mut messages = vec![serde_json::json!({"role": "system", "content": "Rules."})];
+            append_media_capability(&mut messages, &scope);
+            let instruction = messages[0]["content"].as_str().unwrap();
+            assert!(instruction.contains("asset_requests"));
+            assert!(instruction.contains("generated_media: raster_first"));
+            let reason = match kind {
+                ArtifactKind::Demo => "interaction matters",
+                ArtifactKind::Deck => "editable text matters",
+                ArtifactKind::Document => "DOCX compatibility",
+                ArtifactKind::Mailing => "email compatibility",
+                _ => {
+                    assert!(
+                        instruction.contains("You may generate a full-canvas raster composition")
+                    );
+                    assert!(!instruction.contains("Do not generate a full-canvas"));
+                    continue;
+                }
+            };
+            assert!(instruction.contains(reason));
+            assert!(instruction.contains("Raster may support the composition"));
+            assert!(instruction.contains("HTML/SVG remains primary"));
+            assert!(instruction.contains("Do not generate a full-canvas raster composition"));
+        }
+    }
+
     #[test]
     fn cloned_media_scopes_share_the_run_wide_budget() {
-        let scope = MediaScope::new("talk");
+        let scope = enabled_media_scope(ArtifactKind::Demo, "supporting");
         let second_request = scope.clone();
         assert!(Arc::ptr_eq(&scope.remaining, &second_request.remaining));
         assert!(Arc::ptr_eq(&scope.batch_gate, &second_request.batch_gate));
@@ -3881,7 +3984,8 @@ mod tests {
             serde_json::json!({ "role": "system", "content": "Original rules." }),
             serde_json::json!({ "role": "user", "content": "Build it." }),
         ];
-        append_media_capability(&mut messages);
+        let scope = enabled_media_scope(ArtifactKind::Demo, "supporting");
+        append_media_capability(&mut messages, &scope);
         let system = messages[0]["content"].as_str().unwrap();
         assert!(system.starts_with("Original rules.\n"));
         assert!(system.contains(r#"{"asset_requests":[{"name":"short-kebab-name"#));
@@ -3923,6 +4027,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_default_run_never_advertises_or_calls_images_with_a_configured_key() {
+        let server = FakeModelServer::start().await;
+        let images = FakeModelServer::start().await;
+        server.push_text(WRITE_PLAN);
+        server.push_text(
+            r#"{"asset_requests":[{"name":"hero","prompt":"A harbor","shape":"landscape"}]}"#,
+        );
+        server.push_text(SAMPLE_DESIGN);
+        server.push_text(r#"{"screens":[]}"#);
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let uploads = crate::uploads::UploadStore::new(directory.path().join("uploads"));
+        set_up_session(&sessions, "A landing page.").await;
+        let mut configuration = server.configuration();
+        configuration.image = Some(crate::model_client::ImageConfiguration {
+            url: images.configuration().chat_url,
+            model: "unused-image".to_owned(),
+            api_key: "configured-key".to_owned(),
+        });
+        let engine = GenerationEngine::new(
+            configuration,
+            designs,
+            sessions,
+            None,
+            "http://127.0.0.1:3000".to_owned(),
+            ChangeNotifier::new(),
+        )
+        .with_uploads(uploads.clone());
+        let result = engine.run("talk", silent_log()).await.unwrap();
+        assert!(matches!(result, GenerationOutcome::Wrote { .. }));
+        assert!(images.requests().is_empty());
+        assert!(uploads.list("talk").await.unwrap().is_empty());
+        let requests = server.requests();
+        assert!(requests.len() >= 3);
+        for request in requests {
+            let system = request["messages"][0]["content"].as_str().unwrap();
+            assert!(!system.contains("Image generation is available"));
+            assert!(!system.contains("asset_requests"));
+        }
+    }
+
+    #[tokio::test]
     async fn malformed_asset_requests_retry_without_generating() {
         let server = FakeModelServer::start().await;
         for _ in 0..3 {
@@ -3950,7 +4097,7 @@ mod tests {
         let context = ArtifactRequest {
             effort: "low".to_owned(),
             label: "candidate 1".to_owned(),
-            media_scope: Some(MediaScope::new("talk")),
+            media_scope: Some(enabled_media_scope(ArtifactKind::Demo, "supporting")),
             parse: Box::new(parse_design),
             progress: None,
             live: None,
@@ -4019,7 +4166,7 @@ mod tests {
         let context = ArtifactRequest {
             effort: "low".to_owned(),
             label: "candidate 1".to_owned(),
-            media_scope: Some(MediaScope::new("talk")),
+            media_scope: Some(enabled_media_scope(ArtifactKind::Demo, "supporting")),
             parse: Box::new(parse_design),
             progress: None,
             live: None,
@@ -4533,7 +4680,7 @@ mod tests {
             },
             options: session.options.clone(),
             session_id: "talk".to_owned(),
-            media_scope: MediaScope::new("talk"),
+            media_scope: MediaScope::new("talk", session.artifact_kind, &session.options),
         };
         let engine = engine(&server, &designs, &sessions);
         let press = |id: &str| ChatMessage::continue_request("Finish it.", id);

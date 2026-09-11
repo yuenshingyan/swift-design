@@ -105,6 +105,81 @@ fn image_api_key_update(value: &str, is_clear_requested: bool) -> Option<String>
     (!value.is_empty()).then(|| value.to_owned())
 }
 
+/// Merges live image ids with the current and unsaved selection without inventing availability.
+fn image_model_options(
+    live: &[String],
+    current: &str,
+    selected: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut models = live.to_vec();
+    models.push(current.to_owned());
+    if let Some(selected) = selected.filter(|model| !model.is_empty()) {
+        models.push(selected.to_owned());
+    }
+    models.sort();
+    models.dedup();
+    let mut options = vec![(String::new(), "Configured default".to_owned())];
+    options.extend(
+        models
+            .into_iter()
+            .filter(|model| !model.is_empty())
+            .map(|model| {
+                let label = if live.contains(&model) {
+                    model.clone()
+                } else {
+                    format!("{model} (current/custom)")
+                };
+                (model, label)
+            }),
+    );
+    options
+}
+
+/// Preserves an untouched image model and trims an explicit list or custom choice.
+fn image_model_update(selected: Option<String>) -> Option<String> {
+    selected.map(|model| model.trim().to_owned())
+}
+
+/// The credential source for one image model lookup. Never display this value.
+#[derive(Clone, PartialEq, Eq)]
+enum ImageModelSource {
+    Configured,
+    Typed(String),
+}
+
+/// The source and result of a completed image model lookup.
+#[derive(Clone)]
+struct ImageModelLookup {
+    source: ImageModelSource,
+    result: Result<Vec<String>, String>,
+}
+
+/// Returns no source while the key is absent or marked for clearing.
+fn image_model_source(
+    key: &str,
+    is_configured: bool,
+    is_clear_requested: bool,
+) -> Option<ImageModelSource> {
+    if is_clear_requested {
+        return None;
+    }
+    let key = key.trim();
+    if !key.is_empty() {
+        return Some(ImageModelSource::Typed(key.to_owned()));
+    }
+    is_configured.then_some(ImageModelSource::Configured)
+}
+
+/// Hides retained results while a new lookup or a same-source reload is pending.
+fn current_image_model_result<'a>(
+    source: Option<&ImageModelSource>,
+    lookup: Option<&'a ImageModelLookup>,
+    is_pending: bool,
+) -> Option<&'a Result<Vec<String>, String>> {
+    let lookup = lookup?;
+    (!is_pending && source == Some(&lookup.source)).then_some(&lookup.result)
+}
+
 /// Every signal the three setup steps share.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct SetupState {
@@ -118,6 +193,10 @@ pub(crate) struct SetupState {
     is_key_shown: Signal<bool>,
     /// The separate OpenAI API key the user typed for generated images.
     image_api_key: Signal<String>,
+    /// The separate image model update. None preserves the saved choice.
+    image_model: Signal<Option<String>>,
+    /// True when the exact image model id field is open.
+    is_custom_image_model_open: Signal<bool>,
     /// True while the image key field shows the key as plain text.
     is_image_key_shown: Signal<bool>,
     /// True when saving should explicitly clear the image API key.
@@ -247,6 +326,8 @@ impl SetupState {
             api_key: use_signal(String::new),
             is_key_shown: use_signal(|| false),
             image_api_key: use_signal(String::new),
+            image_model: use_signal(|| None),
+            is_custom_image_model_open: use_signal(|| false),
             is_image_key_shown: use_signal(|| false),
             is_image_key_clear_requested: use_signal(|| false),
             is_key_verified: use_signal(|| false),
@@ -650,6 +731,45 @@ fn AccessStep(state: SetupState, provider: api::CatalogProvider) -> Element {
 fn ImageGenerationField(state: SetupState, is_configured: bool, model: String) -> Element {
     let mut state = state;
     let is_clear_requested = state.is_image_key_clear_requested();
+    let source = use_memo(use_reactive!(|is_configured| {
+        image_model_source(
+            &state.image_api_key(),
+            is_configured,
+            state.is_image_key_clear_requested(),
+        )
+    }));
+    let mut models = use_resource(move || {
+        let source = source();
+        async move {
+            let source = source?;
+            let key = match &source {
+                ImageModelSource::Typed(key) => {
+                    // Debounce typed keys. A changed resource cancels the previous request.
+                    pause_briefly().await;
+                    Some(key.as_str())
+                }
+                ImageModelSource::Configured => None,
+            };
+            let result = api::fetch_image_models(key).await;
+            Some(ImageModelLookup { source, result })
+        }
+    });
+    let current_source = source();
+    let lookup = models().flatten();
+    let result = current_image_model_result(
+        current_source.as_ref(),
+        lookup.as_ref(),
+        models.state()() != UseResourceState::Ready,
+    );
+    let is_loading = current_source.is_some() && result.is_none();
+    let live = result
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .cloned()
+        .unwrap_or_default();
+    let selected = (state.image_model)();
+    let options = image_model_options(&live, &model, selected.as_deref());
+    let value = selected.unwrap_or_else(|| model.clone());
 
     rsx! {
         div { class: "field",
@@ -703,7 +823,49 @@ fn ImageGenerationField(state: SetupState, is_configured: bool, model: String) -
                 }
             }
         }
+        div { class: "field",
+            div { class: "field-heading",
+                span { "Image model" }
+                button {
+                    class: "link-button",
+                    disabled: current_source.is_none(),
+                    onclick: move |_| models.restart(),
+                    "Reload"
+                }
+            }
+            if (state.is_custom_image_model_open)() {
+                input {
+                    aria_label: "Exact image model id",
+                    placeholder: "Exact GPT Image model id",
+                    value: "{value}",
+                    oninput: move |event| state.image_model.set(Some(event.value())),
+                }
+                button {
+                    class: "link-button",
+                    onclick: move |_| state.is_custom_image_model_open.set(false),
+                    "Choose from list"
+                }
+            } else {
+                Select {
+                    value: value.clone(),
+                    options,
+                    on_change: move |id| state.image_model.set(Some(id)),
+                }
+                button {
+                    class: "link-button",
+                    onclick: move |_| state.is_custom_image_model_open.set(true),
+                    "Use an exact image model id"
+                }
+            }
+            if let Some(Err(message)) = result {
+                p { class: "error", "{message}" }
+            } else if is_loading {
+                p { class: "agent-log", "Loading image models…" }
+            }
+        }
         p { class: "lede",
+            "The live image model list comes from OpenAI. The current generator supports "
+            "GPT Image-family IDs (gpt-image-*). Image and text models are separate. "
             "ChatGPT login does not cover image API usage. Generated images require an "
             "OpenAI platform API key. You may paste the same OpenAI platform key that you "
             "use for text."
@@ -748,11 +910,18 @@ fn ModelStep(
         let key = state.api_key();
         let image_api_key =
             image_api_key_update(&state.image_api_key(), state.is_image_key_clear_requested());
+        let image_model = image_model_update((state.image_model)());
         state.is_busy.set(true);
         spawn(async move {
             let key = (!key.trim().is_empty()).then_some(key);
-            let image_key = image_api_key.as_deref();
-            let saved = api::save_settings(&provider, &model, key.as_deref(), image_key).await;
+            let request = api::SettingsRequest {
+                provider: &provider,
+                model: &model,
+                api_key: key.as_deref(),
+                image_api_key: image_api_key.as_deref(),
+                image_model: image_model.as_deref(),
+            };
+            let saved = api::save_settings(&request).await;
             match saved {
                 Ok(()) => {
                     is_configuring.set(false);
@@ -853,7 +1022,9 @@ fn ModelStep(
 mod tests {
     use crate::api::CatalogModel;
     use crate::settings::{
-        ModelRow, artifact_project, image_api_key_update, model_rows, stepped_screen,
+        ImageModelLookup, ImageModelSource, ModelRow, artifact_project, current_image_model_result,
+        image_api_key_update, image_model_options, image_model_source, image_model_update,
+        model_rows, stepped_screen,
     };
 
     fn catalog() -> Vec<CatalogModel> {
@@ -898,6 +1069,83 @@ mod tests {
             Some("image-key")
         );
         assert_eq!(image_api_key_update("image-key", true).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn image_lookup_identity_tracks_the_trimmed_key_or_configured_source() {
+        assert!(image_model_source("", false, false).is_none());
+        assert!(image_model_source("  ", false, false).is_none());
+        assert!(image_model_source("key", true, true).is_none());
+        assert!(matches!(
+            image_model_source("  ", true, false),
+            Some(ImageModelSource::Configured)
+        ));
+        for is_configured in [false, true] {
+            assert!(matches!(
+                image_model_source(" key ", is_configured, false),
+                Some(ImageModelSource::Typed(key)) if key == "key"
+            ));
+        }
+    }
+
+    #[test]
+    fn image_lookup_results_and_errors_only_belong_to_the_current_source() {
+        let sources = [
+            ImageModelSource::Configured,
+            ImageModelSource::Typed("first-key".to_owned()),
+            ImageModelSource::Typed("second-key".to_owned()),
+        ];
+        for source in &sources {
+            for result in [
+                Ok(vec!["gpt-image-live".to_owned()]),
+                Err("old error".to_owned()),
+            ] {
+                let lookup = ImageModelLookup {
+                    source: source.clone(),
+                    result,
+                };
+                for current in &sources {
+                    let result = current_image_model_result(Some(current), Some(&lookup), false);
+                    assert_eq!(result.is_some(), current == source);
+                }
+                assert!(current_image_model_result(None, Some(&lookup), false).is_none());
+                // Reloading the same source must hide the old result too.
+                assert!(current_image_model_result(Some(source), Some(&lookup), true).is_none());
+                assert!(current_image_model_result(Some(source), None, true).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn image_models_merge_live_current_and_custom_without_duplicates() {
+        let live = vec!["gpt-image-1".to_owned(), "gpt-image-1".to_owned()];
+        let options = image_model_options(&live, "gpt-image-current", Some("gpt-image-custom"));
+        assert_eq!(
+            options
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            ["", "gpt-image-1", "gpt-image-current", "gpt-image-custom"]
+        );
+        assert_eq!(options[1].1, "gpt-image-1");
+        assert!(options[2].1.contains("current/custom"));
+        assert_eq!(
+            image_model_options(&[], "gpt-image-1", Some("gpt-image-1")).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn image_model_selection_preserves_resets_and_accepts_exact_custom_ids() {
+        assert_eq!(image_model_update(None), None);
+        assert_eq!(
+            image_model_update(Some("  ".to_owned())),
+            Some(String::new())
+        );
+        assert_eq!(
+            image_model_update(Some(" gpt-image-exact-2026 ".to_owned())).as_deref(),
+            Some("gpt-image-exact-2026")
+        );
     }
 
     #[test]

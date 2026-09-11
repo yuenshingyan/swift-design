@@ -103,9 +103,16 @@ pub(crate) fn ModelChip(
         };
         anchor.set(None);
         spawn(async move {
-            // Same provider, no keys: the server keeps the stored chat
-            // and image credentials and only the model changes.
-            match api::save_settings(&provider, &model, None, None).await {
+            // Omit image settings so only the text model changes.
+            let request = api::SettingsRequest {
+                provider: &provider,
+                model: &model,
+                api_key: None,
+                image_api_key: None,
+                image_model: None,
+            };
+            let saved = api::save_settings(&request).await;
+            match saved {
                 Ok(()) => error.set(None),
                 Err(message) => error.set(Some(message)),
             }

@@ -30,7 +30,7 @@ const SHARED_RULES: [&str; 6] = [
     "Use the theme through CSS variables: `--background`, `--text`, `--accent`, `--muted`, `--heading-font`, `--body-font`, `--mono-font`. Write other colors as #rrggbb.",
     "The server loads the theme fonts from Google Fonts. Base styles: text is 32px in the body font and text color, headings use the heading font with margin 0, paragraphs and lists have margin 0, images are block and max-width 100%.",
     "Allowed HTML: headings, text, lists, tables, `<img>`, inline `<svg>`, `<pre><code>`, `<blockquote>`, `<a>`, `<details>` with `<summary>`, `<label>`, and `<input>` with type `checkbox` or `radio`. Close every tag. Do not write `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, `<form>`, `<button>`, `<select>`, `<textarea>`, other input types, media, comments, on* attributes, javascript: URLs, or data: URLs.",
-    "Choose the composition of each unit. Use HTML and CSS for an editable layout. For a raster composition, use one `<img>` that fills the canvas and points to a file from GET /uploads?session={id} or to an exact generated-media path. For an SVG composition, use one inline `<svg>` with a `viewBox` that fills the canvas. You may mix composition types between units. Use no other image source. Keep important text in HTML or SVG unless the request requires raster text.",
+    "Choose the composition of each unit. Use HTML and CSS for an editable layout. Use raster files from GET /uploads?session={id}. New generated-media paths require an explicit `supporting` or `raster_first` run choice in `options.generated_media`. The default is `none`: do not request image generation. A configured image key does not permit generation by itself. Use only exact generated-media paths returned by the app. With `supporting`, generate supporting photos, illustrations, or textures only. Do not generate a full-canvas raster composition with `supporting`. Keep important text and layout in HTML or SVG. With `raster_first`, a generated full-canvas raster composition is permitted only for Social, Print, Campaign, and Artwork. For Demo, Deck, Document, and Mailing, raster may support the composition but HTML/SVG remains primary because interaction, editable text, DOCX, or email compatibility matters. For a permitted raster composition, use one `<img>` that fills the canvas. For an SVG composition, use one inline `<svg>` with a `viewBox` that fills the canvas. You may mix permitted composition types between units. Use no other image source. Keep important text in HTML or SVG unless the run policy and the request permit raster text.",
     "Keep html under 20,000 characters and css under 10,000 characters. Use single quotes for HTML attribute values inside the JSON string.",
 ];
 
@@ -154,7 +154,7 @@ pub const MAILING_RULES: &[&str] = &[
     "Keep the branding the same on every email: the same fonts, the same palette, the same header, and the same footer, so the sequence reads as one sender.",
     "End every email with a footer in muted small type: the sender name, a postal address line, and an unsubscribe line as a plain `<a>` link.",
     "An email is read in an inbox, not clicked between. Do not write links between emails, `<details>`, `<input>`, or any control. Write a web address that is not a call to action as plain text.",
-    "Email clients do not reliably show inline SVG or data URI images. Use an HTML composition with hosted raster images when the email-client HTML export matters. Use SVG-first and raster-first compositions for preview, PDF, and PNG output.",
+    "Email clients do not reliably show inline SVG or data URI images. Use an HTML composition with hosted raster images when the email-client HTML export matters. SVG compositions and raster uploads are also supported for preview, PDF, and PNG output. Generated raster media must only support the HTML composition in a mailing.",
     "A mailing has no `transition` field.",
 ];
 
@@ -950,6 +950,46 @@ mod tests {
             assert!(rules.contains("SVG composition"));
             assert!(rules.contains("generated-media path"));
         }
+    }
+
+    #[test]
+    fn every_kind_requires_a_run_choice_for_generated_media() {
+        for rules in [
+            DEMO_RULES,
+            DECK_RULES,
+            DOCUMENT_RULES,
+            SOCIAL_RULES,
+            PRINT_RULES,
+            MAILING_RULES,
+            CAMPAIGN_RULES,
+            ARTWORK_RULES,
+        ] {
+            let rules = rules.join("\n");
+            assert!(rules.contains("generated-media paths require an explicit `supporting` or `raster_first` run choice"));
+            assert!(rules.contains("The default is `none`: do not request image generation"));
+            assert!(rules.contains("A configured image key does not permit generation"));
+            assert!(
+                rules
+                    .contains("Do not generate a full-canvas raster composition with `supporting`")
+            );
+            assert!(rules.contains("permitted only for Social, Print, Campaign, and Artwork"));
+            assert!(rules.contains("For Demo, Deck, Document, and Mailing"));
+            assert!(rules.contains("HTML/SVG remains primary"));
+        }
+    }
+
+    #[test]
+    fn generated_media_rules_preserve_export_caveats() {
+        let document = DOCUMENT_RULES.join("\n");
+        assert!(document.contains("DOCX export omits inline SVG"));
+        assert!(document.contains("Use HTML or a raster upload instead of an SVG-only page"));
+        let mailing = MAILING_RULES.join("\n");
+        assert!(
+            mailing.contains("Email clients do not reliably show inline SVG or data URI images")
+        );
+        assert!(mailing.contains("HTML composition with hosted raster images"));
+        assert!(mailing.contains("preview, PDF, and PNG output"));
+        assert!(mailing.contains("Generated raster media must only support the HTML composition"));
     }
 
     #[test]

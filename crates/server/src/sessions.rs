@@ -89,6 +89,13 @@ pub struct RunOptions {
     /// Light or dark, one of `COLOR_MODES`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_mode: Option<String>,
+    /// Which generated images a run may use, one of `GENERATED_MEDIA`.
+    /// Missing, unset, and unknown values disable raster generation.
+    #[serde(
+        default = "default_generated_media",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub generated_media: Option<String>,
     /// What kind of product a demo shows, one of `PRODUCT_KINDS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_kind: Option<String>,
@@ -189,6 +196,7 @@ impl RunOptions {
             "audience" => &self.audience,
             "tone" => &self.tone,
             "color_mode" => &self.color_mode,
+            "generated_media" => &self.generated_media,
             "scope" => &self.scope,
             "product_kind" => &self.product_kind,
             "data_state" => &self.data_state,
@@ -220,6 +228,7 @@ impl RunOptions {
             "audience" => &mut self.audience,
             "tone" => &mut self.tone,
             "color_mode" => &mut self.color_mode,
+            "generated_media" => &mut self.generated_media,
             "scope" => &mut self.scope,
             "product_kind" => &mut self.product_kind,
             "data_state" => &mut self.data_state,
@@ -245,12 +254,24 @@ impl RunOptions {
         })
     }
 
-    /// The app-owned axis values, as (prompt name, stored value) pairs,
-    /// for the axes that apply to `kind`. An axis the user has not
-    /// picked is absent, so the agent decides it.
+    /// The effective generated media policy, with unset and unknown values disabled.
+    pub fn generated_media_policy(&self) -> &'static str {
+        match self.generated_media.as_deref() {
+            Some("supporting") => "supporting",
+            Some("raster_first") => "raster_first",
+            _ => "none",
+        }
+    }
+
+    /// The app-owned axis values, as (prompt name, stored value) pairs.
+    /// Only axes that apply to `kind` are included. Unpicked axes are
+    /// absent, except generated media, which uses its safe policy.
     pub fn axes(&self, kind: ArtifactKind) -> Vec<(&'static str, &str)> {
         app_axes(kind)
             .filter_map(|axis| {
+                if axis.key == "generated_media" {
+                    return Some((axis.name, self.generated_media_policy()));
+                }
                 self.axis(axis.key)
                     .and_then(|value| value.as_deref())
                     .map(|value| (axis.name, value))
@@ -262,10 +283,14 @@ impl RunOptions {
     /// key, value) pairs, and records them as suggested. An axis the
     /// user has already answered keeps its answer. A key or a value
     /// the fixed lists do not carry is ignored. Returns the keys that
-    /// were filled.
+    /// were filled. Generated media is never suggested; only the user
+    /// can enable paid images.
     pub fn suggest(&mut self, kind: ArtifactKind, suggestions: &[(String, String)]) -> Vec<String> {
         let mut filled = Vec::new();
         for (key, value) in suggestions {
+            if key == "generated_media" {
+                continue;
+            }
             let Some(axis) = app_axes(kind).find(|axis| axis.key == key) else {
                 continue;
             };
@@ -300,6 +325,7 @@ impl Default for RunOptions {
             tone: None,
             scope: None,
             color_mode: None,
+            generated_media: default_generated_media(),
             product_kind: None,
             data_state: None,
             fidelity: None,
@@ -344,6 +370,11 @@ impl RunOptions {
 /// The effort or variety level when none is set.
 fn default_effort() -> String {
     "medium".to_owned()
+}
+
+/// Disables paid image generation when the option is absent.
+fn default_generated_media() -> Option<String> {
+    Some("none".to_owned())
 }
 
 /// The default for a boolean field that is on when absent.
@@ -1258,6 +1289,77 @@ mod tests {
     }
 
     #[test]
+    fn generated_media_defaults_to_disabled_for_new_and_old_options() {
+        for options in [
+            RunOptions::default(),
+            serde_json::from_str::<RunOptions>("{}").unwrap(),
+        ] {
+            assert_eq!(options.generated_media.as_deref(), Some("none"));
+            assert_eq!(options.generated_media_policy(), "none");
+            let json = serde_json::to_value(&options).unwrap();
+            assert_eq!(json["generated_media"], "none");
+        }
+    }
+
+    #[test]
+    fn generated_media_round_trips_and_only_exact_policies_enable_it() {
+        for (value, policy) in [
+            (None, "none"),
+            (Some("none"), "none"),
+            (Some("supporting"), "supporting"),
+            (Some("raster_first"), "raster_first"),
+            (Some("unlimited images"), "none"),
+            (Some(" supporting "), "none"),
+            (Some("RASTER_FIRST"), "none"),
+            (Some(""), "none"),
+        ] {
+            let json = serde_json::json!({"generated_media": value});
+            let options: RunOptions = serde_json::from_value(json).unwrap();
+            assert_eq!(options.generated_media.as_deref(), value);
+            assert_eq!(options.generated_media_policy(), policy);
+            let back: RunOptions =
+                serde_json::from_value(serde_json::to_value(&options).unwrap()).unwrap();
+            assert_eq!(back.generated_media_policy(), policy);
+            if value.is_some() {
+                assert_eq!(back.generated_media, options.generated_media);
+            }
+            for kind in ArtifactKind::ALL {
+                assert!(options.axes(kind).contains(&("Generated media", policy)));
+            }
+        }
+    }
+
+    #[test]
+    fn planner_suggestions_never_set_generated_media() {
+        for kind in ArtifactKind::ALL {
+            for initial in [None, Some("none"), Some("supporting"), Some("raster_first")] {
+                for value in ["none", "supporting", "raster_first"] {
+                    let mut options = RunOptions {
+                        generated_media: initial.map(str::to_owned),
+                        ..RunOptions::default()
+                    };
+                    let filled =
+                        options.suggest(kind, &[("generated_media".to_owned(), value.to_owned())]);
+                    assert!(filled.is_empty());
+                    assert!(options.suggested.is_empty());
+                    assert_eq!(options.generated_media.as_deref(), initial);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generated_media_has_readable_and_writable_axis_slots() {
+        let mut options = RunOptions::default();
+        *options.axis_slot_mut("generated_media").unwrap() = Some("supporting".to_owned());
+        assert_eq!(
+            options.axis("generated_media"),
+            Some(&options.generated_media)
+        );
+        assert_eq!(options.generated_media_policy(), "supporting");
+    }
+
+    #[test]
     fn a_suggestion_fills_a_blank_axis_and_marks_it() {
         let mut options = RunOptions::default();
         let filled = options.suggest(
@@ -1307,12 +1409,17 @@ mod tests {
         };
         assert_eq!(
             options.axes(ArtifactKind::Demo),
-            [("Color mode", "dark"), ("Product kind", "developer_tool")]
+            [
+                ("Color mode", "dark"),
+                ("Generated media", "none"),
+                ("Product kind", "developer_tool"),
+            ]
         );
         assert_eq!(
             options.axes(ArtifactKind::Deck),
             [
                 ("Color mode", "dark"),
+                ("Generated media", "none"),
                 ("Audience", "newcomers"),
                 ("Tone", "warm")
             ]

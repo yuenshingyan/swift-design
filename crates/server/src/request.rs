@@ -195,11 +195,16 @@ pub(crate) fn request_input(request: &SessionRequest) -> String {
     // the user has not picked is absent, so the agent decides it. A
     // picked value is a slug that the prompt reads as its label; an
     // answer the user typed has no label and is printed as it was
-    // typed.
+    // typed. Generated media always uses its effective safe policy.
     for (name, value) in request.options.axes(request.kind) {
         let text = axis_label(name, value).unwrap_or(value);
         input.push_str(&format!("{name}: {text}\n"));
     }
+    input.push_str(match request.options.generated_media_policy() {
+        "supporting" => "Generated media policy: Generate up to 3 supporting raster assets per run. Keep layout and text in HTML/SVG.\n",
+        "raster_first" => "Generated media policy: Generate up to 3 raster images per run. Use full-canvas raster where appropriate.\n",
+        _ => "Generated media policy: No raster generation is allowed.\n",
+    });
     if request.options.fidelity.as_deref() == Some("wireframe") {
         input.push_str(WIREFRAME_NOTE);
     }
@@ -360,6 +365,56 @@ mod tests {
         let input = request_input(&deck);
         assert!(input.contains("Audience: Practitioners in the field"));
         assert!(input.contains("Tone: Technical and precise"));
+    }
+
+    #[test]
+    fn every_kind_prints_the_generated_media_label_and_policy() {
+        for kind in ArtifactKind::ALL {
+            for (value, label, note) in [
+                (
+                    "none",
+                    "No generated images",
+                    "No raster generation is allowed.",
+                ),
+                (
+                    "supporting",
+                    "Supporting images, up to 3",
+                    "Generate up to 3 supporting raster assets per run. Keep layout and text in HTML/SVG.",
+                ),
+                (
+                    "raster_first",
+                    "Raster-first allowed, up to 3",
+                    "Generate up to 3 raster images per run. Use full-canvas raster where appropriate.",
+                ),
+            ] {
+                let mut request = request(kind);
+                request.options.generated_media = Some(value.to_owned());
+                let input = request_input(&request);
+                assert!(input.contains(&format!("Generated media: {label}\n")));
+                assert!(input.contains(&format!("Generated media policy: {note}\n")));
+            }
+        }
+    }
+
+    #[test]
+    fn absent_and_custom_generated_media_never_authorize_raster_generation() {
+        for kind in ArtifactKind::ALL {
+            let mut request = request(kind);
+            for value in [
+                Some("none"),
+                None,
+                Some("unlimited images"),
+                Some(" supporting "),
+            ] {
+                request.options.generated_media = value.map(str::to_owned);
+                let input = request_input(&request);
+                assert!(input.contains("Generated media: No generated images\n"));
+                assert!(
+                    input.contains("Generated media policy: No raster generation is allowed.\n")
+                );
+                assert!(!input.contains("Generate up to 3"));
+            }
+        }
     }
 
     #[test]

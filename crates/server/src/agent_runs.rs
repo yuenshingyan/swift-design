@@ -245,10 +245,11 @@ impl AgentRunner {
     /// is set.
     async fn model_configuration(&self) -> Option<model_client::ModelConfiguration> {
         match self.settings.read().await {
-            Ok(Some(stored)) => model_client::configuration_from_settings(&stored),
-            _ => None,
+            Ok(Some(stored)) => {
+                model_client::configuration_with_fallback(&stored, model_client::configured_model)
+            }
+            _ => model_client::configured_model(),
         }
-        .or_else(model_client::configured_model)
     }
 
     /// Picks how to run for `session_id`: the custom command, or the
