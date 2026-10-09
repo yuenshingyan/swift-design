@@ -19,6 +19,7 @@ use crate::edit_focus::{
     EditFix, EditInput, EditOrder, MergeInput, findings_for, findings_note, fix_instruction,
     focus_note, fresh_note, merge_note, merge_sources, referenced_indexes, touched_indexes,
 };
+use crate::edit_report::saved_edit_report;
 use crate::events::ChangeNotifier;
 use crate::generation::{
     ArtifactRequest, Attachments, CONTINUE_DRAFT_SHARE, ContinueChunk, DRAFT_SHARE,
@@ -114,8 +115,8 @@ impl GenerationEngine {
                     is_fresh: false,
                     conversation: &conversation,
                 };
-                let design_ids = self.edit_documents(client, context, &order, log).await?;
-                Ok(GenerationOutcome::Wrote { design_ids })
+                let edits = self.edit_documents(client, context, &order, log).await?;
+                Ok(GenerationOutcome::edited(edits))
             }
             GenerationTask::Regenerate {
                 design,
@@ -128,8 +129,8 @@ impl GenerationEngine {
                     is_fresh: true,
                     conversation: &conversation,
                 };
-                let design_ids = self.edit_documents(client, context, &order, log).await?;
-                Ok(GenerationOutcome::Wrote { design_ids })
+                let edits = self.edit_documents(client, context, &order, log).await?;
+                Ok(GenerationOutcome::edited(edits))
             }
             GenerationTask::Merge {
                 sources,
@@ -376,7 +377,7 @@ impl GenerationEngine {
         context: &GenerationContext,
         order: &EditOrder<'_>,
         log: &LogSink,
-    ) -> Result<Vec<String>, GenerationStop> {
+    ) -> Result<Vec<(String, String)>, GenerationStop> {
         let mut saved = Vec::new();
         let mut last_error = None;
         for document_id in order.artifact_ids {
@@ -384,7 +385,7 @@ impl GenerationEngine {
                 .edit_document(client, context, document_id, order, log)
                 .await
             {
-                Ok(()) => saved.push(document_id.clone()),
+                Ok(report) => saved.push((document_id.clone(), report)),
                 Err(GenerationStop::NeedsClarification(set)) => {
                     return Err(GenerationStop::NeedsClarification(set));
                 }
@@ -407,7 +408,7 @@ impl GenerationEngine {
         document_id: &str,
         order: &EditOrder<'_>,
         log: &LogSink,
-    ) -> Result<(), GenerationStop> {
+    ) -> Result<String, GenerationStop> {
         let documents = self.document_store()?;
         let document = documents
             .load(document_id)
@@ -487,13 +488,20 @@ impl GenerationEngine {
             .fix_edited_document(client, edited, &fix, log)
             .await
             .map_err(GenerationStop::Failed)?;
+        let report = saved_edit_report(
+            document_id,
+            context.request.kind,
+            &document,
+            &final_document,
+        )
+        .map_err(GenerationStop::Failed)?;
         documents
             .save(document_id, &final_document)
             .await
             .map_err(|error| GenerationStop::Failed(error.to_string()))?;
         self.notifier.notify();
         log(&format!("edit {document_id}: saved"));
-        Ok(())
+        Ok(report)
     }
 
     /// Writes the remaining pages of the preview document `document_id`
@@ -1704,7 +1712,12 @@ mod tests {
             .run("report", silent_log())
             .await
             .unwrap();
-        assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
+        let GenerationOutcome::Edited { reports, .. } = outcome else {
+            panic!("expected a saved edit report");
+        };
+        assert!(reports[0].contains("Modified page 1"));
+        let messages = stores.sessions.messages("report").await.unwrap();
+        assert!(messages.last().unwrap().content.contains("Modified page 1"));
         let edited = stores
             .documents
             .load("report-candidate-1")
@@ -1772,7 +1785,7 @@ mod tests {
             .run("report", silent_log())
             .await
             .unwrap();
-        assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
+        assert!(matches!(outcome, GenerationOutcome::Edited { .. }));
         let text = server.requests()[0].to_string();
         assert!(text.contains("Write page 1 of"));
         assert!(!text.contains("Old title markup"));

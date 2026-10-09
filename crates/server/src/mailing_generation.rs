@@ -18,6 +18,7 @@ use crate::edit_focus::{
     EditFix, EditInput, EditOrder, MergeInput, findings_for, findings_note, fix_instruction,
     focus_note, fresh_note, merge_note, merge_sources, referenced_indexes, touched_indexes,
 };
+use crate::edit_report::saved_edit_report;
 use crate::events::ChangeNotifier;
 use crate::generation::{
     ArtifactRequest, Attachments, CONTINUE_DRAFT_SHARE, ContinueChunk, DRAFT_SHARE,
@@ -113,8 +114,8 @@ impl GenerationEngine {
                     is_fresh: false,
                     conversation: &conversation,
                 };
-                let design_ids = self.edit_mailings(client, context, &order, log).await?;
-                Ok(GenerationOutcome::Wrote { design_ids })
+                let edits = self.edit_mailings(client, context, &order, log).await?;
+                Ok(GenerationOutcome::edited(edits))
             }
             GenerationTask::Regenerate {
                 design,
@@ -127,8 +128,8 @@ impl GenerationEngine {
                     is_fresh: true,
                     conversation: &conversation,
                 };
-                let design_ids = self.edit_mailings(client, context, &order, log).await?;
-                Ok(GenerationOutcome::Wrote { design_ids })
+                let edits = self.edit_mailings(client, context, &order, log).await?;
+                Ok(GenerationOutcome::edited(edits))
             }
             GenerationTask::Merge {
                 sources,
@@ -372,7 +373,7 @@ impl GenerationEngine {
         context: &GenerationContext,
         order: &EditOrder<'_>,
         log: &LogSink,
-    ) -> Result<Vec<String>, GenerationStop> {
+    ) -> Result<Vec<(String, String)>, GenerationStop> {
         let mut saved = Vec::new();
         let mut last_error = None;
         for mailing_id in order.artifact_ids {
@@ -380,7 +381,7 @@ impl GenerationEngine {
                 .edit_mailing(client, context, mailing_id, order, log)
                 .await
             {
-                Ok(()) => saved.push(mailing_id.clone()),
+                Ok(report) => saved.push((mailing_id.clone(), report)),
                 Err(GenerationStop::NeedsClarification(set)) => {
                     return Err(GenerationStop::NeedsClarification(set));
                 }
@@ -403,7 +404,7 @@ impl GenerationEngine {
         mailing_id: &str,
         order: &EditOrder<'_>,
         log: &LogSink,
-    ) -> Result<(), GenerationStop> {
+    ) -> Result<String, GenerationStop> {
         let mailings = self.mailing_store()?;
         let mailing = mailings
             .load(mailing_id)
@@ -480,13 +481,15 @@ impl GenerationEngine {
             .fix_edited_mailing(client, edited, &fix, log)
             .await
             .map_err(GenerationStop::Failed)?;
+        let report = saved_edit_report(mailing_id, context.request.kind, &mailing, &final_mailing)
+            .map_err(GenerationStop::Failed)?;
         mailings
             .save(mailing_id, &final_mailing)
             .await
             .map_err(|error| GenerationStop::Failed(error.to_string()))?;
         self.notifier.notify();
         log(&format!("edit {mailing_id}: saved"));
-        Ok(())
+        Ok(report)
     }
 
     /// Writes the remaining emails of the preview mailing `mailing_id`
@@ -1697,7 +1700,18 @@ mod tests {
             .run("report", silent_log())
             .await
             .unwrap();
-        assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
+        let GenerationOutcome::Edited { reports, .. } = outcome else {
+            panic!("expected a saved edit report");
+        };
+        assert!(reports[0].contains("Modified email 1"));
+        let messages = stores.sessions.messages("report").await.unwrap();
+        assert!(
+            messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Modified email 1")
+        );
         let edited = stores
             .mailings
             .load("report-candidate-1")
@@ -1765,7 +1779,7 @@ mod tests {
             .run("report", silent_log())
             .await
             .unwrap();
-        assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
+        assert!(matches!(outcome, GenerationOutcome::Edited { .. }));
         let text = server.requests()[0].to_string();
         assert!(text.contains("Write email 1 of"));
         assert!(!text.contains("Old title markup"));

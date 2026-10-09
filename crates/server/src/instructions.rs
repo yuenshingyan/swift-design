@@ -493,6 +493,7 @@ fn instructions() -> serde_json::Value {
             "node_reference": "[screen N, node a/b/c <tag.class>: text] for a design; [slide N, node a/b/c <tag.class>: text] for a deck; [page N, node a/b/c <tag.class>: text] for a document; [frame N, node a/b/c <tag.class>: text] for a social; [sheet N, node a/b/c <tag.class>: text] for a print; [email N, node a/b/c <tag.class>: text] for a mailing; [ad N, node a/b/c <tag.class>: text] for a campaign; [cover N, node a/b/c <tag.class>: text] for an artwork",
             "upload_reference": "[upload name]",
             "comment_lines": "A message may carry several comments, one per line, each `<node or page reference>: <note>`. Apply every line in one edit.",
+            "edit_reports": "The built-in engine compares each original artifact with its final edited artifact after fixes. Its saved edit report lists modified, added, and removed units by one-based number. It reports notes-only changes and shared theme or settings changes separately. Use the latest saved report to answer which units changed. Do not infer saved changes from an assistant promise. A change report does not prove that an interaction or a backend works.",
         },
         "payloads": {
             "PUT /sessions/{id}/question-set": "a BriefQuestionSet",
@@ -939,6 +940,17 @@ mod tests {
         let deck = DECK_RULES.join("\n");
         assert!(!deck.contains("#screen-"));
         assert!(deck.contains("`<input>` with type `checkbox` or `radio`"));
+    }
+
+    #[test]
+    fn instructions_describe_saved_edit_reports_without_claiming_backend_verification() {
+        let payload = instructions();
+        let note = payload["conventions"]["edit_reports"].as_str().unwrap();
+        assert!(note.contains("final edited artifact after fixes"));
+        assert!(note.contains("one-based number"));
+        assert!(note.contains("shared theme"));
+        assert!(note.contains("Use the latest saved report"));
+        assert!(note.contains("does not prove that an interaction or a backend works"));
     }
 
     #[test]

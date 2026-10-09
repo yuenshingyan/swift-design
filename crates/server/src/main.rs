@@ -30,6 +30,7 @@ mod document_render;
 mod documents;
 mod docx;
 mod edit_focus;
+mod edit_report;
 mod email_html;
 mod events;
 mod export;

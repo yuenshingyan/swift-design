@@ -8,6 +8,7 @@ use design_model::{
     QuestionOption, app_axes, axis_by_key,
 };
 
+use crate::edit_report::latest_edit_report_note;
 use crate::request::{SessionRequest, request_input};
 use crate::sessions::ChatMessage;
 
@@ -300,6 +301,7 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
          When the input names two or more artifacts and the user asks to combine parts of them into one, set merge to true and edit to false. Say in reply which parts you take from each. The app writes one new candidate.\n\
          When no artifact is open and candidates exist and the user asks for changes, set generate to true to write new candidates.\n\
          When the user only chats, set generate to false and answer in reply.\n\
+         Use saved edit reports to answer which units changed. Do not infer saved changes from an earlier promise. A saved edit report does not prove that an interaction or a backend works.\n\
          Keep reply to 1 to 3 sentences. Reply with only the JSON.",
         per_turn = QUESTIONS_PER_TURN_LIMIT,
         answered = ANSWERED_QUESTION_LIMIT,
@@ -412,6 +414,7 @@ pub(crate) fn planner_input(
             input.push_str(&conversation_note(recent_conversation(messages)));
         }
     }
+    input.push_str(&latest_edit_report_note(messages, targets));
     input.push_str("Reply with only the JSON.");
     input
 }
@@ -653,6 +656,33 @@ mod tests {
         assert!(set.can_proceed_with_assumptions);
         assert_eq!(set.title, QUESTION_SET_TITLE);
         assert!(set.message.contains("best judgment"));
+    }
+
+    #[test]
+    fn the_planner_receives_saved_edit_reports_outside_the_conversation_window() {
+        let request = SessionRequest {
+            request: "A task app.".to_owned(),
+            conversation: String::new(),
+            kind: ArtifactKind::Demo,
+            answers: Vec::new(),
+            options: RunOptions::default(),
+        };
+        let report = ChatMessage::assistant(
+            "Saved edit report:\nCandidate `task-candidate-4`:\nModified screen 3 (\"Create Draft\").",
+        ).with_artifacts(vec!["task-candidate-4".to_owned()]);
+        let mut messages = vec![report];
+        for number in 0..12 {
+            messages.push(ChatMessage::user(&format!("Later question {number}"), None));
+        }
+        assert!(!conversation_note(recent_conversation(&messages)).contains("Modified screen 3"));
+        let input = planner_input(&request, &messages, 1, &["task-candidate-4".to_owned()]);
+        assert!(input.contains("Modified screen 3 (\"Create Draft\")"));
+        assert!(input.contains("saved before/after comparisons"));
+        assert!(
+            !planner_input(&request, &messages, 1, &["other".to_owned()])
+                .contains("Modified screen 3")
+        );
+        assert!(planner_prompt(ArtifactKind::Demo).contains("Use saved edit reports"));
     }
 
     #[test]

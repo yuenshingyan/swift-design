@@ -485,7 +485,9 @@ pub(crate) fn SessionWorkspace(
                                 .flatten();
                             let is_reverted = reverted().contains(&index);
                             rsx! {
-                                div { class: "{bubble_class}", "{message.content}" }
+                                div { class: "{bubble_class}",
+                                    p { "{message.content}" }
+                                }
                                 if let Some(since) = revert_since {
                                     button {
                                         class: "revert-turn",

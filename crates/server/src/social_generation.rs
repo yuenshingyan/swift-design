@@ -18,6 +18,7 @@ use crate::edit_focus::{
     EditFix, EditInput, EditOrder, MergeInput, findings_for, findings_note, fix_instruction,
     focus_note, fresh_note, merge_note, merge_sources, referenced_indexes, touched_indexes,
 };
+use crate::edit_report::saved_edit_report;
 use crate::events::ChangeNotifier;
 use crate::generation::{
     ArtifactRequest, Attachments, CONTINUE_DRAFT_SHARE, ContinueChunk, DRAFT_SHARE,
@@ -113,8 +114,8 @@ impl GenerationEngine {
                     is_fresh: false,
                     conversation: &conversation,
                 };
-                let design_ids = self.edit_socials(client, context, &order, log).await?;
-                Ok(GenerationOutcome::Wrote { design_ids })
+                let edits = self.edit_socials(client, context, &order, log).await?;
+                Ok(GenerationOutcome::edited(edits))
             }
             GenerationTask::Regenerate {
                 design,
@@ -127,8 +128,8 @@ impl GenerationEngine {
                     is_fresh: true,
                     conversation: &conversation,
                 };
-                let design_ids = self.edit_socials(client, context, &order, log).await?;
-                Ok(GenerationOutcome::Wrote { design_ids })
+                let edits = self.edit_socials(client, context, &order, log).await?;
+                Ok(GenerationOutcome::edited(edits))
             }
             GenerationTask::Merge {
                 sources,
@@ -372,7 +373,7 @@ impl GenerationEngine {
         context: &GenerationContext,
         order: &EditOrder<'_>,
         log: &LogSink,
-    ) -> Result<Vec<String>, GenerationStop> {
+    ) -> Result<Vec<(String, String)>, GenerationStop> {
         let mut saved = Vec::new();
         let mut last_error = None;
         for social_id in order.artifact_ids {
@@ -380,7 +381,7 @@ impl GenerationEngine {
                 .edit_social(client, context, social_id, order, log)
                 .await
             {
-                Ok(()) => saved.push(social_id.clone()),
+                Ok(report) => saved.push((social_id.clone(), report)),
                 Err(GenerationStop::NeedsClarification(set)) => {
                     return Err(GenerationStop::NeedsClarification(set));
                 }
@@ -403,7 +404,7 @@ impl GenerationEngine {
         social_id: &str,
         order: &EditOrder<'_>,
         log: &LogSink,
-    ) -> Result<(), GenerationStop> {
+    ) -> Result<String, GenerationStop> {
         let socials = self.social_store()?;
         let social = socials
             .load(social_id)
@@ -479,13 +480,15 @@ impl GenerationEngine {
             .fix_edited_social(client, edited, &fix, log)
             .await
             .map_err(GenerationStop::Failed)?;
+        let report = saved_edit_report(social_id, context.request.kind, &social, &final_social)
+            .map_err(GenerationStop::Failed)?;
         socials
             .save(social_id, &final_social)
             .await
             .map_err(|error| GenerationStop::Failed(error.to_string()))?;
         self.notifier.notify();
         log(&format!("edit {social_id}: saved"));
-        Ok(())
+        Ok(report)
     }
 
     /// Writes the remaining frames of the preview social `social_id`
@@ -1690,7 +1693,18 @@ mod tests {
             .run("report", silent_log())
             .await
             .unwrap();
-        assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
+        let GenerationOutcome::Edited { reports, .. } = outcome else {
+            panic!("expected a saved edit report");
+        };
+        assert!(reports[0].contains("Modified frame 1"));
+        let messages = stores.sessions.messages("report").await.unwrap();
+        assert!(
+            messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Modified frame 1")
+        );
         let edited = stores
             .socials
             .load("report-candidate-1")
@@ -1758,7 +1772,7 @@ mod tests {
             .run("report", silent_log())
             .await
             .unwrap();
-        assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
+        assert!(matches!(outcome, GenerationOutcome::Edited { .. }));
         let text = server.requests()[0].to_string();
         assert!(text.contains("Write frame 1 of"));
         assert!(!text.contains("Old title markup"));
