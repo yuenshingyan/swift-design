@@ -5,6 +5,7 @@
 //! Existing sessions are listed underneath.
 
 use design_model::ArtifactKind;
+use dioxus::document;
 use dioxus::prelude::*;
 
 use crate::api;
@@ -326,10 +327,16 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
                             title: "Delete this session",
                             onclick: {
                                 let id = summary.id.clone();
+                                let title = summary.title.clone();
                                 move |event: Event<MouseData>| {
                                     event.stop_propagation();
                                     let id = id.clone();
+                                    let title = title.clone();
                                     spawn(async move {
+                                        let is_confirmed = confirm_session_deletion(&title).await;
+                                        if !is_confirmed {
+                                            return;
+                                        }
                                         // A refused delete used to be
                                         // dropped here, so the button
                                         // read as broken.
@@ -350,6 +357,26 @@ pub fn Home(on_open_session: EventHandler<String>) -> Element {
             }
         }
     }
+}
+
+/// Explains the irreversible scope of deleting one named session.
+fn session_deletion_message(title: &str) -> String {
+    format!(
+        "Delete session \"{title}\"?\n\nThis permanently deletes its candidates, \
+         conversation, history, and uploads. This cannot be undone."
+    )
+}
+
+/// Requires an explicit browser confirmation before a session is deleted.
+async fn confirm_session_deletion(title: &str) -> bool {
+    let mut confirmation = document::eval(
+        "const message = await dioxus.recv(); dioxus.send(window.confirm(message));",
+    );
+    if confirmation.send(session_deletion_message(title)).is_err() {
+        return false;
+    }
+    let answer = confirmation.recv::<bool>().await;
+    matches!(answer, Ok(true))
 }
 
 /// The kind picker: the modal that opens when the user sends a request.
@@ -599,8 +626,25 @@ mod tests {
     use design_model::ArtifactKind;
 
     use crate::home::{
-        COMPOSER_PLACEHOLDER, extract_label, kind_detail, short_time, template_button_label,
+        COMPOSER_PLACEHOLDER, extract_label, kind_detail, session_deletion_message, short_time,
+        template_button_label,
     };
+
+    #[test]
+    fn session_deletion_confirmation_names_the_session_and_every_owned_resource() {
+        let message = session_deletion_message("Product launch");
+        assert!(message.contains("Delete session \"Product launch\"?"));
+        for resource in ["candidates", "conversation", "history", "uploads"] {
+            assert!(message.contains(resource));
+        }
+        assert!(message.contains("This cannot be undone"));
+    }
+
+    #[test]
+    fn session_deletion_confirmation_preserves_the_title_as_text() {
+        let title = "A \"quoted\" session <script>";
+        assert!(session_deletion_message(title).contains(title));
+    }
 
     #[test]
     fn the_extract_button_names_its_material() {

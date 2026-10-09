@@ -405,10 +405,12 @@ pub(crate) fn planner_input(
         "Questions answered so far: {}\n",
         request.answers.len()
     ));
-    if messages.is_empty() {
-        input.push_str("Conversation: none yet.\n");
-    } else {
-        input.push_str(&conversation_note(recent_conversation(messages)));
+    if request.conversation.is_empty() {
+        if messages.is_empty() {
+            input.push_str("Conversation: none yet.\n");
+        } else {
+            input.push_str(&conversation_note(recent_conversation(messages)));
+        }
     }
     input.push_str("Reply with only the JSON.");
     input
@@ -657,6 +659,7 @@ mod tests {
     fn the_input_shows_the_canvas_state_and_the_conversation() {
         let request = SessionRequest {
             request: "A todo app.".to_owned(),
+            conversation: String::new(),
             kind: ArtifactKind::Deck,
             answers: Vec::new(),
             options: RunOptions::default(),
@@ -672,5 +675,12 @@ mod tests {
         assert!(input.contains("user (editing todo-candidate-1): Make it bolder."));
         assert!(input.contains("Questions answered so far: 0"));
         assert!(input.ends_with("Reply with only the JSON."));
+        let request = SessionRequest {
+            conversation: conversation_note(recent_conversation(&messages)),
+            ..request
+        };
+        let input = planner_input(&request, &messages, 2, &[]);
+        assert_eq!(input.matches("Conversation, oldest first:").count(), 1);
+        assert_eq!(input.matches("Make it bolder.").count(), 1);
     }
 }

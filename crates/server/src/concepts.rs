@@ -138,6 +138,7 @@ mod tests {
         assert!(prompt.contains("plan 3 distinct"));
         let request = SessionRequest {
             request: "A finance landing page.".to_owned(),
+            conversation: String::new(),
             kind: design_model::ArtifactKind::Demo,
             answers: vec![design_model::AnsweredQuestion {
                 question: "Who is it for?".to_owned(),

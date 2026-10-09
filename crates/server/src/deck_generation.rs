@@ -1407,6 +1407,7 @@ mod tests {
         assert_eq!(value["slides"][0]["index"], 1);
         let request = SessionRequest {
             request: "A talk.".to_owned(),
+            conversation: String::new(),
             kind: ArtifactKind::Deck,
             answers: Vec::new(),
             options: crate::test_support::low_effort_options(),

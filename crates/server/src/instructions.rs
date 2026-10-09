@@ -27,7 +27,7 @@ use design_model::{
 /// kind.
 const SHARED_RULES: [&str; 6] = [
     "The server scopes your CSS to the screen, slide, or page. Write plain selectors such as `.title` or `h1`. Do not write `html`, `body`, or `:root` selectors. Do not use `@import`. `@media`, `@keyframes`, and `@font-face` are allowed.",
-    "Use the theme through CSS variables: `--background`, `--text`, `--accent`, `--muted`, `--heading-font`, `--body-font`, `--mono-font`. Write other colors as #rrggbb.",
+    "Use the theme through CSS variables: `--background`, `--text`, `--accent`, `--muted`, `--heading-font`, `--body-font`, `--mono-font`. Use #rrggbb for opaque colors. Use rgba() or an eight-digit hex color for translucent surfaces.",
     "The server loads the theme fonts from Google Fonts. Base styles: text is 32px in the body font and text color, headings use the heading font with margin 0, paragraphs and lists have margin 0, images are block and max-width 100%.",
     "Allowed HTML: headings, text, lists, tables, `<img>`, inline `<svg>`, `<pre><code>`, `<blockquote>`, `<a>`, `<details>` with `<summary>`, `<label>`, and `<input>` with type `checkbox` or `radio`. Close every tag. Do not write `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, `<form>`, `<button>`, `<select>`, `<textarea>`, other input types, media, comments, on* attributes, javascript: URLs, or data: URLs.",
     "Images: `<img src='/uploads/{name}'>` for files in GET /uploads?session={id}. Use no other image source. Draw charts, icons, and shapes as inline SVG or CSS.",
@@ -45,6 +45,7 @@ pub const DEMO_RULES: &[&str] = &[
     SHARED_RULES[2],
     SHARED_RULES[3],
     SHARED_RULES[4],
+    "If the user asks for a translucent app over a blurred desktop, draw a simulated desktop backdrop inside each screen. Layer the app window above that backdrop. Use translucent backgrounds and backdrop-filter on the app shell and requested panels. Do not reduce the opacity of text or controls. Do not cover the backdrop with opaque page backgrounds. A browser cannot reveal the actual operating-system desktop.",
     "Give every id and @keyframes name a prefix unique to the screen, such as `s3-`.",
     "Size text for the viewport. On a 1440 px desktop canvas: titles 48 to 72px, body 18 to 24px, captions 14 to 16px, margins of at least 64px. On a 390 px phone canvas: titles 28 to 36px, body 16 to 18px, captions 12 to 14px, margins of at least 20px. Give boxes enough height for every line.",
     SHARED_RULES[5],
@@ -914,6 +915,16 @@ mod tests {
         let text = payload.to_string();
         assert!(text.contains("PUT it to /decks/{id}-candidate-1"));
         assert!(text.contains("SWIFT_DESIGN_ARTIFACT_KIND"));
+    }
+
+    #[test]
+    fn demo_rules_allow_translucent_surfaces_over_a_simulated_desktop() {
+        let rules = DEMO_RULES.join("\n");
+        assert!(rules.contains("Use rgba() or an eight-digit hex color"));
+        assert!(rules.contains("simulated desktop backdrop inside each screen"));
+        assert!(rules.contains("backdrop-filter on the app shell"));
+        assert!(rules.contains("Do not cover the backdrop with opaque page backgrounds"));
+        assert!(!rules.contains("Write other colors as #rrggbb"));
     }
 
     #[test]

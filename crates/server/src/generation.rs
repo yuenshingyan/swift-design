@@ -583,9 +583,15 @@ impl GenerationEngine {
             .answered_questions(session_id)
             .await
             .map_err(|error| error.to_string())?;
+        let messages = self
+            .sessions
+            .messages(session_id)
+            .await
+            .map_err(|error| error.to_string())?;
         let context = GenerationContext {
             request: SessionRequest {
                 request: session.request.clone(),
+                conversation: conversation_note(recent_conversation(&messages)),
                 kind: session.artifact_kind,
                 answers: answered_questions_from_answers(&answered),
                 options: session.options.clone(),
@@ -3768,6 +3774,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fresh_candidates_and_concepts_receive_the_users_follow_up_requirements() {
+        let server = FakeModelServer::start().await;
+        server.push_text(r#"{"reply":"PLANNER_PROMISE_ONLY","generate":true}"#);
+        server.push_text(r#"{"concepts":[]}"#);
+        server.push_text(SAMPLE_DESIGN);
+        server.push_text(SAMPLE_DESIGN);
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let mut options = low_effort_options();
+        options.variations = Some(2);
+        sessions
+            .create(NewSession::demo("talk", "Talk", "A business app.").with_options(options))
+            .await
+            .unwrap();
+        sessions
+            .apply("talk", design_model::WorkflowEvent::QuestionsAsked)
+            .await
+            .unwrap();
+        for content in [
+            "Make another one with Apple glass design.",
+            "The entire app must be semi-transparent over a blurred desktop.",
+        ] {
+            sessions
+                .append_message("talk", ChatMessage::user(content, None))
+                .await
+                .unwrap();
+        }
+        let outcome = engine(&server, &designs, &sessions)
+            .run("talk", silent_log())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 4);
+        for request in &requests[1..] {
+            let text = request.to_string();
+            assert!(text.contains("A business app."));
+            assert!(text.contains("Apple glass design"));
+            assert!(text.contains("semi-transparent over a blurred desktop"));
+            assert!(text.contains("A later user instruction replaces"));
+            assert!(!text.contains("PLANNER_PROMISE_ONLY"));
+        }
+    }
+
+    #[tokio::test]
     async fn a_planner_question_set_moves_the_session_to_clarifying() {
         let server = FakeModelServer::start().await;
         server.push_text(
@@ -3953,6 +4005,7 @@ mod tests {
         assert_eq!(value["screens"][0]["index"], 1);
         let request = SessionRequest {
             request: "A landing page.".to_owned(),
+            conversation: String::new(),
             kind: design_model::ArtifactKind::Demo,
             answers: Vec::new(),
             options: low_effort_options(),
@@ -3992,6 +4045,7 @@ mod tests {
         let context = GenerationContext {
             request: SessionRequest {
                 request: session.request.clone(),
+                conversation: String::new(),
                 kind: session.artifact_kind,
                 answers: Vec::new(),
                 options: session.options.clone(),

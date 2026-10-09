@@ -1443,6 +1443,7 @@ mod tests {
         assert_eq!(value["emails"][0]["index"], 1);
         let request = SessionRequest {
             request: "A launch email.".to_owned(),
+            conversation: String::new(),
             kind: ArtifactKind::Mailing,
             answers: Vec::new(),
             options: low_effort_options(),

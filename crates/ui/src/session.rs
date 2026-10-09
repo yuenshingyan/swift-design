@@ -12,7 +12,7 @@ use crate::canvas::{
     cards_from_designs, cards_from_documents, cards_from_mailings, cards_from_prints,
     cards_from_socials, queued_finishes,
 };
-use crate::chat::{mention_at, recall_prompt, remove_mention, watch_caret};
+use crate::chat::{mention_at, recall_prompt, remove_mention, use_follow_thread, watch_caret};
 use crate::chat_controls::{ModelChip, SendButton, with_effort};
 use crate::prompt_history::{PromptHistory, prompt_entries};
 use crate::question_card::{
@@ -190,6 +190,11 @@ pub(crate) fn SessionWorkspace(
             drafts.clone().set(HashMap::new());
         }
     }
+
+    use_follow_thread(
+        "session-thread",
+        view().map(|session| session.messages.len() + 1),
+    );
 
     let Some(session_view) = view() else {
         // A failed fetch must not hide behind the loading line.
@@ -455,7 +460,7 @@ pub(crate) fn SessionWorkspace(
                     button { class: "back", onclick: move |_| on_home.call(()), "‹ Sessions" }
                     span { class: "studio-title", "{session.title}" }
                 }
-                div { class: "thread",
+                div { id: "session-thread", class: "thread",
                     div { class: "bubble user", "{session.request}" }
                     for (index, message) in session_view.messages.iter().enumerate() {
                         {
@@ -714,10 +719,10 @@ pub(crate) fn SessionWorkspace(
             section { class: "workbench",
                 // The open question set owns the workbench while it is
                 // open: it is the one thing waiting on the user.
-                if let Some((number, set)) = open_set_card {
+                if let Some((_number, set)) = open_set_card {
                     div { class: "workbench-questions",
                         QuestionSetCard {
-                            key: "{number}",
+                            key: "{_number}",
                             set,
                             drafts,
                             is_busy: is_running,

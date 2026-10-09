@@ -15,28 +15,33 @@ use crate::select::{Anchor, measure_trigger, menu_style, next_trigger_id};
 /// The effort levels a run can use.
 pub(crate) const EFFORT_LEVELS: [&str; 3] = ["low", "medium", "high"];
 
-/// The models the chip menu lists for the current choice: the
-/// provider's catalog, with the chosen model first when the catalog
-/// does not list it. Empty when no model is chosen.
-fn menu_models(settings: Option<&api::SettingsView>) -> Vec<String> {
+/// Lists live models for the current provider, or the catalog before
+/// lookup succeeds. Keeps the chosen model when the list omits it.
+fn menu_models(
+    settings: Option<&api::SettingsView>,
+    live: Option<&(String, Vec<String>)>,
+) -> Vec<String> {
     let Some(view) = settings else {
         return Vec::new();
     };
     let Some(current) = &view.current else {
         return Vec::new();
     };
-    let mut models: Vec<String> = view
-        .providers
-        .iter()
-        .find(|provider| provider.name == current.provider)
-        .map(|provider| {
-            provider
-                .models
-                .iter()
-                .map(|model| model.id.clone())
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut models = match live.filter(|(provider, _)| provider == &current.provider) {
+        Some((_, models)) => models.clone(),
+        None => view
+            .providers
+            .iter()
+            .find(|provider| provider.name == current.provider)
+            .map(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .map(|model| model.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
     if !models.contains(&current.model) {
         models.insert(0, current.model.clone());
     }
@@ -66,6 +71,8 @@ pub(crate) fn ModelChip(
     let mut anchor = use_signal(|| Option::<Anchor>::None);
     let mut page = use_signal(|| MenuPage::Models);
     let mut error = use_signal(|| Option::<String>::None);
+    let mut live_models = use_signal(|| Option::<(String, Vec<String>)>::None);
+    let mut lookup_number = use_signal(|| 0u64);
     let trigger_id = use_hook(next_trigger_id);
     let current = settings().and_then(|view| view.current);
     let (class, label) = match &current {
@@ -75,11 +82,12 @@ pub(crate) fn ModelChip(
         ),
         None => ("model-chip mono unset", "Choose a model".to_owned()),
     };
-    let models = menu_models(settings().as_ref());
+    let models = menu_models(settings().as_ref(), live_models.read().as_ref());
     let current_model = current.as_ref().map(|current| current.model.clone());
     let provider = current.as_ref().map(|current| current.provider.clone());
     let is_model_chosen = current.is_some();
     let measure_id = trigger_id.clone();
+    let lookup_provider = provider.clone();
     let toggle = move |_| {
         if !is_model_chosen {
             is_configuring.set(!is_configuring());
@@ -90,10 +98,25 @@ pub(crate) fn ModelChip(
             return;
         }
         page.set(MenuPage::Models);
+        error.set(None);
+        let number = lookup_number().wrapping_add(1);
+        lookup_number.set(number);
+        let provider = lookup_provider.clone();
         let id = measure_id.clone();
         spawn(async move {
             if let Some(rect) = measure_trigger(id).await {
                 anchor.set(Some(rect));
+            }
+            let Some(provider) = provider else {
+                return;
+            };
+            let loaded = api::fetch_provider_models(&provider, None).await;
+            if lookup_number() != number {
+                return;
+            }
+            match loaded {
+                Ok(models) => live_models.set(Some((provider, models))),
+                Err(message) => error.set(Some(message)),
             }
         });
     };
@@ -331,14 +354,39 @@ mod tests {
     #[test]
     fn menu_models_list_the_provider_catalog_with_the_chosen_model_first() {
         assert_eq!(
-            menu_models(Some(&view(Some("gpt-5-mini")))),
+            menu_models(Some(&view(Some("gpt-5-mini"))), None),
             vec!["gpt-5", "gpt-5-mini"]
         );
         assert_eq!(
-            menu_models(Some(&view(Some("gpt-6-custom")))),
+            menu_models(Some(&view(Some("gpt-6-custom"))), None),
             vec!["gpt-6-custom", "gpt-5", "gpt-5-mini"]
         );
-        assert!(menu_models(Some(&view(None))).is_empty());
-        assert!(menu_models(None).is_empty());
+        assert!(menu_models(Some(&view(None)), None).is_empty());
+        assert!(menu_models(None, None).is_empty());
+    }
+
+    #[test]
+    fn menu_models_use_new_live_models_instead_of_the_catalog() {
+        let live = (
+            "openai".to_owned(),
+            vec!["gpt-6.0-sol".to_owned(), "gpt-6.1-sol".to_owned()],
+        );
+        assert_eq!(
+            menu_models(Some(&view(Some("gpt-6.1-sol"))), Some(&live)),
+            vec!["gpt-6.0-sol", "gpt-6.1-sol"]
+        );
+        assert_eq!(
+            menu_models(Some(&view(Some("custom-model"))), Some(&live)),
+            vec!["custom-model", "gpt-6.0-sol", "gpt-6.1-sol"]
+        );
+    }
+
+    #[test]
+    fn menu_models_do_not_use_another_providers_live_list() {
+        let live = ("anthropic".to_owned(), vec!["claude-model".to_owned()]);
+        assert_eq!(
+            menu_models(Some(&view(Some("gpt-5-mini"))), Some(&live)),
+            vec!["gpt-5", "gpt-5-mini"]
+        );
     }
 }

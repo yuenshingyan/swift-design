@@ -1449,6 +1449,7 @@ mod tests {
         assert_eq!(value["sheets"][0]["index"], 1);
         let request = SessionRequest {
             request: "A launch flyer.".to_owned(),
+            conversation: String::new(),
             kind: ArtifactKind::Print,
             answers: Vec::new(),
             options: low_effort_options(),

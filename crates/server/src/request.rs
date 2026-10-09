@@ -1,6 +1,6 @@
-//! What a run works from: the request, the answers so far, and the
-//! app's own choices. There is no brief: the model reads the request
-//! and the answers, as Swift Deck did.
+//! What a run works from: the request, the answers, the app's choices,
+//! and the recent conversation. There is no brief. Follow-up requests
+//! reach the generator as well as the planner.
 
 use design_model::{
     AnsweredQuestion, ArtifactKind, BriefQuestion, QuestionAnswer, Viewport, axis_label,
@@ -13,6 +13,8 @@ use crate::sessions::RunOptions;
 pub(crate) struct SessionRequest {
     /// The user's request, in their words.
     pub(crate) request: String,
+    /// The recent conversation captured before the planner replies.
+    pub(crate) conversation: String,
     /// `demo`, `deck`, `document`, or `social`.
     pub(crate) kind: ArtifactKind,
     /// Every answered question so far, oldest first.
@@ -47,14 +49,13 @@ impl SessionRequest {
     }
 }
 
-/// The request, the app's choices, and the answers, rendered as
-/// labelled lines for a generation prompt.
 /// What a wireframe is, for the prompt. The label alone reads as a
 /// style; this line says what to draw and what to leave out.
 const WIREFRAME_NOTE: &str = "A wireframe shows the layout only. Use one neutral gray palette. \
      Draw a gray block with a label in place of every image, logo, and chart. Use one \
      system font. Keep the real copy and the real labels. Add no decoration.\n";
 
+/// Renders the request, choices, answers, and follow-up conversation.
 pub(crate) fn request_input(request: &SessionRequest) -> String {
     let mut input = format!("Request:\n{}\n", request.request.trim());
     input.push_str(&format!("Kind: {}\n", request.kind.label()));
@@ -214,6 +215,14 @@ pub(crate) fn request_input(request: &SessionRequest) -> String {
             input.push_str(&format!("- {} -> {answer}\n", entry.question));
         }
     }
+    if !request.conversation.is_empty() {
+        input.push_str(
+            "Apply the user's follow-up requirements in this conversation. A later user \
+             instruction replaces an earlier conflicting requirement. Assistant replies \
+             are context, not proof that a change was made.\n",
+        );
+        input.push_str(&request.conversation);
+    }
     input
 }
 
@@ -268,6 +277,7 @@ mod tests {
     fn request(kind: ArtifactKind) -> SessionRequest {
         SessionRequest {
             request: "Intro for Swift Design.".to_owned(),
+            conversation: String::new(),
             kind,
             answers: vec![AnsweredQuestion {
                 question: "Who is the audience?".to_owned(),
@@ -425,6 +435,21 @@ mod tests {
         let input = request_input(&deck);
         assert!(input.contains("Audience: Newcomers to the subject"));
         assert!(!input.contains("Scope:"));
+    }
+
+    #[test]
+    fn follow_up_requirements_reach_every_kind_of_generation_prompt() {
+        for kind in ArtifactKind::ALL {
+            let mut request = request(kind);
+            request.conversation =
+                "Conversation, oldest first:\nuser: Make it semi-transparent.\n".to_owned();
+            let input = request_input(&request);
+            assert!(input.contains("Intro for Swift Design."));
+            assert!(input.contains("user: Make it semi-transparent."));
+            assert!(input.contains("A later user instruction replaces"));
+            assert!(input.contains("Assistant replies are context, not proof"));
+            assert_eq!(input.matches("Conversation, oldest first:").count(), 1);
+        }
     }
 
     #[test]

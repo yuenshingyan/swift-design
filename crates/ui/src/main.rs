@@ -547,16 +547,27 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
   box-shadow: 0 0 0 1px rgba(21,24,28,.15); }
 .bezel iframe, .bezel .card-blank { width: 100%; height: 100%; border-radius: 0.875rem; }
 /* The tick box owns the top-left corner, so the pills start to its right. */
-.card-pills { position: absolute; top: 0.5rem; left: 0.5rem; z-index: 2; display: flex;
+.card-pills { position: absolute; top: 0.5rem; left: calc(1rem + 28px); z-index: 2; display: flex;
   align-items: center; gap: 0.375rem; }
-.canvas-card.phone .card-pills { top: 0.5rem; left: 0.5rem; flex-direction: column;
+.canvas-card.phone .card-pills { top: calc(1rem + 28px); left: 0.5rem; flex-direction: column;
   align-items: flex-start; }
-/* A selected card wears the accent on its border and its name. The
-   footer is the control: a click on it ticks the card. */
+/* The checkbox and footer toggle selection without opening the card. */
 .canvas-card.selected, .canvas-card.selected:hover { border-color: var(--teal);
   box-shadow: 0 0 0 1px var(--teal); }
 .canvas-card.selected .card-footer { background: var(--teal-tint); }
-.card-tick { display: flex; color: var(--teal); }
+.card-select { position: absolute; top: 0.5rem; left: 0.5rem; z-index: 4;
+  display: flex; align-items: center; justify-content: center; width: 28px; height: 28px;
+  box-sizing: border-box; cursor: pointer; }
+.card-select:hover .card-select-mark { border-color: var(--teal); }
+.card-select input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0;
+  opacity: 0; cursor: pointer; }
+.card-select-mark { display: flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border: 1px solid var(--line); border-radius: 3px;
+  background: var(--raised); color: var(--raised); pointer-events: none; }
+.card-select-mark svg { width: 12px; height: 12px; opacity: 0; }
+.card-select input:checked + .card-select-mark { background: var(--teal); border-color: var(--teal); }
+.card-select input:checked + .card-select-mark svg { opacity: 1; }
+.card-select input:focus-visible + .card-select-mark { outline: 2px solid var(--teal); outline-offset: 2px; }
 .card-footer { cursor: pointer; }
 .card-footer:hover { background: var(--sunken); }
 /* The bulk actions for the ticked cards. */

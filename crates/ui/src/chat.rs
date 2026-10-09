@@ -15,16 +15,33 @@ use crate::settings::{SettingsPanel, artifact_project, pause_briefly};
 use crate::status::{RunStatusCard, phase_name};
 use crate::uploads::{AttachButton, AttachmentChips, PasteUploads, pending_uploads};
 
-/// Scrolls the conversation to its newest message. Runs after the
-/// thread renders, when the message count changes.
+/// Scrolls one conversation after its updated DOM has been rendered.
 const SCROLL_TO_LATEST: &str = "\
+const id = await dioxus.recv();
 const scrollThread = () => {
-  const thread = document.querySelector('.thread');
+  const thread = document.getElementById(id);
   if (thread) { thread.scrollTop = thread.scrollHeight; }
 };
-scrollThread();
+requestAnimationFrame(() => requestAnimationFrame(scrollThread));
 setTimeout(scrollThread, 120);
 ";
+
+/// True when a loaded conversation has a different message count.
+fn should_follow_thread(previous: Option<usize>, current: Option<usize>) -> bool {
+    current.is_some() && previous != current
+}
+
+/// Follows new messages without scrolling on unrelated server updates.
+pub(crate) fn use_follow_thread(thread_id: &'static str, message_count: Option<usize>) {
+    let mut followed_count = use_signal(|| Option::<usize>::None);
+    use_effect(use_reactive!(|message_count| {
+        if should_follow_thread(*followed_count.peek(), message_count) {
+            followed_count.set(message_count);
+            let script = document::eval(SCROLL_TO_LATEST);
+            let _ = script.send(thread_id);
+        }
+    }));
+}
 
 /// The chat column for one design.
 #[component]
@@ -185,16 +202,7 @@ pub fn DesignChat(
             is_configuring.set(true);
         }
     });
-    // Follow the conversation: jump to the newest message on load and
-    // whenever a message arrives.
-    let mut followed_count = use_signal(|| usize::MAX);
-    use_effect(move || {
-        let count = messages().len();
-        if count != *followed_count.peek() {
-            followed_count.set(count);
-            document::eval(SCROLL_TO_LATEST);
-        }
-    });
+    use_follow_thread("editor-thread", Some(messages().len()));
 
     // Keeps the draft as one comment on the referenced node or page,
     // for a message that carries several. The composer clears for the
@@ -285,7 +293,7 @@ pub fn DesignChat(
     let can_send = is_model_chosen && (has_draft || !comments().is_empty());
     rsx! {
         section { class: "conversation editor-chat",
-            div { class: "thread",
+            div { id: "editor-thread", class: "thread",
                 if messages().is_empty() {
                     p { class: "chat-note",
                         "No conversation yet. Ask for a change below, for example "
@@ -664,8 +672,29 @@ pub(crate) fn has_page_reference(text: &str, unit: &str) -> bool {
 mod tests {
     use super::{
         comment_line, comment_summary, has_page_reference, mention_at, mention_matches,
-        message_with_comments, page_title, reference_for, remove_mention,
+        message_with_comments, page_title, reference_for, remove_mention, should_follow_thread,
     };
+
+    #[test]
+    fn follows_the_initial_conversation_and_new_messages() {
+        assert!(should_follow_thread(None, Some(1)));
+        assert!(should_follow_thread(Some(1), Some(2)));
+        assert!(should_follow_thread(Some(2), Some(3)));
+    }
+
+    #[test]
+    fn does_not_scroll_for_loading_or_background_updates() {
+        assert!(!should_follow_thread(None, None));
+        assert!(!should_follow_thread(Some(3), None));
+        assert!(!should_follow_thread(Some(3), Some(3)));
+    }
+
+    #[test]
+    fn scrolling_targets_one_thread_after_the_dom_update() {
+        assert!(super::SCROLL_TO_LATEST.contains("document.getElementById(id)"));
+        assert!(!super::SCROLL_TO_LATEST.contains("querySelector('.thread')"));
+        assert!(super::SCROLL_TO_LATEST.contains("requestAnimationFrame"));
+    }
 
     #[test]
     fn kept_comments_go_out_as_one_message_one_per_line() {

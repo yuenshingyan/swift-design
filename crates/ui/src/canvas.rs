@@ -643,7 +643,7 @@ pub(crate) fn CandidateCanvas(
                 if selected_count > 0 {
                     "{selected_count} selected"
                 } else {
-                    "Tick a card to select it"
+                    "Select cards with the checkboxes"
                 }
             }
             button {
@@ -754,10 +754,7 @@ pub(crate) fn CandidateCanvas(
                             revision,
                             on_open,
                             on_select: move |id: String| {
-                                let mut picks = selected.write();
-                                if !picks.remove(&id) {
-                                    picks.insert(id);
-                                }
+                                toggle_selection(&mut selected.write(), id);
                                 is_confirming_delete.set(false);
                             },
                             on_page: move |(id, next): (String, usize)| {
@@ -790,8 +787,14 @@ pub(crate) fn key_step(key: &Key) -> Option<i32> {
     }
 }
 
-/// One candidate card: the live preview on a stage, the overlays, and
-/// the footer. A click on the card opens the artifact.
+/// Toggles one candidate without changing the other selected candidates.
+fn toggle_selection(selected: &mut HashSet<String>, id: String) {
+    if !selected.remove(&id) {
+        selected.insert(id);
+    }
+}
+
+/// One candidate card with a preview and a visible selection checkbox.
 #[component]
 fn CandidateCard(
     card: CanvasCard,
@@ -876,6 +879,26 @@ fn CandidateCard(
                 }
             },
             div { class: "card-stage",
+                label {
+                    class: "card-select",
+                    title: if is_selected { "Deselect candidate" } else { "Select for Finish, Fork, or Delete" },
+                    onclick: move |event: MouseEvent| event.stop_propagation(),
+                    onkeydown: move |event: KeyboardEvent| event.stop_propagation(),
+                    input {
+                        r#type: "checkbox",
+                        checked: is_selected,
+                        aria_label: "Select candidate {card.title}",
+                        onchange: {
+                            let id = id.clone();
+                            move |_| on_select.call(id.clone())
+                        },
+                    }
+                    span {
+                        class: "card-select-mark",
+                        aria_hidden: "true",
+                        dangerous_inner_html: icons::CHECK,
+                    }
+                }
                 // A phone sits in a bezel drawn by a wrapper, so the
                 // iframe itself carries no rounded corners or shadows.
                 if is_phone {
@@ -949,8 +972,7 @@ fn CandidateCard(
                     }
                 }
             }
-            // The footer is the selection control: a click on it ticks
-            // the card, and the border and the name show the tick.
+            // Keep footer selection as a shortcut beside the visible toggle.
             div {
                 class: "card-footer",
                 title: if is_selected { "Selected · click to deselect" } else { "Click to select" },
@@ -963,12 +985,6 @@ fn CandidateCard(
                     }
                 },
                 div { class: "card-name",
-                    if is_selected {
-                        span {
-                            class: "card-tick",
-                            dangerous_inner_html: icons::CHECK,
-                        }
-                    }
                     // The number is what the chat calls the card (`@2`),
                     // so it stays; the title tells the cards apart.
                     span { class: "card-number", title: "{candidate_label(&id)}",
@@ -1036,6 +1052,17 @@ fn PlaceholderCard(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidate_selection_toggles_without_clearing_other_cards() {
+        let mut selected = HashSet::new();
+        toggle_selection(&mut selected, "first".to_owned());
+        toggle_selection(&mut selected, "second".to_owned());
+        assert_eq!(selected.len(), 2);
+        toggle_selection(&mut selected, "first".to_owned());
+        assert!(!selected.contains("first"));
+        assert!(selected.contains("second"));
+    }
 
     fn message(role: &str, design: Option<&str>, is_continue: bool) -> api::ChatMessage {
         api::ChatMessage {

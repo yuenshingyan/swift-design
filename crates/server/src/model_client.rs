@@ -204,7 +204,7 @@ pub fn configuration_from_settings(
         // The retired `gpt-5` slug 400s on the ChatGPT backend; remap
         // it to the current default and pass everything else through.
         let model = if settings.model == "gpt-5" {
-            crate::settings::CHATGPT_LOGIN_MODELS[0].to_owned()
+            crate::settings::CHATGPT_DEFAULT_MODEL.to_owned()
         } else {
             settings.model.clone()
         };

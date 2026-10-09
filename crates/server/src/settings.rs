@@ -656,22 +656,96 @@ async fn list_provider_models(
 ) -> Response {
     let mut api_key = request.api_key.filter(|key| !key.trim().is_empty());
     if api_key.is_none()
-        && let Ok(Some(stored)) = store.read().await
+        && let Ok(Some(mut stored)) = store.read().await
         && stored.provider == request.provider
     {
-        // A ChatGPT login has no key and no models endpoint; offer the
-        // models that backend serves.
         if request.provider == "openai" && stored.oauth.is_some() {
-            return Json(CHATGPT_LOGIN_MODELS.to_vec()).into_response();
+            return models_response(load_chatgpt_models(&store, &mut stored).await);
         }
         api_key = stored.api_key;
     }
-    match fetch_provider_models(&request.provider, api_key.as_deref()).await {
+    models_response(fetch_provider_models(&request.provider, api_key.as_deref()).await)
+}
+
+/// Converts a model lookup into the settings API response.
+fn models_response(result: Result<Vec<String>, String>) -> Response {
+    match result {
         Ok(models) => Json(models).into_response(),
         Err(message) => {
             api_error::error_response(StatusCode::UNPROCESSABLE_ENTITY, &message, Vec::new())
         }
     }
+}
+
+/// Loads the subscription catalog, renewing expired credentials first.
+async fn load_chatgpt_models(
+    store: &SettingsStore,
+    settings: &mut StoredSettings,
+) -> Result<Vec<String>, String> {
+    let oauth = settings.oauth.as_ref().ok_or("sign in to ChatGPT first")?;
+    if is_login_expiring(oauth) {
+        let renewed = refresh_chatgpt_login(&oauth.refresh_token)
+            .await
+            .map_err(|_| "could not renew the ChatGPT login; sign in again".to_owned())?;
+        settings.oauth = Some(renewed);
+        store
+            .write(settings)
+            .await
+            .map_err(|_| "could not save the renewed ChatGPT login".to_owned())?;
+    }
+    let oauth = settings.oauth.as_ref().ok_or("sign in to ChatGPT first")?;
+    fetch_chatgpt_models(oauth, CHATGPT_MODELS_URL).await
+}
+
+/// Requests the live Codex catalog with the user's subscription credentials.
+async fn fetch_chatgpt_models(oauth: &StoredOauth, url: &str) -> Result<Vec<String>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|_| "could not create the ChatGPT models client".to_owned())?;
+    let mut request = client
+        .get(url)
+        .query(&[("client_version", CHATGPT_CATALOG_CLIENT_VERSION)])
+        .bearer_auth(&oauth.access_token)
+        .header("originator", "codex_cli_rs");
+    if let Some(account_id) = &oauth.account_id {
+        request = request.header("ChatGPT-Account-Id", account_id);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|_| "request for ChatGPT models failed; try reloading the list".to_owned())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "ChatGPT model lookup returned {}; sign in again or retry",
+            response.status()
+        ));
+    }
+    let value = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|_| "ChatGPT returned an invalid model catalog".to_owned())?;
+    chatgpt_model_ids(&value)
+}
+
+/// Reads picker-visible model slugs without a local model allowlist.
+fn chatgpt_model_ids(value: &serde_json::Value) -> Result<Vec<String>, String> {
+    let entries = value["models"]
+        .as_array()
+        .ok_or("ChatGPT returned an invalid model catalog")?;
+    let mut models: Vec<String> = entries
+        .iter()
+        .filter(|entry| entry["visibility"].as_str() == Some("list"))
+        .filter_map(|entry| entry["slug"].as_str())
+        .filter(|slug| !slug.trim().is_empty())
+        .map(str::to_owned)
+        .collect();
+    models.sort();
+    models.dedup();
+    if models.is_empty() {
+        return Err("ChatGPT returned no selectable models".to_owned());
+    }
+    Ok(models)
 }
 
 /// Asks the provider's models endpoint for its current model ids.
@@ -832,18 +906,15 @@ async fn openrouter_login_callback(
     }
 }
 
-/// Models the ChatGPT backend serves to subscription logins. Other
-/// models are API-key only ("not supported when using Codex with a
-/// ChatGPT account").
-pub const CHATGPT_LOGIN_MODELS: &[&str] = &[
-    "gpt-5.5",
-    "gpt-5.6-sol",
-    "gpt-5.6-luna",
-    "gpt-5.6-terra",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "gpt-5.3-codex-spark",
-];
+/// Initial model choice before the live subscription catalog is loaded.
+pub const CHATGPT_DEFAULT_MODEL: &str = "gpt-5.5";
+
+/// The subscription model catalog endpoint used by Codex.
+const CHATGPT_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
+
+// The catalog uses the Codex client version for protocol compatibility.
+// This is not a model allowlist: new slugs come from the live response.
+const CHATGPT_CATALOG_CLIENT_VERSION: &str = "0.161.0";
 
 /// The OAuth client id of the Codex CLI public client, used for
 /// ChatGPT-subscription logins (the flow pi and Codex use).
@@ -1025,12 +1096,11 @@ async fn run_openai_callback_listener(
             Ok(oauth) => {
                 let model = match store.read().await {
                     Ok(Some(stored))
-                        if stored.provider == "openai"
-                            && CHATGPT_LOGIN_MODELS.contains(&stored.model.as_str()) =>
+                        if stored.provider == "openai" && !stored.model.trim().is_empty() =>
                     {
                         stored.model
                     }
-                    _ => CHATGPT_LOGIN_MODELS[0].to_owned(),
+                    _ => CHATGPT_DEFAULT_MODEL.to_owned(),
                 };
                 let settings = StoredSettings {
                     provider: "openai".to_owned(),
@@ -1077,10 +1147,119 @@ async fn run_openai_callback_listener(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use axum::extract::Query;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::routing::get;
+    use axum::{Json, Router};
+
     use crate::settings::{
         CATALOG, StoredOauth, StoredSettings, anthropic_authorize_url, base64_url_encode,
         is_login_expiring, pkce_pair, unix_now_seconds,
     };
+
+    #[test]
+    fn subscription_catalog_accepts_new_slugs_and_omits_hidden_models() {
+        let value = serde_json::json!({ "models": [
+            { "slug": "gpt-6.1-sol", "visibility": "list" },
+            { "slug": "gpt-6.0-sol", "visibility": "list" },
+            { "slug": "gpt-6.1-sol", "visibility": "list" },
+            { "slug": "hidden", "visibility": "hide" },
+            { "slug": "internal", "visibility": "none" },
+            { "slug": "", "visibility": "list" },
+            { "visibility": "list" }
+        ] });
+        assert_eq!(
+            super::chatgpt_model_ids(&value).unwrap(),
+            vec!["gpt-6.0-sol", "gpt-6.1-sol"]
+        );
+    }
+
+    #[test]
+    fn subscription_catalog_rejects_invalid_or_empty_lists() {
+        for value in [
+            serde_json::json!({ "data": [{ "id": "wrong-format" }] }),
+            serde_json::json!({ "models": [] }),
+            serde_json::json!({ "models": [{ "slug": "hidden", "visibility": "hide" }] }),
+        ] {
+            assert!(super::chatgpt_model_ids(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn model_lookup_errors_use_the_api_error_status() {
+        assert_eq!(
+            super::models_response(Err("lookup failed".to_owned())).status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            super::models_response(Ok(vec!["new-model".to_owned()])).status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_catalog_requires_a_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = super::SettingsStore::new(
+            directory.path().join("settings.json"),
+            "127.0.0.1:3001".to_owned(),
+        );
+        let mut settings = StoredSettings::default();
+        assert_eq!(
+            super::load_chatgpt_models(&store, &mut settings)
+                .await
+                .unwrap_err(),
+            "sign in to ChatGPT first"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_catalog_uses_authenticated_live_lookup() {
+        let router = Router::new()
+            .route("/models", get(subscription_catalog_reply))
+            .route(
+                "/denied",
+                get(|| async { (StatusCode::UNAUTHORIZED, "private provider response") }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let oauth = StoredOauth {
+            access_token: "test-token".to_owned(),
+            refresh_token: "test-refresh".to_owned(),
+            expires_at_unix_seconds: unix_now_seconds() + 3600,
+            account_id: Some("test-account".to_owned()),
+        };
+        let models = super::fetch_chatgpt_models(&oauth, &format!("http://{address}/models"))
+            .await
+            .unwrap();
+        assert_eq!(models, vec!["gpt-6.1-sol"]);
+        let error = super::fetch_chatgpt_models(&oauth, &format!("http://{address}/denied"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("401"));
+        assert!(!error.contains("private provider response"));
+        assert!(!error.contains("test-token"));
+        server.abort();
+    }
+
+    async fn subscription_catalog_reply(
+        headers: HeaderMap,
+        Query(query): Query<std::collections::HashMap<String, String>>,
+    ) -> Json<serde_json::Value> {
+        assert_eq!(headers["authorization"], "Bearer test-token");
+        assert_eq!(headers["chatgpt-account-id"], "test-account");
+        assert_eq!(headers["originator"], "codex_cli_rs");
+        assert_eq!(
+            query["client_version"],
+            super::CHATGPT_CATALOG_CLIENT_VERSION
+        );
+        Json(serde_json::json!({ "models": [
+            { "slug": "gpt-6.1-sol", "visibility": "list" }
+        ] }))
+    }
 
     #[test]
     fn pkce_values_are_url_safe() {

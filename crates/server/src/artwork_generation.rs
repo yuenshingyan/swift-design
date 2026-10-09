@@ -1443,6 +1443,7 @@ mod tests {
         assert_eq!(value["covers"][0]["index"], 1);
         let request = SessionRequest {
             request: "A launch cover.".to_owned(),
+            conversation: String::new(),
             kind: ArtifactKind::Artwork,
             answers: Vec::new(),
             options: low_effort_options(),

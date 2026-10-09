@@ -1446,6 +1446,7 @@ mod tests {
         assert_eq!(value["pages"][0]["index"], 1);
         let request = SessionRequest {
             request: "A report.".to_owned(),
+            conversation: String::new(),
             kind: ArtifactKind::Document,
             answers: Vec::new(),
             options: low_effort_options(),

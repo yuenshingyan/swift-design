@@ -1444,6 +1444,7 @@ mod tests {
         assert_eq!(value["ads"][0]["index"], 1);
         let request = SessionRequest {
             request: "A launch ad.".to_owned(),
+            conversation: String::new(),
             kind: ArtifactKind::Campaign,
             answers: Vec::new(),
             options: low_effort_options(),
