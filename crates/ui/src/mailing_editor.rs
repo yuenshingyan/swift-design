@@ -1020,38 +1020,36 @@ mod tests {
     use design_model::{Email, EmailFormat, FontSet, Mailing, Palette, Theme};
 
     use super::{
-        MailingPreviewMode, default_email, email_label, field_count, format_option_label,
-        outline_title, preview_stage_class, remove_email,
+        MailingPreviewMode, default_email, email_download_name, email_export_href, email_label,
+        export_href, field_count, format_option_label, outline_title, png_export_href,
+        preview_stage_class, remove_email,
     };
 
     #[test]
     fn a_scoped_export_names_the_email_in_href_and_filename() {
+        assert_eq!(export_href("launch", "", None), "/mailings/launch/export");
         assert_eq!(
-            super::export_href("launch", "", None),
-            "/mailings/launch/export"
-        );
-        assert_eq!(
-            super::export_href("launch", ".pdf", Some(1)),
+            export_href("launch", ".pdf", Some(1)),
             "/mailings/launch/export.pdf?email=2"
         );
         assert_eq!(
-            super::png_export_href("launch", None),
+            png_export_href("launch", None),
             "/mailings/launch/export.zip"
         );
         assert_eq!(
-            super::png_export_href("launch", Some(1)),
+            png_export_href("launch", Some(1)),
             "/mailings/launch/emails/2.png"
         );
         assert_eq!(
-            super::email_export_href("launch", None),
+            email_export_href("launch", None),
             "/mailings/launch/export.email.zip"
         );
         assert_eq!(
-            super::email_export_href("launch", Some(1)),
+            email_export_href("launch", Some(1)),
             "/mailings/launch/emails/2.html"
         );
         assert_eq!(
-            super::email_download_name("launch", 1, "html"),
+            email_download_name("launch", 1, "html"),
             "launch-email-2.html"
         );
     }

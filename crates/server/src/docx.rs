@@ -17,7 +17,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use crate::pptx::escape_xml;
-use crate::uploads::UploadStore;
+use crate::uploads::{UploadStore, is_stored_name};
 
 /// The content type of a `.docx` download.
 pub const DOCX_CONTENT_TYPE: &str =
@@ -187,9 +187,7 @@ async fn load_pictures(blocks: &[Block], uploads: &UploadStore) -> anyhow::Resul
             .next()
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if !PICTURE_EXTENSIONS.contains(&extension.as_str())
-            || !crate::uploads::is_stored_name(name)
-        {
+        if !PICTURE_EXTENSIONS.contains(&extension.as_str()) || !is_stored_name(name) {
             continue;
         }
         if let Some(bytes) = uploads.read(name).await? {

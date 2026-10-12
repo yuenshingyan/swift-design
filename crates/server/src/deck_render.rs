@@ -12,9 +12,10 @@
 
 use design_model::{DECK_VIEWPORT, Deck, Slide};
 
+use crate::pptx::MEASURE_SCRIPT;
 use crate::render::{
-    AUDIT_SCRIPT, EDITING_SCRIPT, LAYOUT_SCRIPT, NAVIGATION_SCRIPT, css_safe, design_attributes,
-    escape_html, print_stylesheet, script_markup, stylesheet, transition_styles,
+    AUDIT_SCRIPT, EDITING_SCRIPT, FIT_SCRIPT, LAYOUT_SCRIPT, NAVIGATION_SCRIPT, css_safe,
+    design_attributes, escape_html, print_stylesheet, script_markup, stylesheet, transition_styles,
 };
 use crate::screen_css::{google_fonts_link, scope_css};
 
@@ -153,9 +154,9 @@ fn slide_markup(deck: &Deck, only_slide: Option<usize>) -> (String, String) {
 /// content the studio shows.
 fn page_script(options: &RenderOptions) -> String {
     if options.is_print {
-        return crate::render::FIT_SCRIPT.to_owned();
+        return FIT_SCRIPT.to_owned();
     }
-    let mut script = crate::render::FIT_SCRIPT.to_owned();
+    let mut script = FIT_SCRIPT.to_owned();
     script.push_str(LAYOUT_SCRIPT);
     script.push_str(NAVIGATION_SCRIPT);
     if options.is_editable {
@@ -165,7 +166,7 @@ fn page_script(options: &RenderOptions) -> String {
         script.push_str(AUDIT_SCRIPT);
     }
     if options.is_measuring {
-        script.push_str(crate::pptx::MEASURE_SCRIPT);
+        script.push_str(MEASURE_SCRIPT);
     }
     if options.audience_channel.is_some() {
         script.push_str(AUDIENCE_SCRIPT);

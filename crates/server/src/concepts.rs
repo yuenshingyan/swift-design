@@ -5,8 +5,11 @@
 //! concept and told what the other concepts are, so candidates differ
 //! by design rather than by chance.
 
-use crate::request::{SessionRequest, request_input};
 use serde::{Deserialize, Serialize};
+
+use crate::request::{SessionRequest, request_input};
+#[cfg(test)]
+use crate::sessions::RunOptions;
 
 /// One design direction for a candidate design.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -145,7 +148,7 @@ mod tests {
                 answer: "retail investors".to_owned(),
                 is_assumed: false,
             }],
-            options: crate::sessions::RunOptions::default(),
+            options: RunOptions::default(),
         };
         assert!(concept_input(&request).contains("Who is it for? -> retail investors"));
         assert!(concept_input(&request).contains("A finance landing page."));

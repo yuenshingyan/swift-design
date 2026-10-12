@@ -10,7 +10,10 @@
 
 use std::sync::Arc;
 
-use crate::settings::SettingsStore;
+use crate::settings::{
+    CHATGPT_DEFAULT_MODEL, SettingsStore, StoredSettings, is_login_expiring, refresh_chatgpt_login,
+    refresh_login,
+};
 
 /// Longest time to wait for one model response.
 /// How long a connection to the provider may take to open.
@@ -184,9 +187,7 @@ pub fn configured_model() -> Option<ModelConfiguration> {
 
 /// Builds the configuration from the settings the user picked in the
 /// studio. `None` when the stored choice has no usable credential.
-pub fn configuration_from_settings(
-    settings: &crate::settings::StoredSettings,
-) -> Option<ModelConfiguration> {
+pub fn configuration_from_settings(settings: &StoredSettings) -> Option<ModelConfiguration> {
     if let Some(oauth) = &settings.oauth
         && settings.provider == "anthropic"
     {
@@ -204,7 +205,7 @@ pub fn configuration_from_settings(
         // The retired `gpt-5` slug 400s on the ChatGPT backend; remap
         // it to the current default and pass everything else through.
         let model = if settings.model == "gpt-5" {
-            crate::settings::CHATGPT_DEFAULT_MODEL.to_owned()
+            CHATGPT_DEFAULT_MODEL.to_owned()
         } else {
             settings.model.clone()
         };
@@ -331,20 +332,19 @@ impl ModelClient {
         let Some(oauth) = stored.oauth.clone() else {
             return Ok(());
         };
-        if !crate::settings::is_login_expiring(&oauth) {
+        if !is_login_expiring(&oauth) {
             return Ok(());
         }
         log("refreshing the login");
         let refreshed = match &self.configuration.auth {
             ProviderAuth::AnthropicLogin(_) => {
-                let refreshed = crate::settings::refresh_login(&oauth.refresh_token).await?;
+                let refreshed = refresh_login(&oauth.refresh_token).await?;
                 self.configuration.auth =
                     ProviderAuth::AnthropicLogin(refreshed.access_token.clone());
                 refreshed
             }
             _ => {
-                let refreshed =
-                    crate::settings::refresh_chatgpt_login(&oauth.refresh_token).await?;
+                let refreshed = refresh_chatgpt_login(&oauth.refresh_token).await?;
                 self.configuration.auth = ProviderAuth::ChatGptLogin {
                     access_token: refreshed.access_token.clone(),
                     account_id: refreshed

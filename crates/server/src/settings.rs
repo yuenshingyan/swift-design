@@ -20,9 +20,12 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
+use crate::AppState;
 use crate::api_error;
 use crate::events::ChangeNotifier;
 use crate::export::base64_encode;
+use crate::model_client::provider_chat_url;
+use crate::screenshots::find_chrome;
 
 /// The OAuth client id of the Claude Code/pi/opencode public client.
 const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -441,7 +444,7 @@ pub fn is_login_expiring(oauth: &StoredOauth) -> bool {
 }
 
 /// The `/settings` route table.
-pub fn routes() -> Router<crate::AppState> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/settings", get(get_settings).put(put_settings))
         .route("/settings/models", post(list_provider_models))
@@ -494,7 +497,7 @@ async fn get_settings(State(store): State<SettingsStore>) -> Response {
             "model": settings.model,
             "auth": settings.auth_method(),
         })),
-        "has_chrome": crate::screenshots::find_chrome().is_some(),
+        "has_chrome": find_chrome().is_some(),
     }))
     .into_response()
 }
@@ -764,8 +767,8 @@ async fn fetch_provider_models(
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
     } else {
-        let chat_url = crate::model_client::provider_chat_url(provider)
-            .ok_or_else(|| format!("unknown provider `{provider}`"))?;
+        let chat_url =
+            provider_chat_url(provider).ok_or_else(|| format!("unknown provider `{provider}`"))?;
         let mut request = client.get(chat_url.replace("/chat/completions", "/models"));
         if let Some(api_key) = api_key {
             request = request.bearer_auth(api_key);
@@ -1153,8 +1156,10 @@ mod tests {
     use axum::{Json, Router};
 
     use crate::settings::{
-        CATALOG, StoredOauth, StoredSettings, anthropic_authorize_url, base64_url_encode,
-        is_login_expiring, pkce_pair, unix_now_seconds,
+        CATALOG, CHATGPT_CATALOG_CLIENT_VERSION, SettingsStore, StoredOauth, StoredSettings,
+        anthropic_authorize_url, base64_url_decode, base64_url_encode, chatgpt_account_id,
+        chatgpt_model_ids, fetch_chatgpt_models, is_login_expiring, load_chatgpt_models,
+        models_response, pkce_pair, provider_chat_url, unix_now_seconds, url_encode_component,
     };
 
     #[test]
@@ -1169,7 +1174,7 @@ mod tests {
             { "visibility": "list" }
         ] });
         assert_eq!(
-            super::chatgpt_model_ids(&value).unwrap(),
+            chatgpt_model_ids(&value).unwrap(),
             vec!["gpt-6.0-sol", "gpt-6.1-sol"]
         );
     }
@@ -1181,18 +1186,18 @@ mod tests {
             serde_json::json!({ "models": [] }),
             serde_json::json!({ "models": [{ "slug": "hidden", "visibility": "hide" }] }),
         ] {
-            assert!(super::chatgpt_model_ids(&value).is_err());
+            assert!(chatgpt_model_ids(&value).is_err());
         }
     }
 
     #[test]
     fn model_lookup_errors_use_the_api_error_status() {
         assert_eq!(
-            super::models_response(Err("lookup failed".to_owned())).status(),
+            models_response(Err("lookup failed".to_owned())).status(),
             StatusCode::UNPROCESSABLE_ENTITY
         );
         assert_eq!(
-            super::models_response(Ok(vec!["new-model".to_owned()])).status(),
+            models_response(Ok(vec!["new-model".to_owned()])).status(),
             StatusCode::OK
         );
     }
@@ -1200,13 +1205,13 @@ mod tests {
     #[tokio::test]
     async fn subscription_catalog_requires_a_login() {
         let directory = tempfile::tempdir().unwrap();
-        let store = super::SettingsStore::new(
+        let store = SettingsStore::new(
             directory.path().join("settings.json"),
             "127.0.0.1:3001".to_owned(),
         );
         let mut settings = StoredSettings::default();
         assert_eq!(
-            super::load_chatgpt_models(&store, &mut settings)
+            load_chatgpt_models(&store, &mut settings)
                 .await
                 .unwrap_err(),
             "sign in to ChatGPT first"
@@ -1232,11 +1237,11 @@ mod tests {
             expires_at_unix_seconds: unix_now_seconds() + 3600,
             account_id: Some("test-account".to_owned()),
         };
-        let models = super::fetch_chatgpt_models(&oauth, &format!("http://{address}/models"))
+        let models = fetch_chatgpt_models(&oauth, &format!("http://{address}/models"))
             .await
             .unwrap();
         assert_eq!(models, vec!["gpt-6.1-sol"]);
-        let error = super::fetch_chatgpt_models(&oauth, &format!("http://{address}/denied"))
+        let error = fetch_chatgpt_models(&oauth, &format!("http://{address}/denied"))
             .await
             .unwrap_err();
         assert!(error.contains("401"));
@@ -1252,10 +1257,7 @@ mod tests {
         assert_eq!(headers["authorization"], "Bearer test-token");
         assert_eq!(headers["chatgpt-account-id"], "test-account");
         assert_eq!(headers["originator"], "codex_cli_rs");
-        assert_eq!(
-            query["client_version"],
-            super::CHATGPT_CATALOG_CLIENT_VERSION
-        );
+        assert_eq!(query["client_version"], CHATGPT_CATALOG_CLIENT_VERSION);
         Json(serde_json::json!({ "models": [
             { "slug": "gpt-6.1-sol", "visibility": "list" }
         ] }))
@@ -1287,36 +1289,27 @@ mod tests {
         });
         let token = format!(
             "header.{}.signature",
-            crate::settings::base64_url_encode(claims.to_string().as_bytes()),
+            base64_url_encode(claims.to_string().as_bytes()),
         );
-        assert_eq!(
-            crate::settings::chatgpt_account_id(&token).as_deref(),
-            Some("account-123")
-        );
-        assert_eq!(crate::settings::chatgpt_account_id("not-a-jwt"), None);
+        assert_eq!(chatgpt_account_id(&token).as_deref(), Some("account-123"));
+        assert_eq!(chatgpt_account_id("not-a-jwt"), None);
     }
 
     #[test]
     fn base64_url_decoding_reverses_encoding() {
         let bytes = b"swift-design?~\xfb\xff";
-        let encoded = crate::settings::base64_url_encode(bytes);
-        assert_eq!(
-            crate::settings::base64_url_decode(&encoded).unwrap(),
-            bytes.to_vec()
-        );
-        assert_eq!(crate::settings::base64_url_decode("!!"), None);
+        let encoded = base64_url_encode(bytes);
+        assert_eq!(base64_url_decode(&encoded).unwrap(), bytes.to_vec());
+        assert_eq!(base64_url_decode("!!"), None);
     }
 
     #[test]
     fn url_components_are_percent_encoded() {
         assert_eq!(
-            crate::settings::url_encode_component("http://127.0.0.1:3000/a b"),
+            url_encode_component("http://127.0.0.1:3000/a b"),
             "http%3A%2F%2F127.0.0.1%3A3000%2Fa%20b"
         );
-        assert_eq!(
-            crate::settings::url_encode_component("safe-._~09Az"),
-            "safe-._~09Az"
-        );
+        assert_eq!(url_encode_component("safe-._~09Az"), "safe-._~09Az");
     }
 
     #[test]
@@ -1360,7 +1353,7 @@ mod tests {
     fn every_catalog_provider_resolves_to_a_chat_url() {
         for provider in CATALOG {
             assert!(
-                crate::model_client::provider_chat_url(provider.name).is_some(),
+                provider_chat_url(provider.name).is_some(),
                 "provider `{}` has no chat URL in the generation registry",
                 provider.name
             );

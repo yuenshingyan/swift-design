@@ -519,6 +519,8 @@ pub(crate) fn answered_entries(
 
 #[cfg(test)]
 mod tests {
+    use design_model::QuestionOption;
+
     use super::*;
 
     #[test]
@@ -539,7 +541,6 @@ mod tests {
         assert_eq!(question_pages(false, true), vec![QuestionPage::Agent]);
         assert_eq!(question_pages(false, false), vec![QuestionPage::Agent]);
     }
-    use design_model::QuestionOption;
 
     #[test]
     fn answered_entries_read_every_round_in_order() {

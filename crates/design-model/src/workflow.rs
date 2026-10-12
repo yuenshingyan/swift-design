@@ -11,6 +11,12 @@ use std::fmt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use WorkflowEvent::{
+    ContinueRequested, GenerationStarted, GenerationSucceeded, QuestionsAsked, Recovered,
+    RunFailed, RunStopped,
+};
+use WorkflowState::{Clarifying, Error, Generating, Intake, Reviewing, Stopped};
+
 /// Where a session is in the workflow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -36,14 +42,7 @@ pub enum WorkflowState {
 
 impl WorkflowState {
     /// Every state, in workflow order.
-    pub const ALL: [WorkflowState; 6] = [
-        WorkflowState::Intake,
-        WorkflowState::Clarifying,
-        WorkflowState::Generating,
-        WorkflowState::Reviewing,
-        WorkflowState::Stopped,
-        WorkflowState::Error,
-    ];
+    pub const ALL: [WorkflowState; 6] = [Intake, Clarifying, Generating, Reviewing, Stopped, Error];
 
     /// The snake_case name used in JSON and in messages.
     pub fn as_str(self) -> &'static str {
@@ -120,32 +119,27 @@ impl WorkflowEvent {
 
     /// The states this event is allowed in.
     pub fn allowed_in(self) -> &'static [WorkflowState] {
-        use WorkflowState::*;
         match self {
-            WorkflowEvent::QuestionsAsked => &[Intake, Clarifying, Generating, Reviewing],
-            WorkflowEvent::GenerationStarted => &[Intake, Clarifying, Reviewing],
-            WorkflowEvent::GenerationSucceeded => &[Generating],
+            QuestionsAsked => &[Intake, Clarifying, Generating, Reviewing],
+            GenerationStarted => &[Intake, Clarifying, Reviewing],
+            GenerationSucceeded => &[Generating],
             // A second continue may arrive while the first still
             // runs: the user pressed Finish on more than one candidate.
-            WorkflowEvent::ContinueRequested => &[Reviewing, Generating],
-            WorkflowEvent::RunFailed | WorkflowEvent::RunStopped => {
-                &[Intake, Clarifying, Generating, Reviewing]
-            }
-            WorkflowEvent::Recovered { .. } => &[Stopped, Error],
+            ContinueRequested => &[Reviewing, Generating],
+            RunFailed | RunStopped => &[Intake, Clarifying, Generating, Reviewing],
+            Recovered { .. } => &[Stopped, Error],
         }
     }
 
     /// The state this event leads to.
     fn target(self) -> WorkflowState {
         match self {
-            WorkflowEvent::QuestionsAsked => WorkflowState::Clarifying,
-            WorkflowEvent::GenerationStarted | WorkflowEvent::ContinueRequested => {
-                WorkflowState::Generating
-            }
-            WorkflowEvent::GenerationSucceeded => WorkflowState::Reviewing,
-            WorkflowEvent::RunFailed => WorkflowState::Error,
-            WorkflowEvent::RunStopped => WorkflowState::Stopped,
-            WorkflowEvent::Recovered { to } => to,
+            QuestionsAsked => Clarifying,
+            GenerationStarted | ContinueRequested => Generating,
+            GenerationSucceeded => Reviewing,
+            RunFailed => Error,
+            RunStopped => Stopped,
+            Recovered { to } => to,
         }
     }
 }
@@ -207,12 +201,14 @@ pub fn transition(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{WorkflowError, WorkflowEvent, WorkflowState, transition};
+    use super::{
+        Clarifying, ContinueRequested, Error, Generating, GenerationStarted, GenerationSucceeded,
+        Intake, QuestionsAsked, Recovered, Reviewing, RunFailed, RunStopped, Stopped,
+        WorkflowError, WorkflowEvent, WorkflowState, transition,
+    };
 
     #[test]
     fn every_documented_transition_is_allowed() {
-        use WorkflowEvent::*;
-        use WorkflowState::*;
         let cases = [
             (Intake, QuestionsAsked, Clarifying),
             (Intake, GenerationStarted, Generating),

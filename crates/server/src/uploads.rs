@@ -23,8 +23,11 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::api_error;
 use crate::events::ChangeNotifier;
+use crate::files::write_atomically;
+use crate::office::{DOCX, PPTX, XLSX};
 
 /// Uploads above this size are rejected. Big enough for screen images
 /// and PDF source material.
@@ -86,7 +89,7 @@ impl UploadStore {
     async fn write_owners(&self, owners: &HashMap<String, String>) -> anyhow::Result<()> {
         tokio::fs::create_dir_all(&self.directory).await?;
         let text = serde_json::to_string_pretty(owners)?;
-        crate::files::write_atomically(&self.directory.join(OWNERS_FILE), &text).await
+        write_atomically(&self.directory.join(OWNERS_FILE), &text).await
     }
 
     /// Saves `bytes` for `scope` under a sanitized version of
@@ -225,7 +228,7 @@ impl UploadStore {
 }
 
 /// The `/uploads` route table.
-pub fn routes() -> Router<crate::AppState> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/uploads", get(list_uploads).post(upload))
         .route("/uploads/{name}", get(get_upload).delete(delete_upload))
@@ -355,9 +358,9 @@ pub(crate) fn content_type_of(name: &str) -> &'static str {
         "pdf" => "application/pdf",
         // Office files are zip archives of XML; `office.rs` reads
         // their text for the prompt.
-        "docx" => crate::office::DOCX,
-        "pptx" => crate::office::PPTX,
-        "xlsx" => crate::office::XLSX,
+        "docx" => DOCX,
+        "pptx" => PPTX,
+        "xlsx" => XLSX,
         "txt" => "text/plain; charset=utf-8",
         "md" => "text/markdown; charset=utf-8",
         // Source files are text, so the prompt carries their code. A
@@ -527,8 +530,10 @@ async fn delete_upload(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use crate::office::{DOCX, PPTX, XLSX};
     use crate::uploads::{
-        UploadStore, content_type_of, is_image_name, is_stored_name, sanitize_file_name,
+        DRAFT_SCOPE, UploadStore, UploadSummary, content_type_of, is_image_name, is_stored_name,
+        sanitize_file_name,
     };
 
     #[test]
@@ -561,7 +566,7 @@ mod tests {
         let store = UploadStore::new(directory.path().to_path_buf());
         store.save("talk", "notes.md", b"one").await.unwrap();
         store.save("pitch", "other.md", b"two").await.unwrap();
-        let names = |listing: Vec<super::UploadSummary>| {
+        let names = |listing: Vec<UploadSummary>| {
             listing
                 .into_iter()
                 .map(|summary| summary.name)
@@ -570,7 +575,7 @@ mod tests {
         assert_eq!(names(store.list("talk").await.unwrap()), ["notes.md"]);
         assert_eq!(names(store.list("pitch").await.unwrap()), ["other.md"]);
         // The draft scope holds what no session has taken yet.
-        assert!(store.list(super::DRAFT_SCOPE).await.unwrap().is_empty());
+        assert!(store.list(DRAFT_SCOPE).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -592,10 +597,7 @@ mod tests {
     async fn a_new_session_takes_the_draft_files_and_the_unowned_ones() {
         let directory = tempfile::tempdir().unwrap();
         let store = UploadStore::new(directory.path().to_path_buf());
-        store
-            .save(super::DRAFT_SCOPE, "brief.md", b"one")
-            .await
-            .unwrap();
+        store.save(DRAFT_SCOPE, "brief.md", b"one").await.unwrap();
         // A file from before the scopes existed, written straight into
         // the directory.
         tokio::fs::write(directory.path().join("legacy.md"), b"old")
@@ -611,7 +613,7 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["brief.md", "legacy.md"]);
-        assert!(store.list(super::DRAFT_SCOPE).await.unwrap().is_empty());
+        assert!(store.list(DRAFT_SCOPE).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -701,9 +703,9 @@ mod tests {
 
     #[test]
     fn an_office_upload_is_typed_so_its_text_reaches_the_prompt() {
-        assert_eq!(content_type_of("brief.docx"), crate::office::DOCX);
-        assert_eq!(content_type_of("old-deck.pptx"), crate::office::PPTX);
-        assert_eq!(content_type_of("figures.xlsx"), crate::office::XLSX);
+        assert_eq!(content_type_of("brief.docx"), DOCX);
+        assert_eq!(content_type_of("old-deck.pptx"), PPTX);
+        assert_eq!(content_type_of("figures.xlsx"), XLSX);
         assert_eq!(content_type_of("figures.xls"), "application/octet-stream");
     }
 }

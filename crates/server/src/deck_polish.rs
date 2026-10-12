@@ -8,19 +8,21 @@
 
 use design_model::Deck;
 
+use crate::deck_patch::PATCH_FORMAT;
 use crate::model_client::LogSink;
 use crate::polish::{Finding, finding_advice, prioritized, raw_findings};
+use crate::screenshots::{dump_deck_dom, find_chrome};
 
 /// Layout findings for a deck, measured in a browser. Empty when no
 /// Chrome is installed or the audit fails; both are logged.
 pub async fn dom_findings(deck: &Deck, base_url: &str, label: &str, log: &LogSink) -> Vec<String> {
-    if crate::screenshots::find_chrome().is_none() {
+    if find_chrome().is_none() {
         log(&format!(
             "{label}: no Chrome found for the layout audit; reviewing from JSON only"
         ));
         return Vec::new();
     }
-    match crate::screenshots::dump_deck_dom(deck, base_url).await {
+    match dump_deck_dom(deck, base_url).await {
         Ok(dom) => {
             let findings = parse_findings(&dom);
             if findings.is_empty() && !dom.contains("data-swift-design-findings") {
@@ -88,7 +90,7 @@ pub fn polish_prompt(deck_json: &str, findings: &[String], image_count: usize) -
          dense or too empty, and a weak title slide. Keep the concept, the outline, and the \
          content. Do not add or delete slides. Change only the slides that need it.\n",
     );
-    prompt.push_str(crate::deck_patch::PATCH_FORMAT);
+    prompt.push_str(PATCH_FORMAT);
     prompt.push_str(" When nothing needs a change, reply with {}.");
     prompt
 }

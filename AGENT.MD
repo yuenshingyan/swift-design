@@ -4,6 +4,13 @@
 
 Before making changes, inspect existing session, chat, runtime, artifact, persistence, and UI code. Reuse existing validation and storage boundaries where possible. Do not replace a working runtime abstraction merely to add this feature.
 
+## Rust imports
+
+- Import internal names at the top of their module.
+- Do not use inline `crate::` or `super::` paths in types, expressions, attributes, or macro expansions.
+- Keep qualified paths in `use` declarations. This includes `super::*` test imports.
+- Use clear import aliases when names collide.
+
 ## Architecture rules
 
 ### State is authoritative

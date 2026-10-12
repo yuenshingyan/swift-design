@@ -73,6 +73,7 @@ use serde::Deserialize;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
+use crate::AppState;
 use crate::api_error;
 use crate::artwork_render;
 use crate::artworks::{ArtworkStore, is_valid_artwork_id};
@@ -104,7 +105,7 @@ const PPTX_CONTENT_TYPE: &str =
 /// The `/designs/{id}/export`, `/decks/{id}/export`,
 /// `/documents/{id}/export`, `/socials/{id}/export`,
 /// `/prints/{id}/export`, and `/mailings/{id}/export` route table.
-pub fn routes() -> Router<crate::AppState> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/designs/{id}/export", get(export_design))
         .route("/decks/{id}/export", get(export_deck))

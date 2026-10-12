@@ -47,7 +47,7 @@ impl Design {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use crate::test_support::sample_design;
-    use crate::{Design, Transition, TransitionAxis, TransitionEffect};
+    use crate::{Design, Transition, TransitionAxis, TransitionEffect, Viewport};
 
     #[test]
     fn design_round_trips_through_json() {
@@ -63,7 +63,7 @@ mod tests {
         assert_eq!(value["viewport"]["width"], 1440);
         value.as_object_mut().unwrap().remove("viewport");
         let design: Design = serde_json::from_value(value).unwrap();
-        assert_eq!(design.viewport, crate::Viewport::default());
+        assert_eq!(design.viewport, Viewport::default());
     }
 
     #[test]

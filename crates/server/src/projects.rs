@@ -10,6 +10,7 @@ use axum::{Json, Router};
 use design_model::WorkflowState;
 use serde::Deserialize;
 
+use crate::AppState;
 use crate::api_error;
 use crate::designs::is_valid_design_id;
 use crate::events::ChangeNotifier;
@@ -24,7 +25,7 @@ struct RenameRequest {
 }
 
 /// The `/projects` route table.
-pub fn routes() -> Router<crate::AppState> {
+pub fn routes() -> Router<AppState> {
     Router::new().route("/projects/{name}/rename", post(rename_project))
 }
 

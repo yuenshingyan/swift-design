@@ -1926,7 +1926,9 @@ fn field_count(design: &Design) -> usize {
 mod tests {
     use design_model::TransitionEffect;
 
-    use crate::editor::{
+    use crate::api::UploadSummary;
+
+    use super::{
         MONO_FONTS, NodeStyles, PreviewMode, SelectedNode, SelectionEntry, TEXT_FONTS,
         ThumbnailState, default_screen, effect_uses_motion, field_count, first_heading,
         font_options, history_label, image_upload_paths, move_screen, navigation_target,
@@ -1950,13 +1952,13 @@ mod tests {
     #[test]
     fn only_image_uploads_become_picker_entries() {
         let uploads = vec![
-            crate::api::UploadSummary {
+            UploadSummary {
                 name: "hero.png".to_owned(),
                 size_bytes: 10,
                 content_type: "image/png".to_owned(),
                 is_image: true,
             },
-            crate::api::UploadSummary {
+            UploadSummary {
                 name: "notes.txt".to_owned(),
                 size_bytes: 10,
                 content_type: "text/plain".to_owned(),

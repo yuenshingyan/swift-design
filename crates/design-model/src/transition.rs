@@ -105,7 +105,7 @@ impl TransitionAxis {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{Transition, TransitionAxis, TransitionEffect};
+    use super::{DEFAULT_TRANSITION_MS, Transition, TransitionAxis, TransitionEffect};
 
     #[test]
     fn transition_round_trips_through_json() {
@@ -131,7 +131,7 @@ mod tests {
         assert_eq!(transition, Transition::default());
         assert_eq!(transition.effect, TransitionEffect::Push);
         assert_eq!(transition.axis, TransitionAxis::Vertical);
-        assert_eq!(transition.duration_ms, super::DEFAULT_TRANSITION_MS);
+        assert_eq!(transition.duration_ms, DEFAULT_TRANSITION_MS);
     }
 
     #[test]

@@ -20,8 +20,23 @@ use http_body_util::BodyExt;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+use crate::agent_runs::AgentRunner;
+use crate::artworks::ArtworkStore;
+use crate::campaigns::CampaignStore;
+use crate::decks::DeckStore;
+use crate::designs::DesignStore;
+use crate::documents::DocumentStore;
+use crate::events::ChangeNotifier;
+use crate::history::HistoryStore;
+use crate::mailings::MailingStore;
 use crate::model_client::{ModelConfiguration, ProviderAuth, WireFormat};
+use crate::prints::PrintStore;
 use crate::sessions::{RunOptions, SessionStore};
+use crate::settings::SettingsStore;
+use crate::socials::SocialStore;
+use crate::static_files::UiDirectory;
+use crate::templates::TemplateStore;
+use crate::uploads::UploadStore;
 use crate::{AppState, router};
 
 /// The canonical valid design, as JSON.
@@ -97,37 +112,29 @@ pub(crate) fn test_application(directory: &TempDir) -> Router {
 /// Builds a test application whose runner uses `command`, or the
 /// built-in engine when `None`.
 pub(crate) fn application_with_command(directory: &TempDir, command: Option<String>) -> Router {
-    let changes = crate::events::ChangeNotifier::new();
-    let designs = DesignStore::new(directory.path().join("designs")).with_history(
-        crate::history::HistoryStore::new(directory.path().join("history")),
-    );
-    let decks = DeckStore::new(directory.path().join("decks")).with_history(
-        crate::history::HistoryStore::new(directory.path().join("deck-history")),
-    );
-    let documents = DocumentStore::new(directory.path().join("documents")).with_history(
-        crate::history::HistoryStore::new(directory.path().join("document-history")),
-    );
-    let socials = SocialStore::new(directory.path().join("socials")).with_history(
-        crate::history::HistoryStore::new(directory.path().join("social-history")),
-    );
-    let prints = PrintStore::new(directory.path().join("prints")).with_history(
-        crate::history::HistoryStore::new(directory.path().join("print-history")),
-    );
-    let mailings = MailingStore::new(directory.path().join("mailings")).with_history(
-        crate::history::HistoryStore::new(directory.path().join("mailing-history")),
-    );
-    let campaigns = CampaignStore::new(directory.path().join("campaigns")).with_history(
-        crate::history::HistoryStore::new(directory.path().join("campaign-history")),
-    );
-    let artworks = ArtworkStore::new(directory.path().join("artworks")).with_history(
-        crate::history::HistoryStore::new(directory.path().join("artwork-history")),
-    );
+    let changes = ChangeNotifier::new();
+    let designs = DesignStore::new(directory.path().join("designs"))
+        .with_history(HistoryStore::new(directory.path().join("history")));
+    let decks = DeckStore::new(directory.path().join("decks"))
+        .with_history(HistoryStore::new(directory.path().join("deck-history")));
+    let documents = DocumentStore::new(directory.path().join("documents"))
+        .with_history(HistoryStore::new(directory.path().join("document-history")));
+    let socials = SocialStore::new(directory.path().join("socials"))
+        .with_history(HistoryStore::new(directory.path().join("social-history")));
+    let prints = PrintStore::new(directory.path().join("prints"))
+        .with_history(HistoryStore::new(directory.path().join("print-history")));
+    let mailings = MailingStore::new(directory.path().join("mailings"))
+        .with_history(HistoryStore::new(directory.path().join("mailing-history")));
+    let campaigns = CampaignStore::new(directory.path().join("campaigns"))
+        .with_history(HistoryStore::new(directory.path().join("campaign-history")));
+    let artworks = ArtworkStore::new(directory.path().join("artworks"))
+        .with_history(HistoryStore::new(directory.path().join("artwork-history")));
     let sessions = SessionStore::new(directory.path().join("data/sessions"));
-    let settings = crate::settings::SettingsStore::new(
+    let settings = SettingsStore::new(
         directory.path().join("data/settings.json"),
         "127.0.0.1:3000".to_owned(),
     );
-    let agent = crate::agent_runs::AgentRunner::new(
+    let agent = AgentRunner::new(
         command,
         settings.clone(),
         designs.clone(),
@@ -156,20 +163,10 @@ pub(crate) fn application_with_command(directory: &TempDir, command: Option<Stri
         settings,
         agent,
         changes,
-        templates: crate::templates::TemplateStore::new(directory.path().join("templates")),
-        ui: crate::static_files::UiDirectory(directory.path().join("ui")),
+        templates: TemplateStore::new(directory.path().join("templates")),
+        ui: UiDirectory(directory.path().join("ui")),
     })
 }
-
-use crate::artworks::ArtworkStore;
-use crate::campaigns::CampaignStore;
-use crate::decks::DeckStore;
-use crate::designs::DesignStore;
-use crate::documents::DocumentStore;
-use crate::mailings::MailingStore;
-use crate::prints::PrintStore;
-use crate::socials::SocialStore;
-use crate::uploads::UploadStore;
 
 /// Sends a request with an optional content type and body.
 pub(crate) async fn send_raw(

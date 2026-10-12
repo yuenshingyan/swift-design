@@ -15,6 +15,8 @@ use design_model::Design;
 use serde::Deserialize;
 
 use crate::model_client::LogSink;
+use crate::patch::PATCH_FORMAT;
+use crate::screenshots::{dump_design_dom, find_chrome};
 
 /// One finding from the in-browser audit script.
 #[derive(Debug, Deserialize)]
@@ -81,7 +83,7 @@ impl PolishStop {
 /// True when a layout audit can run at all. Without Chrome nothing is
 /// measured, and an unmeasured candidate must not be reported as clean.
 pub fn can_audit() -> bool {
-    crate::screenshots::find_chrome().is_some()
+    find_chrome().is_some()
 }
 
 /// Layout findings measured in a browser. Empty when no Chrome is
@@ -92,13 +94,13 @@ pub async fn dom_findings(
     label: &str,
     log: &LogSink,
 ) -> Vec<String> {
-    if crate::screenshots::find_chrome().is_none() {
+    if find_chrome().is_none() {
         log(&format!(
             "{label}: no Chrome found for the layout audit; reviewing from JSON only"
         ));
         return Vec::new();
     }
-    match crate::screenshots::dump_design_dom(design, base_url).await {
+    match dump_design_dom(design, base_url).await {
         Ok(dom) => {
             let findings = parse_findings(&dom);
             if findings.is_empty() && !dom.contains("data-swift-design-findings") {
@@ -266,7 +268,7 @@ pub fn polish_prompt(design_json: &str, findings: &[String], image_count: usize)
          dense or too empty, and a weak title screen. Keep the concept, the outline, and the \
          content. Do not add or delete screens. Change only the screens that need it.\n",
     );
-    prompt.push_str(crate::patch::PATCH_FORMAT);
+    prompt.push_str(PATCH_FORMAT);
     prompt.push_str(" When nothing needs a change, reply with {}.");
     prompt
 }
@@ -274,6 +276,7 @@ pub fn polish_prompt(design_json: &str, findings: &[String], image_count: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::render::AUDIT_SCRIPT;
 
     #[test]
@@ -341,7 +344,7 @@ mod tests {
 
     #[test]
     fn the_audit_script_sets_the_text_floor_by_canvas() {
-        let script = crate::render::AUDIT_SCRIPT;
+        let script = AUDIT_SCRIPT;
         assert!(script.contains("canvasWidth >= 1920 ? { flag: 20, ask: 24 }"));
         assert!(script.contains("canvasWidth >= 1000 ? { flag: 12, ask: 14 }"));
         assert!(script.contains("{ flag: 11, ask: 12 }"));
@@ -350,7 +353,7 @@ mod tests {
 
     #[test]
     fn the_audit_script_holds_the_contrast_check() {
-        let script = crate::render::AUDIT_SCRIPT;
+        let script = AUDIT_SCRIPT;
         assert!(script.contains("const contrastRatio = (a, b) =>"));
         assert!(script.contains("const luminance = (rgb) =>"));
         assert!(script.contains("(Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05)"));
@@ -360,7 +363,7 @@ mod tests {
 
     #[test]
     fn the_audit_script_holds_the_line_length_check() {
-        let script = crate::render::AUDIT_SCRIPT;
+        let script = AUDIT_SCRIPT;
         assert!(script.contains("kind: 'long_lines'"));
         assert!(script.contains("rect.height / scale / lineHeight"));
         assert!(script.contains("if (perLine > 100)"));

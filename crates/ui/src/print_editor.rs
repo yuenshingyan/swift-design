@@ -972,30 +972,24 @@ mod tests {
     use design_model::{FontSet, Orientation, Palette, Print, PrintSize, Sheet, Theme};
 
     use super::{
-        PrintPreviewMode, default_sheet, field_count, outline_title, preview_stage_class,
-        remove_sheet, sheet_label, size_option_label,
+        PrintPreviewMode, default_sheet, export_href, field_count, outline_title, png_export_href,
+        preview_stage_class, remove_sheet, sheet_download_name, sheet_label, size_option_label,
     };
 
     #[test]
     fn a_scoped_export_names_the_sheet_in_href_and_filename() {
+        assert_eq!(export_href("launch", "", None), "/prints/launch/export");
         assert_eq!(
-            super::export_href("launch", "", None),
-            "/prints/launch/export"
-        );
-        assert_eq!(
-            super::export_href("launch", ".pdf", Some(1)),
+            export_href("launch", ".pdf", Some(1)),
             "/prints/launch/export.pdf?sheet=2"
         );
+        assert_eq!(png_export_href("launch", None), "/prints/launch/export.zip");
         assert_eq!(
-            super::png_export_href("launch", None),
-            "/prints/launch/export.zip"
-        );
-        assert_eq!(
-            super::png_export_href("launch", Some(1)),
+            png_export_href("launch", Some(1)),
             "/prints/launch/sheets/2.png"
         );
         assert_eq!(
-            super::sheet_download_name("launch", 1, "png"),
+            sheet_download_name("launch", 1, "png"),
             "launch-sheet-2.png"
         );
     }

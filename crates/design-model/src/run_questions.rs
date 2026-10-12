@@ -501,6 +501,7 @@ pub fn axis_label(name: &str, value: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AdSize, CoverSize, EmailFormat, Format, Orientation, Paper, PrintSize};
 
     #[test]
     fn a_known_value_reads_back_as_its_label() {
@@ -650,56 +651,56 @@ mod tests {
     #[test]
     fn the_paper_values_are_the_paper_names() {
         for (value, _) in PAPERS {
-            assert!(crate::Paper::from_name(value).is_some(), "{value}");
+            assert!(Paper::from_name(value).is_some(), "{value}");
         }
     }
 
     #[test]
     fn the_format_values_are_the_format_names() {
         for (value, _) in FORMATS {
-            assert!(crate::Format::from_name(value).is_some(), "{value}");
+            assert!(Format::from_name(value).is_some(), "{value}");
         }
-        assert_eq!(FORMATS.len(), crate::Format::ALL.len());
+        assert_eq!(FORMATS.len(), Format::ALL.len());
     }
 
     #[test]
     fn the_print_size_values_are_the_print_size_names() {
         for (value, _) in PRINT_SIZES {
-            assert!(crate::PrintSize::from_name(value).is_some(), "{value}");
+            assert!(PrintSize::from_name(value).is_some(), "{value}");
         }
-        assert_eq!(PRINT_SIZES.len(), crate::PrintSize::ALL.len());
+        assert_eq!(PRINT_SIZES.len(), PrintSize::ALL.len());
     }
 
     #[test]
     fn the_orientation_values_are_the_orientation_names() {
         for (value, _) in ORIENTATIONS {
-            assert!(crate::Orientation::from_name(value).is_some(), "{value}");
+            assert!(Orientation::from_name(value).is_some(), "{value}");
         }
-        assert_eq!(ORIENTATIONS.len(), crate::Orientation::ALL.len());
+        assert_eq!(ORIENTATIONS.len(), Orientation::ALL.len());
     }
 
     #[test]
     fn the_email_format_values_are_the_email_format_names() {
         for (value, _) in EMAIL_FORMATS {
-            assert!(crate::EmailFormat::from_name(value).is_some(), "{value}");
+            assert!(EmailFormat::from_name(value).is_some(), "{value}");
         }
-        assert_eq!(EMAIL_FORMATS.len(), crate::EmailFormat::ALL.len());
+        assert_eq!(EMAIL_FORMATS.len(), EmailFormat::ALL.len());
     }
 
     #[test]
     fn the_ad_size_values_are_the_ad_size_names() {
         for (value, _) in AD_SIZES {
-            assert!(crate::AdSize::from_name(value).is_some(), "{value}");
+            assert!(AdSize::from_name(value).is_some(), "{value}");
         }
-        assert_eq!(AD_SIZES.len(), crate::AdSize::ALL.len());
+        assert_eq!(AD_SIZES.len(), AdSize::ALL.len());
     }
 
     #[test]
     fn the_cover_size_values_are_the_cover_size_names() {
         for (value, _) in COVER_SIZES {
-            assert!(crate::CoverSize::from_name(value).is_some(), "{value}");
+            assert!(CoverSize::from_name(value).is_some(), "{value}");
         }
-        assert_eq!(COVER_SIZES.len(), crate::CoverSize::ALL.len());
+        assert_eq!(COVER_SIZES.len(), CoverSize::ALL.len());
     }
 
     #[test]

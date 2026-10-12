@@ -23,6 +23,7 @@ use design_model::{
     Artwork, Campaign, DECK_VIEWPORT, Deck, Design, Document, Mailing, Print, Social, Viewport,
 };
 
+use crate::AppState;
 use crate::api_error;
 use crate::artwork_render;
 use crate::artworks::{ArtworkStore, is_valid_artwork_id};
@@ -33,6 +34,7 @@ use crate::decks::{DeckStore, is_valid_deck_id};
 use crate::designs::{DesignStore, is_valid_design_id};
 use crate::document_render;
 use crate::documents::{DocumentStore, is_valid_document_id};
+use crate::export::email_client_html;
 use crate::mailing_render;
 use crate::mailings::{MailingStore, is_valid_mailing_id};
 use crate::print_render;
@@ -41,6 +43,7 @@ use crate::render::{RenderOptions, render_design_with};
 use crate::settings::SettingsStore;
 use crate::social_render;
 use crate::socials::{SocialStore, is_valid_social_id};
+use crate::uploads::UploadStore;
 
 /// Environment variable that names the Chrome binary to use.
 pub const CHROME_ENVIRONMENT_VARIABLE: &str = "SWIFT_DESIGN_CHROME";
@@ -704,7 +707,7 @@ async fn run_chrome(
 /// `/prints/{id}/sheets/{n}.png`, `/mailings/{id}/emails/{n}.png`,
 /// `/campaigns/{id}/ads/{n}.png`, and `/artworks/{id}/covers/{n}.png`
 /// route table.
-pub fn routes() -> Router<crate::AppState> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/designs/{id}/screens/{file}", get(get_screen_image))
         .route("/decks/{id}/slides/{file}", get(get_slide_image))
@@ -930,7 +933,7 @@ async fn get_sheet_image(
 /// Serves a PNG of one email. `file` is `{n}.png` with a 1-based `n`.
 async fn get_email_image(
     State(mailings): State<MailingStore>,
-    State(uploads): State<crate::uploads::UploadStore>,
+    State(uploads): State<UploadStore>,
     State(settings): State<SettingsStore>,
     Path((id, file)): Path<(String, String)>,
 ) -> Response {
@@ -940,7 +943,7 @@ async fn get_email_image(
     // `{n}.html` on the same route serves the email-client HTML the
     // email zip packs: the copy button fetches it.
     if let Some(number) = email_client_number(&file) {
-        return crate::export::email_client_html(&mailings, &uploads, &id, number).await;
+        return email_client_html(&mailings, &uploads, &id, number).await;
     }
     let Some(number) = image_number(&file) else {
         return bad_image_name("email", &file);

@@ -15,6 +15,8 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use tokio::sync::watch;
 
+use crate::AppState;
+
 /// Longest wait `GET /events` accepts, in seconds. Below common proxy
 /// and agent-tool timeouts, so a waiting call always returns cleanly.
 const WAIT_LIMIT_SECONDS: u64 = 60;
@@ -45,7 +47,7 @@ impl ChangeNotifier {
 }
 
 /// The `/events` route table.
-pub fn routes() -> Router<crate::AppState> {
+pub fn routes() -> Router<AppState> {
     Router::new().route("/events", get(wait_for_change))
 }
 

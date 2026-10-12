@@ -8,8 +8,10 @@
 
 use design_model::Document;
 
+use crate::document_patch::PATCH_FORMAT;
 use crate::model_client::LogSink;
 use crate::polish::{Finding, finding_advice, prioritized, raw_findings};
+use crate::screenshots::{dump_document_dom, find_chrome};
 
 /// Layout findings for a document, measured in a browser. Empty when no
 /// Chrome is installed or the audit fails; both are logged.
@@ -19,13 +21,13 @@ pub async fn dom_findings(
     label: &str,
     log: &LogSink,
 ) -> Vec<String> {
-    if crate::screenshots::find_chrome().is_none() {
+    if find_chrome().is_none() {
         log(&format!(
             "{label}: no Chrome found for the layout audit; reviewing from JSON only"
         ));
         return Vec::new();
     }
-    match crate::screenshots::dump_document_dom(document, base_url).await {
+    match dump_document_dom(document, base_url).await {
         Ok(dom) => {
             let findings = parse_findings(&dom);
             if findings.is_empty() && !dom.contains("data-swift-design-findings") {
@@ -94,7 +96,7 @@ pub fn polish_prompt(document_json: &str, findings: &[String], image_count: usiz
          Keep the concept, the outline, and the content. Do not add or delete pages. Change \
          only the pages that need it.\n",
     );
-    prompt.push_str(crate::document_patch::PATCH_FORMAT);
+    prompt.push_str(PATCH_FORMAT);
     prompt.push_str(" When nothing needs a change, reply with {}.");
     prompt
 }

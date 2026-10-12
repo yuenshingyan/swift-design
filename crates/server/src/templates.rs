@@ -20,16 +20,24 @@ use axum::{Json, Router};
 use design_model::{DECK_VIEWPORT, Design, Screen, Theme, Viewport};
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::api_error;
 use crate::artworks::{ArtworkStore, is_pending_cover};
+use crate::brand::{extract_style, material_from_uploads, material_from_url};
 use crate::campaigns::{CampaignStore, is_pending_ad};
 use crate::decks::{DeckStore, is_pending_slide};
 use crate::designs::{DesignStore, is_pending_screen};
 use crate::documents::{DocumentStore, is_pending_page};
 use crate::events::ChangeNotifier;
 use crate::mailings::{MailingStore, is_pending_email};
+use crate::model_client::{ModelClient, configuration_from_settings, configured_model};
 use crate::prints::{PrintStore, is_pending_sheet};
+use crate::render::{RenderOptions, render_design_with};
+use crate::session_routes::ArtifactStores;
+use crate::settings::SettingsStore;
 use crate::socials::{SocialStore, is_pending_frame};
+use crate::time::{rfc3339_now, unix_now_seconds};
+use crate::uploads::{DRAFT_SCOPE, UploadStore};
 
 /// How many screens one template keeps as layout examples. The title
 /// screen plus a few body screens show the style; more would only make the
@@ -313,7 +321,7 @@ fn invalid_template_id(id: &str) -> Response {
 }
 
 /// The `/templates` route table.
-pub fn routes() -> Router<crate::AppState> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/templates", get(list_templates).post(save_template))
         .route("/templates/extract", post(extract_template))
@@ -365,8 +373,8 @@ fn html_escape(text: &str) -> String {
 /// reads the material and answers with a theme and a style note.
 async fn extract_template(
     State(store): State<TemplateStore>,
-    State(uploads): State<crate::uploads::UploadStore>,
-    State(settings): State<crate::settings::SettingsStore>,
+    State(uploads): State<UploadStore>,
+    State(settings): State<SettingsStore>,
     State(notifier): State<ChangeNotifier>,
     Json(request): Json<ExtractRequest>,
 ) -> Response {
@@ -393,11 +401,11 @@ async fn extract_template(
     // The model the runner would use: the studio settings, else the
     // environment.
     let configuration = match settings.read().await {
-        Ok(Some(stored)) => crate::model_client::configuration_from_settings(&stored),
+        Ok(Some(stored)) => configuration_from_settings(&stored),
         Ok(None) => None,
         Err(error) => return api_error::internal_error(&error),
     }
-    .or_else(crate::model_client::configured_model);
+    .or_else(configured_model);
     let Some(configuration) = configuration else {
         return api_error::error_response(
             StatusCode::CONFLICT,
@@ -406,13 +414,10 @@ async fn extract_template(
         );
     };
     let material = match url {
-        Some(url) => crate::brand::material_from_url(url).await,
+        Some(url) => material_from_url(url).await,
         None => {
-            let scope = request
-                .scope
-                .as_deref()
-                .unwrap_or(crate::uploads::DRAFT_SCOPE);
-            crate::brand::material_from_uploads(&uploads, scope, &request.uploads).await
+            let scope = request.scope.as_deref().unwrap_or(DRAFT_SCOPE);
+            material_from_uploads(&uploads, scope, &request.uploads).await
         }
     };
     let material = match material {
@@ -421,7 +426,7 @@ async fn extract_template(
             return api_error::error_response(StatusCode::BAD_REQUEST, &message, Vec::new());
         }
     };
-    let http = match crate::model_client::ModelClient::build_http_client() {
+    let http = match ModelClient::build_http_client() {
         Ok(http) => http,
         Err(message) => {
             return api_error::error_response(
@@ -431,8 +436,8 @@ async fn extract_template(
             );
         }
     };
-    let client = crate::model_client::ModelClient::new(configuration, Some(settings));
-    let style = match crate::brand::extract_style(&client, &http, &material).await {
+    let client = ModelClient::new(configuration, Some(settings));
+    let style = match extract_style(&client, &http, &material).await {
         Ok(style) => style,
         Err(message) => {
             return api_error::error_response(StatusCode::BAD_GATEWAY, &message, Vec::new());
@@ -441,7 +446,7 @@ async fn extract_template(
     let template = Template {
         id: template_id(name),
         name: name.to_owned(),
-        saved_at: crate::time::rfc3339_now(),
+        saved_at: rfc3339_now(),
         source_design: material.source.clone(),
         theme: style.theme,
         viewport: Viewport::default(),
@@ -544,11 +549,11 @@ async fn render_template(
         }
         None => None,
     };
-    let options = crate::render::RenderOptions {
+    let options = RenderOptions {
         only_screen,
-        ..crate::render::RenderOptions::default()
+        ..RenderOptions::default()
     };
-    Html(crate::render::render_design_with(&design, options)).into_response()
+    Html(render_design_with(&design, options)).into_response()
 }
 
 /// The error for an id no template file matches.
@@ -840,7 +845,7 @@ async fn artwork_style(artworks: &ArtworkStore, id: &str) -> Result<SourceStyle,
 /// mailing, campaign, or artwork as a template.
 async fn save_template(
     State(store): State<TemplateStore>,
-    State(stores): State<crate::session_routes::ArtifactStores>,
+    State(stores): State<ArtifactStores>,
     State(notifier): State<ChangeNotifier>,
     Json(request): Json<SaveRequest>,
 ) -> Response {
@@ -885,7 +890,7 @@ async fn save_template(
     let template = Template {
         id: template_id(name),
         name: name.to_owned(),
-        saved_at: crate::time::rfc3339_now(),
+        saved_at: rfc3339_now(),
         source_design: source_id,
         theme: style.theme,
         viewport: style.viewport,
@@ -962,13 +967,17 @@ fn template_id(name: &str) -> String {
     } else {
         slug.chars().take(40).collect()
     };
-    format!("{slug}-{}", crate::time::unix_now_seconds())
+    format!("{slug}-{}", unix_now_seconds())
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    use crate::test_support::{
+        sample_deck, sample_document, sample_social, send, test_application,
+    };
 
     fn sample_design() -> design_model::Design {
         serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap()
@@ -1063,10 +1072,7 @@ mod tests {
     async fn a_template_saves_from_a_social() {
         let directory = tempfile::tempdir().unwrap();
         let socials = SocialStore::new(directory.path().join("socials"));
-        socials
-            .save("launch", &crate::test_support::sample_social())
-            .await
-            .unwrap();
+        socials.save("launch", &sample_social()).await.unwrap();
         let style = social_style(&socials, "launch").await.ok().unwrap();
         assert_eq!(style.viewport, design_model::PORTRAIT_VIEWPORT);
         assert_eq!(style.screens.len(), 3);
@@ -1079,10 +1085,7 @@ mod tests {
     async fn a_template_saves_from_a_document() {
         let directory = tempfile::tempdir().unwrap();
         let documents = DocumentStore::new(directory.path().join("documents"));
-        documents
-            .save("report", &crate::test_support::sample_document())
-            .await
-            .unwrap();
+        documents.save("report", &sample_document()).await.unwrap();
         let style = document_style(&documents, "report").await.ok().unwrap();
         assert_eq!(style.viewport, design_model::A4_VIEWPORT);
         assert_eq!(style.screens.len(), 3);
@@ -1095,10 +1098,7 @@ mod tests {
     async fn a_template_saves_from_a_deck() {
         let directory = tempfile::tempdir().unwrap();
         let decks = DeckStore::new(directory.path().join("decks"));
-        decks
-            .save("talk", &crate::test_support::sample_deck())
-            .await
-            .unwrap();
+        decks.save("talk", &sample_deck()).await.unwrap();
         let style = deck_style(&decks, "talk").await.ok().unwrap();
         assert_eq!(style.viewport, DECK_VIEWPORT);
         assert_eq!(style.screens.len(), 3);
@@ -1110,7 +1110,7 @@ mod tests {
     #[tokio::test]
     async fn a_screenless_template_renders_as_a_swatch_and_takes_the_default_mark() {
         let directory = tempfile::tempdir().unwrap();
-        let application = crate::test_support::test_application(&directory);
+        let application = test_application(&directory);
         let store = TemplateStore::new(directory.path().join("templates"));
         let design = sample_design();
         store
@@ -1127,7 +1127,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let (status, body) = crate::test_support::send(
+        let (status, body) = send(
             application.clone(),
             "GET",
             "/templates/acme-1/render?screen=1",
@@ -1137,7 +1137,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body.contains("Generous whitespace &amp; 8px corners."));
         assert!(body.contains("Get started"));
-        let (status, body) = crate::test_support::send(
+        let (status, body) = send(
             application.clone(),
             "PUT",
             "/templates/acme-1/default",
@@ -1146,11 +1146,10 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body.contains("\"is_default\":true"));
-        let (_, listing) =
-            crate::test_support::send(application.clone(), "GET", "/templates", None).await;
+        let (_, listing) = send(application.clone(), "GET", "/templates", None).await;
         assert!(listing.contains("\"is_default\":true"));
         assert!(store.load("acme-1").await.unwrap().unwrap().is_default);
-        let (status, _) = crate::test_support::send(
+        let (status, _) = send(
             application.clone(),
             "PUT",
             "/templates/missing/default",
@@ -1163,8 +1162,8 @@ mod tests {
     #[tokio::test]
     async fn an_extraction_needs_a_name_one_source_and_a_model() {
         let directory = tempfile::tempdir().unwrap();
-        let application = crate::test_support::test_application(&directory);
-        let (status, body) = crate::test_support::send(
+        let application = test_application(&directory);
+        let (status, body) = send(
             application.clone(),
             "POST",
             "/templates/extract",
@@ -1172,7 +1171,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-        let (status, body) = crate::test_support::send(
+        let (status, body) = send(
             application.clone(),
             "POST",
             "/templates/extract",
@@ -1182,7 +1181,7 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(body.contains("exactly one source"));
         // No model is chosen in a fresh test application.
-        let (status, body) = crate::test_support::send(
+        let (status, body) = send(
             application.clone(),
             "POST",
             "/templates/extract",

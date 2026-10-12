@@ -18,8 +18,12 @@ use axum::{Json, Router};
 use design_model::{Design, Screen};
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
+use crate::candidates::{candidate_id, copy_design, next_candidate_number};
 use crate::events::ChangeNotifier;
+use crate::files::write_atomically;
 use crate::history::{HistoryStore, Snapshot, is_valid_stamp};
+use crate::sessions::{SessionStore, session_id_of_artifact, write_access};
 use crate::{api_error, provenance, render};
 
 /// The CSS class on a screen that holds the place of one the model has
@@ -238,7 +242,7 @@ impl DesignStore {
         tokio::fs::create_dir_all(&self.directory).await?;
         self.snapshot_current(id).await;
         let json = serde_json::to_string_pretty(design)?;
-        crate::files::write_atomically(&self.path_of(id), &(json + "\n")).await?;
+        write_atomically(&self.path_of(id), &(json + "\n")).await?;
         Ok(())
     }
 
@@ -358,7 +362,7 @@ impl DesignStore {
     pub async fn delete_session(&self, session_id: &str) -> anyhow::Result<usize> {
         let mut deleted = 0;
         for id in self.stored_ids().await? {
-            if crate::sessions::session_id_of_artifact(&id) != session_id {
+            if session_id_of_artifact(&id) != session_id {
                 continue;
             }
             if self.delete(&id).await? {
@@ -370,7 +374,7 @@ impl DesignStore {
 }
 
 /// The `/designs` route table.
-pub fn routes() -> Router<crate::AppState> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/designs", get(list_designs))
         .route(
@@ -424,7 +428,7 @@ async fn get_design(State(store): State<DesignStore>, Path(id): Path<String>) ->
 /// changed fields as user-authored; other saves count as agent writes.
 async fn put_design(
     State(store): State<DesignStore>,
-    State(sessions): State<crate::sessions::SessionStore>,
+    State(sessions): State<SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path(id): Path<String>,
     headers: HeaderMap,
@@ -439,7 +443,7 @@ async fn put_design(
         == Some("user");
     // Gating: designs are written only while the session is generating,
     // and the editor may also save while reviewing.
-    if let Err(message) = crate::sessions::write_access(&sessions, &id, is_user).await {
+    if let Err(message) = write_access(&sessions, &id, is_user).await {
         return api_error::error_response(StatusCode::CONFLICT, &message, Vec::new());
     }
     let errors = design.validate();
@@ -495,14 +499,14 @@ async fn list_history(State(store): State<DesignStore>, Path(id): Path<String>) 
 /// becomes the newest snapshot.
 async fn restore_history(
     State(store): State<DesignStore>,
-    State(sessions): State<crate::sessions::SessionStore>,
+    State(sessions): State<SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path((id, stamp)): Path<(String, String)>,
 ) -> Response {
     if !is_valid_design_id(&id) {
         return api_error::invalid_design_id(&id);
     }
-    if let Err(message) = crate::sessions::write_access(&sessions, &id, true).await {
+    if let Err(message) = write_access(&sessions, &id, true).await {
         return api_error::error_response(StatusCode::CONFLICT, &message, Vec::new());
     }
     if !is_valid_stamp(&stamp) {
@@ -535,7 +539,7 @@ async fn restore_history(
 /// Deletes one stored design.
 async fn delete_design(
     State(store): State<DesignStore>,
-    State(sessions): State<crate::sessions::SessionStore>,
+    State(sessions): State<SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path(id): Path<String>,
 ) -> Response {
@@ -559,14 +563,14 @@ async fn delete_design(
 /// writes, so the number cannot race the run.
 async fn fork_design(
     State(store): State<DesignStore>,
-    State(sessions): State<crate::sessions::SessionStore>,
+    State(sessions): State<SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path(id): Path<String>,
 ) -> Response {
     if !is_valid_design_id(&id) {
         return api_error::invalid_design_id(&id);
     }
-    let base = crate::sessions::session_id_of_artifact(&id).to_owned();
+    let base = session_id_of_artifact(&id).to_owned();
     if let Ok(Some(session)) = sessions.read(&base).await
         && session.state == design_model::WorkflowState::Generating
     {
@@ -580,10 +584,9 @@ async fn fork_design(
         Ok(rows) => rows,
         Err(error) => return api_error::internal_error(&error),
     };
-    let number =
-        crate::candidates::next_candidate_number(&base, rows.iter().map(|row| row.id.as_str()));
-    let new_id = crate::candidates::candidate_id(&base, number);
-    if let Err(response) = crate::candidates::copy_design(&store, &id, &new_id).await {
+    let number = next_candidate_number(&base, rows.iter().map(|row| row.id.as_str()));
+    let new_id = candidate_id(&base, number);
+    if let Err(response) = copy_design(&store, &id, &new_id).await {
         return response;
     }
     // The session's updated_at moves, so the listing sorts it first.

@@ -13,8 +13,8 @@
 use design_model::{Print, Sheet};
 
 use crate::render::{
-    AUDIT_SCRIPT, EDITING_SCRIPT, LAYOUT_SCRIPT, NAVIGATION_SCRIPT, css_safe, escape_html,
-    print_stylesheet, script_markup, stylesheet,
+    AUDIT_SCRIPT, EDITING_SCRIPT, FIT_SCRIPT, LAYOUT_SCRIPT, NAVIGATION_SCRIPT, css_safe,
+    escape_html, print_stylesheet, script_markup, stylesheet,
 };
 use crate::screen_css::{google_fonts_link, scope_css};
 
@@ -107,9 +107,9 @@ fn sheet_markup(print: &Print, only_sheet: Option<usize>) -> (String, String) {
 /// fit alone, so the PDF holds the same content the studio shows.
 fn sheet_script(options: &RenderOptions) -> String {
     if options.is_print {
-        return crate::render::FIT_SCRIPT.to_owned();
+        return FIT_SCRIPT.to_owned();
     }
-    let mut script = crate::render::FIT_SCRIPT.to_owned();
+    let mut script = FIT_SCRIPT.to_owned();
     script.push_str(LAYOUT_SCRIPT);
     script.push_str(NAVIGATION_SCRIPT);
     if options.is_editable {

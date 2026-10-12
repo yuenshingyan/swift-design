@@ -11,7 +11,9 @@ use design_model::Theme;
 use serde::Deserialize;
 
 use crate::capture::{capture_problem, page_text};
+use crate::export::base64_encode;
 use crate::model_client::ModelClient;
+use crate::office::{is_office_type, office_text};
 use crate::screenshots::{dump_url, find_chrome, screenshot_url, supports_vision};
 use crate::uploads::UploadStore;
 
@@ -121,8 +123,8 @@ pub(crate) async fn material_from_uploads(
                 "File {name}:\n{}\n\n",
                 String::from_utf8_lossy(&bytes)
             ));
-        } else if crate::office::is_office_type(&content_type) {
-            let text = crate::office::office_text(&content_type, &bytes)
+        } else if is_office_type(&content_type) {
+            let text = office_text(&content_type, &bytes)
                 .map_err(|error| format!("reading `{name}` failed: {error:#}"))?;
             material.text.push_str(&format!("File {name}:\n{text}\n\n"));
         } else {
@@ -163,7 +165,7 @@ pub(crate) async fn extract_style(
             "image_url": {
                 "url": format!(
                     "data:{content_type};base64,{}",
-                    crate::export::base64_encode(bytes)
+                    base64_encode(bytes)
                 ),
             },
         }));

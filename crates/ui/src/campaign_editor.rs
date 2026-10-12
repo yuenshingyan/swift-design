@@ -961,32 +961,27 @@ mod tests {
     use design_model::{Ad, AdSize, Campaign, FontSet, Palette, Theme};
 
     use super::{
-        CampaignPreviewMode, ad_label, default_ad, field_count, outline_title, preview_stage_class,
-        remove_ad, size_option_label, strip_tile_width,
+        CampaignPreviewMode, ad_download_name, ad_label, default_ad, export_href, field_count,
+        outline_title, png_export_href, preview_stage_class, remove_ad, size_option_label,
+        strip_tile_width,
     };
 
     #[test]
     fn a_scoped_export_names_the_ad_in_href_and_filename() {
+        assert_eq!(export_href("launch", "", None), "/campaigns/launch/export");
         assert_eq!(
-            super::export_href("launch", "", None),
-            "/campaigns/launch/export"
-        );
-        assert_eq!(
-            super::export_href("launch", ".pdf", Some(1)),
+            export_href("launch", ".pdf", Some(1)),
             "/campaigns/launch/export.pdf?ad=2"
         );
         assert_eq!(
-            super::png_export_href("launch", None),
+            png_export_href("launch", None),
             "/campaigns/launch/export.zip"
         );
         assert_eq!(
-            super::png_export_href("launch", Some(1)),
+            png_export_href("launch", Some(1)),
             "/campaigns/launch/ads/2.png"
         );
-        assert_eq!(
-            super::ad_download_name("launch", 1, "png"),
-            "launch-ad-2.png"
-        );
+        assert_eq!(ad_download_name("launch", 1, "png"), "launch-ad-2.png");
     }
 
     #[test]

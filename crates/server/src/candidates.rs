@@ -16,6 +16,7 @@ use axum::{Json, Router};
 use design_model::{ArtifactKind, DECK_VIEWPORT};
 use serde::Deserialize;
 
+use crate::AppState;
 use crate::api_error;
 use crate::artworks::ArtworkStore;
 use crate::campaigns::CampaignStore;
@@ -25,8 +26,9 @@ use crate::documents::DocumentStore;
 use crate::events::ChangeNotifier;
 use crate::mailings::MailingStore;
 use crate::prints::PrintStore;
+use crate::render::escape_html;
 use crate::session_routes::ArtifactStores;
-use crate::sessions::SessionStore;
+use crate::sessions::{CANDIDATE_MARKER, SessionStore};
 use crate::socials::SocialStore;
 
 /// Most variations one base id may have. Keeps generation cost bounded.
@@ -44,7 +46,7 @@ pub const CARD_LIMIT: usize = CANDIDATE_LIMIT * PLATFORM_LIMIT;
 /// fork, a merge, and a later run all number after the candidates
 /// that exist, so none overwrites an earlier one.
 pub(crate) fn next_candidate_number<'id>(base: &str, ids: impl Iterator<Item = &'id str>) -> usize {
-    let prefix = format!("{base}{}", crate::sessions::CANDIDATE_MARKER);
+    let prefix = format!("{base}{}", CANDIDATE_MARKER);
     ids.filter_map(|id| id.strip_prefix(&prefix))
         .filter_map(|tail| tail.parse::<usize>().ok())
         .max()
@@ -53,17 +55,17 @@ pub(crate) fn next_candidate_number<'id>(base: &str, ids: impl Iterator<Item = &
 
 /// The id of candidate `number` of `base`.
 pub(crate) fn candidate_id(base: &str, number: usize) -> String {
-    format!("{base}{}{number}", crate::sessions::CANDIDATE_MARKER)
+    format!("{base}{}{number}", CANDIDATE_MARKER)
 }
 
 /// The candidate number in `id`, when its tail is one.
 pub(crate) fn candidate_number_of(id: &str) -> Option<usize> {
-    let (_, tail) = id.rsplit_once(crate::sessions::CANDIDATE_MARKER)?;
+    let (_, tail) = id.rsplit_once(CANDIDATE_MARKER)?;
     tail.parse().ok()
 }
 
 /// The `/candidates` route table.
-pub fn routes() -> Router<crate::AppState> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/candidates/{base}", get(chooser))
         .route("/candidates/{base}/choose", post(choose))
@@ -518,7 +520,7 @@ fn chooser_page(base: &str, kind: ArtifactKind, candidates: &[CandidateCard]) ->
              </div>\n</article>\n",
             preview = candidate.preview_url,
             id = candidate.id,
-            theme = crate::render::escape_html(&candidate.theme),
+            theme = escape_html(&candidate.theme),
             ratio = candidate.ratio,
         ));
     }

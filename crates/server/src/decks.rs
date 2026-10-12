@@ -19,9 +19,13 @@ use axum::{Json, Router};
 use design_model::{Deck, Slide};
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
+use crate::candidates::{candidate_id, copy_deck, next_candidate_number};
 use crate::designs::{PENDING_SCREEN_CLASS, is_valid_design_id};
 use crate::events::ChangeNotifier;
+use crate::files::write_atomically;
 use crate::history::{HistoryStore, Snapshot, is_valid_stamp};
+use crate::sessions::{SessionStore, session_id_of_artifact, write_access};
 use crate::{api_error, deck_render, presenter, provenance};
 
 /// The CSS class on a slide that holds the place of one the model has
@@ -220,7 +224,7 @@ impl DeckStore {
         tokio::fs::create_dir_all(&self.directory).await?;
         self.snapshot_current(id).await;
         let json = serde_json::to_string_pretty(deck)?;
-        crate::files::write_atomically(&self.path_of(id), &(json + "\n")).await?;
+        write_atomically(&self.path_of(id), &(json + "\n")).await?;
         Ok(())
     }
 
@@ -340,7 +344,7 @@ impl DeckStore {
     pub async fn delete_session(&self, session_id: &str) -> anyhow::Result<usize> {
         let mut deleted = 0;
         for id in self.stored_ids().await? {
-            if crate::sessions::session_id_of_artifact(&id) != session_id {
+            if session_id_of_artifact(&id) != session_id {
                 continue;
             }
             if self.delete(&id).await? {
@@ -368,7 +372,7 @@ fn summary_of(id: &str, deck: Deck) -> DeckSummary {
 }
 
 /// The `/decks` route table.
-pub fn routes() -> Router<crate::AppState> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/decks", get(list_decks))
         .route(
@@ -413,7 +417,7 @@ async fn get_deck(State(store): State<DeckStore>, Path(id): Path<String>) -> Res
 /// changed fields as user-authored; other saves count as agent writes.
 async fn put_deck(
     State(store): State<DeckStore>,
-    State(sessions): State<crate::sessions::SessionStore>,
+    State(sessions): State<SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path(id): Path<String>,
     headers: HeaderMap,
@@ -428,7 +432,7 @@ async fn put_deck(
         == Some("user");
     // Gating: decks are written only while the session is generating,
     // and the editor may also save while reviewing.
-    if let Err(message) = crate::sessions::write_access(&sessions, &id, is_user).await {
+    if let Err(message) = write_access(&sessions, &id, is_user).await {
         return api_error::error_response(StatusCode::CONFLICT, &message, Vec::new());
     }
     let errors = deck.validate();
@@ -484,14 +488,14 @@ async fn list_history(State(store): State<DeckStore>, Path(id): Path<String>) ->
 /// becomes the newest snapshot.
 async fn restore_history(
     State(store): State<DeckStore>,
-    State(sessions): State<crate::sessions::SessionStore>,
+    State(sessions): State<SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path((id, stamp)): Path<(String, String)>,
 ) -> Response {
     if !is_valid_deck_id(&id) {
         return api_error::invalid_deck_id(&id);
     }
-    if let Err(message) = crate::sessions::write_access(&sessions, &id, true).await {
+    if let Err(message) = write_access(&sessions, &id, true).await {
         return api_error::error_response(StatusCode::CONFLICT, &message, Vec::new());
     }
     if !is_valid_stamp(&stamp) {
@@ -524,7 +528,7 @@ async fn restore_history(
 /// Deletes one stored deck.
 async fn delete_deck(
     State(store): State<DeckStore>,
-    State(sessions): State<crate::sessions::SessionStore>,
+    State(sessions): State<SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path(id): Path<String>,
 ) -> Response {
@@ -548,14 +552,14 @@ async fn delete_deck(
 /// writes, so the number cannot race the run.
 async fn fork_deck(
     State(store): State<DeckStore>,
-    State(sessions): State<crate::sessions::SessionStore>,
+    State(sessions): State<SessionStore>,
     State(notifier): State<ChangeNotifier>,
     Path(id): Path<String>,
 ) -> Response {
     if !is_valid_deck_id(&id) {
         return api_error::invalid_deck_id(&id);
     }
-    let base = crate::sessions::session_id_of_artifact(&id).to_owned();
+    let base = session_id_of_artifact(&id).to_owned();
     if let Ok(Some(session)) = sessions.read(&base).await
         && session.state == design_model::WorkflowState::Generating
     {
@@ -569,10 +573,9 @@ async fn fork_deck(
         Ok(rows) => rows,
         Err(error) => return api_error::internal_error(&error),
     };
-    let number =
-        crate::candidates::next_candidate_number(&base, rows.iter().map(|row| row.id.as_str()));
-    let new_id = crate::candidates::candidate_id(&base, number);
-    if let Err(response) = crate::candidates::copy_deck(&store, &id, &new_id).await {
+    let number = next_candidate_number(&base, rows.iter().map(|row| row.id.as_str()));
+    let new_id = candidate_id(&base, number);
+    if let Err(response) = copy_deck(&store, &id, &new_id).await {
         return response;
     }
     // The session's updated_at moves, so the listing sorts it first.

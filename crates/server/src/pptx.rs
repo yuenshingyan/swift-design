@@ -20,6 +20,7 @@ use zip::{CompressionMethod, ZipWriter};
 
 use crate::deck_render::{RenderOptions, render_deck_with};
 use crate::screenshots;
+use crate::uploads::{UploadStore, is_stored_name};
 
 /// EMU per CSS pixel: 12192000 EMU across a 1920 px canvas.
 const EMU_PER_PIXEL: f64 = 6350.0;
@@ -174,7 +175,7 @@ pub struct SlideInput {
 /// Where the export reads image bytes and runs Chrome.
 pub struct ExportSources<'a> {
     /// Upload storage, for `<img src='/uploads/...'>` bytes.
-    pub uploads: &'a crate::uploads::UploadStore,
+    pub uploads: &'a UploadStore,
     /// The server URL Chrome loads images from.
     pub base_url: String,
 }
@@ -246,7 +247,7 @@ pub async fn export_deck(deck: &Deck, sources: &ExportSources<'_>) -> anyhow::Re
 /// can show. Other images stay in the screenshot only.
 async fn load_pictures(
     images: &[ImageRecord],
-    uploads: &crate::uploads::UploadStore,
+    uploads: &UploadStore,
 ) -> anyhow::Result<Vec<Picture>> {
     let mut pictures = Vec::new();
     for record in images {
@@ -258,9 +259,7 @@ async fn load_pictures(
             .next()
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if !PICTURE_EXTENSIONS.contains(&extension.as_str())
-            || !crate::uploads::is_stored_name(name)
-        {
+        if !PICTURE_EXTENSIONS.contains(&extension.as_str()) || !is_stored_name(name) {
             continue;
         }
         if let Some(bytes) = uploads.read(name).await? {

@@ -15,6 +15,7 @@ use axum::routing::get;
 use design_model::{Deck, Slide};
 use serde::Deserialize;
 
+use crate::AppState;
 use crate::api_error;
 use crate::decks::{DeckStore, is_valid_deck_id};
 use crate::render::{escape_html, script_hash};
@@ -141,7 +142,7 @@ iframe[hidden], .end[hidden] { display: none; }\n\
 .empty { margin: 0; color: #7A828B; }\n";
 
 /// The `/decks/{id}/present` route table.
-pub fn routes() -> Router<crate::AppState> {
+pub fn routes() -> Router<AppState> {
     Router::new().route("/decks/{id}/present", get(present_deck))
 }
 

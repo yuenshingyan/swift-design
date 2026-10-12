@@ -944,30 +944,28 @@ mod tests {
     };
 
     use super::{
-        SocialPreviewMode, default_frame, field_count, format_option_label, frame_label,
-        outline_title, preview_stage_class, remove_frame,
+        SocialPreviewMode, default_frame, export_href, field_count, format_option_label,
+        frame_download_name, frame_label, outline_title, png_export_href, preview_stage_class,
+        remove_frame,
     };
 
     #[test]
     fn a_scoped_export_names_the_frame_in_href_and_filename() {
+        assert_eq!(export_href("launch", "", None), "/socials/launch/export");
         assert_eq!(
-            super::export_href("launch", "", None),
-            "/socials/launch/export"
-        );
-        assert_eq!(
-            super::export_href("launch", ".pdf", Some(1)),
+            export_href("launch", ".pdf", Some(1)),
             "/socials/launch/export.pdf?frame=2"
         );
         assert_eq!(
-            super::png_export_href("launch", None),
+            png_export_href("launch", None),
             "/socials/launch/export.zip"
         );
         assert_eq!(
-            super::png_export_href("launch", Some(1)),
+            png_export_href("launch", Some(1)),
             "/socials/launch/frames/2.png"
         );
         assert_eq!(
-            super::frame_download_name("launch", 1, "png"),
+            frame_download_name("launch", 1, "png"),
             "launch-frame-2.png"
         );
     }

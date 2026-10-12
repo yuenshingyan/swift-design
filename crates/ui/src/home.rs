@@ -4,7 +4,7 @@
 //! session, starts the briefing run, and opens the session workspace.
 //! Existing sessions are listed underneath.
 
-use design_model::ArtifactKind;
+use design_model::{ArtifactKind, WorkflowState};
 use dioxus::document;
 use dioxus::prelude::*;
 
@@ -56,13 +56,12 @@ fn kind_detail(kind: ArtifactKind) -> &'static str {
 }
 
 /// The badge class suffix for a session state.
-fn state_class(state: design_model::WorkflowState) -> &'static str {
-    use design_model::WorkflowState::*;
+fn state_class(state: WorkflowState) -> &'static str {
     match state {
-        Generating => "generating",
-        Reviewing => "reviewing",
-        Stopped => "stopped",
-        Error => "error",
+        WorkflowState::Generating => "generating",
+        WorkflowState::Reviewing => "reviewing",
+        WorkflowState::Stopped => "stopped",
+        WorkflowState::Error => "error",
         _ => "",
     }
 }
