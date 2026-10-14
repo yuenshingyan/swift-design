@@ -220,6 +220,11 @@ pub(crate) fn SessionWorkspace(
     let run_value = run();
     let is_running = run_value.as_ref().is_some_and(|run| run.is_running);
     let can_chat = is_chat_open(state, is_running);
+    let send_label = if is_running || state == WorkflowState::Generating {
+        "Queue"
+    } else {
+        "Send"
+    };
 
     let artifact_kind = session.artifact_kind;
     let cards = match session.artifact_kind {
@@ -451,7 +456,12 @@ pub(crate) fn SessionWorkspace(
         }
     };
 
-    let can_start = is_start_offered(state, is_running, open_set.is_some());
+    let has_queued = session_view
+        .messages
+        .iter()
+        .any(|message| message.is_queued);
+    let can_start = is_start_offered(state, is_running, open_set.is_some())
+        || (has_queued && !is_running && state == WorkflowState::Reviewing);
 
     rsx! {
         main { class: "session",
@@ -480,12 +490,26 @@ pub(crate) fn SessionWorkspace(
                             // A turn that wrote artifacts can be reverted
                             // while nothing runs: each artifact goes back to
                             // its snapshot from before the turn.
-                            let revert_since = (!message.artifacts.is_empty() && can_chat)
+                            let has_restore_points = message
+                                .snapshot_stamps
+                                .as_ref()
+                                .is_none_or(|snapshots| {
+                                    message.artifacts.iter().all(|id| snapshots.contains_key(id))
+                                });
+                            let revert_since = (!message.artifacts.is_empty() && has_restore_points
+                                && !is_running && !has_queued && state != WorkflowState::Generating)
                                 .then(|| turn_start(&session_view.messages, index))
                                 .flatten();
                             let is_reverted = reverted().contains(&index);
                             rsx! {
                                 div { class: "{bubble_class}",
+                                    if message.is_queued {
+                                        small {
+                                            class: "queued-prompt",
+                                            title: "Runs after the current turn, using the latest saved candidate",
+                                            "Queued"
+                                        }
+                                    }
                                     p { "{message.content}" }
                                 }
                                 if let Some(since) = revert_since {
@@ -495,13 +519,19 @@ pub(crate) fn SessionWorkspace(
                                         title: "Put every artifact of this turn back to how it was before it",
                                         onclick: {
                                             let artifacts = message.artifacts.clone();
+                                            let snapshots = message.snapshot_stamps.clone(); // The setup card asked the app's
                                             let kind = session.artifact_kind;
                                             move |_| {
                                                 let artifacts = artifacts.clone();
+                                                let snapshots = snapshots.clone();
                                                 let since = since.clone();
                                                 spawn(async move {
                                                     for id in &artifacts {
-                                                        let done = revert_artifact(kind, id, &since).await;
+                                                        let stamp = snapshots
+                                                            .as_ref()
+                                                            .and_then(|snapshots| snapshots.get(id))
+                                                            .map(String::as_str);
+                                                        let done = revert_artifact(kind, id, &since, stamp).await;
                                                         if let Err(message) = done {
                                                             error.set(Some(message));
                                                             return;
@@ -711,7 +741,7 @@ pub(crate) fn SessionWorkspace(
                             },
                         }
                         SendButton {
-                            label: "Send",
+                            label: send_label,
                             is_enabled: can_chat && !draft.read().trim().is_empty(),
                             on_send: move |_| send_message.call(()),
                         }
@@ -893,12 +923,9 @@ fn is_start_offered(state: WorkflowState, is_running: bool, has_open_set: bool) 
     }
 }
 
-/// True when the chat accepts a message: not while a run is active,
-/// since a message sent then would wait unread, and not while the
-/// session generates. After an error the chat stays open: the next
-/// message is the retry.
-fn is_chat_open(state: WorkflowState, is_running: bool) -> bool {
-    !is_running && state != WorkflowState::Generating
+/// Keeps chat open in every state. Busy runs queue prompts; halted runs resume on send.
+fn is_chat_open(_state: WorkflowState, _is_running: bool) -> bool {
+    true
 }
 
 /// The answers the user gave to question set `number`, as Q and A text.
@@ -982,7 +1009,7 @@ fn chat_placeholder(state: WorkflowState) -> &'static str {
     match state {
         WorkflowState::Intake => "Reply, or add detail…",
         WorkflowState::Clarifying => "Answer the questions above, or reply here…",
-        WorkflowState::Generating => "Generating… send after it finishes",
+        WorkflowState::Generating => "Add a prompt to the queue…",
         WorkflowState::Reviewing => "Ask for a change, or for new candidates… @ pins a candidate",
         WorkflowState::Stopped => "The run stopped. Send a message to carry on…",
         WorkflowState::Error => "The run failed. Send a message to try again…",
@@ -991,11 +1018,16 @@ fn chat_placeholder(state: WorkflowState) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use design_model::WorkflowState;
+
+    use crate::api::AgentRun;
+
     use super::{
         candidate_mentions, chat_placeholder, generation_step, is_canvas_shown, is_chat_open,
         is_start_offered, pin_candidates, pinned_reference, progress_label,
     };
-    use design_model::WorkflowState;
 
     fn ids() -> Vec<String> {
         vec![
@@ -1041,14 +1073,15 @@ mod tests {
     }
 
     #[test]
-    fn the_chat_is_open_except_while_a_run_works() {
+    fn the_chat_stays_open_while_a_run_works_and_queues_prompts() {
         assert!(is_chat_open(WorkflowState::Intake, false));
         assert!(is_chat_open(WorkflowState::Reviewing, false));
         assert!(is_chat_open(WorkflowState::Error, false));
         // A stopped session takes a message: it resumes on the way in.
         assert!(is_chat_open(WorkflowState::Stopped, false));
-        assert!(!is_chat_open(WorkflowState::Generating, false));
-        assert!(!is_chat_open(WorkflowState::Reviewing, true));
+        assert!(is_chat_open(WorkflowState::Generating, false));
+        assert!(is_chat_open(WorkflowState::Generating, true));
+        assert!(is_chat_open(WorkflowState::Reviewing, true));
     }
 
     #[test]
@@ -1063,8 +1096,8 @@ mod tests {
         assert!(!is_start_offered(WorkflowState::Reviewing, false, false));
     }
 
-    fn run(log: &str) -> crate::api::AgentRun {
-        crate::api::AgentRun {
+    fn run(log: &str) -> AgentRun {
+        AgentRun {
             is_running: true,
             exit_code: None,
             log_tail: log.to_owned(),
@@ -1075,7 +1108,7 @@ mod tests {
             total_tokens: 0,
             context_window: 0,
             progress: Some(40),
-            designs: std::collections::HashMap::new(),
+            designs: HashMap::new(),
         }
     }
 
@@ -1108,6 +1141,7 @@ mod tests {
         assert_ne!(stopped, failed);
         assert!(!stopped.contains("fail"));
         assert!(failed.contains("failed"));
+        assert!(chat_placeholder(WorkflowState::Generating).contains("queue"));
         assert!(chat_placeholder(WorkflowState::Stopped).contains("carry on"));
         assert!(chat_placeholder(WorkflowState::Error).contains("failed"));
     }

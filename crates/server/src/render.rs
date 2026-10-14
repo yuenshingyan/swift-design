@@ -52,6 +52,16 @@ pub(crate) const FIT_SCRIPT: &str = r##"(() => {
   const hasContent = (element) =>
     element.matches('img, svg, video, canvas, input, textarea') ||
     element.textContent.trim() !== '';
+  const isClippedOrHidden = (element, root) => {
+    const details = element.closest('details:not([open])');
+    if (details && element !== details && element.tagName.toLowerCase() !== 'summary' && !element.closest('summary')) { return true; }
+    for (let node = element; node && node !== root; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || Number(style.opacity) === 0) { return true; }
+      if (node !== element && (/^(auto|scroll)$/.test(style.overflowX) || /^(auto|scroll)$/.test(style.overflowY))) { return true; }
+    }
+    return false;
+  };
   const contentOverflows = (root) => {
     const box = root.getBoundingClientRect();
     const scale = box.width / (root.clientWidth || 1);
@@ -59,7 +69,7 @@ pub(crate) const FIT_SCRIPT: &str = r##"(() => {
     const right = box.right + 2 * scale;
     return Array.from(root.querySelectorAll('*')).some((element) => {
       if (element.closest('svg') && element.tagName.toLowerCase() !== 'svg') { return false; }
-      if (element.hasAttribute('data-swift-design-inner-root') || !hasContent(element)) { return false; }
+      if (element.hasAttribute('data-swift-design-inner-root') || !hasContent(element) || isClippedOrHidden(element, root)) { return false; }
       const rect = element.getBoundingClientRect();
       return rect.bottom > bottom || rect.right > right;
     });
@@ -87,7 +97,10 @@ pub(crate) const FIT_SCRIPT: &str = r##"(() => {
     root.style.setProperty('--swift-design-fit', String(factor));
     root.dataset.swiftDesignFit = factor.toFixed(4);
   };
-  const fitAll = () => document.querySelectorAll('[data-swift-design-root]').forEach((root) => { markInnerRoot(root); fitRoot(root); });
+  const fitAll = () => {
+    if (window.swiftDesignApplyWindow) { window.swiftDesignApplyWindow(); }
+    document.querySelectorAll('[data-swift-design-root]').forEach((root) => { markInnerRoot(root); fitRoot(root); });
+  };
   fitAll();
   // A web font changes the metrics, so the fit is measured again once
   // the fonts are in.
@@ -95,6 +108,55 @@ pub(crate) const FIT_SCRIPT: &str = r##"(() => {
     document.fonts.ready.then(fitAll).catch(() => {});
   }
   window.swiftDesignFit = fitAll;
+})();
+"##;
+
+/// Places the app window shell at the shared geometry for each screen.
+///
+/// Design models can name one app window rectangle for all screens. The
+/// model writes a direct child marked `data-swift-design-window` under
+/// each root. This script owns the hard geometry and writes it inline with
+/// `!important`, before the fit script measures the content.
+pub(crate) const DESIGN_WINDOW_SCRIPT: &str = r##"(() => {
+  const main = document.querySelector('main.design');
+  if (!main || !main.dataset.swiftDesignWindowLeft) { return; }
+  const geometry = {
+    left: Number(main.dataset.swiftDesignWindowLeft),
+    top: Number(main.dataset.swiftDesignWindowTop),
+    width: Number(main.dataset.swiftDesignWindowWidth),
+    height: Number(main.dataset.swiftDesignWindowHeight),
+  };
+  if (![geometry.left, geometry.top, geometry.width, geometry.height].every(Number.isFinite)) { return; }
+  const setImportant = (style, property, value) => style.setProperty(property, value, 'important');
+  const apply = () => document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
+    const windowElement = Array.from(root.children).find((child) => child.hasAttribute('data-swift-design-window'));
+    if (!windowElement) { return; }
+    const style = windowElement.style;
+    const properties = ['position', 'left', 'top', 'right', 'bottom', 'width', 'height', 'min-width', 'max-width', 'min-height', 'max-height', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'box-sizing', 'transform', 'translate', 'rotate', 'scale'];
+    if (!windowElement.hasAttribute('data-swift-design-window-applied')) {
+      const original = properties.map((property) => [property, style.getPropertyValue(property), style.getPropertyPriority(property)]);
+      windowElement.dataset.swiftDesignWindowApplied = JSON.stringify(original);
+    }
+    setImportant(style, 'position', 'absolute');
+    setImportant(style, 'left', geometry.left + 'px');
+    setImportant(style, 'top', geometry.top + 'px');
+    setImportant(style, 'right', 'auto');
+    setImportant(style, 'bottom', 'auto');
+    setImportant(style, 'width', geometry.width + 'px');
+    setImportant(style, 'height', geometry.height + 'px');
+    setImportant(style, 'min-width', geometry.width + 'px');
+    setImportant(style, 'max-width', geometry.width + 'px');
+    setImportant(style, 'min-height', geometry.height + 'px');
+    setImportant(style, 'max-height', geometry.height + 'px');
+    setImportant(style, 'margin', '0');
+    setImportant(style, 'box-sizing', 'border-box');
+    setImportant(style, 'transform', 'none');
+    setImportant(style, 'translate', 'none');
+    setImportant(style, 'rotate', 'none');
+    setImportant(style, 'scale', 'none');
+  });
+  window.swiftDesignApplyWindow = apply;
+  apply();
 })();
 "##;
 
@@ -327,12 +389,20 @@ function serialize(root) {
   const clone = root.cloneNode(true);
   // The editing and fit scripts mark nodes with reserved attributes.
   // None of them belong in the saved HTML.
-  clone.querySelectorAll('[contenteditable], [spellcheck], [data-swift-design-selected], [data-swift-design-inner-root], [data-swift-design-dragging]').forEach((node) => {
+  clone.querySelectorAll('[contenteditable], [spellcheck], [data-swift-design-selected], [data-swift-design-inner-root], [data-swift-design-dragging], [data-swift-design-window-applied]').forEach((node) => {
     node.removeAttribute('contenteditable');
     node.removeAttribute('spellcheck');
     node.removeAttribute('data-swift-design-selected');
     node.removeAttribute('data-swift-design-inner-root');
     node.removeAttribute('data-swift-design-dragging');
+    if (node.hasAttribute('data-swift-design-window-applied')) {
+      let original = [];
+      try { original = JSON.parse(node.getAttribute('data-swift-design-window-applied')); } catch (error) {}
+      ['position', 'left', 'top', 'right', 'bottom', 'width', 'height', 'min-width', 'max-width', 'min-height', 'max-height', 'margin', 'box-sizing', 'transform', 'translate', 'rotate', 'scale'].forEach((property) => node.style.removeProperty(property));
+      original.forEach(([property, value, priority]) => { if (value) { node.style.setProperty(property, value, priority); } });
+      node.removeAttribute('data-swift-design-window-applied');
+      if (!node.getAttribute('style')) { node.removeAttribute('style'); }
+    }
   });
   return clone.innerHTML;
 }
@@ -997,13 +1067,90 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
   if (document.readyState !== 'complete') {
     await new Promise((resolve) => window.addEventListener('load', resolve, { once: true }));
   }
+  const main = document.querySelector('main.design');
+  const canvasWidth = Number(main && main.dataset.swiftDesignWidth) || 1440;
+  const canvasHeight = Number(main && main.dataset.swiftDesignHeight) || 900;
+  const isDemo = !!(main && main.classList.contains('design') && main.classList.length === 1);
+  const fitThreshold = isDemo ? 0.999 : 0.97;
+  const tolerancePx = 2;
+  const windowGeometry = main && main.dataset.swiftDesignWindowLeft ? {
+    left: Number(main.dataset.swiftDesignWindowLeft),
+    top: Number(main.dataset.swiftDesignWindowTop),
+    width: Number(main.dataset.swiftDesignWindowWidth),
+    height: Number(main.dataset.swiftDesignWindowHeight),
+  } : null;
+  const hasWindowGeometry = windowGeometry && [windowGeometry.left, windowGeometry.top, windowGeometry.width, windowGeometry.height].every(Number.isFinite);
+  // Navigation hides inactive transition frames. Audit every frame, not only the open one.
+  document.querySelectorAll('[data-swift-design-frame]').forEach((frame) => {
+    frame.style.setProperty('transition', 'none', 'important');
+    frame.style.setProperty('animation', 'none', 'important');
+    frame.style.setProperty('visibility', 'visible', 'important');
+    frame.style.setProperty('opacity', '1', 'important');
+    frame.style.setProperty('transform', 'none', 'important');
+  });
+  if (window.swiftDesignFit) { window.swiftDesignFit(); }
+  // Revealing inactive frames can start loading fonts that the first frame did not use.
   if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch (error) {} }
+  if (window.swiftDesignFit) { window.swiftDesignFit(); }
   const findings = [];
+  const auditedScreens = [];
   const hasOwnText = (element) => Array.from(element.childNodes).some((node) => node.nodeType === 3 && node.textContent.trim());
+  const isClosedDetailsDescendant = (element) => {
+    const details = element.closest('details:not([open])');
+    return !!(details && element !== details && element.tagName.toLowerCase() !== 'summary' && !element.closest('summary'));
+  };
+  const isVisible = (element) => {
+    if (isClosedDetailsDescendant(element)) { return false; }
+    for (let node = element; node && node.nodeType === 1; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || Number(style.opacity) === 0) { return false; }
+      if (node.hasAttribute('hidden')) { return false; }
+    }
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  const overflowMode = (element) => {
+    const style = getComputedStyle(element);
+    return { x: style.overflowX, y: style.overflowY };
+  };
+  const isIntentionalScrollport = (element) => {
+    const mode = overflowMode(element);
+    return /^(auto|scroll)$/.test(mode.x) || /^(auto|scroll)$/.test(mode.y);
+  };
+  const isInsideScrollport = (element, root) => {
+    let node = element.parentElement;
+    while (node && node !== root) {
+      if (isIntentionalScrollport(node)) { return true; }
+      node = node.parentElement;
+    }
+    return false;
+  };
+  const rectIntersects = (a, b, tolerance) =>
+    a.right > b.left + tolerance && a.left < b.right - tolerance && a.bottom > b.top + tolerance && a.top < b.bottom - tolerance;
+  const visibleChildrenOf = (element, rootRect) => Array.from(element.children).filter((child) => {
+    if (!isVisible(child)) { return false; }
+    const rect = child.getBoundingClientRect();
+    return rectIntersects(rect, rootRect, 0);
+  });
+  const axisValue = (rect, mode) => {
+    if (mode === 'left') { return rect.left; }
+    if (mode === 'right') { return rect.right; }
+    if (mode === 'top') { return rect.top; }
+    if (mode === 'bottom') { return rect.bottom; }
+    if (mode === 'center-x') { return (rect.left + rect.right) / 2; }
+    if (mode === 'center-y') { return (rect.top + rect.bottom) / 2; }
+    if (mode === 'width') { return rect.width; }
+    if (mode === 'height') { return rect.height; }
+    return null;
+  };
+  const alignmentModes = new Set(['left', 'right', 'top', 'bottom', 'center-x', 'center-y', 'width', 'height']);
+  const gapModes = new Set(['x', 'y']);
   document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
     const screen = Number(root.closest('[data-swift-design-screen]').dataset.swiftDesignScreen);
+    auditedScreens.push(screen);
     const rootRect = root.getBoundingClientRect();
     const scale = rootRect.width / canvasWidth || 1;
+    const tolerance = tolerancePx * scale;
     const pathOf = (element) => {
       const parts = [];
       let node = element;
@@ -1011,31 +1158,89 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
       return parts.join('/');
     };
     const name = (element) => element.tagName.toLowerCase() + (element.classList[0] ? '.' + element.classList[0] : '') + ' (' + pathOf(element) + ')';
-    if (!root.textContent.trim() && !root.querySelector('img, svg')) {
-      findings.push({ screen, node: 'root', kind: 'empty', detail: 'the screen has no text, image, or svg' });
+    const visibleAll = Array.from(root.querySelectorAll('*')).filter(isVisible);
+    if (!hasOwnText(root) && !visibleAll.some((element) => hasOwnText(element) || element.matches('img, svg'))) {
+      findings.push({ screen, node: 'root', kind: 'empty', detail: 'the screen has no visible text, image, or svg' });
     }
-    const all = Array.from(root.querySelectorAll('*')).filter((element) => {
-      const style = getComputedStyle(element);
-      return style.display !== 'none' && style.visibility !== 'hidden';
+    // Scroll extents include trailing padding. Check painted content before declaring clipping.
+    const hasVisibleOverflow = (element, axis) => {
+      const rectangle = element.getBoundingClientRect();
+      const axisScale = axis === 'x' ? rectangle.width / element.offsetWidth : rectangle.height / element.offsetHeight;
+      const factor = axisScale || scale;
+      const start = axis === 'x' ? rectangle.left + element.clientLeft * factor : rectangle.top + element.clientTop * factor;
+      const end = start + (axis === 'x' ? element.clientWidth : element.clientHeight) * factor;
+      const outside = (rectangle) => axis === 'x'
+        ? rectangle.left < start - tolerance || rectangle.right > end + tolerance
+        : rectangle.top < start - tolerance || rectangle.bottom > end + tolerance;
+      let hasMeasuredContent = false;
+      const nodes = [element, ...Array.from(element.querySelectorAll('*')).filter((node) => isVisible(node) && !isInsideScrollport(node, element))];
+      for (const node of nodes) {
+        if (node !== element) {
+          hasMeasuredContent = true;
+          if (outside(node.getBoundingClientRect())) { return true; }
+        }
+        // Generated content has no text node to measure. Keep its scroll warning conservatively.
+        if (['::before', '::after'].some((pseudo) => {
+          const content = getComputedStyle(node, pseudo).content;
+          return content && content !== 'none' && content !== 'normal' && content !== '""';
+        })) { return true; }
+        for (const child of node.childNodes) {
+          if (child.nodeType !== Node.TEXT_NODE || !child.textContent.trim()) { continue; }
+          const range = document.createRange();
+          range.selectNodeContents(child);
+          for (const rectangle of range.getClientRects()) {
+            if (!rectangle.width || !rectangle.height) { continue; }
+            hasMeasuredContent = true;
+            if (outside(rectangle)) { return true; }
+          }
+        }
+      }
+      return !hasMeasuredContent;
+    };
+    const overflowAxes = new Map();
+    const overflowing = visibleAll.filter((element) => {
+      if (element.closest('svg') || isIntentionalScrollport(element)) { return false; }
+      const x = element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 2 && hasVisibleOverflow(element, 'x');
+      const y = element.clientHeight > 0 && element.scrollHeight > element.clientHeight + 2 && hasVisibleOverflow(element, 'y');
+      overflowAxes.set(element, { x, y });
+      return x || y;
     });
-    const overflowing = all.filter((element) => element.clientHeight > 0 && element.scrollHeight > element.clientHeight + 2 && !element.closest('svg'));
     overflowing.forEach((element) => {
       if (overflowing.some((other) => other !== element && element.contains(other))) { return; }
-      findings.push({ screen, node: name(element), kind: 'overflow', detail: 'content needs ' + Math.round(element.scrollHeight) + 'px but the box is ' + Math.round(element.clientHeight) + 'px tall' });
+      const needs = [];
+      if (overflowAxes.get(element).x) { needs.push(Math.round(element.scrollWidth) + 'px wide but the box is ' + Math.round(element.clientWidth) + 'px wide'); }
+      if (overflowAxes.get(element).y) { needs.push(Math.round(element.scrollHeight) + 'px tall but the box is ' + Math.round(element.clientHeight) + 'px tall'); }
+      findings.push({ screen, node: name(element), kind: 'overflow', detail: 'content needs ' + needs.join(' and ') });
     });
     if (root.scrollHeight > root.clientHeight + 2 || root.scrollWidth > root.clientWidth + 2) {
       findings.push({ screen, node: 'root', kind: 'off_screen', detail: 'content runs past the ' + canvasWidth + ' by ' + canvasHeight + ' canvas (' + Math.round(root.scrollWidth) + ' by ' + Math.round(root.scrollHeight) + 'px)' });
     }
-    // The page shrinks a screen that holds too much, so it is whole
-    // rather than cut off. It is still too much content.
     const fitFactor = Number(root.dataset.swiftDesignFit || 1);
-    if (fitFactor < 0.97) {
+    if (hasWindowGeometry) {
+      const windowElement = Array.from(root.children).find((child) => child.hasAttribute('data-swift-design-window'));
+      const windowTolerance = 1.5;
+      const differs = (actual, expected) => Math.abs(actual - expected) > windowTolerance;
+      if (!windowElement) {
+        findings.push({ screen, node: 'root', kind: 'window_geometry', detail: 'missing direct child marked data-swift-design-window for the app window geometry' });
+      } else {
+        const rect = windowElement.getBoundingClientRect();
+        const actual = {
+          left: (rect.left - rootRect.left) / scale,
+          top: (rect.top - rootRect.top) / scale,
+          width: rect.width / scale,
+          height: rect.height / scale,
+        };
+        if (differs(actual.left, windowGeometry.left) || differs(actual.top, windowGeometry.top) || differs(actual.width, windowGeometry.width) || differs(actual.height, windowGeometry.height)) {
+          findings.push({ screen, node: 'data-swift-design-window', kind: 'window_geometry', detail: 'app window is at ' + Math.round(actual.left) + ',' + Math.round(actual.top) + ' ' + Math.round(actual.width) + ' by ' + Math.round(actual.height) + 'px but metadata requires ' + windowGeometry.left + ',' + windowGeometry.top + ' ' + windowGeometry.width + ' by ' + windowGeometry.height + 'px' });
+        }
+      }
+      if (fitFactor < 0.999) {
+        findings.push({ screen, node: 'root', kind: 'window_geometry', detail: 'the app window geometry forced the screen to scale to ' + Math.round(fitFactor * 1000) / 10 + '%: keep the marked window inside the canvas' });
+      }
+    }
+    if (fitFactor < fitThreshold) {
       findings.push({ screen, node: 'root', kind: 'overfull', detail: 'the screen holds more than the ' + canvasWidth + ' by ' + canvasHeight + ' canvas fits, so it was scaled to ' + Math.round(fitFactor * 100) + '%: cut content or reduce the sizes' });
     }
-    // A control that looks clickable and does nothing. A link acts
-    // when it names a screen or a real URL, a label when it names an
-    // input, a summary or a details when it opens. A box that only
-    // holds acting controls is a container, not a control.
     const controlPattern = /(^|[-_ ])(button|btn|cta|toggle|switch|tab|menu|dropdown)([-_ ]|$)/i;
     const acts = (element) => {
       const tag = element.tagName.toLowerCase();
@@ -1044,7 +1249,7 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
       if (tag === 'label') { return !!element.getAttribute('for'); }
       return tag === 'summary' || tag === 'details' || tag === 'input';
     };
-    all.forEach((element) => {
+    visibleAll.forEach((element) => {
       if (element.closest('svg')) { return; }
       const tag = element.tagName.toLowerCase();
       const looksLikeControl = tag === 'a' || tag === 'button' || element.getAttribute('role') === 'button' || controlPattern.test(element.getAttribute('class') || '');
@@ -1052,21 +1257,60 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
       if (element.closest('a[href], label[for], summary') || element.querySelector('a[href], label[for], summary, input')) { return; }
       findings.push({ screen, node: name(element), kind: 'static_control', detail: 'looks like a control but does nothing when clicked' });
     });
-    // The smallest readable text depends on the canvas. A slide is
-    // read from across a room; a desktop app screen uses 12 to 14px
-    // labels, and a phone screen 11 to 12px. The deck floor applied
-    // to a demo flagged every label, and the real layout findings
-    // were lost in hundreds of these.
+    visibleAll.forEach((element) => {
+      const align = element.getAttribute('data-layout-align');
+      if (align !== null) {
+        if (!alignmentModes.has(align)) {
+          findings.push({ screen, node: name(element), kind: 'alignment', detail: 'data-layout-align must be one of left, right, top, bottom, center-x, center-y, width, or height' });
+        } else {
+          const children = visibleChildrenOf(element, rootRect);
+          if (children.length < 2) {
+            findings.push({ screen, node: name(element), kind: 'alignment', detail: 'data-layout-align="' + align + '" needs at least 2 visible direct children' });
+          } else {
+            const values = children.map((child) => ({ child, value: axisValue(child.getBoundingClientRect(), align) / scale }));
+            const expected = values[0].value;
+            const offender = values.find((entry) => Math.abs(entry.value - expected) > tolerancePx);
+            if (offender) {
+              findings.push({ screen, node: name(element), kind: 'alignment', detail: 'direct children marked for ' + align + ' alignment differ by more than ' + tolerancePx + ' canvas px' });
+            }
+          }
+        }
+      }
+      const gap = element.getAttribute('data-layout-gap');
+      if (gap !== null) {
+        if (!gapModes.has(gap)) {
+          findings.push({ screen, node: name(element), kind: 'alignment', detail: 'data-layout-gap must be x or y' });
+        } else {
+          const children = visibleChildrenOf(element, rootRect).sort((a, b) => {
+            const ar = a.getBoundingClientRect(), br = b.getBoundingClientRect();
+            return gap === 'x' ? ar.left - br.left : ar.top - br.top;
+          });
+          if (children.length < 3) {
+            findings.push({ screen, node: name(element), kind: 'alignment', detail: 'data-layout-gap="' + gap + '" needs at least 3 visible direct children' });
+          } else {
+            const gaps = [];
+            for (let index = 1; index < children.length; index += 1) {
+              const previous = children[index - 1].getBoundingClientRect();
+              const current = children[index].getBoundingClientRect();
+              gaps.push((gap === 'x' ? current.left - previous.right : current.top - previous.bottom) / scale);
+            }
+            const expected = gaps[0];
+            if (gaps.some((value) => Math.abs(value - expected) > tolerancePx)) {
+              findings.push({ screen, node: name(element), kind: 'alignment', detail: 'adjacent ' + (gap === 'x' ? 'horizontal' : 'vertical') + ' gaps differ by more than ' + tolerancePx + ' canvas px' });
+            }
+          }
+        }
+      }
+    });
     const textFloor = canvasWidth >= 1920 ? { flag: 20, ask: 24 } : canvasWidth >= 1000 ? { flag: 12, ask: 14 } : { flag: 11, ask: 12 };
     const textBlocks = [];
-    all.forEach((element) => {
+    visibleAll.forEach((element) => {
       if (element.closest('svg') && element.tagName.toLowerCase() !== 'svg') { return; }
       const isText = hasOwnText(element);
       const tag = element.tagName.toLowerCase();
       if (!isText && tag !== 'img' && tag !== 'svg') { return; }
       const rect = element.getBoundingClientRect();
-      const tolerance = 2 * scale;
-      if (rect.left < rootRect.left - tolerance || rect.top < rootRect.top - tolerance || rect.right > rootRect.right + tolerance || rect.bottom > rootRect.bottom + tolerance) {
+      if (!isInsideScrollport(element, root) && (rect.left < rootRect.left - tolerance || rect.top < rootRect.top - tolerance || rect.right > rootRect.right + tolerance || rect.bottom > rootRect.bottom + tolerance)) {
         findings.push({ screen, node: name(element), kind: 'off_screen', detail: 'runs off the screen: keep it inside the ' + canvasWidth + ' by ' + canvasHeight + ' canvas' });
       }
       if (isText) {
@@ -1074,7 +1318,7 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
         if (size < textFloor.flag) {
           findings.push({ screen, node: name(element), kind: 'tiny_text', detail: 'font-size ' + Math.round(size) + 'px is too small: use at least ' + textFloor.ask + 'px' });
         }
-        textBlocks.push({ element, rect });
+        if (!isInsideScrollport(element, root)) { textBlocks.push({ element, rect }); }
       }
     });
     const parseColor = (value) => {
@@ -1125,6 +1369,7 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
       for (let second = first + 1; second < textBlocks.length && overlaps < 6; second += 1) {
         const a = textBlocks[first], b = textBlocks[second];
         if (a.element.contains(b.element) || b.element.contains(a.element)) { continue; }
+        if (isInsideScrollport(a.element, root) || isInsideScrollport(b.element, root)) { continue; }
         const width = Math.min(a.rect.right, b.rect.right) - Math.max(a.rect.left, b.rect.left);
         const height = Math.min(a.rect.bottom, b.rect.bottom) - Math.max(a.rect.top, b.rect.top);
         if (width > 4 * scale && height > 4 * scale) {
@@ -1135,9 +1380,9 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
     }
   });
   document.documentElement.setAttribute('data-swift-design-findings', JSON.stringify(findings));
+  document.documentElement.setAttribute('data-swift-design-audited-screens', JSON.stringify(auditedScreens));
 })();
 "##;
-
 /// How to render a design page.
 #[derive(Clone, Debug, Default)]
 pub struct RenderOptions {
@@ -1213,7 +1458,20 @@ pub fn render_design_with(design: &Design, options: RenderOptions) -> String {
     let transition = (options.only_screen.is_none() && !options.is_print)
         .then_some(design.transition)
         .flatten();
-    let design_attributes = transition.map(design_attributes).unwrap_or_default();
+    let mut main_attributes = String::new();
+    if let Some(app_window) = &design.app_window {
+        main_attributes.push_str(&format!(
+            " data-swift-design-window-left=\"{left}\" data-swift-design-window-top=\"{top}\" \
+             data-swift-design-window-width=\"{width}\" data-swift-design-window-height=\"{height}\"",
+            left = app_window.left,
+            top = app_window.top,
+            width = app_window.width,
+            height = app_window.height,
+        ));
+    }
+    if let Some(transition) = transition {
+        main_attributes.push_str(&design_attributes(transition));
+    }
     let transition_style = transition.map(transition_styles).unwrap_or_default();
     let print_style = if options.is_print {
         print_stylesheet(design.viewport)
@@ -1232,7 +1490,7 @@ pub fn render_design_with(design: &Design, options: RenderOptions) -> String {
          font-src 'self' https://fonts.gstatic.com; img-src {image_sources}; connect-src 'none'; \
          object-src 'none'; frame-src 'none'; form-action 'none'\">\n\
          <title>{title}</title>\n{fonts}<style>\n{style}{print_style}{transition_style}{screen_styles}</style>\n</head>\n<body>\n\
-         <main class=\"design\" data-swift-design-width=\"{width}\" data-swift-design-height=\"{height}\"{design_attributes}>\n{sections}</main>\n\
+         <main class=\"design\" data-swift-design-width=\"{width}\" data-swift-design-height=\"{height}\"{main_attributes}>\n{sections}</main>\n\
          {script_element}</body>\n</html>\n",
         title = escape_html(&design.title),
         fonts = google_fonts_link(&design.theme).unwrap_or_default(),
@@ -1245,14 +1503,15 @@ pub fn render_design_with(design: &Design, options: RenderOptions) -> String {
 /// The page script for `options`: the fit always, layout and navigation
 /// on screen, editing and audit on request.
 ///
-/// A print carries the fit and nothing else: the PDF must hold the same
-/// content the studio shows, and the rest of the scripts have no place
-/// in a print.
+/// A print carries the app-window geometry and the fit only: the PDF
+/// must hold the same content the studio shows, and the rest of the
+/// scripts have no place in a print.
 fn page_script(options: &RenderOptions) -> String {
+    let mut script = DESIGN_WINDOW_SCRIPT.to_owned();
+    script.push_str(FIT_SCRIPT);
     if options.is_print {
-        return FIT_SCRIPT.to_owned();
+        return script;
     }
-    let mut script = FIT_SCRIPT.to_owned();
     script.push_str(LAYOUT_SCRIPT);
     script.push_str(NAVIGATION_SCRIPT);
     if options.is_editable {
@@ -1448,8 +1707,8 @@ mod tests {
 
     use crate::export::base64_encode;
     use crate::render::{
-        EDITING_SCRIPT, FIT_SCRIPT, MAX_TRANSITION_MS, NAVIGATION_SCRIPT, RenderOptions, css_safe,
-        escape_html, render_design, render_design_with,
+        AUDIT_SCRIPT, DESIGN_WINDOW_SCRIPT, EDITING_SCRIPT, FIT_SCRIPT, MAX_TRANSITION_MS,
+        NAVIGATION_SCRIPT, RenderOptions, css_safe, escape_html, render_design, render_design_with,
     };
 
     fn sample_design() -> Design {
@@ -1623,6 +1882,8 @@ mod tests {
         assert!(editable.contains("'dblclick'"));
         // The HTML posted back carries none of the scripts' marks.
         assert!(editable.contains("node.removeAttribute('data-swift-design-inner-root')"));
+        assert!(editable.contains("node.removeAttribute('data-swift-design-window-applied')"));
+        assert!(editable.contains("node.style.setProperty(property, value, priority)"));
         // A command-click adds a node to the selection.
         assert!(editable.contains("event.metaKey || event.ctrlKey"));
         assert!(editable.contains("selection: selection.map(brief)"));
@@ -1655,6 +1916,97 @@ mod tests {
         );
         assert!(auditing.contains("data-swift-design-findings"));
         assert!(auditing.contains("img-src 'self' data: http://127.0.0.1:3000;"));
+    }
+
+    #[test]
+    fn app_window_script_stays_design_owned_and_runs_before_fit() {
+        assert!(DESIGN_WINDOW_SCRIPT.contains("data-swift-design-window"));
+        assert!(!FIT_SCRIPT.contains("data-swift-design-window"));
+        assert!(DESIGN_WINDOW_SCRIPT.contains("style.setProperty(property, value, 'important')"));
+        assert!(DESIGN_WINDOW_SCRIPT.contains("position', 'absolute'"));
+        assert!(DESIGN_WINDOW_SCRIPT.contains("transform', 'none'"));
+        assert!(DESIGN_WINDOW_SCRIPT.contains("translate', 'none'"));
+        assert!(DESIGN_WINDOW_SCRIPT.contains("rotate', 'none'"));
+        assert!(DESIGN_WINDOW_SCRIPT.contains("scale', 'none'"));
+        assert!(DESIGN_WINDOW_SCRIPT.contains("window.swiftDesignApplyWindow = apply"));
+        assert!(FIT_SCRIPT.contains("window.swiftDesignApplyWindow()"));
+        assert!(
+            DESIGN_WINDOW_SCRIPT
+                .contains("if (!windowElement.hasAttribute('data-swift-design-window-applied'))")
+        );
+        let html = render_design(&sample_design(), false);
+        let script_start = html.find(DESIGN_WINDOW_SCRIPT).unwrap();
+        let fit_start = html.find(FIT_SCRIPT).unwrap();
+        assert!(script_start < fit_start);
+    }
+
+    #[test]
+    fn legacy_designs_and_scoped_exports_have_no_window_metadata() {
+        let design = sample_design();
+        let full = render_design(&design, false);
+        let scoped = render_design_with(
+            &design,
+            RenderOptions {
+                only_screen: Some(2),
+                is_print: true,
+                ..RenderOptions::default()
+            },
+        );
+        assert!(!full.contains("data-swift-design-window-left="));
+        assert!(!scoped.contains("data-swift-design-window-left="));
+        assert!(scoped.contains(DESIGN_WINDOW_SCRIPT));
+        assert!(scoped.contains(FIT_SCRIPT));
+        assert!(!scoped.contains("ResizeObserver"));
+        assert!(!scoped.contains("data-swift-design-effect="));
+    }
+
+    #[test]
+    fn audit_checks_app_window_geometry_when_metadata_exists() {
+        assert!(AUDIT_SCRIPT.contains("swiftDesignWindowLeft"));
+        assert!(AUDIT_SCRIPT.contains("window_geometry"));
+        assert!(AUDIT_SCRIPT.contains("rootRect.width / canvasWidth"));
+        assert!(AUDIT_SCRIPT.contains("fitFactor < 0.999"));
+        assert!(AUDIT_SCRIPT.contains("Array.from(root.children).find"));
+    }
+
+    #[test]
+    fn audit_has_opt_in_alignment_checks() {
+        assert!(AUDIT_SCRIPT.contains("data-layout-align"));
+        assert!(AUDIT_SCRIPT.contains("data-layout-gap"));
+        assert!(AUDIT_SCRIPT.contains("kind: 'alignment'"));
+        assert!(AUDIT_SCRIPT.contains("alignmentModes.has(align)"));
+        assert!(AUDIT_SCRIPT.contains("gapModes.has(gap)"));
+        assert!(AUDIT_SCRIPT.contains("needs at least 3 visible direct children"));
+        assert!(AUDIT_SCRIPT.contains("differ by more than ' + tolerancePx + ' canvas px"));
+    }
+
+    #[test]
+    fn audit_respects_hidden_toggles_and_scrollports() {
+        assert!(AUDIT_SCRIPT.contains("details:not([open])"));
+        assert!(AUDIT_SCRIPT.contains("node.hasAttribute('hidden')"));
+        assert!(AUDIT_SCRIPT.contains("style.visibility === 'collapse'"));
+        assert!(AUDIT_SCRIPT.contains("isIntentionalScrollport"));
+        assert!(AUDIT_SCRIPT.contains("overflowX"));
+        assert!(AUDIT_SCRIPT.contains("overflowY"));
+        assert!(AUDIT_SCRIPT.contains("!isInsideScrollport(element, root)"));
+    }
+
+    #[test]
+    fn audit_reports_measured_screen_coverage() {
+        assert!(AUDIT_SCRIPT.contains("auditedScreens.push(screen)"));
+        assert!(AUDIT_SCRIPT.contains("data-swift-design-audited-screens"));
+        assert!(AUDIT_SCRIPT.contains("JSON.stringify(auditedScreens)"));
+        assert!(
+            AUDIT_SCRIPT.contains("frame.style.setProperty('visibility', 'visible', 'important')")
+        );
+        assert!(AUDIT_SCRIPT.contains("if (window.swiftDesignFit) { window.swiftDesignFit(); }"));
+    }
+
+    #[test]
+    fn audit_uses_demo_specific_fit_threshold() {
+        assert!(AUDIT_SCRIPT.contains("const isDemo"));
+        assert!(AUDIT_SCRIPT.contains("const fitThreshold = isDemo ? 0.999 : 0.97"));
+        assert!(AUDIT_SCRIPT.contains("fitFactor < fitThreshold"));
     }
 
     #[test]
@@ -1710,7 +2062,7 @@ mod tests {
         assert!(html.contains("@page { size: 1440px 900px; margin: 0; }"));
         assert!(html.contains("break-after: page"));
         assert!(html.contains("transform: scale(var(--swift-design-fit, 1)); }"));
-        // A print carries the fit and nothing else, so the PDF holds the
+        // A print carries geometry and fit only, so the PDF holds the
         // same content the studio shows.
         assert!(html.contains("swiftDesignFit"));
         assert!(!html.contains("ResizeObserver"));

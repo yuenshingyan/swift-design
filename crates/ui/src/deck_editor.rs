@@ -224,7 +224,9 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                             && from != to
                             && to < deck.peek().slides.len()
                         {
-                            deck.with_mut(|deck| move_screen(&mut deck.slides, from, to));
+                            deck.with_mut(|deck| {
+                                move_screen(&mut deck.slides, &mut deck.outline, from, to)
+                            });
                             dragged.set(Some(to));
                             selected.set(to);
                             selected_node.set(None);
@@ -718,67 +720,123 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
     }
 }
 
-/// The deck toolbar's export group: the presenter view, the HTML file,
-/// and the two Chrome-backed exports, PDF and PPTX.
-#[component]
-fn DeckExportGroup(deck_id: String, selected: usize, can_export_with_chrome: bool) -> Element {
-    rsx! {
-        div { class: "export-group",
-            a {
-                class: "button",
-                href: "/decks/{deck_id}/present?slide={selected + 1}",
-                target: "_blank",
-                title: "Present in a new window",
-                span { dangerous_inner_html: icons::PLAY }
-                "Present"
-            }
-            a {
-                class: "button",
-                href: "/decks/{deck_id}/export",
-                title: "Export as one HTML file",
-                span { dangerous_inner_html: icons::DOWNLOAD }
-                "HTML"
-            }
-            ChromeExportLink {
-                href: format!("/decks/{deck_id}/export.pdf"),
-                label: "PDF",
-                title: "Export as a PDF",
-                is_enabled: can_export_with_chrome,
-            }
-            ChromeExportLink {
-                href: format!("/decks/{deck_id}/export.pptx"),
-                label: "PPTX",
-                title: "Export as a PowerPoint file",
-                is_enabled: can_export_with_chrome,
-            }
-        }
+/// The href of the PNG export: one slide's image when scoped, the zip
+/// of every slide otherwise.
+fn png_export_href(deck_id: &str, only: Option<usize>) -> String {
+    match only {
+        Some(index) => format!("/decks/{deck_id}/slides/{}.png", index + 1),
+        None => format!("/decks/{deck_id}/export.zip"),
     }
 }
 
-/// One export link that needs Chrome on the server: a link when Chrome
-/// is there, a disabled cell with the install hint otherwise.
+/// The download name of a scoped slide image, matching the zip entry.
+fn slide_download_name(deck_id: &str, index: usize) -> String {
+    format!("{deck_id}-slide-{}.png", index + 1)
+}
+
+/// The label of the menu that downloads the slide on display.
+fn slide_export_label(index: usize) -> String {
+    format!("Slide {}", index + 1)
+}
+
+/// The deck toolbar's export menus: the presenter view, `All` downloads
+/// the whole deck, and `Slide N` downloads the slide on display.
 #[component]
-fn ChromeExportLink(
-    href: String,
-    label: &'static str,
-    title: &'static str,
-    is_enabled: bool,
-) -> Element {
-    if is_enabled {
-        return rsx! {
-            a { class: "button", href: "{href}", title: "{title}",
-                span { dangerous_inner_html: icons::DOWNLOAD }
-                "{label}"
-            }
-        };
-    }
+fn DeckExportGroup(deck_id: String, selected: usize, can_export_with_chrome: bool) -> Element {
+    let mut is_all_menu_open = use_signal(|| false);
+    let mut is_unit_menu_open = use_signal(|| false);
+    let unit_label = slide_export_label(selected);
     rsx! {
-        span {
-            class: "export-cell",
-            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
-            a { class: "button", "aria-disabled": "true",
+        a {
+            class: "button",
+            href: "/decks/{deck_id}/present?slide={selected + 1}",
+            target: "_blank",
+            title: "Present in a new window",
+            span { dangerous_inner_html: icons::PLAY }
+            "Present"
+        }
+        div { class: "unit-export",
+            button {
+                title: "Download the whole deck",
+                onclick: move |_| is_all_menu_open.set(!is_all_menu_open()),
                 span { dangerous_inner_html: icons::DOWNLOAD }
-                "{label}"
+                "All"
+            }
+            if is_all_menu_open() {
+                div {
+                    class: "menu-backdrop",
+                    onclick: move |_| is_all_menu_open.set(false),
+                }
+                div { class: "toolbar-menu unit-export-menu",
+                    a {
+                        href: "/decks/{deck_id}/export",
+                        onclick: move |_| is_all_menu_open.set(false),
+                        "Download as HTML"
+                    }
+                    if can_export_with_chrome {
+                        a {
+                            href: "/decks/{deck_id}/export.pdf",
+                            onclick: move |_| is_all_menu_open.set(false),
+                            "Download as PDF"
+                        }
+                        a {
+                            href: "/decks/{deck_id}/export.pptx",
+                            onclick: move |_| is_all_menu_open.set(false),
+                            "Download as PPTX"
+                        }
+                        a {
+                            href: png_export_href(&deck_id, None),
+                            onclick: move |_| is_all_menu_open.set(false),
+                            "Download as PNG zip"
+                        }
+                    } else {
+                        a {
+                            "aria-disabled": "true",
+                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                            "Download as PDF"
+                        }
+                        a {
+                            "aria-disabled": "true",
+                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                            "Download as PPTX"
+                        }
+                        a {
+                            "aria-disabled": "true",
+                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                            "Download as PNG zip"
+                        }
+                    }
+                }
+            }
+        }
+        div { class: "unit-export",
+            button {
+                title: "Download only the slide on display",
+                onclick: move |_| is_unit_menu_open.set(!is_unit_menu_open()),
+                span { dangerous_inner_html: icons::DOWNLOAD }
+                "{unit_label}"
+            }
+            if is_unit_menu_open() {
+                div {
+                    class: "menu-backdrop",
+                    onclick: move |_| is_unit_menu_open.set(false),
+                }
+                div { class: "toolbar-menu unit-export-menu",
+                    if can_export_with_chrome {
+                        a {
+                            href: png_export_href(&deck_id, Some(selected)),
+                            download: slide_download_name(&deck_id, selected),
+                            onclick: move |_| is_unit_menu_open.set(false),
+                            "Download as PNG"
+                        }
+                    } else {
+                        a {
+                            "aria-disabled": "true",
+                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                            "Download as PNG"
+                        }
+                    }
+                }
             }
         }
     }
@@ -827,7 +885,10 @@ fn field_count(deck: &Deck) -> usize {
 mod tests {
     use design_model::{Deck, FontSet, Palette, Slide, Theme};
 
-    use super::{DeckPreviewMode, default_slide, field_count, outline_title, slide_label};
+    use super::{
+        DeckPreviewMode, default_slide, field_count, outline_title, png_export_href,
+        slide_download_name, slide_export_label, slide_label,
+    };
 
     #[test]
     fn a_deck_opens_in_read_mode_and_edit_loads_the_editing_script() {
@@ -899,5 +960,16 @@ mod tests {
         // 9 deck and theme fields, html and notes on the first slide, html
         // and css on the second.
         assert_eq!(field_count(&deck), 9 + 2 + 2);
+    }
+
+    #[test]
+    fn png_exports_name_the_slide_in_href_and_filename() {
+        assert_eq!(png_export_href("launch", None), "/decks/launch/export.zip");
+        assert_eq!(
+            png_export_href("launch", Some(1)),
+            "/decks/launch/slides/2.png"
+        );
+        assert_eq!(slide_download_name("launch", 1), "launch-slide-2.png");
+        assert_eq!(slide_export_label(1), "Slide 2");
     }
 }

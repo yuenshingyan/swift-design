@@ -103,12 +103,18 @@ pub struct ChatMessage {
     /// True when the user pressed Finish on the design in `design`.
     #[serde(default)]
     pub is_continue: bool,
+    /// True while the prompt waits for its own turn.
+    #[serde(default)]
+    pub is_queued: bool,
     /// When the turn was recorded, RFC 3339.
     #[serde(default)]
     pub at: Option<String>,
     /// The artifacts an assistant turn wrote, edited, or finished.
     #[serde(default)]
     pub artifacts: Vec<String>,
+    /// Exact pre-edit snapshots for saved edit reports. None for older reports.
+    #[serde(default)]
+    pub snapshot_stamps: Option<HashMap<String, String>>,
 }
 
 /// One recorded set of answers.

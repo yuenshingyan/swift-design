@@ -27,6 +27,11 @@ pub(crate) const PLAY: &str = "<svg width=\"12\" height=\"12\" viewBox=\"0 0 14 
 fill=\"none\" aria-hidden=\"true\"><path d=\"M3 2.5l8 4.5-8 4.5V2.5z\" stroke=\"currentColor\" \
 stroke-width=\"1.3\" stroke-linejoin=\"round\"></path></svg>";
 
+/// A solid square, for stopping a generation run like a media player.
+pub(crate) const STOP: &str = "<svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" \
+aria-hidden=\"true\"><rect x=\"3\" y=\"3\" width=\"8\" height=\"8\" rx=\"0.6\" \
+fill=\"currentColor\" stroke=\"currentColor\"></rect></svg>";
+
 /// A circular arrow, for writing a unit anew.
 pub(crate) const REDO: &str = "<svg width=\"12\" height=\"12\" viewBox=\"0 0 14 14\" \
 fill=\"none\" aria-hidden=\"true\"><path d=\"M11.5 7a4.5 4.5 0 1 1-1.3-3.2M11.5 2.5v2.5H9\" \
@@ -87,6 +92,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stop_is_a_solid_square_player_icon() {
+        assert!(STOP.contains("<rect "));
+        assert!(STOP.contains("width=\"8\" height=\"8\""));
+        assert!(STOP.contains("fill=\"currentColor\""));
+        assert!(!STOP.contains("<path "));
+    }
+
+    #[test]
     fn every_glyph_is_one_hidden_svg_in_current_color() {
         for glyph in [
             CHEVRON_LEFT,
@@ -94,6 +107,7 @@ mod tests {
             CHEVRON_DOWN,
             CHECK,
             PLAY,
+            STOP,
             DOWNLOAD,
             PENCIL,
             DASHED_SQUARE,

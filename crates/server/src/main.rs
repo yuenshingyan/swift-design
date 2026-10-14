@@ -22,6 +22,8 @@ mod deck_patch;
 mod deck_polish;
 mod deck_render;
 mod decks;
+#[cfg(test)]
+mod demo_tweaks_tests;
 mod designs;
 mod document_generation;
 mod document_patch;
@@ -45,7 +47,9 @@ mod mailing_polish;
 mod mailing_render;
 mod mailings;
 mod model_client;
+mod model_retry;
 mod office;
+mod parallel_edit;
 mod patch;
 mod planner;
 mod polish;

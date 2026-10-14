@@ -34,7 +34,7 @@ pub(crate) fn saved_edit_report<T: Serialize>(
 }
 
 /// Names the units without inferring a kind from the artifact id or contents.
-fn unit_names(kind: ArtifactKind) -> (&'static str, &'static str) {
+pub(crate) fn unit_names(kind: ArtifactKind) -> (&'static str, &'static str) {
     match kind {
         ArtifactKind::Demo => ("screen", "screens"),
         ArtifactKind::Deck => ("slide", "slides"),

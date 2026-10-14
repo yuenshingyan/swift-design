@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use http_body_util::BodyExt;
@@ -30,6 +30,7 @@ use crate::events::ChangeNotifier;
 use crate::history::HistoryStore;
 use crate::mailings::MailingStore;
 use crate::model_client::{ModelConfiguration, ProviderAuth, WireFormat};
+use crate::polish::DemoDomRunner;
 use crate::prints::PrintStore;
 use crate::sessions::{RunOptions, SessionStore};
 use crate::settings::SettingsStore;
@@ -357,8 +358,20 @@ async fn open_generating_session_with(application: &Router, id: &str, body: &str
     );
 }
 
-/// Low-effort options: no polish rounds and few fix rounds, so engine
-/// tests never invoke Chrome.
+/// A successful browser boundary for engine tests not concerned with layout.
+pub(crate) fn clean_demo_dom_runner() -> DemoDomRunner {
+    Arc::new(|design, _| {
+        Box::pin(async move {
+            let screens: Vec<usize> = (0..design.screens.len()).collect();
+            Ok(format!(
+                "<html data-swift-design-findings=\"[]\" data-swift-design-audited-screens=\"{}\">",
+                serde_json::to_string(&screens).unwrap()
+            ))
+        })
+    })
+}
+
+/// Low-effort options with one bounded tweaking round.
 pub(crate) fn low_effort_options() -> RunOptions {
     RunOptions {
         effort: "low".to_owned(),
@@ -371,6 +384,12 @@ pub(crate) fn low_effort_options() -> RunOptions {
 pub(crate) enum FakeReply {
     /// A successful assistant message with this content.
     Text(String),
+    /// A provider error with the HTTP status and response body.
+    Error(StatusCode, String),
+    /// A provider error with a Retry-After header.
+    RetryAfter(StatusCode, String, String),
+    /// A successful HTTP response containing provider stream events.
+    Stream(String),
 }
 
 /// Shared state of the fake provider: the queue of replies and the
@@ -416,6 +435,42 @@ impl FakeModelServer {
             .push_back(FakeReply::Text(content.to_owned()));
     }
 
+    /// Queues one provider HTTP error.
+    pub(crate) fn push_error(&self, status: StatusCode, message: &str) {
+        self.state
+            .replies
+            .lock()
+            .unwrap()
+            .push_back(FakeReply::Error(status, message.to_owned()));
+    }
+
+    /// Queues a provider error with a Retry-After header.
+    pub(crate) fn push_error_with_retry_after(
+        &self,
+        status: StatusCode,
+        message: &str,
+        retry_after: &str,
+    ) {
+        self.state
+            .replies
+            .lock()
+            .unwrap()
+            .push_back(FakeReply::RetryAfter(
+                status,
+                message.to_owned(),
+                retry_after.to_owned(),
+            ));
+    }
+
+    /// Queues a provider event stream.
+    pub(crate) fn push_stream(&self, events: &str) {
+        self.state
+            .replies
+            .lock()
+            .unwrap()
+            .push_back(FakeReply::Stream(events.to_owned()));
+    }
+
     /// The request bodies the server received, in order.
     pub(crate) fn requests(&self) -> Vec<serde_json::Value> {
         self.state.requests.lock().unwrap().clone()
@@ -450,6 +505,13 @@ async fn handle(
             "usage": { "prompt_tokens": 10, "completion_tokens": 5 },
         }))
         .into_response(),
+        Some(FakeReply::Error(status, message)) => (status, message).into_response(),
+        Some(FakeReply::RetryAfter(status, message, retry_after)) => {
+            (status, [(header::RETRY_AFTER, retry_after)], message).into_response()
+        }
+        Some(FakeReply::Stream(events)) => {
+            ([(header::CONTENT_TYPE, "text/event-stream")], events).into_response()
+        }
         None => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "no canned reply queued".to_owned(),

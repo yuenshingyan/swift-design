@@ -11,7 +11,9 @@
 use crate::artwork::COVER_COUNT_LIMIT;
 use crate::campaign::AD_COUNT_LIMIT;
 use crate::mailing::EMAIL_COUNT_LIMIT;
-use crate::markup::{SCREEN_CSS_LIMIT, SCREEN_HTML_LIMIT, css_problems, html_problems};
+use crate::markup::{
+    SCREEN_CSS_LIMIT, SCREEN_HTML_LIMIT, css_problems, html_problems, window_marker_summary,
+};
 use crate::print::SHEET_COUNT_LIMIT;
 use crate::transition::{MAX_TRANSITION_MS, Transition};
 use crate::viewport::{MAX_VIEWPORT_SIDE, MIN_VIEWPORT_SIDE};
@@ -209,6 +211,60 @@ pub enum ValidationError {
         /// The longest allowed side in px.
         max: u32,
     },
+    /// The app window has zero width or height.
+    #[error("app_window is {width} by {height}: set positive width and height")]
+    InvalidAppWindowDimensions {
+        /// The rejected width in px.
+        width: u32,
+        /// The rejected height in px.
+        height: u32,
+    },
+    /// The app window does not fit inside the viewport.
+    #[error(
+        "app_window at {left},{top} size {width} by {height} does not fit viewport {viewport_width} by {viewport_height}: keep the window inside the viewport"
+    )]
+    AppWindowOutOfBounds {
+        /// Distance from the viewport left edge in px.
+        left: u32,
+        /// Distance from the viewport top edge in px.
+        top: u32,
+        /// Window width in px.
+        width: u32,
+        /// Window height in px.
+        height: u32,
+        /// Viewport width in px.
+        viewport_width: u32,
+        /// Viewport height in px.
+        viewport_height: u32,
+    },
+    /// A screen has no top-level app window marker.
+    #[error(
+        "screens[{index}].html has no top-level data-swift-design-window element: mark exactly one top-level non-void element"
+    )]
+    MissingAppWindowMarker {
+        /// Zero-based screen index.
+        index: usize,
+    },
+    /// A screen has more than one top-level app window marker.
+    #[error(
+        "screens[{index}].html has {count} top-level data-swift-design-window elements: keep exactly one"
+    )]
+    DuplicateAppWindowMarker {
+        /// Zero-based screen index.
+        index: usize,
+        /// Number of top-level markers found.
+        count: usize,
+    },
+    /// A screen has an app window marker below the top level.
+    #[error(
+        "screens[{index}].html has {count} nested data-swift-design-window elements: move the marker to one top-level non-void element"
+    )]
+    NestedAppWindowMarker {
+        /// Zero-based screen index.
+        index: usize,
+        /// Number of nested markers found.
+        count: usize,
+    },
 }
 
 impl Design {
@@ -234,10 +290,64 @@ impl Design {
                 max: MAX_VIEWPORT_SIDE,
             });
         }
+        app_window_problems(self, &mut errors);
         for (index, screen) in self.screens.iter().enumerate() {
             validate_screen(screen, index, &mut errors);
+            app_window_marker_problems(self.app_window.is_some(), screen, index, &mut errors);
         }
         errors
+    }
+}
+
+fn app_window_problems(design: &Design, errors: &mut Vec<ValidationError>) {
+    let Some(app_window) = design.app_window else {
+        return;
+    };
+    if app_window.width == 0 || app_window.height == 0 {
+        errors.push(ValidationError::InvalidAppWindowDimensions {
+            width: app_window.width,
+            height: app_window.height,
+        });
+    }
+    let right = app_window.left.checked_add(app_window.width);
+    let bottom = app_window.top.checked_add(app_window.height);
+    let is_out_of_bounds = right.is_none_or(|right| right > design.viewport.width)
+        || bottom.is_none_or(|bottom| bottom > design.viewport.height);
+    if is_out_of_bounds {
+        errors.push(ValidationError::AppWindowOutOfBounds {
+            left: app_window.left,
+            top: app_window.top,
+            width: app_window.width,
+            height: app_window.height,
+            viewport_width: design.viewport.width,
+            viewport_height: design.viewport.height,
+        });
+    }
+}
+
+fn app_window_marker_problems(
+    has_app_window: bool,
+    screen: &Screen,
+    index: usize,
+    errors: &mut Vec<ValidationError>,
+) {
+    if !has_app_window || screen.html.trim().is_empty() {
+        return;
+    }
+    let summary = window_marker_summary(&screen.html);
+    if summary.top_level == 0 {
+        errors.push(ValidationError::MissingAppWindowMarker { index });
+    } else if summary.top_level > 1 {
+        errors.push(ValidationError::DuplicateAppWindowMarker {
+            index,
+            count: summary.top_level,
+        });
+    }
+    if summary.nested > 0 {
+        errors.push(ValidationError::NestedAppWindowMarker {
+            index,
+            count: summary.nested,
+        });
     }
 }
 
@@ -661,8 +771,8 @@ mod tests {
     use crate::validation::ValidationError;
     use crate::viewport::{MAX_VIEWPORT_SIDE, MIN_VIEWPORT_SIDE};
     use crate::{
-        AD_COUNT_LIMIT, Ad, COVER_COUNT_LIMIT, Cover, EMAIL_COUNT_LIMIT, Email, Frame, Page,
-        SHEET_COUNT_LIMIT, Screen, Sheet, Slide, Transition, Viewport,
+        AD_COUNT_LIMIT, Ad, AppWindow, COVER_COUNT_LIMIT, Cover, EMAIL_COUNT_LIMIT, Email, Frame,
+        Page, SHEET_COUNT_LIMIT, Screen, Sheet, Slide, Transition, Viewport,
     };
 
     #[test]
@@ -1048,6 +1158,140 @@ mod tests {
                 .to_string()
                 .contains("use 320 to 4096 px")
         );
+    }
+
+    #[test]
+    fn accepts_a_bounded_app_window_with_one_top_level_marker() {
+        let mut design = sample_design();
+        design.app_window = Some(AppWindow {
+            left: 10,
+            top: 20,
+            width: 800,
+            height: 600,
+        });
+        design.screens[0].html =
+            "<main data-swift-design-window><h1 class='title'>Sample</h1></main>".to_owned();
+        assert_eq!(design.validate(), Vec::new());
+    }
+
+    #[test]
+    fn rejects_app_window_zero_dimensions() {
+        let mut design = sample_design();
+        design.app_window = Some(AppWindow {
+            left: 0,
+            top: 0,
+            width: 0,
+            height: 600,
+        });
+        let errors = design.validate();
+        assert!(
+            errors.contains(&ValidationError::InvalidAppWindowDimensions {
+                width: 0,
+                height: 600,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_app_window_bounds_and_overflow() {
+        let mut design = sample_design();
+        design.app_window = Some(AppWindow {
+            left: 1_000,
+            top: 0,
+            width: 600,
+            height: 600,
+        });
+        let errors = design.validate();
+        assert!(errors.contains(&ValidationError::AppWindowOutOfBounds {
+            left: 1_000,
+            top: 0,
+            width: 600,
+            height: 600,
+            viewport_width: 1440,
+            viewport_height: 900,
+        }));
+
+        design.app_window = Some(AppWindow {
+            left: u32::MAX,
+            top: 0,
+            width: 1,
+            height: 600,
+        });
+        let errors = design.validate();
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            ValidationError::AppWindowOutOfBounds { left: u32::MAX, .. }
+        )));
+    }
+
+    #[test]
+    fn requires_an_app_window_marker_on_each_screen() {
+        let mut design = sample_design();
+        design.app_window = Some(AppWindow {
+            left: 0,
+            top: 0,
+            width: 800,
+            height: 600,
+        });
+        let errors = design.validate();
+        assert!(errors.contains(&ValidationError::MissingAppWindowMarker { index: 0 }));
+    }
+
+    #[test]
+    fn rejects_duplicate_app_window_markers() {
+        let mut design = sample_design();
+        design.app_window = Some(AppWindow {
+            left: 0,
+            top: 0,
+            width: 800,
+            height: 600,
+        });
+        design.screens[0].html = concat!(
+            "<section data-swift-design-window>One</section>",
+            "<section data-swift-design-window>Two</section>"
+        )
+        .to_owned();
+        let errors = design.validate();
+        assert!(errors.contains(&ValidationError::DuplicateAppWindowMarker { index: 0, count: 2 }));
+    }
+
+    #[test]
+    fn rejects_nested_app_window_markers() {
+        let mut design = sample_design();
+        design.app_window = Some(AppWindow {
+            left: 0,
+            top: 0,
+            width: 800,
+            height: 600,
+        });
+        design.screens[0].html =
+            "<section><div data-swift-design-window>Nested</div></section>".to_owned();
+        let errors = design.validate();
+        assert!(errors.contains(&ValidationError::MissingAppWindowMarker { index: 0 }));
+        assert!(errors.contains(&ValidationError::NestedAppWindowMarker { index: 0, count: 1 }));
+    }
+
+    #[test]
+    fn ignores_fake_app_window_marker_text() {
+        let mut design = sample_design();
+        design.app_window = Some(AppWindow {
+            left: 0,
+            top: 0,
+            width: 800,
+            height: 600,
+        });
+        design.screens[0].html = concat!(
+            "<!-- <section data-swift-design-window></section> -->",
+            "<section data-note='data-swift-design-window'>Fake</section>"
+        )
+        .to_owned();
+        let errors = design.validate();
+        assert!(errors.contains(&ValidationError::MissingAppWindowMarker { index: 0 }));
+        assert!(!errors.iter().any(|error| matches!(
+            error,
+            ValidationError::DuplicateAppWindowMarker { .. }
+                | ValidationError::NestedAppWindowMarker { .. }
+        )));
     }
 
     #[test]

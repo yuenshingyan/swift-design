@@ -454,6 +454,9 @@ async fn put_design(
         Ok(previous) => previous,
         Err(error) => return api_error::internal_error(&error),
     };
+    if let Err(response) = check_window_write(&sessions, &id, previous.as_ref(), &design).await {
+        return response;
+    }
     if let Err(error) = store.save(&id, &design).await {
         return api_error::internal_error(&error);
     }
@@ -466,6 +469,36 @@ async fn put_design(
     notifier.notify();
     tracing::info!(%id, screen_count = design.screens.len(), is_user, "design saved");
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// Requires shared geometry on fresh app writes and preserves existing contracts.
+async fn check_window_write(
+    sessions: &SessionStore,
+    id: &str,
+    previous: Option<&Design>,
+    design: &Design,
+) -> Result<(), Response> {
+    if design.app_window.is_some() {
+        return Ok(());
+    }
+    let has_existing_window = previous.is_some_and(|design| design.app_window.is_some());
+    let needs_window = if previous.is_none() {
+        match sessions.read(session_id_of_artifact(id)).await {
+            Ok(Some(session)) => session.options.should_have_app_window(),
+            Ok(None) => false,
+            Err(error) => return Err(api_error::internal_error(&error.into())),
+        }
+    } else {
+        false
+    };
+    if has_existing_window || needs_window {
+        return Err(api_error::error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "This app candidate needs shared app_window bounds. Mark one top-level data-swift-design-window shell on every screen. Preserve existing bounds when editing.",
+            Vec::new(),
+        ));
+    }
+    Ok(())
 }
 
 /// Lists the field paths the user changed in this design.
@@ -654,10 +687,13 @@ async fn render_stored_design(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use design_model::Design;
+    use axum::http::StatusCode;
+    use design_model::{AppWindow, Design};
 
-    use crate::designs::{DesignStore, is_valid_design_id};
+    use crate::designs::{DesignStore, check_window_write, is_valid_design_id};
     use crate::history::HistoryStore;
+    use crate::sessions::SessionStore;
+    use crate::test_support::{send, test_application};
 
     fn sample_design() -> Design {
         serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap()
@@ -666,6 +702,62 @@ mod tests {
     fn store_with_history(directory: &std::path::Path) -> DesignStore {
         DesignStore::new(directory.join("designs"))
             .with_history(HistoryStore::new(directory.join("history")))
+    }
+
+    #[tokio::test]
+    async fn fresh_app_writes_require_shared_geometry_at_the_http_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let application = test_application(&directory);
+        let (status, _) = send(
+            application.clone(),
+            "POST",
+            "/sessions",
+            Some(r#"{"id":"app","request":"An app","options":{"product_kind":"business_app"}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, _) = send(application.clone(), "POST", "/sessions/app/generate", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let body = serde_json::to_string(&sample_design()).unwrap();
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/designs/app-candidate-1",
+            Some(&body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let (status, _) = send(application, "GET", "/designs/app-candidate-1", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn old_designs_remain_editable_but_existing_window_contracts_cannot_disappear() {
+        let directory = tempfile::tempdir().unwrap();
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let legacy = sample_design();
+        assert!(
+            check_window_write(&sessions, "app-candidate-1", Some(&legacy), &legacy)
+                .await
+                .is_ok()
+        );
+        let mut original = legacy.clone();
+        original.app_window = Some(AppWindow {
+            left: 80,
+            top: 60,
+            width: 1280,
+            height: 780,
+        });
+        assert!(
+            check_window_write(&sessions, "app-candidate-1", Some(&original), &legacy)
+                .await
+                .is_err()
+        );
+        assert!(
+            check_window_write(&sessions, "app-candidate-1", Some(&original), &original)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

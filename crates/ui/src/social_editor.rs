@@ -226,7 +226,9 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                             && from != to
                             && to < social.peek().frames.len()
                         {
-                            social.with_mut(|social| move_screen(&mut social.frames, from, to));
+                            social.with_mut(|social| {
+                                move_screen(&mut social.frames, &mut social.outline, from, to)
+                            });
                             dragged.set(Some(to));
                             selected.set(to);
                             selected_node.set(None);

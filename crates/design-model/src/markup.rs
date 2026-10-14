@@ -118,6 +118,49 @@ pub fn html_problems(html: &str) -> Vec<String> {
     checker.problems
 }
 
+/// Counts real `data-swift-design-window` markers in an HTML fragment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowMarkerSummary {
+    /// Top-level non-void elements with the marker.
+    pub top_level: usize,
+    /// Nested non-void elements with the marker.
+    pub nested: usize,
+}
+
+/// Counts app window markers while ignoring comments and attribute values.
+pub fn window_marker_summary(html: &str) -> WindowMarkerSummary {
+    let mut checker = HtmlChecker::new(html);
+    checker.run();
+    checker.window_summary
+}
+
+/// Remaps local screen links in valid HTML with a zero-based old-to-new index map.
+/// Leaves text, styles, external URLs, invalid targets, and malformed HTML unchanged.
+pub fn remap_screen_links(html: &str, old_to_new: &[usize]) -> String {
+    let mut checker = HtmlChecker::new(html);
+    checker.run();
+    if !checker.problems.is_empty() {
+        return html.to_owned();
+    }
+    let mut result = String::new();
+    let mut previous = 0;
+    for (start, end, target) in &checker.screen_links {
+        let Some(number) = target
+            .checked_sub(1)
+            .and_then(|index| old_to_new.get(index))
+            .and_then(|index| index.checked_add(1))
+            .filter(|number| *number <= old_to_new.len())
+        else {
+            continue;
+        };
+        result.extend(checker.characters[previous..*start].iter());
+        result.push_str(&format!("#screen-{number}"));
+        previous = *end;
+    }
+    result.extend(checker.characters[previous..].iter());
+    result
+}
+
 /// The upload file name in a `/uploads/{name}` or `uploads/{name}`
 /// value, when the name is one the upload store can hold.
 pub fn upload_name(value: &str) -> Option<&str> {
@@ -136,6 +179,23 @@ pub fn upload_name(value: &str) -> Option<&str> {
     is_valid.then_some(name)
 }
 
+/// Returns declared layout checks in source order, using real HTML attributes.
+pub fn layout_declarations(html: &str) -> Vec<(String, String)> {
+    let mut checker = HtmlChecker::new(html);
+    checker.run();
+    checker.layout_declarations
+}
+
+/// Reads the exact numbered fragment the navigation script accepts.
+fn screen_link_target(value: &str) -> Option<usize> {
+    let decoded = decode_entities(value);
+    let digits = decoded.strip_prefix("#screen-")?;
+    if digits.is_empty() || !digits.bytes().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 /// A flat HTML tokenizer that reports forbidden and malformed markup.
 struct HtmlChecker<'html> {
     characters: Vec<char>,
@@ -145,6 +205,10 @@ struct HtmlChecker<'html> {
     svg_depth: usize,
     /// The `type` of the `<input>` being read, once seen.
     input_type: Option<String>,
+    has_window_marker: bool,
+    window_summary: WindowMarkerSummary,
+    screen_links: Vec<(usize, usize, usize)>,
+    layout_declarations: Vec<(String, String)>,
     source: &'html str,
 }
 
@@ -157,6 +221,10 @@ impl<'html> HtmlChecker<'html> {
             open: Vec::new(),
             svg_depth: 0,
             input_type: None,
+            has_window_marker: false,
+            window_summary: WindowMarkerSummary::default(),
+            screen_links: Vec::new(),
+            layout_declarations: Vec::new(),
             source,
         }
     }
@@ -250,6 +318,7 @@ impl<'html> HtmlChecker<'html> {
         }
         let mut is_self_closing = false;
         self.input_type = None;
+        self.has_window_marker = false;
         loop {
             self.skip_whitespace_and_slashes(&mut is_self_closing);
             match self.characters.get(self.position) {
@@ -274,8 +343,19 @@ impl<'html> HtmlChecker<'html> {
             let value = if self.characters.get(self.position) == Some(&'=') {
                 self.position += 1;
                 self.skip_whitespace();
+                let is_quoted = matches!(self.characters.get(self.position), Some('\'' | '"'));
+                let start = self.position + usize::from(is_quoted);
                 match self.read_attribute_value() {
-                    Some(value) => Some(value),
+                    Some(value) => {
+                        if name == "a"
+                            && attribute == "href"
+                            && let Some(target) = screen_link_target(&value)
+                        {
+                            let end = self.position - usize::from(is_quoted);
+                            self.screen_links.push((start, end, target));
+                        }
+                        Some(value)
+                    }
                     None => {
                         self.problems.push(format!(
                             "unterminated value for `{attribute}` on <{name}>: close the quote"
@@ -295,16 +375,31 @@ impl<'html> HtmlChecker<'html> {
             self.svg_depth += 1;
         }
         if VOID_TAGS.contains(&name.as_str()) {
+            self.has_window_marker = false;
             return;
         }
+        self.implicitly_close_before(&name);
+        self.record_window_marker();
         if is_self_closing && self.svg_depth > 0 {
             if name == "svg" {
                 self.svg_depth -= 1;
             }
+            self.has_window_marker = false;
             return;
         }
-        self.implicitly_close_before(&name);
+        self.has_window_marker = false;
         self.open.push(name);
+    }
+
+    fn record_window_marker(&mut self) {
+        if !self.has_window_marker {
+            return;
+        }
+        if self.open.is_empty() {
+            self.window_summary.top_level += 1;
+        } else {
+            self.window_summary.nested += 1;
+        }
     }
 
     /// Skips whitespace and stray `/` inside a tag. Records a `/` right
@@ -398,13 +493,22 @@ impl<'html> HtmlChecker<'html> {
         if tag == "input" && attribute == "type" {
             self.input_type = Some(value.unwrap_or_default().trim().to_ascii_lowercase());
         }
+        if attribute == "data-swift-design-window" {
+            self.has_window_marker = true;
+        }
+        if matches!(attribute, "data-layout-align" | "data-layout-gap") {
+            self.layout_declarations.push((
+                attribute.to_owned(),
+                decode_entities(value.unwrap_or_default()),
+            ));
+        }
         if attribute.starts_with("on") {
             self.problems.push(format!(
                 "<{tag}> has attribute `{attribute}`: event handler attributes are not allowed"
             ));
             return;
         }
-        if attribute.starts_with("data-swift-design") {
+        if attribute.starts_with("data-swift-design") && attribute != "data-swift-design-window" {
             self.problems.push(format!(
                 "<{tag}> has attribute `{attribute}`: names starting with data-swift-design are reserved"
             ));
@@ -742,6 +846,55 @@ mod tests {
 
     fn first(problems: Vec<String>) -> String {
         problems.into_iter().next().unwrap_or_default()
+    }
+
+    #[test]
+    fn layout_declarations_come_from_real_attributes_not_text() {
+        let declarations = layout_declarations(
+            "<div DATA-LAYOUT-ALIGN='left' data-layout-gap='&#120;'><p>data-layout-align='right'</p></div>",
+        );
+        assert_eq!(
+            declarations,
+            [
+                ("data-layout-align".to_owned(), "left".to_owned()),
+                ("data-layout-gap".to_owned(), "x".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn screen_link_remapping_changes_only_real_anchor_destinations() {
+        let html = "<p>你好 #screen-2</p><a HREF = '#screen-2' data-label='#screen-1'>Go</a><a href=\"#screen-1\">Home</a><a href=#screen-3>Last</a><a href='https://example.com/#screen-2'>External</a>";
+        let expected = "<p>你好 #screen-2</p><a HREF = '#screen-1' data-label='#screen-1'>Go</a><a href=\"#screen-3\">Home</a><a href=#screen-2>Last</a><a href='https://example.com/#screen-2'>External</a>";
+        assert_eq!(remap_screen_links(html, &[2, 0, 1]), expected);
+    }
+
+    #[test]
+    fn screen_link_remapping_handles_entities_and_leaves_invalid_targets_unchanged() {
+        let html = "<a href='&#35;screen-&#50;'>Go</a><a href='#screen-0'>Zero</a><a href='#screen-7'>Missing</a><a href='#screen-999999999999999999999999999999999'>Huge</a>";
+        let result = remap_screen_links(html, &[2, 0, 1]);
+        assert!(result.contains("href='#screen-1'>Go"));
+        assert!(result.contains("href='#screen-0'"));
+        assert!(result.contains("href='#screen-7'"));
+        assert!(result.contains("href='#screen-999999999999999999999999999999999'"));
+        assert_eq!(
+            remap_screen_links("<a href='#screen-1'>Go</a>", &[usize::MAX]),
+            "<a href='#screen-1'>Go</a>"
+        );
+        assert_eq!(screen_link_target("#screen-2"), Some(2));
+        assert_eq!(screen_link_target("#screen-2-extra"), None);
+        assert_eq!(screen_link_target(" #screen-2"), None);
+    }
+
+    #[test]
+    fn malformed_html_and_comments_are_not_rewritten() {
+        for html in [
+            "<a href='#screen-1>Go</a>",
+            "<!-- href='#screen-1' -->",
+            "<p>href='#screen-1'</p>",
+        ] {
+            assert_eq!(remap_screen_links(html, &[1, 0]), html);
+        }
     }
 
     #[test]

@@ -8,6 +8,20 @@ use crate::theme::Theme;
 use crate::transition::Transition;
 use crate::viewport::Viewport;
 
+/// The app window rectangle inside a design viewport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AppWindow {
+    /// Distance from the viewport left edge in px.
+    pub left: u32,
+    /// Distance from the viewport top edge in px.
+    pub top: u32,
+    /// Window width in px.
+    pub width: u32,
+    /// Window height in px.
+    pub height: u32,
+}
+
 /// A complete design: one theme and one viewport applied to an ordered
 /// list of screens.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -24,6 +38,11 @@ pub struct Design {
     pub viewport: Viewport,
     /// Screens in flow order.
     pub screens: Vec<Screen>,
+    /// The shared app window inside the viewport. Choose its bounds once
+    /// per candidate. Each screen must then have exactly one
+    /// top-level non-void element marked `data-swift-design-window`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_window: Option<AppWindow>,
     /// The screen titles of the complete design, in order. A preview design
     /// lists more titles than it has screens: the app continues it from
     /// this list later. Leave it empty when the design is complete.
@@ -47,7 +66,7 @@ impl Design {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use crate::test_support::sample_design;
-    use crate::{Design, Transition, TransitionAxis, TransitionEffect, Viewport};
+    use crate::{AppWindow, Design, Transition, TransitionAxis, TransitionEffect, Viewport};
 
     #[test]
     fn design_round_trips_through_json() {
@@ -64,6 +83,12 @@ mod tests {
         value.as_object_mut().unwrap().remove("viewport");
         let design: Design = serde_json::from_value(value).unwrap();
         assert_eq!(design.viewport, Viewport::default());
+    }
+
+    #[test]
+    fn app_window_rejects_unknown_geometry_fields() {
+        let json = r#"{"left":80,"top":60,"width":1280,"height":780,"screen":2}"#;
+        assert!(serde_json::from_str::<AppWindow>(json).is_err());
     }
 
     #[test]
@@ -85,6 +110,33 @@ mod tests {
         assert_eq!(restored.outline, design.outline);
         design.outline.truncate(1);
         assert!(!design.is_preview());
+    }
+
+    #[test]
+    fn app_window_round_trips_and_stays_out_when_absent() {
+        let mut design = sample_design();
+        assert!(
+            !serde_json::to_string(&design)
+                .unwrap()
+                .contains("app_window")
+        );
+        design.app_window = Some(AppWindow {
+            left: 10,
+            top: 20,
+            width: 800,
+            height: 600,
+        });
+        let json = serde_json::to_string(&design).unwrap();
+        let restored: Design = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.app_window, design.app_window);
+    }
+
+    #[test]
+    fn old_json_loads_without_app_window() {
+        let mut value = serde_json::to_value(sample_design()).unwrap();
+        value.as_object_mut().unwrap().remove("app_window");
+        let design: Design = serde_json::from_value(value).unwrap();
+        assert_eq!(design.app_window, None);
     }
 
     #[test]

@@ -18,30 +18,34 @@ use design_model::{
 };
 use serde::Deserialize;
 
+use crate::AppState;
 use crate::agent_runs::AgentRunner;
 use crate::api_error;
 use crate::artworks::ArtworkStore;
 use crate::campaigns::CampaignStore;
 use crate::candidates::{CANDIDATE_LIMIT, PLATFORM_LIMIT};
+use crate::capture::capture_urls;
 use crate::decks::DeckStore;
 use crate::designs::{DesignStore, is_valid_design_id};
 use crate::documents::DocumentStore;
 use crate::edit_focus::referenced_indexes;
 use crate::events::ChangeNotifier;
 use crate::mailings::MailingStore;
+use crate::planner::relax_question_set;
 use crate::prints::PrintStore;
 use crate::sessions::{
     AnswerRecord, ChatMessage, NewSession, RunOptions, Session, SessionError, SessionStore,
     SessionSummary, SessionView, is_valid_session_id, new_session_id, session_id_of_artifact,
 };
 use crate::socials::SocialStore;
+use crate::uploads::UploadStore;
 
 /// Most slides a deck run may be asked for. Past this the run costs
 /// more than a user waits for.
 const SLIDE_COUNT_LIMIT: u32 = 60;
 
 /// The `/sessions` route table.
-pub fn routes() -> Router<crate::AppState> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{id}", get(get_session).delete(delete_session))
@@ -99,8 +103,8 @@ pub(crate) struct ArtifactStores {
     pub(crate) artworks: ArtworkStore,
 }
 
-impl axum::extract::FromRef<crate::AppState> for ArtifactStores {
-    fn from_ref(state: &crate::AppState) -> ArtifactStores {
+impl axum::extract::FromRef<AppState> for ArtifactStores {
+    fn from_ref(state: &AppState) -> ArtifactStores {
         ArtifactStores {
             designs: state.designs.clone(),
             decks: state.decks.clone(),
@@ -229,8 +233,11 @@ async fn build_view(
     Ok(view)
 }
 
-/// The number of the latest question set when it is still unanswered.
+/// The latest unanswered question set while the workflow awaits answers.
 fn open_question_set(session: &Session, answers: &[AnswerRecord]) -> Option<u32> {
+    if session.state != WorkflowState::Clarifying {
+        return None;
+    }
     let latest = session.latest_question_set?;
     let answered = answers.iter().any(|record| record.question_set == latest);
     (!answered).then_some(latest)
@@ -255,7 +262,7 @@ struct CreateRequest {
 async fn create_session(
     State(sessions): State<SessionStore>,
     State(runner): State<AgentRunner>,
-    State(uploads): State<crate::uploads::UploadStore>,
+    State(uploads): State<UploadStore>,
     State(notifier): State<ChangeNotifier>,
     Json(request): Json<CreateRequest>,
 ) -> Response {
@@ -307,7 +314,7 @@ async fn create_session(
             }
             // A link in the request is captured before the first run
             // reads the uploads.
-            crate::capture::capture_urls(&uploads, &id, prompt).await;
+            capture_urls(&uploads, &id, prompt).await;
             notifier.notify();
             try_start(&runner, &id).await;
             tracing::info!(
@@ -353,7 +360,7 @@ async fn delete_session(
     State(sessions): State<SessionStore>,
     State(stores): State<ArtifactStores>,
     State(runner): State<AgentRunner>,
-    State(uploads): State<crate::uploads::UploadStore>,
+    State(uploads): State<UploadStore>,
     State(notifier): State<ChangeNotifier>,
     Path(id): Path<String>,
 ) -> Response {
@@ -667,7 +674,6 @@ fn regenerate_problem(session: &Session, request: &MessageRequest) -> Option<Str
 async fn post_message(
     State(sessions): State<SessionStore>,
     State(runner): State<AgentRunner>,
-    State(uploads): State<crate::uploads::UploadStore>,
     State(notifier): State<ChangeNotifier>,
     Path(id): Path<String>,
     Json(request): Json<MessageRequest>,
@@ -729,8 +735,6 @@ async fn post_message(
         {
             return conflict("continue is only allowed while reviewing, generating, or halted");
         }
-    } else if session.state == WorkflowState::Generating {
-        return conflict("cannot send a message while generating");
     }
     // A message after a halted run is the resume: the session returns to
     // the state the run halted in, then takes the turn.
@@ -746,16 +750,14 @@ async fn post_message(
             return session_error_response(&error);
         }
     }
-    let message = match (is_continue, is_regenerate, request.design.as_deref()) {
+    let mut message = match (is_continue, is_regenerate, request.design.as_deref()) {
         (true, _, Some(design)) => ChatMessage::continue_request(content, design),
         (_, true, Some(design)) => ChatMessage::regenerate_request(content, design),
         _ => ChatMessage::user(content, request.design.as_deref()).with_pinned(request.pinned),
     };
-    // A link in the message becomes source files before the run reads
-    // the uploads, so the model sees the page.
-    if !is_continue && !is_regenerate {
-        crate::capture::capture_urls(&uploads, &id, content).await;
-    }
+    // Each ordinary prompt gets its own turn. Defer link captures until that
+    // turn starts, so they cannot affect the run already in flight.
+    message.is_queued = !is_continue;
     if let Err(error) = sessions.append_message(&id, message).await {
         return session_error_response(&error);
     }
@@ -763,9 +765,14 @@ async fn post_message(
         return session_error_response(&error);
     }
     notifier.notify();
-    // Every message is a turn: the planner answers, asks, writes, or
-    // edits, as Swift Deck did.
-    try_start(&runner, &id).await;
+    // Finish joins the active turn. Ordinary prompts wait for their own turn.
+    if is_continue {
+        if let Err(error) = runner.start_continue(&id).await {
+            tracing::debug!(%error, session_id = %id, "continue waits for the active run");
+        }
+    } else {
+        try_start(&runner, &id).await;
+    }
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -789,7 +796,7 @@ async fn put_question_set(
         );
     }
     // Every set asks the Swift Deck way: the user can always skip.
-    crate::planner::relax_question_set(&mut set);
+    relax_question_set(&mut set);
     let number = match sessions.write_question_set(&id, &set).await {
         Ok(number) => number,
         Err(error) => return session_error_response(&error),
@@ -812,8 +819,7 @@ struct AnswersRequest {
     answers: Vec<QuestionAnswer>,
 }
 
-/// Records the user's answers. Stays in clarifying; the studio then
-/// starts a briefing run.
+/// Records answers and resumes their turn before its queued follow-ups.
 async fn post_answers(
     State(sessions): State<SessionStore>,
     State(runner): State<AgentRunner>,
@@ -848,10 +854,27 @@ async fn post_answers(
             problems.iter().map(ToString::to_string).collect(),
         );
     }
+    let records = match sessions.answers(&id).await {
+        Ok(records) => records,
+        Err(error) => return session_error_response(&error),
+    };
+    // Retrying identical answers must not enqueue another copy of an active turn.
+    if records
+        .iter()
+        .rev()
+        .find(|record| record.question_set == request.question_set)
+        .is_some_and(|record| record.answers == request.answers)
+    {
+        return StatusCode::NO_CONTENT.into_response();
+    }
     if let Err(error) = sessions
         .record_answers(&id, request.question_set, request.answers)
         .await
     {
+        return session_error_response(&error);
+    }
+    // Resume the prompt that asked these questions before its queued follow-ups.
+    if let Err(error) = sessions.queue_answered_turn(&id).await {
         return session_error_response(&error);
     }
     notifier.notify();
@@ -949,9 +972,13 @@ async fn retry(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use axum::http::StatusCode;
+    use design_model::WorkflowEvent;
     use tempfile::TempDir;
 
-    use crate::test_support::{send, test_application};
+    use crate::decks::DeckStore;
+    use crate::designs::DesignStore;
+    use crate::sessions::SessionStore;
+    use crate::test_support::{sample_deck, send, test_application};
 
     /// Reads a session view.
     async fn view(application: &axum::Router, id: &str) -> serde_json::Value {
@@ -1057,6 +1084,81 @@ mod tests {
         assert_eq!(body.trim(), "[]");
         let messages = &view(&application, "finance-app").await["messages"];
         assert_eq!(messages[0]["role"], "user");
+    }
+
+    #[tokio::test]
+    async fn answering_questions_resumes_the_current_prompt_before_queued_followups() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "finance-app").await;
+        let (status, body) = send(application.clone(), "PUT", "/sessions/finance-app/question-set", Some(r#"{"title":"T","message":"Which color?","questions":[{"id":"color","label":"Color","kind":"single_select","required":false,"options":[{"value":"a","label":"A"},{"value":"b","label":"B"}]}]}"#)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        send(
+            application.clone(),
+            "POST",
+            "/sessions/finance-app/messages",
+            Some(r#"{"content":"Later prompt"}"#),
+        )
+        .await;
+        for _ in 0..2 {
+            let (status, body) = send(
+                application.clone(),
+                "POST",
+                "/sessions/finance-app/answers",
+                Some(r#"{"question_set":1,"answers":[]}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        }
+        let snapshot = view(&application, "finance-app").await;
+        let queued: Vec<_> = snapshot["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["is_queued"] == true)
+            .collect();
+        assert_eq!(queued.len(), 2);
+        assert_eq!(queued[0]["content"], snapshot["session"]["request"]);
+        assert_eq!(queued[0]["is_resume"], true);
+        assert_eq!(queued[1]["content"], "Later prompt");
+        assert_eq!(snapshot["answers"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn messages_during_generation_are_accepted_and_queued_with_their_targets() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "finance-app").await;
+        send(
+            application.clone(),
+            "POST",
+            "/sessions/finance-app/generate",
+            None,
+        )
+        .await;
+        for content in ["First queued prompt", "Second queued prompt"] {
+            let body = serde_json::json!({"content": content, "design":"finance-app-candidate-1", "pinned":["finance-app-candidate-2"]}).to_string();
+            let (status, response) = send(
+                application.clone(),
+                "POST",
+                "/sessions/finance-app/messages",
+                Some(&body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{response}");
+        }
+        let snapshot = view(&application, "finance-app").await;
+        let messages = snapshot["messages"].as_array().unwrap();
+        let queued: Vec<_> = messages
+            .iter()
+            .filter(|message| message["is_queued"] == true)
+            .collect();
+        assert_eq!(queued.len(), 2);
+        assert_eq!(queued[0]["content"], "First queued prompt");
+        assert_eq!(queued[1]["content"], "Second queued prompt");
+        assert_eq!(queued[0]["design"], "finance-app-candidate-1");
+        assert_eq!(queued[0]["pinned"][0], "finance-app-candidate-2");
+        assert_eq!(snapshot["session"]["state"], "generating");
     }
 
     #[tokio::test]
@@ -1257,7 +1359,7 @@ mod tests {
         let application = test_application(&directory);
         create(&application, "talk").await;
         send(application.clone(), "POST", "/sessions/talk/generate", None).await;
-        let sessions = crate::sessions::SessionStore::new(directory.path().join("data/sessions"));
+        let sessions = SessionStore::new(directory.path().join("data/sessions"));
         sessions
             .apply("talk", design_model::WorkflowEvent::RunFailed)
             .await
@@ -1288,14 +1390,14 @@ mod tests {
         let application = test_application(&directory);
         create(&application, "talk").await;
         // The stores the test application serves from.
-        let designs = crate::designs::DesignStore::new(directory.path().join("designs"));
-        let decks = crate::decks::DeckStore::new(directory.path().join("decks"));
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let decks = DeckStore::new(directory.path().join("decks"));
         let design: design_model::Design =
             serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap();
         designs.save("talk-candidate-1", &design).await.unwrap();
         designs.save("other-candidate-1", &design).await.unwrap();
         decks
-            .save("talk-candidate-1", &crate::test_support::sample_deck())
+            .save("talk-candidate-1", &sample_deck())
             .await
             .unwrap();
         let (status, body) = send(application.clone(), "DELETE", "/sessions/talk", None).await;
@@ -1330,6 +1432,61 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
         let (status, _) = send(application.clone(), "GET", "/sessions/talk", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn historical_unanswered_questions_do_not_cover_generation_or_review() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "talk").await;
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/sessions/talk/question-set",
+            Some(r#"{"title":"Follow-up","message":"Which label?","questions":[{"id":"label","label":"Which label?","kind":"single_select","required":false,"options":[{"value":"plain","label":"Plain"},{"value":"brand","label":"Brand"}]}]}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(view(&application, "talk").await["open_question_set"], 1);
+        let sessions = SessionStore::new(directory.path().join("data/sessions"));
+        for event in [
+            WorkflowEvent::GenerationStarted,
+            WorkflowEvent::GenerationSucceeded,
+        ] {
+            sessions.apply("talk", event).await.unwrap();
+            let session = view(&application, "talk").await;
+            assert!(session["open_question_set"].is_null());
+            assert_eq!(session["question_sets"].as_array().unwrap().len(), 1);
+            assert!(session["answers"].as_array().unwrap().is_empty());
+            assert_eq!(session["session"]["latest_question_set"], 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_clarification_after_review_still_opens_its_question_card() {
+        let directory = TempDir::new().unwrap();
+        let application = test_application(&directory);
+        create(&application, "talk").await;
+        let sessions = SessionStore::new(directory.path().join("data/sessions"));
+        sessions
+            .apply("talk", WorkflowEvent::GenerationStarted)
+            .await
+            .unwrap();
+        sessions
+            .apply("talk", WorkflowEvent::GenerationSucceeded)
+            .await
+            .unwrap();
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/sessions/talk/question-set",
+            Some(r#"{"title":"Follow-up","message":"Which label?","questions":[{"id":"label","label":"Which label?","kind":"single_select","required":false,"options":[{"value":"plain","label":"Plain"},{"value":"brand","label":"Brand"}]}]}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let session = view(&application, "talk").await;
+        assert_eq!(session["session"]["state"], "clarifying");
+        assert_eq!(session["open_question_set"], 1);
     }
 
     #[tokio::test]
@@ -1394,7 +1551,7 @@ mod tests {
         create(&application, "talk").await;
         send(application.clone(), "POST", "/sessions/talk/generate", None).await;
         // The process died with the run: the boot sweep stops it.
-        let sessions = crate::sessions::SessionStore::new(directory.path().join("data/sessions"));
+        let sessions = SessionStore::new(directory.path().join("data/sessions"));
         sessions
             .apply("talk", design_model::WorkflowEvent::RunStopped)
             .await

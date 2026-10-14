@@ -225,7 +225,9 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                             && from != to
                             && to < print.peek().sheets.len()
                         {
-                            print.with_mut(|print| move_screen(&mut print.sheets, from, to));
+                            print.with_mut(|print| {
+                                move_screen(&mut print.sheets, &mut print.outline, from, to)
+                            });
                             dragged.set(Some(to));
                             selected.set(to);
                             selected_node.set(None);

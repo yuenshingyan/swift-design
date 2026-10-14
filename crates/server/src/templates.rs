@@ -527,6 +527,7 @@ async fn render_template(
         title: template.name.clone(),
         theme: template.theme.clone(),
         viewport: template.viewport,
+        app_window: None,
         screens,
         outline: Vec::new(),
         transition: None,

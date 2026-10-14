@@ -8,6 +8,7 @@
 use dioxus::prelude::*;
 
 use crate::api;
+use crate::icons;
 
 /// A short token count: `850`, `42k`, `1.2M`.
 fn format_tokens(count: u64) -> String {
@@ -40,14 +41,26 @@ pub(crate) fn usage_line(run: &api::AgentRun) -> String {
 /// is `Thinking…`: the model may be answering a question, and no
 /// artifact is touched until the planner decides.
 pub(crate) fn phase_name(run: &api::AgentRun) -> String {
+    let last = last_log_line(&run.log_tail)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if last.contains("waiting to retry attempt") {
+        return "Waiting to retry…".to_owned();
+    }
+    if last.starts_with("model request: retrying attempt") {
+        return "Retrying model request…".to_owned();
+    }
+    if last.contains("tweak round") || last.contains("tweak reply") {
+        return "Tweaking layout…".to_owned();
+    }
+    if last.contains("checking layout") || last.contains("final layout verified") {
+        return "Checking layout…".to_owned();
+    }
     match run.designs.len() {
         0 => {}
         1 => return "Writing a candidate…".to_owned(),
         count => return format!("Writing {count} candidates…"),
     }
-    let last = last_log_line(&run.log_tail)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
     if last.starts_with("merging") || last.starts_with("merge") {
         "Merging…".to_owned()
     } else if last.starts_with("edit ") {
@@ -116,7 +129,13 @@ pub(crate) fn RunStatusCard(run: api::AgentRun) -> Element {
                 }
                 div { class: "usage-line",
                     span { "{usage_line(&run)}" }
-                    button { onclick: stop_agent, "Stop" }
+                    button {
+                        class: "stop-control",
+                        onclick: stop_agent,
+                        title: "Stop generation",
+                        aria_label: "Stop generation",
+                        span { dangerous_inner_html: icons::STOP }
+                    }
                 }
             }
         };
@@ -129,7 +148,9 @@ pub(crate) fn RunStatusCard(run: api::AgentRun) -> Element {
             }
         } else if run.exit_code.is_some_and(|code| code != 0) {
             p { class: "error", "{failure_title(&run)}" }
-            if let Some(line) = last_log_line(&run.log_tail) {
+            if let Some(line) = last_log_line(&run.log_tail)
+                && line.strip_prefix("error: ") != Some(failure_title(&run).as_str())
+            {
                 p { class: "agent-log wrapped", "{line}" }
             }
         } else if run.total_tokens > 0 {
@@ -139,8 +160,8 @@ pub(crate) fn RunStatusCard(run: api::AgentRun) -> Element {
 }
 
 /// The first line of a failed run. A custom command has an exit code
-/// worth reading; the built-in engine's code is only a flag, so the
-/// line says the run failed and leaves the reason to the log line.
+/// worth reading. A built-in failure shows the explicit error from the
+/// log when available, with a generic title only as a fallback.
 fn failure_title(run: &api::AgentRun) -> String {
     if run.active_agent.as_deref() == Some("custom") {
         return format!(
@@ -148,12 +169,50 @@ fn failure_title(run: &api::AgentRun) -> String {
             run.exit_code.unwrap_or_default()
         );
     }
-    "The run failed.".to_owned()
+    last_log_line(&run.log_tail)
+        .and_then(|line| line.strip_prefix("error: ").map(str::to_owned))
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| "The run failed.".to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_backoff_is_visible_even_when_candidates_exist() {
+        let mut running = run();
+        running.designs.insert("candidate-1".to_owned(), 50);
+        running.log_tail = "model request: waiting to retry attempt 2 of 4 in 5 seconds after a temporary provider failure".to_owned();
+        assert_eq!(phase_name(&running), "Waiting to retry…");
+        running.log_tail = "model request: retrying attempt 2 of 4".to_owned();
+        assert_eq!(phase_name(&running), "Retrying model request…");
+    }
+
+    #[test]
+    fn provider_failures_show_the_actual_reason_instead_of_only_a_generic_title() {
+        let mut failed = run();
+        failed.is_running = false;
+        failed.exit_code = Some(1);
+        failed.log_tail =
+            "error: Our servers are currently overloaded. Please try again later.".to_owned();
+        assert_eq!(
+            failure_title(&failed),
+            "Our servers are currently overloaded. Please try again later."
+        );
+    }
+
+    #[test]
+    fn layout_checks_and_tweaks_are_visible_even_when_a_candidate_is_being_written() {
+        let mut run = run();
+        run.designs.insert("candidate-1".to_owned(), 45);
+        run.log_tail = "candidate 1: checking layout before tweak 1".to_owned();
+        assert_eq!(phase_name(&run), "Checking layout…");
+        run.log_tail = "candidate 1: tweak round 1 of at most 3".to_owned();
+        assert_eq!(phase_name(&run), "Tweaking layout…");
+        run.log_tail = "candidate 1: final layout verified after 1 tweaking round(s)".to_owned();
+        assert_eq!(phase_name(&run), "Checking layout…");
+    }
 
     fn run() -> api::AgentRun {
         api::AgentRun {

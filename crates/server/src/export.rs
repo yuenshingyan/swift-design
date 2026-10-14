@@ -6,17 +6,20 @@
 //! Google Fonts stylesheet and every font file it names and inlines
 //! them too, so the exported file opens offline. Images referenced
 //! inside text fragments are not rewritten. When the font fetch fails,
-//! the export keeps the online `<link>`. A design has no PDF export: a
-//! demo is clicked, and a print loses its flows and widgets.
+//! the export keeps the online `<link>`. `GET /designs/{id}/export.zip`
+//! packs one PNG per screen. A design has no PDF export: a demo is
+//! clicked, and a print loses its flows and widgets.
 //!
 //! Decks export the same way under `/decks/{id}/export`, and
 //! `GET /decks/{id}/export.pdf` prints the deck with the user's Chrome,
-//! one slide per page. `GET /decks/{id}/export.pptx` builds a
-//! PowerPoint file from the measured slides; see `pptx.rs`.
+//! one slide per page. `GET /decks/{id}/export.zip` packs one PNG per
+//! slide. `GET /decks/{id}/export.pptx` builds a PowerPoint file from
+//! the measured slides; see `pptx.rs`.
 //!
 //! Documents export under `/documents/{id}/export`, and
 //! `GET /documents/{id}/export.pdf` prints the document with the user's
 //! Chrome, one page per sheet of its paper. `GET
+//! /documents/{id}/export.zip` packs one PNG per page. `GET
 //! /documents/{id}/export.docx` builds a Word file from the pages' HTML;
 //! see `docx.rs`. It needs no Chrome.
 //!
@@ -108,11 +111,14 @@ const PPTX_CONTENT_TYPE: &str =
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/designs/{id}/export", get(export_design))
+        .route("/designs/{id}/export.zip", get(export_design_zip))
         .route("/decks/{id}/export", get(export_deck))
         .route("/decks/{id}/export.pdf", get(export_deck_pdf))
+        .route("/decks/{id}/export.zip", get(export_deck_zip))
         .route("/decks/{id}/export.pptx", get(export_deck_pptx))
         .route("/documents/{id}/export", get(export_document))
         .route("/documents/{id}/export.pdf", get(export_document_pdf))
+        .route("/documents/{id}/export.zip", get(export_document_zip))
         .route("/documents/{id}/export.docx", get(export_document_docx))
         .route("/socials/{id}/export", get(export_social))
         .route("/socials/{id}/export.pdf", get(export_social_pdf))
@@ -338,6 +344,24 @@ async fn fetch_as_browser(url: String) -> anyhow::Result<Vec<u8>> {
     anyhow::bail!("no network in tests: {url}")
 }
 
+/// Loads a stored design for an export: 400, 404, or 422 as a response
+/// when the id, the file, or the design is not usable.
+async fn load_design_for_export(designs: &DesignStore, id: &str) -> Result<Design, Response> {
+    if !is_valid_design_id(id) {
+        return Err(api_error::invalid_design_id(id));
+    }
+    let design = match designs.load(id).await {
+        Ok(Some(design)) => design,
+        Ok(None) => return Err(api_error::design_not_found(id)),
+        Err(error) => return Err(api_error::internal_error(&error)),
+    };
+    let errors = design.validate();
+    if !errors.is_empty() {
+        return Err(api_error::validation_failed(&errors));
+    }
+    Ok(design)
+}
+
 /// Renders a stored design with uploaded images and theme fonts inlined
 /// and returns it as a file download.
 async fn export_design(
@@ -345,24 +369,58 @@ async fn export_design(
     State(uploads): State<UploadStore>,
     Path(id): Path<String>,
 ) -> Response {
-    if !is_valid_design_id(&id) {
-        return api_error::invalid_design_id(&id);
-    }
-    let mut design = match designs.load(&id).await {
-        Ok(Some(design)) => design,
-        Ok(None) => return api_error::design_not_found(&id),
-        Err(error) => return api_error::internal_error(&error),
+    let mut design = match load_design_for_export(&designs, &id).await {
+        Ok(design) => design,
+        Err(response) => return response,
     };
-    let errors = design.validate();
-    if !errors.is_empty() {
-        return api_error::validation_failed(&errors);
-    }
     if let Err(error) = inline_uploaded_images(&mut design, &uploads).await {
         return api_error::internal_error(&error);
     }
     let html = inline_google_fonts(render::render_design(&design, false), fetch_as_browser).await;
     tracing::info!(%id, size_bytes = html.len(), "design exported");
     file_download(&id, "html", "text/html; charset=utf-8", html.into_bytes())
+}
+
+/// Packs one PNG per screen of a stored design into a zip and returns
+/// it as a file download. 503 when no Chrome is installed.
+async fn export_design_zip(
+    State(designs): State<DesignStore>,
+    State(settings): State<SettingsStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let design = match load_design_for_export(&designs, &id).await {
+        Ok(design) => design,
+        Err(response) => return response,
+    };
+    let base_url = format!("http://{}", settings.address());
+    build_design_zip_response(&id, &design, &base_url, screenshots::find_chrome()).await
+}
+
+/// Screenshots every screen and packs the PNGs. `chrome` is a parameter
+/// so the no-Chrome path is testable.
+async fn build_design_zip_response(
+    id: &str,
+    design: &Design,
+    base_url: &str,
+    chrome: Option<PathBuf>,
+) -> Response {
+    if chrome.is_none() {
+        return screenshots::chrome_missing_response("PNG exports");
+    }
+    let mut images = Vec::with_capacity(design.screens.len());
+    for index in 0..design.screens.len() {
+        match screenshots::screenshot_screen(design, index, base_url).await {
+            Ok(bytes) => images.push(bytes),
+            Err(error) => return api_error::internal_error(&error),
+        }
+    }
+    match pack_unit_images(id, "screen", &images) {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), screen_count = images.len(), "design exported as png zip");
+            file_download(id, "zip", "application/zip", bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
 }
 
 /// Loads a stored deck for an export: 400, 404, or 422 as a response
@@ -414,6 +472,48 @@ async fn export_deck_pdf(
         Err(response) => return response,
     };
     build_deck_pdf_response(&id, deck, &uploads, screenshots::find_chrome()).await
+}
+
+/// Packs one PNG per slide of a stored deck into a zip and returns it
+/// as a file download. 503 when no Chrome is installed.
+async fn export_deck_zip(
+    State(decks): State<DeckStore>,
+    State(settings): State<SettingsStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let deck = match load_deck_for_export(&decks, &id).await {
+        Ok(deck) => deck,
+        Err(response) => return response,
+    };
+    let base_url = format!("http://{}", settings.address());
+    build_deck_zip_response(&id, &deck, &base_url, screenshots::find_chrome()).await
+}
+
+/// Screenshots every slide and packs the PNGs. `chrome` is a parameter
+/// so the no-Chrome path is testable.
+async fn build_deck_zip_response(
+    id: &str,
+    deck: &Deck,
+    base_url: &str,
+    chrome: Option<PathBuf>,
+) -> Response {
+    if chrome.is_none() {
+        return screenshots::chrome_missing_response("PNG exports");
+    }
+    let mut images = Vec::with_capacity(deck.slides.len());
+    for index in 0..deck.slides.len() {
+        match screenshots::screenshot_slide(deck, index, base_url).await {
+            Ok(bytes) => images.push(bytes),
+            Err(error) => return api_error::internal_error(&error),
+        }
+    }
+    match pack_unit_images(id, "slide", &images) {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), slide_count = images.len(), "deck exported as png zip");
+            file_download(id, "zip", "application/zip", bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
 }
 
 /// Inlines uploaded images, renders the deck print page, and prints it
@@ -542,6 +642,48 @@ async fn export_document_pdf(
         Err(response) => return response,
     };
     build_document_pdf_response(&id, document, &uploads, screenshots::find_chrome()).await
+}
+
+/// Packs one PNG per page of a stored document into a zip and returns
+/// it as a file download. 503 when no Chrome is installed.
+async fn export_document_zip(
+    State(documents): State<DocumentStore>,
+    State(settings): State<SettingsStore>,
+    Path(id): Path<String>,
+) -> Response {
+    let document = match load_document_for_export(&documents, &id).await {
+        Ok(document) => document,
+        Err(response) => return response,
+    };
+    let base_url = format!("http://{}", settings.address());
+    build_document_zip_response(&id, &document, &base_url, screenshots::find_chrome()).await
+}
+
+/// Screenshots every page and packs the PNGs. `chrome` is a parameter
+/// so the no-Chrome path is testable.
+async fn build_document_zip_response(
+    id: &str,
+    document: &Document,
+    base_url: &str,
+    chrome: Option<PathBuf>,
+) -> Response {
+    if chrome.is_none() {
+        return screenshots::chrome_missing_response("PNG exports");
+    }
+    let mut images = Vec::with_capacity(document.pages.len());
+    for index in 0..document.pages.len() {
+        match screenshots::screenshot_page(document, index, base_url).await {
+            Ok(bytes) => images.push(bytes),
+            Err(error) => return api_error::internal_error(&error),
+        }
+    }
+    match pack_unit_images(id, "page", &images) {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), page_count = images.len(), "document exported as png zip");
+            file_download(id, "zip", "application/zip", bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
 }
 
 /// Builds a Word file from a stored document and returns it as a file
@@ -771,25 +913,13 @@ async fn build_social_zip_response(
             Err(error) => return api_error::internal_error(&error),
         }
     }
-    match pack_frame_images(id, &images) {
+    match pack_unit_images(id, "frame", &images) {
         Ok(bytes) => {
             tracing::info!(%id, size_bytes = bytes.len(), frame_count = images.len(), "social exported as png zip");
             file_download(id, "zip", "application/zip", bytes)
         }
         Err(error) => api_error::internal_error(&error),
     }
-}
-
-/// One zip with `{id}-frame-{n}.png` per image, 1-based, in order. A
-/// PNG is compressed already, so the entries are stored as they are.
-fn pack_frame_images(id: &str, images: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
-    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-    for (index, image) in images.iter().enumerate() {
-        writer.start_file(format!("{id}-frame-{}.png", index + 1), options)?;
-        writer.write_all(image)?;
-    }
-    Ok(writer.finish()?.into_inner())
 }
 
 /// Loads a stored print for an export: 400, 404, or 422 as a response
@@ -968,25 +1098,13 @@ async fn build_print_zip_response(
             Err(error) => return api_error::internal_error(&error),
         }
     }
-    match pack_sheet_images(id, &images) {
+    match pack_unit_images(id, "sheet", &images) {
         Ok(bytes) => {
             tracing::info!(%id, size_bytes = bytes.len(), sheet_count = images.len(), "print exported as png zip");
             file_download(id, "zip", "application/zip", bytes)
         }
         Err(error) => api_error::internal_error(&error),
     }
-}
-
-/// One zip with `{id}-sheet-{n}.png` per image, 1-based, in order. A
-/// PNG is compressed already, so the entries are stored as they are.
-fn pack_sheet_images(id: &str, images: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
-    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-    for (index, image) in images.iter().enumerate() {
-        writer.start_file(format!("{id}-sheet-{}.png", index + 1), options)?;
-        writer.write_all(image)?;
-    }
-    Ok(writer.finish()?.into_inner())
 }
 
 /// The print twin of `inline_uploaded_images`: rewrites sheet html and
@@ -1193,25 +1311,13 @@ async fn build_campaign_zip_response(
             Err(error) => return api_error::internal_error(&error),
         }
     }
-    match pack_ad_images(id, &images) {
+    match pack_unit_images(id, "ad", &images) {
         Ok(bytes) => {
             tracing::info!(%id, size_bytes = bytes.len(), ad_count = images.len(), "campaign exported as png zip");
             file_download(id, "zip", "application/zip", bytes)
         }
         Err(error) => api_error::internal_error(&error),
     }
-}
-
-/// One zip with `{id}-ad-{n}.png` per image, 1-based, in order. A PNG
-/// is compressed already, so the entries are stored as they are.
-fn pack_ad_images(id: &str, images: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
-    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-    for (index, image) in images.iter().enumerate() {
-        writer.start_file(format!("{id}-ad-{}.png", index + 1), options)?;
-        writer.write_all(image)?;
-    }
-    Ok(writer.finish()?.into_inner())
 }
 
 /// The campaign twin of `inline_uploaded_images`: rewrites ad html and
@@ -1415,25 +1521,13 @@ async fn build_artwork_zip_response(
             Err(error) => return api_error::internal_error(&error),
         }
     }
-    match pack_cover_images(id, &images) {
+    match pack_unit_images(id, "cover", &images) {
         Ok(bytes) => {
             tracing::info!(%id, size_bytes = bytes.len(), cover_count = images.len(), "artwork exported as png zip");
             file_download(id, "zip", "application/zip", bytes)
         }
         Err(error) => api_error::internal_error(&error),
     }
-}
-
-/// One zip with `{id}-cover-{n}.png` per image, 1-based, in order. A
-/// PNG is compressed already, so the entries are stored as they are.
-fn pack_cover_images(id: &str, images: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
-    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-    for (index, image) in images.iter().enumerate() {
-        writer.start_file(format!("{id}-cover-{}.png", index + 1), options)?;
-        writer.write_all(image)?;
-    }
-    Ok(writer.finish()?.into_inner())
 }
 
 /// The artwork twin of `inline_uploaded_images`: rewrites cover html
@@ -1637,7 +1731,7 @@ async fn build_mailing_zip_response(
             Err(error) => return api_error::internal_error(&error),
         }
     }
-    match pack_email_images(id, &images) {
+    match pack_unit_images(id, "email", &images) {
         Ok(bytes) => {
             tracing::info!(%id, size_bytes = bytes.len(), email_count = images.len(), "mailing exported as png zip");
             file_download(id, "zip", "application/zip", bytes)
@@ -1726,13 +1820,13 @@ Preheader: {}
     Ok(writer.finish()?.into_inner())
 }
 
-/// One zip with `{id}-email-{n}.png` per image, 1-based, in order. A
+/// One zip with `{id}-{unit}-{n}.png` per image, 1-based, in order. A
 /// PNG is compressed already, so the entries are stored as they are.
-fn pack_email_images(id: &str, images: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
+fn pack_unit_images(id: &str, unit: &str, images: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     for (index, image) in images.iter().enumerate() {
-        writer.start_file(format!("{id}-email-{}.png", index + 1), options)?;
+        writer.start_file(format!("{id}-{unit}-{}.png", index + 1), options)?;
         writer.write_all(image)?;
     }
     Ok(writer.finish()?.into_inner())
@@ -1979,20 +2073,25 @@ pub(crate) fn base64_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use axum::http::StatusCode;
+    use axum::body::to_bytes;
+    use axum::http::{StatusCode, header};
     use design_model::Design;
 
     use crate::export::{
         ExportScope, FONT_LINK_PREFIX, FontLink, attachment_disposition, base64_encode,
-        build_deck_pdf_response, build_document_pdf_response, build_pptx_response,
-        build_social_pdf_response, build_social_zip_response, google_fonts_link, inline_font_urls,
-        inline_google_fonts, inline_uploaded_frame_images, inline_uploaded_images,
-        inline_uploaded_page_images, inline_uploaded_slide_images, only_cover_index,
-        pack_frame_images, upload_references,
+        build_deck_pdf_response, build_deck_zip_response, build_design_zip_response,
+        build_document_pdf_response, build_document_zip_response, build_pptx_response,
+        build_social_pdf_response, build_social_zip_response, file_download, google_fonts_link,
+        inline_font_urls, inline_google_fonts, inline_uploaded_frame_images,
+        inline_uploaded_images, inline_uploaded_page_images, inline_uploaded_slide_images,
+        only_cover_index, pack_unit_images, upload_references,
     };
     use crate::pptx::ExportSources;
     use crate::render;
-    use crate::test_support::{sample_artwork, sample_deck, sample_document, sample_social};
+    use crate::test_support::{
+        SAMPLE_DECK, SAMPLE_DESIGN, SAMPLE_DOCUMENT, sample_artwork, sample_deck, sample_document,
+        sample_social, send, test_application,
+    };
     use crate::uploads::UploadStore;
 
     #[tokio::test]
@@ -2015,6 +2114,66 @@ mod tests {
             build_social_zip_response("launch", &sample_social(), "http://127.0.0.1:3000", None)
                 .await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn new_png_zip_exports_without_chrome_are_503() {
+        let response =
+            build_design_zip_response("overview", &sample_design(), "http://127.0.0.1:3000", None)
+                .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.starts_with("PNG exports need Chrome"));
+        assert!(message.contains("SWIFT_DESIGN_CHROME"));
+
+        let response =
+            build_deck_zip_response("talk", &sample_deck(), "http://127.0.0.1:3000", None).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let response = build_document_zip_response(
+            "report",
+            &sample_document(),
+            "http://127.0.0.1:3000",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn unit_images_pack_as_numbered_pngs_in_order() {
+        let bytes = pack_unit_images(
+            "overview",
+            "screen",
+            &[b"PNG1".to_vec(), b"PNG2".to_vec(), b"PNG3".to_vec()],
+        )
+        .unwrap();
+        assert_eq!(&bytes[..2], b"PK");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(archive.len(), 3);
+        assert_eq!(archive.by_index(0).unwrap().name(), "overview-screen-1.png");
+        assert_eq!(archive.by_index(1).unwrap().name(), "overview-screen-2.png");
+        assert_eq!(archive.by_index(2).unwrap().name(), "overview-screen-3.png");
+        let mut content = Vec::new();
+        std::io::Read::read_to_end(&mut archive.by_index(2).unwrap(), &mut content).unwrap();
+        assert_eq!(content, b"PNG3");
+    }
+
+    #[tokio::test]
+    async fn zip_download_headers_name_the_attachment() {
+        let response = file_download("overview", "zip", "application/zip", b"PK".to_vec());
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/zip"
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename=\"overview.zip\""
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(bytes.as_ref(), b"PK");
     }
 
     #[test]
@@ -2047,7 +2206,8 @@ mod tests {
 
     #[test]
     fn frame_images_pack_as_numbered_pngs() {
-        let bytes = pack_frame_images("launch", &[b"PNG1".to_vec(), b"PNG2".to_vec()]).unwrap();
+        let bytes =
+            pack_unit_images("launch", "frame", &[b"PNG1".to_vec(), b"PNG2".to_vec()]).unwrap();
         assert_eq!(&bytes[..2], b"PK");
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         assert_eq!(archive.len(), 2);
@@ -2112,6 +2272,91 @@ mod tests {
 
     fn sample_design() -> Design {
         serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap()
+    }
+
+    async fn write_invalid_artifact(directory: &tempfile::TempDir, kind: &str, id: &str) {
+        let path = directory.path().join(kind).join(format!("{id}.json"));
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        let mut value: serde_json::Value = match kind {
+            "designs" => serde_json::from_str(SAMPLE_DESIGN).unwrap(),
+            "decks" => serde_json::from_str(SAMPLE_DECK).unwrap(),
+            "documents" => serde_json::from_str(SAMPLE_DOCUMENT).unwrap(),
+            _ => unreachable!(),
+        };
+        match kind {
+            "designs" => value["screens"] = serde_json::json!([]),
+            "decks" => value["slides"] = serde_json::json!([]),
+            "documents" => value["pages"] = serde_json::json!([]),
+            _ => unreachable!(),
+        }
+        tokio::fs::write(path, serde_json::to_vec(&value).unwrap())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn png_zip_routes_reject_invalid_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let application = test_application(&directory);
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            "/designs/Bad_Id/export.zip",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = send(application.clone(), "GET", "/decks/Bad_Id/export.zip", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = send(application, "GET", "/documents/Bad_Id/export.zip", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn png_zip_routes_404_for_missing_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let application = test_application(&directory);
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            "/designs/missing/export.zip",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            "/decks/missing/export.zip",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send(application, "GET", "/documents/missing/export.zip", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn png_zip_routes_reject_invalid_artifacts_before_chrome() {
+        let directory = tempfile::tempdir().unwrap();
+        write_invalid_artifact(&directory, "designs", "broken").await;
+        write_invalid_artifact(&directory, "decks", "broken").await;
+        write_invalid_artifact(&directory, "documents", "broken").await;
+        let application = test_application(&directory);
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            "/designs/broken/export.zip",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let (status, _) = send(application.clone(), "GET", "/decks/broken/export.zip", None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let (status, _) = send(application, "GET", "/documents/broken/export.zip", None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     /// A fetcher with no network: the stylesheet URL returns `FONT_CSS`

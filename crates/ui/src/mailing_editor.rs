@@ -248,7 +248,9 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                             && from != to
                             && to < mailing.peek().emails.len()
                         {
-                            mailing.with_mut(|mailing| move_screen(&mut mailing.emails, from, to));
+                            mailing.with_mut(|mailing| {
+                                move_screen(&mut mailing.emails, &mut mailing.outline, from, to)
+                            });
                             dragged.set(Some(to));
                             selected.set(to);
                             selected_node.set(None);

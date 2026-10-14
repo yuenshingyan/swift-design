@@ -23,6 +23,9 @@ use design_model::{
     Artwork, Campaign, Deck, Design, Document, Mailing, Print, QUESTIONS_PER_TURN_LIMIT, Social,
 };
 
+use crate::AppState;
+use crate::planner::ANSWERED_QUESTION_LIMIT;
+
 /// Rules every screen, slide, page, and frame follow. Shared by every
 /// kind.
 const SHARED_RULES: [&str; 6] = [
@@ -31,7 +34,7 @@ const SHARED_RULES: [&str; 6] = [
     "The server loads the theme fonts from Google Fonts. Base styles: text is 32px in the body font and text color, headings use the heading font with margin 0, paragraphs and lists have margin 0, images are block and max-width 100%.",
     "Allowed HTML: headings, text, lists, tables, `<img>`, inline `<svg>`, `<pre><code>`, `<blockquote>`, `<a>`, `<details>` with `<summary>`, `<label>`, and `<input>` with type `checkbox` or `radio`. Close every tag. Do not write `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<link>`, `<meta>`, `<form>`, `<button>`, `<select>`, `<textarea>`, other input types, media, comments, on* attributes, javascript: URLs, or data: URLs.",
     "Images: `<img src='/uploads/{name}'>` for files in GET /uploads?session={id}. Use no other image source. Draw charts, icons, and shapes as inline SVG or CSS.",
-    "Keep html under 20,000 characters and css under 10,000 characters. Use single quotes for HTML attribute values inside the JSON string.",
+    "Keep html under 20,000 characters and css under 10,000 characters. Use single quotes for HTML attribute values inside the JSON string. The built-in model client retries transient provider failures at most three times. Backoff waits are 5, 10, and 20 seconds. A Retry-After header can extend each wait to at most 60 seconds. If the provider asks for more than 60 seconds, stop and ask the user to retry later. Retry the failed request only. Do not restart a completed edit. Do not retry authentication or insufficient-quota errors. Stop cancels a pending retry wait.",
 ];
 
 /// Design (demo) content rules, shared by the agent instructions and the
@@ -46,11 +49,19 @@ pub const DEMO_RULES: &[&str] = &[
     SHARED_RULES[3],
     SHARED_RULES[4],
     "If the user asks for a translucent app over a blurred desktop, draw a simulated desktop backdrop inside each screen. Layer the app window above that backdrop. Use translucent backgrounds and backdrop-filter on the app shell and requested panels. Do not reduce the opacity of text or controls. Do not cover the backdrop with opaque page backgrounds. A browser cannot reveal the actual operating-system desktop.",
+    "For app screens, set one `app_window` on the design: `left`, `top`, `width`, and `height` in px. Keep it inside the viewport. Use the full canvas for a full-screen app. Choose the bounds once per candidate. Different candidates may use different bounds. New app candidates require shared bounds. Preserve them when saving an existing candidate. Omit it for a landing page without an app window.",
+    "When `app_window` is set, put `data-swift-design-window` on exactly one top-level non-void shell element in every screen. Put the desktop backdrop beside the shell. Put the app content inside the shell. The renderer applies the shared bounds. Do not nest the shell in another element. Do not hide overflow to pass the audit.",
+    "Keep the window chrome, header height, and sidebar width consistent across the screens of one candidate. Preserve `app_window` during edits, regeneration, and continuation. Change it only when the user requests a window resize. A resize affects every screen in that candidate. Fix content that causes screen fitting to shrink the window.",
     "Give every id and @keyframes name a prefix unique to the screen, such as `s3-`.",
     "Size text for the viewport. On a 1440 px desktop canvas: titles 48 to 72px, body 18 to 24px, captions 14 to 16px, margins of at least 64px. On a 390 px phone canvas: titles 28 to 36px, body 16 to 18px, captions 12 to 14px, margins of at least 20px. Give boxes enough height for every line.",
     SHARED_RULES[5],
     "Put one idea on each screen. Put intent, states, and handoff remarks in notes. The renderer does not show notes on the screen.",
     "Every control acts. A button or a link opens a screen: write `<a href='#screen-3'>` with the screen number, counted from 1. Write the screen the link opens. Give each step of a flow its own screen.",
+    "Demo completion requires a browser layout check. After each reply, the built-in engine renders the result and measures it. It asks for bounded tweaking rounds when findings remain. It rechecks the exact final version. Unresolved clipping, off-screen content, overlap, shrinking, or declared alignment errors block completion. An unavailable or incomplete audit is an error, not a pass.",
+    "Declare alignment on a container with data-layout-align='left', 'right', 'top', 'bottom', 'center-x', 'center-y', 'width', or 'height'. Use one mode per container. It compares visible direct children within 2 canvas px. Declare equal gaps with data-layout-gap='x' or 'y' on a container with at least three children. Use these checks for rows, label columns, and repeated cards that must align. Preserve the declarations during tweaking. Leave deliberate offsets unmarked. Use overflow:auto or overflow:scroll for a real scroll region.",
+    "The overflow audit measures visible text and child boxes. Unused padding in scroll measurements does not block a save. Fix visible clipping. If a layout repair request fails, report the provider error and the remaining element findings.",
+    "Plain references such as Page 3 and Screen 3 focus a demo edit on that screen. A focused edit verifies the named and changed screens. A shared theme, viewport, or window change verifies all screens. The saved report lists the verified screens. Do not claim that untouched legacy screens are clean.",
+    "Screen numbers refer to the current order. The studio remaps local screen links when the user reorders screens. Keep the remapped destinations. Do not restore old numbers from the conversation. When you change the screen order yourself, update links to preserve their destination screens.",
     "A menu or a dropdown is `<details>` with a `<summary>`. A toggle, a tab set, or a modal is `<input type='checkbox'>` or `<input type='radio'>` with a `<label for>`, styled through `:checked`. Give the input an id with the screen prefix. Do not write `<button>`. Style the `<a>` or the `<label>` as the button. Do not write a control that does nothing: the audit reports it as `static_control`.",
     "`transition` is optional. Leave it out and the design scrolls. Set it to give the design a page transition: `effect` is `none`, `fade`, `push`, `cover`, or `zoom`; `axis` is `vertical` or `horizontal`; `duration_ms` is 0 to 3000. `axis` moves `push` and `cover` only. Set it only when the user asks for one.",
 ];
@@ -235,7 +246,7 @@ pub const CHART_EXAMPLE: &str = "<svg class='s4-chart' viewBox='0 0 800 500' rol
 </svg>";
 
 /// The `/instructions` and `/schemas` route table.
-pub fn routes() -> Router<crate::AppState> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/instructions", get(get_instructions))
         .route("/schemas/design", get(get_design_schema))
@@ -305,8 +316,8 @@ async fn get_instructions() -> Json<serde_json::Value> {
 fn steps() -> Vec<String> {
     vec![
         "GET /schemas/design, GET /schemas/deck, GET /schemas/document, GET /schemas/social, GET /schemas/print, GET /schemas/mailing, GET /schemas/campaign, GET /schemas/artwork, and GET /schemas/question-set. Read the JSON Schemas.".to_owned(),
-        "GET /sessions/{id}. Read the request, the artifact_kind, the options, the state, the messages, the question sets, and the answers. The artifact_kind is `demo`, `deck`, `document`, `social`, `print`, `mailing`, `campaign`, or `artwork`. A demo session writes designs. A deck session writes decks. A document session writes documents. A social session writes socials. A print session writes prints. A mailing session writes mailings. A campaign session writes campaigns. An artwork session writes artworks. There is no brief: the request and the answers are the input.".to_owned(),
-        format!("Plan the turn. When you need a choice from the user, PUT /sessions/{{id}}/question-set with a BriefQuestionSet: at most {limit} questions, each with 2 to 4 short options and allow_other true, none required, can_proceed_with_assumptions true. Use single_select when the options rule each other out. Use multi_select when the user can pick more than one at once. The app adds a skip choice. Write every option from the request and the source files, in their words. An option that would fit any other project is wrong. Name the real thing the option builds. The session moves to clarifying. Then stop. After {answered} answered questions about one request, do not ask more about it. A later request for a change starts fresh: ask when the change is unclear.", limit = QUESTIONS_PER_TURN_LIMIT, answered = crate::planner::ANSWERED_QUESTION_LIMIT),
+        "GET /sessions/{id}. Read the request, the artifact_kind, the options, the state, the messages, the question sets, and the answers. A question set is open only while the state is clarifying. Historical unanswered question sets do not reopen the setup card. The artifact_kind is `demo`, `deck`, `document`, `social`, `print`, `mailing`, `campaign`, or `artwork`. A demo session writes designs. A deck session writes decks. A document session writes documents. A social session writes socials. A print session writes prints. A mailing session writes mailings. A campaign session writes campaigns. An artwork session writes artworks. There is no brief: the request and the answers are the input.".to_owned(),
+        format!("Plan the turn. When you need a choice from the user, PUT /sessions/{{id}}/question-set with a BriefQuestionSet: at most {limit} questions, each with 2 to 4 short options and allow_other true, none required, can_proceed_with_assumptions true. Use single_select when the options rule each other out. Use multi_select when the user can pick more than one at once. The app adds a skip choice. Write every option from the request and the source files, in their words. An option that would fit any other project is wrong. Name the real thing the option builds. The session moves to clarifying. Then stop. After {answered} answered questions about one request, do not ask more about it. A later request for a change starts fresh: ask when the change is unclear.", limit = QUESTIONS_PER_TURN_LIMIT, answered = ANSWERED_QUESTION_LIMIT),
         "The app asks the user for these, not you: the artifact kind, how the colors read, the number of variations; for a demo how much to build, what kind of product it is, what state the screens show, and the canvases; for a deck the audience, the tone, the scenario, the number of slides, how much goes on a slide, how much it leans on data, and how different the candidates are; for a document the audience, the tone, how much it leans on data, what kind of document it is, the paper, how much goes on a page, the number of pages, and how different the candidates are; for a social the audience, the tone, how much it leans on data, the platform, the format, what the post is for, the number of frames, and how different the candidates are; for a print the audience, the tone, how much it leans on data, what kind of print piece it is, the paper size, the orientation, the number of sheets, and how different the candidates are; for a mailing the audience, the tone, how much it leans on data, what kind of email it is, the email format, the number of emails, and how different the candidates are; for a campaign the audience, the tone, how much it leans on data, what kind of ad it is, the ad size, the number of ads, and how different the candidates are; for an artwork the audience, the tone, how much it leans on data, what kind of cover it is, the cover size, the number of covers, and how different the candidates are. Never ask about them, and never ask about them in other words. Ask only what this request raises and that list does not cover, such as the features to show or the data on a screen. Ask nothing when the request and the source files already say enough. Read them from the session options and follow them. A demo with several platforms wants one design per canvas: write one file per canvas, each with that canvas in `viewport`.".to_owned(),
         "When you know enough, write. First POST /sessions/{id}/generate: the session moves to generating and accepts artifact writes; in any other state the server answers 409. Demo session: write the design as JSON that conforms to GET /schemas/design. PUT it to /designs/{id}-candidate-1. Use the session id as the base. Number a later run after the candidates the session has: with candidates 1 to 3 present, write candidate 4. The browser shows the candidates.".to_owned(),
         "Deck session: write the deck as JSON that conforms to GET /schemas/deck. The deck has `slides`, not `screens`, and no `viewport`. PUT it to /decks/{id}-candidate-1. Use the session id as the base. The browser shows the candidates.".to_owned(),
@@ -319,9 +330,9 @@ fn steps() -> Vec<String> {
         "A 422 response lists every problem in error.details. Fix each one. PUT again.".to_owned(),
         "When the user asks for a change in the chat while an artifact is open, edit that artifact and PUT it again. When no artifact is open, write new candidates. A message that pins two or more candidates and asks to combine parts of them is a merge: write one new candidate under the next free number, and take each part from the candidate the user names for it. A message with is_regenerate true names units like `[screen 2]`, `[slide 2]`, `[page 2]`, `[frame 2]`, `[sheet 2]`, `[email 2]`, `[ad 2]`, or `[cover 2]`: write those units anew, without their old markup, and keep the rest. POST /designs/{id}/fork, POST /decks/{id}/fork, POST /documents/{id}/fork, POST /socials/{id}/fork, POST /prints/{id}/fork, POST /mailings/{id}/fork, POST /campaigns/{id}/fork, or POST /artworks/{id}/fork copies a candidate to the next free number; the user presses Fork for that, you do not.".to_owned(),
         "GET /uploads?session={id} lists the source files of that session. Each row has name, size_bytes, content_type, and is_image. GET /uploads/{name} returns the file. Use an image row as `<img src='/uploads/{name}'>`. A file belongs to one session: never read another session's files.".to_owned(),
-        "After you save a design, look at it: GET /designs/{id}/screens/{n}.png returns a PNG of screen n, 1-based. It needs Chrome or Chromium and answers 503 without one. Review every screen for overlap, overflow, empty space, and weak contrast. Fix what you see and PUT the design again. GET /designs/{id}/export returns the design as one HTML file. A design has no PDF export.".to_owned(),
-        "After you save a deck, look at it: GET /decks/{id}/slides/{n}.png returns a PNG of slide n, 1-based. Review every slide the same way and PUT the deck again. GET /decks/{id}/export returns the deck as one HTML file. GET /decks/{id}/export.pdf returns it as a PDF, one page per slide. GET /decks/{id}/export.pptx returns it as a PowerPoint file. GET /decks/{id}/present is the presenter view with the notes.".to_owned(),
-        "After you save a document, look at it: GET /documents/{id}/pages/{n}.png returns a PNG of page n, 1-based. Review every page the same way and PUT the document again. GET /documents/{id}/export returns the document as one HTML file. GET /documents/{id}/export.pdf returns it as a PDF, one sheet per page. GET /documents/{id}/export.docx returns it as a Word file.".to_owned(),
+        "After you save a design, look at it: GET /designs/{id}/screens/{n}.png returns a PNG of screen n, 1-based. It needs Chrome or Chromium and answers 503 without one. Review every screen for overlap, overflow, empty space, and weak contrast. Fix what you see and PUT the design again. GET /designs/{id}/export returns the design as one HTML file. GET /designs/{id}/export.zip returns one PNG per screen in a zip. Each image is named {id}-screen-{n}.png. A design has no PDF export.".to_owned(),
+        "After you save a deck, look at it: GET /decks/{id}/slides/{n}.png returns a PNG of slide n, 1-based. Review every slide the same way and PUT the deck again. GET /decks/{id}/export returns the deck as one HTML file. GET /decks/{id}/export.pdf returns it as a PDF, one page per slide. GET /decks/{id}/export.pptx returns it as a PowerPoint file. GET /decks/{id}/export.zip returns one PNG per slide in a zip. Each image is named {id}-slide-{n}.png. GET /decks/{id}/present is the presenter view with the notes.".to_owned(),
+        "After you save a document, look at it: GET /documents/{id}/pages/{n}.png returns a PNG of page n, 1-based. Review every page the same way and PUT the document again. GET /documents/{id}/export returns the document as one HTML file. GET /documents/{id}/export.pdf returns it as a PDF, one sheet per page. GET /documents/{id}/export.docx returns it as a Word file. GET /documents/{id}/export.zip returns one PNG per page in a zip. Each image is named {id}-page-{n}.png.".to_owned(),
         "After you save a social, look at it: GET /socials/{id}/frames/{n}.png returns a PNG of frame n, 1-based. Review every frame the same way and PUT the social again. GET /socials/{id}/export returns the social as one HTML file. GET /socials/{id}/export.pdf returns it as a PDF, one sheet per frame, the file a LinkedIn carousel takes. GET /socials/{id}/export.zip returns one PNG per frame in a zip, the files an Instagram carousel takes. Add ?frame=N to the HTML or PDF export to export only frame N.".to_owned(),
         "After you save a print, look at it: GET /prints/{id}/sheets/{n}.png returns a PNG of sheet n, 1-based. Review every sheet the same way and PUT the print again. GET /prints/{id}/export returns the print as one HTML file. GET /prints/{id}/export.pdf returns it as a PDF, one PDF page per sheet, the file a print shop takes. GET /prints/{id}/export.zip returns one PNG per sheet in a zip. Add ?sheet=N to the HTML or PDF export to export only sheet N.".to_owned(),
         "After you save a mailing, look at it: GET /mailings/{id}/emails/{n}.png returns a PNG of email n, 1-based. Review every email the same way and PUT the mailing again. GET /mailings/{id}/export returns the mailing as one HTML file. GET /mailings/{id}/export.pdf returns it as a PDF, one PDF page per email. GET /mailings/{id}/export.zip returns one PNG per email in a zip. GET /mailings/{id}/export.email.zip returns one email-client HTML file per email in a zip: inlined styles, a 600 px table shell, and Outlook support. Send that file from your email service. Add ?email=N to the HTML or PDF export to export only email N.".to_owned(),
@@ -358,6 +369,7 @@ fn routes_map() -> serde_json::Value {
         ("render_design", "GET /designs/{id}/render"),
         ("screen_image", "GET /designs/{id}/screens/{n}.png"),
         ("export_html", "GET /designs/{id}/export"),
+        ("export_design_zip", "GET /designs/{id}/export.zip"),
         ("save_deck", "PUT /decks/{id}"),
         ("check_deck", "POST /decks/render"),
         ("render_deck", "GET /decks/{id}/render"),
@@ -366,6 +378,7 @@ fn routes_map() -> serde_json::Value {
         ("present", "GET /decks/{id}/present"),
         ("export_deck_html", "GET /decks/{id}/export"),
         ("export_deck_pdf", "GET /decks/{id}/export.pdf"),
+        ("export_deck_zip", "GET /decks/{id}/export.zip"),
         ("export_pptx", "GET /decks/{id}/export.pptx"),
         ("save_document", "PUT /documents/{id}"),
         ("check_document", "POST /documents/render"),
@@ -373,6 +386,7 @@ fn routes_map() -> serde_json::Value {
         ("page_image", "GET /documents/{id}/pages/{n}.png"),
         ("export_document_html", "GET /documents/{id}/export"),
         ("export_document_pdf", "GET /documents/{id}/export.pdf"),
+        ("export_document_zip", "GET /documents/{id}/export.zip"),
         ("export_docx", "GET /documents/{id}/export.docx"),
         ("save_social", "PUT /socials/{id}"),
         ("check_social", "POST /socials/render"),
@@ -493,6 +507,8 @@ fn instructions() -> serde_json::Value {
             "node_reference": "[screen N, node a/b/c <tag.class>: text] for a design; [slide N, node a/b/c <tag.class>: text] for a deck; [page N, node a/b/c <tag.class>: text] for a document; [frame N, node a/b/c <tag.class>: text] for a social; [sheet N, node a/b/c <tag.class>: text] for a print; [email N, node a/b/c <tag.class>: text] for a mailing; [ad N, node a/b/c <tag.class>: text] for a campaign; [cover N, node a/b/c <tag.class>: text] for an artwork",
             "upload_reference": "[upload name]",
             "comment_lines": "A message may carry several comments, one per line, each `<node or page reference>: <note>`. Apply every line in one edit.",
+            "queued_prompts": "Send prompts while a run works. The app stores them with is_queued: true and shows Queued. Ignore queued messages in the active run. The app activates one prompt after the current turn ends. Use the latest saved artifact for that prompt. Keep its candidate targets and unit references. Stop and failure pause the queue. A question card also pauses the queue until the user responds. Answers resume the prompt that asked the questions before later queued prompts. Finish requests still join the active turn. Capture links from a queued prompt only when its turn starts. Saved edit messages include snapshot_stamps for exact reverts. Do not use a queued prompt's arrival time to select its edit baseline.",
+            "parallel_edits": "The built-in engine edits multiple addressed units in parallel. It runs at most four unit-writing requests at once per candidate. Each worker reads the same original artifact. A worker replaces only its assigned unit. It cannot change shared values, add units, or remove units. One serial coordination pass reconciles the combined units and requested shared changes. It must not rewrite every unit again. The app audits the combined result before saving. A worker or coordination failure leaves the stored artifact unchanged. A single-unit edit uses one ordinary edit request.",
             "edit_reports": "The built-in engine compares each original artifact with its final edited artifact after fixes. Its saved edit report lists modified, added, and removed units by one-based number. It reports notes-only changes and shared theme or settings changes separately. Use the latest saved report to answer which units changed. Do not infer saved changes from an assistant promise. A change report does not prove that an interaction or a backend works.",
         },
         "payloads": {
@@ -943,6 +959,30 @@ mod tests {
     }
 
     #[test]
+    fn instructions_describe_queued_prompts_and_pause_conditions() {
+        let payload = instructions();
+        let note = payload["conventions"]["queued_prompts"].as_str().unwrap();
+        assert!(note.contains("is_queued: true"));
+        assert!(note.contains("Ignore queued messages"));
+        assert!(note.contains("one prompt"));
+        assert!(note.contains("latest saved artifact"));
+        assert!(note.contains("Stop and failure pause"));
+        assert!(note.contains("Finish requests"));
+    }
+
+    #[test]
+    fn instructions_describe_parallel_editing_before_serial_coordination() {
+        let payload = instructions();
+        let note = payload["conventions"]["parallel_edits"].as_str().unwrap();
+        assert!(note.contains("at most four"));
+        assert!(note.contains("same original artifact"));
+        assert!(note.contains("only its assigned unit"));
+        assert!(note.contains("One serial coordination pass"));
+        assert!(note.contains("before saving"));
+        assert!(note.contains("stored artifact unchanged"));
+    }
+
+    #[test]
     fn instructions_describe_saved_edit_reports_without_claiming_backend_verification() {
         let payload = instructions();
         let note = payload["conventions"]["edit_reports"].as_str().unwrap();
@@ -982,6 +1022,66 @@ mod tests {
             serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap();
         design.screens[0].html = format!("<div class='s4-page'>{CHART_EXAMPLE}</div>");
         assert_eq!(design.validate(), Vec::new());
+    }
+
+    #[test]
+    fn demo_rules_require_verified_tweaking_and_declared_alignment() {
+        let rules = DEMO_RULES.join("\n");
+        assert!(rules.contains("rechecks the exact final version"));
+        assert!(rules.contains("Plain references such as Page 3"));
+        assert!(rules.contains("saved report lists the verified screens"));
+        assert!(rules.contains("Unused padding in scroll measurements does not block a save"));
+        assert!(rules.contains("Backoff waits are 5, 10, and 20 seconds"));
+        assert!(rules.contains("report the provider error and the remaining element findings"));
+        assert!(rules.contains("data-layout-align='left'"));
+        assert!(rules.contains("data-layout-gap='x'"));
+        assert!(rules.contains("an error, not a pass"));
+    }
+
+    #[test]
+    fn demo_rules_preserve_destinations_after_screen_reordering() {
+        let rules = DEMO_RULES.join("\n");
+        assert!(rules.contains("The studio remaps local screen links"));
+        assert!(rules.contains("Do not restore old numbers from the conversation"));
+    }
+
+    #[test]
+    fn demo_rules_define_window_bounds_per_candidate_not_across_candidates() {
+        let rules = DEMO_RULES.join("\n");
+        assert!(rules.contains("Choose the bounds once per candidate"));
+        assert!(rules.contains("Different candidates may use different bounds"));
+        assert!(rules.contains("exactly one top-level non-void shell"));
+        assert!(
+            rules.contains("Preserve `app_window` during edits, regeneration, and continuation")
+        );
+    }
+
+    #[test]
+    fn instructions_keep_historical_questions_separate_from_current_clarification() {
+        let payload = instructions();
+        assert!(payload["steps"].as_array().unwrap().iter().any(|step| {
+            step.as_str().unwrap().contains(
+                "A question set is open only while the state is clarifying. Historical unanswered question sets do not reopen the setup card.",
+            )
+        }));
+    }
+
+    #[test]
+    fn instructions_describe_image_zip_handoffs_for_demos_decks_and_documents() {
+        let payload = instructions();
+        for (key, kind, unit) in [
+            ("export_design_zip", "designs", "screen"),
+            ("export_deck_zip", "decks", "slide"),
+            ("export_document_zip", "documents", "page"),
+        ] {
+            let route = format!("GET /{kind}/{{id}}/export.zip");
+            assert_eq!(payload["routes"][key], route);
+            let steps = payload["steps"].as_array().unwrap();
+            assert!(steps.iter().any(|step| {
+                let text = step.as_str().unwrap();
+                text.contains(&route) && text.contains(&format!("{{id}}-{unit}-{{n}}.png"))
+            }));
+        }
     }
 
     #[test]

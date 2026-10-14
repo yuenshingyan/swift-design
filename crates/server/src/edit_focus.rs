@@ -4,21 +4,29 @@
 //! measured in Chrome. A change that names none is systemic: the model
 //! gets the whole artifact.
 
+use crate::candidates::candidate_number_of;
 use crate::generation::ArtifactRequest;
 use crate::request::SessionRequest;
 
-/// The zero-based indexes named by references like `[{unit} 3, …]`.
-/// Sorted, without repeats.
+/// The zero-based indexes named by references or plain wording such as `Page 3`.
+/// Treats page as an alias for a demo screen. Sorts and removes repeats.
 pub(crate) fn referenced_indexes(instruction: &str, unit: &str) -> Vec<usize> {
-    let marker = format!("[{unit} ");
-    let mut indexes: Vec<usize> = instruction
-        .match_indices(&marker)
-        .filter_map(|(start, _)| {
-            let digits: String = instruction[start + marker.len()..]
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect();
-            digits.parse::<usize>().ok()?.checked_sub(1)
+    // Keep hyphens and underscores in words so URLs and CSS names are not references.
+    let words: Vec<&str> = instruction
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_')
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+    let mut indexes: Vec<usize> = words
+        .windows(2)
+        .filter_map(|pair| {
+            let is_unit = pair[0].eq_ignore_ascii_case(unit)
+                || (unit == "screen" && pair[0].eq_ignore_ascii_case("page"));
+            if !is_unit {
+                return None;
+            }
+            pair[1].parse::<usize>().ok()?.checked_sub(1)
         })
         .collect();
     indexes.sort_unstable();
@@ -93,14 +101,17 @@ pub(crate) fn findings_note(findings: &[String]) -> String {
     )
 }
 
-/// The units an edit touched: the ones the change named, and every
-/// index whose content differs after the edit. Sorted, without repeats,
-/// and within `after`.
+/// The units to audit after an edit: every unit for a systemic change,
+/// or the named and changed units for a focused change. Shared theme
+/// changes can affect layout even when each unit's markup is unchanged.
 pub(crate) fn touched_indexes<T: PartialEq>(
     before: &[T],
     after: &[T],
     named: &[usize],
 ) -> Vec<usize> {
+    if named.is_empty() {
+        return (0..after.len()).collect();
+    }
     let mut indexes: Vec<usize> = named
         .iter()
         .copied()
@@ -187,7 +198,7 @@ pub(crate) fn merge_sources<T: serde::Serialize>(
         .iter()
         .enumerate()
         .map(|(position, (id, artifact))| {
-            let number = crate::candidates::candidate_number_of(id).unwrap_or(position + 1);
+            let number = candidate_number_of(id).unwrap_or(position + 1);
             let json = serde_json::to_string(artifact).map_err(|error| error.to_string())?;
             Ok((number, json))
         })
@@ -220,6 +231,28 @@ pub(crate) fn conversation_block(note: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordinary_page_and_screen_wording_focuses_demo_edits() {
+        assert_eq!(
+            referenced_indexes("Page 3 is still overflowed.", "screen"),
+            [2]
+        );
+        assert_eq!(
+            referenced_indexes("SCREEN 4 and [screen 3]", "screen"),
+            [2, 3]
+        );
+        assert_eq!(referenced_indexes("Page 3", "page"), [2]);
+        for text in [
+            "homepage 3",
+            "#screen-3",
+            "screen_name 3",
+            "Page 0",
+            "Page 999999999999999999999999999999999999",
+        ] {
+            assert!(referenced_indexes(text, "screen").is_empty());
+        }
+    }
 
     #[test]
     fn references_name_the_units_zero_based_without_repeats() {
@@ -262,7 +295,8 @@ mod tests {
         let before = vec!["a", "b", "c"];
         let after = vec!["a", "B", "c", "d"];
         assert_eq!(touched_indexes(&before, &after, &[2, 9]), vec![1, 2, 3]);
-        assert!(touched_indexes(&before, &before, &[]).is_empty());
+        assert_eq!(touched_indexes(&before, &before, &[]), vec![0, 1, 2]);
+        assert_eq!(touched_indexes(&before, &after, &[]), vec![0, 1, 2, 3]);
         assert!(fix_instruction("slides").contains("in the slides shown"));
     }
 

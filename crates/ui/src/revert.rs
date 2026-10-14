@@ -24,16 +24,27 @@ pub(crate) fn turn_start(messages: &[api::ChatMessage], index: usize) -> Option<
     messages[..index]
         .iter()
         .rev()
-        .find(|message| message.role == "user")
+        .find(|message| message.role == "user" && !message.is_queued)
         .and_then(|message| message.at.clone())
 }
 
-/// Reverts one artifact to what it was at `since`. Returns what
+fn restore_stamp(
+    history: &[api::HistorySnapshot],
+    since: &str,
+    exact: Option<&str>,
+) -> Option<String> {
+    exact
+        .map(str::to_owned)
+        .or_else(|| snapshot_since(history, since))
+}
+
+/// Reverts one artifact to its exact saved baseline, or the legacy time-based baseline. Returns what
 /// happened, for the log.
 pub(crate) async fn revert_artifact(
     kind: ArtifactKind,
     id: &str,
     since: &str,
+    exact_stamp: Option<&str>,
 ) -> Result<&'static str, String> {
     let history = match kind {
         ArtifactKind::Demo => api::fetch_design_history(id).await?,
@@ -45,7 +56,7 @@ pub(crate) async fn revert_artifact(
         ArtifactKind::Campaign => api::fetch_campaign_history(id).await?,
         ArtifactKind::Artwork => api::fetch_artwork_history(id).await?,
     };
-    match snapshot_since(&history, since) {
+    match restore_stamp(&history, since, exact_stamp) {
         Some(stamp) => {
             match kind {
                 ArtifactKind::Demo => api::restore_design_history(id, &stamp).await?,
@@ -103,6 +114,31 @@ mod tests {
     }
 
     #[test]
+    fn a_queued_edit_restores_its_exact_snapshot_not_the_turn_running_when_it_was_typed() {
+        let history = vec![
+            snapshot("2026-08-29T07-26-12Z"),
+            snapshot("2026-08-29T07-28-00Z"),
+        ];
+        assert_eq!(
+            restore_stamp(
+                &history,
+                "2026-08-29T07:25:00Z",
+                Some("2026-08-29T07-28-00Z")
+            )
+            .as_deref(),
+            Some("2026-08-29T07-28-00Z")
+        );
+        assert_eq!(
+            restore_stamp(&history, "2026-08-29T07:25:00Z", None).as_deref(),
+            Some("2026-08-29T07-26-12Z")
+        );
+        assert_eq!(
+            restore_stamp(&[], "2026-08-29T07:25:00Z", Some("pruned-stamp")).as_deref(),
+            Some("pruned-stamp")
+        );
+    }
+
+    #[test]
     fn a_turn_starts_at_the_user_message_before_it() {
         let user = api::ChatMessage {
             role: "user".to_owned(),
@@ -110,8 +146,10 @@ mod tests {
             design: None,
             question_set: None,
             is_continue: false,
+            is_queued: false,
             at: Some("2026-08-29T07:26:12Z".to_owned()),
             artifacts: Vec::new(),
+            snapshot_stamps: None,
         };
         let assistant = api::ChatMessage {
             role: "assistant".to_owned(),
@@ -119,9 +157,12 @@ mod tests {
             at: Some("2026-08-29T07:28:00Z".to_owned()),
             ..user.clone()
         };
-        let messages = vec![user, assistant];
+        let mut pending = user.clone();
+        pending.is_queued = true;
+        pending.at = Some("2026-08-29T07:27:00Z".to_owned());
+        let messages = vec![user, pending, assistant];
         assert_eq!(
-            turn_start(&messages, 1).as_deref(),
+            turn_start(&messages, 2).as_deref(),
             Some("2026-08-29T07:26:12Z")
         );
         assert_eq!(turn_start(&messages, 0), None);

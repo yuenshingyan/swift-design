@@ -6,28 +6,56 @@
 //! back for a fix round, and save the result. The studio watches it all
 //! through `/events`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use design_model::{BriefQuestionSet, Design, QuestionSetError, validate_question_set};
+use design_model::{
+    ArtifactKind, BriefQuestionSet, Design, QuestionSetError, validate_question_set,
+};
 
+use crate::artworks::ArtworkStore;
+use crate::campaigns::CampaignStore;
 use crate::candidates::{candidate_id, next_candidate_number};
 use crate::concepts::{Concept, concept_input, concept_note, concept_prompt, parse_concepts};
-use crate::designs::DesignStore;
+use crate::decks::DeckStore;
+use crate::designs::{DesignStore, PENDING_SCREEN_CLASS, is_pending_screen};
+use crate::documents::DocumentStore;
 use crate::edit_focus::{
-    EditFix, EditInput, EditOrder, MergeInput, findings_for, findings_note, fix_instruction,
-    focus_note, fresh_note, merge_note, merge_sources, referenced_indexes, touched_indexes,
+    EditFix, EditInput, EditOrder, MergeInput, conversation_block, findings_for, findings_note,
+    fix_instruction, focus_note, fresh_note, merge_note, merge_sources, referenced_indexes,
+    touched_indexes,
 };
 use crate::edit_report::{EDIT_REPORT_PREFIX, saved_edit_report};
 use crate::events::ChangeNotifier;
+use crate::export::base64_encode;
+use crate::history::Snapshot;
 use crate::instructions::DEMO_RULES;
+use crate::mailings::MailingStore;
 use crate::model_client::{LogSink, ModelClient, ModelConfiguration, TextSink, UsageSink};
+use crate::office::{is_office_type, office_text};
+use crate::parallel_edit::EditExecution;
+use crate::patch::{PATCH_FORMAT, apply_patch, parse_patch};
 use crate::planner::{
     ANSWERED_QUESTION_LIMIT, app_question_set, conversation_note, parse_plan, planner_input,
     planner_prompt, recent_conversation,
 };
+use crate::polish::{
+    DemoAudit, DemoDomRunner, PolishStop, apply_tweak, chrome_dom_runner, polish_prompt,
+    polish_round_limit,
+};
+use crate::prints::PrintStore;
+use crate::render::escape_html;
 use crate::request::{SessionRequest, answered_questions_from_answers, request_input};
+use crate::screenshots::{POLISH_IMAGE_LIMIT, find_chrome, screenshot_screen, supports_vision};
 use crate::sessions::session_id_of_artifact;
-use crate::sessions::{ChatMessage, RunMode, RunOptions, RunRecord, SessionStore};
+use crate::sessions::{
+    AnswerRecord, ChatMessage, RunMode, RunOptions, RunRecord, Session, SessionStore,
+};
+use crate::settings::SettingsStore;
+use crate::socials::SocialStore;
+use crate::templates::{Template, TemplateStore};
+use crate::time::rfc3339_now;
+use crate::uploads::UploadStore;
 
 /// Fix rounds per candidate before giving up, by effort level.
 pub(crate) fn fix_round_limit(effort: &str) -> usize {
@@ -171,7 +199,7 @@ fn edit_targets(messages: &[ChatMessage], chosen: Option<&str>) -> Vec<String> {
 /// Every answer counts while nothing was written yet.
 pub(crate) fn answers_since_last_write(
     messages: &[ChatMessage],
-    records: &[crate::sessions::AnswerRecord],
+    records: &[AnswerRecord],
 ) -> usize {
     let last_write = messages
         .iter()
@@ -210,31 +238,32 @@ pub struct GenerationEngine {
     pub(crate) model: ModelClient,
     pub(crate) designs: DesignStore,
     /// The deck store, for deck sessions. `None` refuses deck runs.
-    pub(crate) decks: Option<crate::decks::DeckStore>,
+    pub(crate) decks: Option<DeckStore>,
     /// The document store, for document sessions. `None` refuses
     /// document runs.
-    pub(crate) documents: Option<crate::documents::DocumentStore>,
+    pub(crate) documents: Option<DocumentStore>,
     /// The social store, for social sessions. `None` refuses social
     /// runs.
-    pub(crate) socials: Option<crate::socials::SocialStore>,
+    pub(crate) socials: Option<SocialStore>,
     /// The print store, for print sessions. `None` refuses print runs.
-    pub(crate) prints: Option<crate::prints::PrintStore>,
+    pub(crate) prints: Option<PrintStore>,
     /// The mailing store, for mailing sessions. `None` refuses mailing
     /// runs.
-    pub(crate) mailings: Option<crate::mailings::MailingStore>,
+    pub(crate) mailings: Option<MailingStore>,
     /// The campaign store, for campaign sessions. `None` refuses
     /// campaign runs.
-    pub(crate) campaigns: Option<crate::campaigns::CampaignStore>,
+    pub(crate) campaigns: Option<CampaignStore>,
     /// The artwork store, for artwork sessions. `None` refuses artwork
     /// runs.
-    pub(crate) artworks: Option<crate::artworks::ArtworkStore>,
+    pub(crate) artworks: Option<ArtworkStore>,
     pub(crate) sessions: SessionStore,
     address: String,
     pub(crate) notifier: ChangeNotifier,
     progress_sink: Option<ProgressSink>,
     design_progress_sink: Option<DesignProgressSink>,
-    templates: Option<crate::templates::TemplateStore>,
-    uploads: Option<crate::uploads::UploadStore>,
+    templates: Option<TemplateStore>,
+    uploads: Option<UploadStore>,
+    demo_dom_runner: DemoDomRunner,
 }
 
 /// A sink for how far the current turn is, 0 to 100, shared with the
@@ -384,7 +413,7 @@ impl GenerationEngine {
         configuration: ModelConfiguration,
         designs: DesignStore,
         sessions: SessionStore,
-        settings: Option<crate::settings::SettingsStore>,
+        settings: Option<SettingsStore>,
         address: String,
         notifier: ChangeNotifier,
     ) -> Self {
@@ -405,61 +434,75 @@ impl GenerationEngine {
             design_progress_sink: None,
             templates: None,
             uploads: None,
+            demo_dom_runner: chrome_dom_runner(),
         }
     }
 
+    /// Replaces the real browser boundary in engine tests.
+    #[cfg(test)]
+    pub(crate) fn with_demo_dom_runner(mut self, runner: DemoDomRunner) -> Self {
+        self.demo_dom_runner = runner;
+        self
+    }
+
+    /// Measures a complete demo and rejects unavailable or incomplete browser reports.
+    async fn audit_demo(&self, design: &Design) -> Result<DemoAudit, String> {
+        let dom = (self.demo_dom_runner)(design.clone(), self.base_url()).await?;
+        DemoAudit::from_dom(&dom, design.screens.len())
+    }
+
     /// Lets the engine write decks, for deck sessions.
-    pub fn with_decks(mut self, decks: crate::decks::DeckStore) -> Self {
+    pub fn with_decks(mut self, decks: DeckStore) -> Self {
         self.decks = Some(decks);
         self
     }
 
     /// Lets the engine write documents, for document sessions.
-    pub fn with_documents(mut self, documents: crate::documents::DocumentStore) -> Self {
+    pub fn with_documents(mut self, documents: DocumentStore) -> Self {
         self.documents = Some(documents);
         self
     }
 
     /// Lets the engine write socials, for social sessions.
-    pub fn with_socials(mut self, socials: crate::socials::SocialStore) -> Self {
+    pub fn with_socials(mut self, socials: SocialStore) -> Self {
         self.socials = Some(socials);
         self
     }
 
     /// Lets the engine write prints, for print sessions.
-    pub fn with_prints(mut self, prints: crate::prints::PrintStore) -> Self {
+    pub fn with_prints(mut self, prints: PrintStore) -> Self {
         self.prints = Some(prints);
         self
     }
 
     /// Lets the engine write mailings, for mailing sessions.
-    pub fn with_mailings(mut self, mailings: crate::mailings::MailingStore) -> Self {
+    pub fn with_mailings(mut self, mailings: MailingStore) -> Self {
         self.mailings = Some(mailings);
         self
     }
 
     /// Lets the engine write campaigns, for campaign sessions.
-    pub fn with_campaigns(mut self, campaigns: crate::campaigns::CampaignStore) -> Self {
+    pub fn with_campaigns(mut self, campaigns: CampaignStore) -> Self {
         self.campaigns = Some(campaigns);
         self
     }
 
     /// Lets the engine write artworks, for artwork sessions.
-    pub fn with_artworks(mut self, artworks: crate::artworks::ArtworkStore) -> Self {
+    pub fn with_artworks(mut self, artworks: ArtworkStore) -> Self {
         self.artworks = Some(artworks);
         self
     }
 
     /// Lets the engine read the saved templates, so a brief that names
     /// one can style its candidates from it.
-    pub fn with_templates(mut self, templates: crate::templates::TemplateStore) -> Self {
+    pub fn with_templates(mut self, templates: TemplateStore) -> Self {
         self.templates = Some(templates);
         self
     }
 
     /// Lets the engine attach the user's uploads to the requests that
     /// write content.
-    pub fn with_uploads(mut self, uploads: crate::uploads::UploadStore) -> Self {
+    pub fn with_uploads(mut self, uploads: UploadStore) -> Self {
         self.uploads = Some(uploads);
         self
     }
@@ -525,7 +568,7 @@ impl GenerationEngine {
     /// A user message with `text` and the attachments as content parts.
     /// Image parts go only to models that can see them.
     pub(crate) fn user_message(&self, text: &str, attachments: &Attachments) -> serde_json::Value {
-        let can_see_images = crate::screenshots::supports_vision(self.model.model());
+        let can_see_images = supports_vision(self.model.model());
         serde_json::json!({
             "role": "user",
             "content": user_content_with_attachments(text, attachments, can_see_images),
@@ -538,7 +581,7 @@ impl GenerationEngine {
         &self,
         options: &RunOptions,
         log: &LogSink,
-    ) -> Vec<crate::templates::Template> {
+    ) -> Vec<Template> {
         let ids = options.templates.clone();
         if ids.is_empty() {
             return Vec::new();
@@ -604,7 +647,7 @@ impl GenerationEngine {
             .map_err(|error| error.to_string())?;
         let messages = self
             .sessions
-            .messages(session_id)
+            .messages_for_run(session_id)
             .await
             .map_err(|error| error.to_string())?;
         let context = GenerationContext {
@@ -628,7 +671,7 @@ impl GenerationEngine {
                     runtime: "built-in".to_owned(),
                     provider: None,
                     model: Some(self.model.model().to_owned()),
-                    started_at: crate::time::rfc3339_now(),
+                    started_at: rfc3339_now(),
                     finished_at: None,
                     result: None,
                     error: None,
@@ -751,7 +794,7 @@ impl GenerationEngine {
     ) -> Result<Option<GenerationTask>, String> {
         let messages = self
             .sessions
-            .messages(&context.session_id)
+            .messages_for_run(&context.session_id)
             .await
             .map_err(|error| error.to_string())?;
         if let Some((design, instruction)) = trailing_regenerate(&messages) {
@@ -828,14 +871,14 @@ impl GenerationEngine {
     async fn plan_turn(
         &self,
         client: &reqwest::Client,
-        session: &crate::sessions::Session,
+        session: &Session,
         context: &GenerationContext,
         log: &LogSink,
     ) -> Result<PlanStep, String> {
         let session_id = context.session_id.as_str();
         let messages = self
             .sessions
-            .messages(session_id)
+            .messages_for_run(session_id)
             .await
             .map_err(|error| error.to_string())?;
         let candidate_count = self.candidate_count(context).await;
@@ -1041,7 +1084,7 @@ impl GenerationEngine {
     async fn continue_requests(&self, session_id: &str) -> Result<Vec<String>, String> {
         let messages = self
             .sessions
-            .messages(session_id)
+            .messages_for_run(session_id)
             .await
             .map_err(|error| error.to_string())?;
         let mut previews = Vec::new();
@@ -1187,12 +1230,10 @@ impl GenerationEngine {
                 reports,
             }) => {
                 let summary = format!("{EDIT_REPORT_PREFIX}{}", reports.join("\n\n"));
-                self.complete_artifacts(
-                    session_id,
-                    run_id,
-                    ChatMessage::assistant(&summary).with_artifacts(design_ids.clone()),
-                )
-                .await?;
+                let mut message =
+                    ChatMessage::assistant(&summary).with_artifacts(design_ids.clone());
+                message.snapshot_stamps = Some(self.edit_snapshots(session_id, &design_ids).await);
+                self.complete_artifacts(session_id, run_id, message).await?;
                 Ok(GenerationOutcome::Edited {
                     design_ids,
                     reports,
@@ -1233,6 +1274,35 @@ impl GenerationEngine {
                 .await;
                 Err(message)
             }
+        }
+    }
+
+    /// Captures exact edit baselines without using a queued prompt's arrival time.
+    async fn edit_snapshots(&self, session_id: &str, ids: &[String]) -> HashMap<String, String> {
+        let mut snapshots = HashMap::new();
+        let Ok(Some(session)) = self.sessions.read(session_id).await else {
+            return snapshots;
+        };
+        for id in ids {
+            if let Some(history) = self.artifact_history(session.artifact_kind, id).await
+                && let Some(snapshot) = history.first()
+            {
+                snapshots.insert(id.clone(), snapshot.stamp.clone());
+            }
+        }
+        snapshots
+    }
+
+    async fn artifact_history(&self, kind: ArtifactKind, id: &str) -> Option<Vec<Snapshot>> {
+        match kind {
+            ArtifactKind::Demo => self.designs.history(id).await.ok(),
+            ArtifactKind::Deck => self.decks.as_ref()?.history(id).await.ok(),
+            ArtifactKind::Document => self.documents.as_ref()?.history(id).await.ok(),
+            ArtifactKind::Social => self.socials.as_ref()?.history(id).await.ok(),
+            ArtifactKind::Print => self.prints.as_ref()?.history(id).await.ok(),
+            ArtifactKind::Mailing => self.mailings.as_ref()?.history(id).await.ok(),
+            ArtifactKind::Campaign => self.campaigns.as_ref()?.history(id).await.ok(),
+            ArtifactKind::Artwork => self.artworks.as_ref()?.history(id).await.ok(),
         }
     }
 
@@ -1565,7 +1635,8 @@ impl GenerationEngine {
             .into_iter()
             .filter(|index| *index < design.screens.len())
             .collect();
-        let measured = crate::polish::dom_findings(&design, &self.base_url(), &label, log).await;
+        log(&format!("{label}: checking layout before editing"));
+        let measured = self.audit_demo(&design).await?.instructions(None);
         let findings = findings_for(&measured, "screens", &indexes);
         let total = design.screens.len();
         let (design_json, note) = if indexes.is_empty() {
@@ -1599,17 +1670,35 @@ impl GenerationEngine {
         let request = ArtifactRequest {
             effort,
             label,
-            parse: Box::new(move |content| {
-                crate::patch::apply_patch(&original, crate::patch::parse_patch(content)?)
-            }),
+            parse: Box::new(move |content| apply_patch(&original, parse_patch(content)?)),
             progress: self.shared_progress(&[design_id.to_owned()], 5, 95).pop(),
             live: None,
         };
-        let edited = self.request_valid(client, messages, &request, log).await?;
+        let edited = self
+            .request_edit(
+                client,
+                EditExecution {
+                    original: &design,
+                    messages,
+                    input: &input,
+                    indexes: &indexes,
+                    is_fresh: order.is_fresh,
+                    request: &request,
+                },
+                log,
+            )
+            .await?;
         // A fix can make a new problem. The touched screens are measured
         // again, and the model tweaks them until they measure clean or
         // the effort's rounds run out.
-        let touched = touched_indexes(&design.screens, &edited.screens, &indexes);
+        let touched = if design.theme != edited.theme
+            || design.viewport != edited.viewport
+            || design.app_window != edited.app_window
+        {
+            (0..edited.screens.len()).collect()
+        } else {
+            touched_indexes(&design.screens, &edited.screens, &indexes)
+        };
         let fix = EditFix {
             request: &context.request,
             context: &request,
@@ -1619,8 +1708,16 @@ impl GenerationEngine {
             .fix_edited_design(client, edited, &fix, log)
             .await
             .map_err(GenerationStop::Failed)?;
-        let report = saved_edit_report(design_id, context.request.kind, &design, &final_design)
+        let mut report = saved_edit_report(design_id, context.request.kind, &design, &final_design)
             .map_err(GenerationStop::Failed)?;
+        let verified: Vec<String> = fix
+            .indexes
+            .iter()
+            .map(|index| (index + 1).to_string())
+            .collect();
+        if !verified.is_empty() {
+            report.push_str(&format!("\nRendered layout verified on screen(s) {}. Untouched screens are not claimed as verified.", verified.join(", ")));
+        }
         self.designs
             .save(design_id, &final_design)
             .await
@@ -1807,9 +1904,7 @@ impl GenerationEngine {
             .ok_or_else(|| format!("design `{design_id}` does not exist"))?;
         // A run that stopped may have left placeholder screens behind.
         // They hold no content, so they do not count as written.
-        design
-            .screens
-            .retain(|screen| !crate::designs::is_pending_screen(screen));
+        design.screens.retain(|screen| !is_pending_screen(screen));
         if !design.is_preview() {
             log(&format!(
                 "continue {design_id}: the design is complete already"
@@ -1938,7 +2033,7 @@ impl GenerationEngine {
         if continued.screens.len() >= planned {
             continued.outline.clear();
         }
-        saver.finish(&continued).await?;
+        // Keep this as a streaming draft until the exact final version passes the audit.
         // The polish rounds fill the last share.
         let share = Arc::clone(progress);
         let polish_context = ArtifactRequest {
@@ -1951,19 +2046,25 @@ impl GenerationEngine {
             })),
             live: None,
         };
-        let final_design = self
+        let final_design = match self
             .polish_design(client, continued, &polish_context, log)
-            .await?;
+            .await
+        {
+            Ok(design) => design,
+            Err(error) => {
+                saver.abort(Some(&preview)).await?;
+                return Err(error);
+            }
+        };
         saver.finish(&final_design).await?;
         progress(1.0);
         log(&format!("{label}: saved with {added} new screens"));
         Ok(added)
     }
 
-    /// Reviews a valid design as a designer, one round per effort level.
-    /// An improved design that validates replaces the original; anything
-    /// else keeps the original and logs why.
-    async fn polish_design(
+    /// Tweaks a rendered design within the effort budget and verifies the final version.
+    /// Unavailable audits and unresolved hard layout errors block completion.
+    pub(crate) async fn polish_design(
         &self,
         client: &reqwest::Client,
         mut design: Design,
@@ -1971,56 +2072,53 @@ impl GenerationEngine {
         log: &LogSink,
     ) -> Result<Design, String> {
         let label = &context.label;
-        // Without Chrome nothing can be measured, and a round would
-        // ask the model to fix findings that were never taken.
-        if !crate::polish::can_audit() {
-            log(&format!(
-                "{label}: {}",
-                crate::polish::PolishStop::NotMeasured.describe(0, 0)
-            ));
-            context.report(1.0);
-            return Ok(design);
-        }
-        let limit = crate::polish::polish_round_limit(&context.effort);
-        // The version that measured best, and its finding count. A
-        // round that makes the page worse is measured, reported, and
-        // then thrown away in favour of this.
-        // `limit` is at least 1, so the loop always measures once and
-        // `best_count` is always set before it is read.
+        let limit = polish_round_limit(&context.effort);
+        // Hard layout errors outrank cosmetic warnings when choosing a fallback.
         let mut best = design.clone();
-        let mut best_count = usize::MAX;
-        let mut previous_count: Option<usize> = None;
-        let mut stop = crate::polish::PolishStop::OutOfRounds;
+        let mut best_score = (usize::MAX, usize::MAX);
+        let mut previous_score: Option<(usize, usize)> = None;
+        let mut stop = PolishStop::OutOfRounds;
         let mut rounds_taken = 0usize;
-        for round in 1..=limit {
-            let findings = crate::polish::dom_findings(&design, &self.base_url(), label, log).await;
-            if findings.len() < best_count {
-                best_count = findings.len();
+        // The extra measurement evaluates the last allowed repair, not its predecessor.
+        for round in 0..=limit {
+            log(&format!(
+                "{label}: checking layout before tweak {}",
+                round + 1
+            ));
+            let audit = self.audit_demo(&design).await?;
+            let findings = audit.instructions(None);
+            let score = audit.score(None);
+            if score < best_score {
+                best_score = score;
                 best = design.clone();
             }
             // Nothing measures wrong: another round would spend a model
             // call to change a page that is already good.
             if findings.is_empty() {
-                stop = crate::polish::PolishStop::Clean;
+                stop = PolishStop::Clean;
                 break;
             }
             // The last round did not reduce the findings, so the next
             // will not either. This also breaks a fix-one-break-one
             // loop that would otherwise run to the limit.
-            if previous_count.is_some_and(|before| findings.len() >= before) {
-                stop = crate::polish::PolishStop::NoImprovement;
+            if previous_score.is_some_and(|before| score >= before) {
+                stop = PolishStop::NoImprovement;
                 break;
             }
-            previous_count = Some(findings.len());
+            if round == limit {
+                break;
+            }
+            previous_score = Some(score);
+            let round = round + 1;
             rounds_taken = round;
             let images = self.screen_images(&design, label, log).await;
             log(&format!(
-                "{label}: polish round {round} of at most {limit} ({} layout findings, {} screen images)",
+                "{label}: tweak round {round} of at most {limit} ({} layout findings, {} screen images)",
                 findings.len(),
                 images.len()
             ));
             let design_json = serde_json::to_string(&design).map_err(|error| error.to_string())?;
-            let prompt = crate::polish::polish_prompt(&design_json, &findings, images.len());
+            let prompt = polish_prompt(&design_json, &findings, images.len());
             let messages = vec![
                 serde_json::json!({ "role": "system", "content": system_prompt() }),
                 serde_json::json!({
@@ -2039,27 +2137,27 @@ impl GenerationEngine {
                 )
                 .await?;
             log(&format!(
-                "{label}: polish reply in {:.0}s ({} chars)",
+                "{label}: tweak reply in {:.0}s ({} chars)",
                 started.elapsed().as_secs_f32(),
                 content.len()
             ));
-            // The review is a patch: only the screens it changes.
-            let improved = crate::patch::parse_patch(&content)
-                .and_then(|patch| crate::patch::apply_patch(&design, patch));
-            match improved {
-                Ok(improved) if improved.validate().is_empty() => design = improved,
-                Ok(_) => log(&format!(
-                    "{label}: polished design failed validation; keeping the previous version"
-                )),
-                Err(parse_error) => log(&format!(
-                    "{label}: polish reply unusable ({parse_error}); keeping the previous version"
+            match apply_tweak(&design, &content, None) {
+                Ok(improved) => design = improved,
+                Err(error) => log(&format!(
+                    "{label}: tweak reply unusable ({error}); keeping the previous version"
                 )),
             }
-            context.report(DRAFT_SHARE + (1.0 - DRAFT_SHARE) * round as f32 / limit as f32);
+            context.report(
+                (DRAFT_SHARE + (1.0 - DRAFT_SHARE) * round as f32 / limit as f32).min(0.98),
+            );
         }
         log(&format!(
             "{label}: {}",
-            stop.describe(rounds_taken, best_count)
+            stop.describe(rounds_taken, best_score.1)
+        ));
+        self.audit_demo(&best).await?.require_layout_clean()?;
+        log(&format!(
+            "{label}: final layout verified after {rounds_taken} tweaking round(s)"
         ));
         context.report(1.0);
         Ok(best)
@@ -2068,8 +2166,8 @@ impl GenerationEngine {
     /// Measures the touched screens of an edited design and asks the
     /// model to fix what Chrome finds, round after round: until the
     /// screens measure clean, a round does not help, or the effort's
-    /// round limit runs out. Returns the best version measured.
-    async fn fix_edited_design(
+    /// round limit runs out. Verifies the best exact version before it can replace the saved design.
+    pub(crate) async fn fix_edited_design(
         &self,
         client: &reqwest::Client,
         mut design: Design,
@@ -2077,35 +2175,40 @@ impl GenerationEngine {
         log: &LogSink,
     ) -> Result<Design, String> {
         let label = &fix.context.label;
-        if fix.indexes.is_empty() || !crate::polish::can_audit() {
-            fix.context.report(1.0);
-            return Ok(design);
-        }
-        let limit = crate::polish::polish_round_limit(&fix.context.effort);
+        let limit = polish_round_limit(&fix.context.effort);
         let mut best = design.clone();
-        let mut best_count = usize::MAX;
-        let mut previous_count: Option<usize> = None;
-        let mut stop = crate::polish::PolishStop::OutOfRounds;
+        let mut best_score = (usize::MAX, usize::MAX);
+        let mut previous_score: Option<(usize, usize)> = None;
+        let mut stop = PolishStop::OutOfRounds;
         let mut rounds_taken = 0usize;
-        for round in 1..=limit {
-            let measured = crate::polish::dom_findings(&design, &self.base_url(), label, log).await;
-            let findings = findings_for(&measured, "screens", &fix.indexes);
-            if findings.len() < best_count {
-                best_count = findings.len();
+        for round in 0..=limit {
+            log(&format!(
+                "{label}: checking layout before tweak {}",
+                round + 1
+            ));
+            let audit = self.audit_demo(&design).await?;
+            let findings = audit.layout_instructions(&fix.indexes);
+            let score = audit.score(Some(&fix.indexes));
+            if score < best_score {
+                best_score = score;
                 best = design.clone();
             }
             if findings.is_empty() {
-                stop = crate::polish::PolishStop::Clean;
+                stop = PolishStop::Clean;
                 break;
             }
-            if previous_count.is_some_and(|before| findings.len() >= before) {
-                stop = crate::polish::PolishStop::NoImprovement;
+            if previous_score.is_some_and(|before| score >= before) {
+                stop = PolishStop::NoImprovement;
                 break;
             }
-            previous_count = Some(findings.len());
+            if round == limit {
+                break;
+            }
+            previous_score = Some(score);
+            let round = round + 1;
             rounds_taken = round;
             log(&format!(
-                "{label}: fix round {round} of at most {limit} ({} findings on the touched screens)",
+                "{label}: tweak round {round} of at most {limit} ({} findings on the touched screens)",
                 findings.len()
             ));
             let design_json = focused_design_json(&design, &fix.indexes, false)
@@ -2133,32 +2236,41 @@ impl GenerationEngine {
                     None,
                 )
                 .await;
-            // The edit itself is done. A fix round that cannot reach the
-            // model leaves the best version as it is.
+            // A failed repair must report its cause, not masquerade as exhausted layout rounds.
             let content = match reply {
                 Ok(content) => content,
                 Err(error) => {
                     log(&format!("{label}: fix round {round} failed: {error}"));
-                    break;
+                    return Err(format!(
+                        "The layout repair could not finish: {error}. No verified final version was saved. Remaining layout findings: {}",
+                        findings.join("; ")
+                    ));
                 }
             };
-            let improved = crate::patch::parse_patch(&content)
-                .and_then(|patch| crate::patch::apply_patch(&design, patch));
-            match improved {
-                Ok(improved) if improved.validate().is_empty() => design = improved,
-                Ok(_) => log(&format!(
-                    "{label}: the fix failed validation; keeping the previous version"
-                )),
-                Err(parse_error) => log(&format!(
-                    "{label}: fix reply unusable ({parse_error}); keeping the previous version"
+            match apply_tweak(&design, &content, Some(&fix.indexes)) {
+                Ok(improved) => design = improved,
+                Err(error) => log(&format!(
+                    "{label}: tweak reply unusable ({error}); keeping the previous version"
                 )),
             }
-            fix.context
-                .report(DRAFT_SHARE + (1.0 - DRAFT_SHARE) * round as f32 / limit as f32);
+            fix.context.report(
+                (DRAFT_SHARE + (1.0 - DRAFT_SHARE) * round as f32 / limit as f32).min(0.98),
+            );
         }
         log(&format!(
             "{label}: {}",
-            stop.describe(rounds_taken, best_count)
+            stop.describe(rounds_taken, best_score.0)
+        ));
+        let final_audit = self.audit_demo(&best).await?;
+        final_audit.require_layout_clean_on(Some(&fix.indexes))?;
+        let unedited_errors = final_audit.score(None).0;
+        if unedited_errors > 0 {
+            log(&format!(
+                "{label}: {unedited_errors} layout finding(s) remain on unedited screens; the verification covers only the touched screens"
+            ));
+        }
+        log(&format!(
+            "{label}: final layout verified after {rounds_taken} tweaking round(s) on the touched screens"
         ));
         fix.context.report(1.0);
         Ok(best)
@@ -2168,27 +2280,24 @@ impl GenerationEngine {
     /// `POLISH_IMAGE_LIMIT`. Empty when the model cannot see images or
     /// no Chrome is installed; a failed screenshot is logged and skipped.
     async fn screen_images(&self, design: &Design, label: &str, log: &LogSink) -> Vec<Vec<u8>> {
-        if !crate::screenshots::supports_vision(self.model.model()) {
+        if !supports_vision(self.model.model()) {
             return Vec::new();
         }
-        if crate::screenshots::find_chrome().is_none() {
+        if find_chrome().is_none() {
             log(&format!(
                 "{label}: no Chrome found for screen images; reviewing from JSON only"
             ));
             return Vec::new();
         }
         let base_url = self.base_url();
-        let count = design
-            .screens
-            .len()
-            .min(crate::screenshots::POLISH_IMAGE_LIMIT);
+        let count = design.screens.len().min(POLISH_IMAGE_LIMIT);
         // One Chrome per screen, all at once.
         let mut tasks = tokio::task::JoinSet::new();
         for index in 0..count {
             let design = design.clone();
             let base_url = base_url.clone();
             tasks.spawn(async move {
-                let shot = crate::screenshots::screenshot_screen(&design, index, &base_url).await;
+                let shot = screenshot_screen(&design, index, &base_url).await;
                 (index, shot)
             });
         }
@@ -2229,13 +2338,22 @@ impl GenerationEngine {
         ];
         let saver = LiveSaver::new(self, &request.design_id);
         let live_saver = saver.clone();
+        let needs_app_window = request.context.options.should_have_app_window();
         let context = ArtifactRequest {
             effort: request.context.effort().to_owned(),
             label: format!("candidate {}", request.candidate_number),
-            parse: Box::new(parse_design),
+            parse: Box::new(move |content| {
+                let design = parse_design(content)?;
+                if needs_app_window && design.app_window.is_none() {
+                    return Err("This app candidate needs shared app_window bounds. Mark one top-level data-swift-design-window shell in every screen.".to_owned());
+                }
+                Ok(design)
+            }),
             progress: Some(Arc::clone(progress)),
             live: Some(Arc::new(move |text: &str| {
-                if let Some(design) = partial_design(text) {
+                if let Some(design) = partial_design(text)
+                    && (!needs_app_window || design.app_window.is_some())
+                {
                     let rank = design.screens.len();
                     live_saver.offer(design, rank);
                 }
@@ -2243,10 +2361,13 @@ impl GenerationEngine {
         };
         let draft = self.request_valid(client, messages, &context, log).await?;
         saver.offer(draft.clone(), draft.screens.len());
-        let polished = self
-            .polish_design(client, draft, &context, log)
-            .await
-            .map_err(GenerationStop::Failed)?;
+        let polished = match self.polish_design(client, draft, &context, log).await {
+            Ok(design) => design,
+            Err(error) => {
+                saver.abort(None).await.map_err(GenerationStop::Failed)?;
+                return Err(GenerationStop::Failed(error));
+            }
+        };
         saver
             .finish(&polished)
             .await
@@ -2345,6 +2466,12 @@ impl GenerationEngine {
         )))
     }
 
+    /// Reports transient provider retries to the active run.
+    pub fn with_retry_log(mut self, log: LogSink) -> Self {
+        self.model = self.model.with_retry_log(log);
+        self
+    }
+
     /// Reports each request's token usage to `sink`.
     pub fn with_usage_sink(mut self, sink: UsageSink) -> Self {
         self.model = self.model.with_usage_sink(sink);
@@ -2431,7 +2558,7 @@ pub(crate) fn user_content_with_images(text: &str, images: &[Vec<u8>]) -> serde_
         parts.push(serde_json::json!({
             "type": "image_url",
             "image_url": {
-                "url": format!("data:image/png;base64,{}", crate::export::base64_encode(image)),
+                "url": format!("data:image/png;base64,{}", base64_encode(image)),
             },
         }));
     }
@@ -2562,7 +2689,7 @@ fn attachment_parts(
                     "url": format!(
                         "data:{};base64,{}",
                         file.content_type,
-                        crate::export::base64_encode(&file.bytes)
+                        base64_encode(&file.bytes)
                     ),
                 },
             }),
@@ -2577,7 +2704,7 @@ fn attachment_parts(
                     "filename": file.name,
                     "file_data": format!(
                         "data:application/pdf;base64,{}",
-                        crate::export::base64_encode(&file.bytes)
+                        base64_encode(&file.bytes)
                     ),
                 },
             }),
@@ -2587,8 +2714,8 @@ fn attachment_parts(
         let text = String::from_utf8_lossy(&file.bytes);
         return vec![inlined_text_part(file, &text, &size, budget)];
     }
-    if crate::office::is_office_type(&file.content_type) {
-        return match crate::office::office_text(&file.content_type, &file.bytes) {
+    if is_office_type(&file.content_type) {
+        return match office_text(&file.content_type, &file.bytes) {
             Ok(text) => vec![inlined_text_part(file, &text, &size, budget)],
             Err(error) => vec![label(&format!(
                 ": the file could not be read ({error:#}). Tell the user if you need its content."
@@ -2620,7 +2747,7 @@ fn text_of(bytes: &[u8]) -> Option<&str> {
 fn is_text_attachment(file: &UploadAttachment) -> bool {
     file.content_type.starts_with("text/")
         || file.content_type == "application/json"
-        || crate::office::is_office_type(&file.content_type)
+        || is_office_type(&file.content_type)
         || (!file.content_type.starts_with("image/")
             && file.content_type != "application/pdf"
             && text_of(&file.bytes).is_some())
@@ -2801,8 +2928,8 @@ fn placeholder_screen(title: &str) -> design_model::Screen {
         html: format!(
             "<div class=\"{pending} pending\"><p class=\"pending-label\">Writing</p>\
              <h2 class=\"pending-title\">{title}</h2></div>",
-            pending = crate::designs::PENDING_SCREEN_CLASS,
-            title = crate::render::escape_html(title),
+            pending = PENDING_SCREEN_CLASS,
+            title = escape_html(title),
         ),
         css: Some(
             ".pending { display: flex; flex-direction: column; align-items: center; \
@@ -2873,6 +3000,24 @@ impl LiveSaver {
                 saver.notifier.notify();
             }
         });
+    }
+
+    /// Stops pending draft writes and restores the baseline after verification fails.
+    async fn abort(&self, previous: Option<&Design>) -> Result<(), String> {
+        let _guard = self.write_lock.lock().await;
+        self.is_finished
+            .store(true, std::sync::atomic::Ordering::Release);
+        let restored = if let Some(previous) = previous {
+            self.designs.save(&self.design_id, previous).await
+        } else {
+            self.designs.delete(&self.design_id).await.map(|_| ())
+        };
+        restored.map_err(|error| {
+            tracing::error!(design_id = %self.design_id, %error, "failed to restore the candidate after layout verification failed");
+            "Could not restore the candidate after verification failed. Retry the run.".to_owned()
+        })?;
+        self.notifier.notify();
+        Ok(())
     }
 
     /// Saves the final design after every partial save landed.
@@ -3075,14 +3220,16 @@ fn edit_prompt(request: &SessionRequest, input: &EditInput<'_>) -> String {
          start of its text. A reference like [screen 3, nodes 0/1 <h2>; 0/2 <p>] names several \
          elements of one screen the same way, without their text. A reference like [screen 3] \
          names the screen alone: the change is about that screen. Change only what the critique asks for. Keep every other screen and \
-         value as it is. Return every changed screen complete: html, css, and notes.\n{format}",
+         value as it is. Preserve the candidate's shared app_window bounds and every shell marker. \
+         Do not resize the window to fit one screen's content. Keep window chrome, header height, \
+         and sidebar width consistent across screens. Return every changed screen complete: html, css, and notes.\n{format}",
         design_json = input.artifact_json,
         note = input.note,
         request = request_input(request),
         critique = input.instruction.trim(),
-        conversation = crate::edit_focus::conversation_block(input.conversation),
+        conversation = conversation_block(input.conversation),
         findings = findings_note(input.findings),
-        format = crate::patch::PATCH_FORMAT
+        format = PATCH_FORMAT
     )
 }
 
@@ -3111,6 +3258,7 @@ fn focused_design_json(
         "title": design.title,
         "theme": design.theme,
         "viewport": design.viewport,
+        "app_window": design.app_window,
         "screen_count": design.screens.len(),
         "screens": screens,
     }))
@@ -3142,7 +3290,7 @@ struct CandidateRequest<'request> {
     design_id: String,
     /// The template the candidate takes its look from, when the options
     /// name one.
-    template: Option<&'request crate::templates::Template>,
+    template: Option<&'request Template>,
     /// The candidates to combine, when this candidate is a merge.
     merge: Option<&'request MergeInput>,
 }
@@ -3188,7 +3336,9 @@ fn continue_prompt(
     prompt.push_str(&format!(
         "Write {} screens: outline titles {} to {last} of {planned}, in order, one screen per \
          title:\n{}\n\
-         Keep the theme. Match the existing screens in CSS style, font sizes, spacing, colors, \
+         Keep the theme and app_window. When app_window is set, mark exactly one top-level \
+         shell element with data-swift-design-window on every new screen. Match window chrome, \
+         header height, and sidebar width. Match the existing screens in CSS style, font sizes, spacing, colors, \
          and visual language, so the design reads as one design. Do not change or repeat the \
          existing screens.\n",
         next_titles.len(),
@@ -3331,7 +3481,7 @@ pub(crate) fn candidate_plans(
         for variation in 1..=variations.max(1) {
             let candidate_number = first_number.max(1) + plans.len();
             plans.push(CandidatePlan {
-                design_id: crate::candidates::candidate_id(base, candidate_number),
+                design_id: candidate_id(base, candidate_number),
                 candidate_number,
                 variation,
                 viewport,
@@ -3380,7 +3530,11 @@ fn candidate_prompt(request: &CandidateRequest<'_>) -> String {
     // own canvas.
     let viewport = request.viewport;
     prompt.push_str(&format!(
-        "Set `viewport` to {} by {} px. Design every screen for that canvas.\n",
+        "Set `viewport` to {} by {} px. Design every screen for that canvas. \
+         For app screens, choose one shared app_window rectangle for this candidate. \
+         Mark one top-level shell per screen with data-swift-design-window. \
+         Reuse the same window chrome, header height, and sidebar width. \
+         Different candidates may choose different window bounds.\n",
         viewport.width, viewport.height
     ));
     prompt.push_str("Reply with only the design JSON.");
@@ -3391,9 +3545,9 @@ fn candidate_prompt(request: &CandidateRequest<'_>) -> String {
 /// Candidates are numbered from one and wrap around the chosen
 /// templates, so three looks across five candidates run 1, 2, 3, 1, 2.
 pub(crate) fn candidate_template(
-    templates: &[crate::templates::Template],
+    templates: &[Template],
     candidate_number: usize,
-) -> Option<crate::templates::Template> {
+) -> Option<Template> {
     if templates.is_empty() {
         return None;
     }
@@ -3404,7 +3558,7 @@ pub(crate) fn candidate_template(
 
 /// The prompt lines for a template: the theme to copy and the screens to
 /// match. The template gives the look. The brief gives the content.
-pub(crate) fn template_note(template: &crate::templates::Template) -> String {
+pub(crate) fn template_note(template: &Template) -> String {
     let mut note = format!(
         "Use the saved template `{name}` for the look of this design.\n\
          Copy this theme into the design exactly. Use it instead of any palette or fonts \
@@ -3456,24 +3610,29 @@ fn parse_design(content: &str) -> Result<Design, String> {
 mod tests {
     use std::sync::Arc;
 
-    use design_model::WorkflowState;
+    use design_model::{AppWindow, WorkflowState};
 
     use super::edit_targets;
 
     use super::{
         ATTACHMENT_TEXT_LIMIT_BYTES, ATTACHMENT_TEXT_TOTAL_LIMIT_BYTES, Attachments,
-        GenerationContext, GenerationEngine, GenerationOutcome, ProgressGroup, ProgressSink,
-        UploadAttachment, answers_since_last_write, candidate_plans, edit_prompt,
+        GenerationContext, GenerationEngine, GenerationOutcome, LiveSaver, ProgressGroup,
+        ProgressSink, UploadAttachment, answers_since_last_write, candidate_plans, edit_prompt,
         focused_design_json, system_prompt, text_of, trailing_continue_ids,
         user_content_with_attachments,
     };
     use crate::designs::DesignStore;
     use crate::edit_focus::EditInput;
+    use crate::edit_report::EDIT_REPORT_PREFIX;
     use crate::events::ChangeNotifier;
     use crate::model_client::LogSink;
+    use crate::office::DOCX;
     use crate::request::SessionRequest;
-    use crate::sessions::{ChatMessage, NewSession, SessionStore};
-    use crate::test_support::{FakeModelServer, SAMPLE_DESIGN, low_effort_options};
+    use crate::sessions::{AnswerRecord, ChatMessage, NewSession, SessionStore};
+    use crate::test_support::{
+        FakeModelServer, SAMPLE_DESIGN, clean_demo_dom_runner, low_effort_options,
+    };
+    use crate::uploads::UploadStore;
 
     /// The planner reply that writes candidates.
     const WRITE_PLAN: &str = r#"{"reply":"Writing it now.","generate":true}"#;
@@ -3495,6 +3654,34 @@ mod tests {
             "http://127.0.0.1:3000".to_owned(),
             ChangeNotifier::new(),
         )
+        .with_demo_dom_runner(clean_demo_dom_runner())
+    }
+
+    #[tokio::test]
+    async fn failed_verification_restores_the_baseline_and_stops_pending_draft_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let designs = DesignStore::new(directory.path().join("designs"));
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let fake = FakeModelServer::start().await;
+        let engine = engine(&fake, &designs, &sessions);
+        let original: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+        designs.save("candidate-1", &original).await.unwrap();
+        let mut unverified = original.clone();
+        unverified.title = "Unverified".to_owned();
+        let saver = LiveSaver::new(&engine, "candidate-1");
+        saver.offer(unverified.clone(), 1);
+        saver.abort(Some(&original)).await.unwrap();
+        saver.offer(unverified, 2);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(
+            designs.load("candidate-1").await.unwrap().unwrap(),
+            original
+        );
+        let fresh = LiveSaver::new(&engine, "candidate-2");
+        fresh.offer(original, 1);
+        fresh.abort(None).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(designs.load("candidate-2").await.unwrap().is_none());
     }
 
     /// A fresh one-candidate, low-effort session, still in intake.
@@ -3579,7 +3766,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let designs = DesignStore::new(directory.path().join("designs"));
         let sessions = SessionStore::new(directory.path().join("sessions"));
-        let uploads = crate::uploads::UploadStore::new(directory.path().join("uploads"));
+        let uploads = UploadStore::new(directory.path().join("uploads"));
         uploads
             .save(
                 "talk",
@@ -3618,7 +3805,7 @@ mod tests {
         let attachments = Attachments {
             files: vec![UploadAttachment {
                 name: "brief.docx".to_owned(),
-                content_type: crate::office::DOCX.to_owned(),
+                content_type: DOCX.to_owned(),
                 bytes,
             }],
             skipped: Vec::new(),
@@ -3631,7 +3818,7 @@ mod tests {
         let broken = Attachments {
             files: vec![UploadAttachment {
                 name: "brief.docx".to_owned(),
-                content_type: crate::office::DOCX.to_owned(),
+                content_type: DOCX.to_owned(),
                 bytes: b"not a zip".to_vec(),
             }],
             skipped: Vec::new(),
@@ -4019,7 +4206,7 @@ mod tests {
 
     #[test]
     fn answers_count_per_request_from_the_last_write() {
-        let record = |at: &str, count: usize| crate::sessions::AnswerRecord {
+        let record = |at: &str, count: usize| AnswerRecord {
             question_set: 1,
             answers: (0..count)
                 .map(|index| design_model::QuestionAnswer {
@@ -4044,14 +4231,35 @@ mod tests {
     }
 
     #[test]
+    fn fresh_app_candidates_require_shared_window_bounds_but_landing_pages_do_not() {
+        let mut options = low_effort_options();
+        assert!(!options.should_have_app_window());
+        options.product_kind = Some("business_app".to_owned());
+        assert!(options.should_have_app_window());
+        options.scope = Some("landing_page".to_owned());
+        assert!(!options.should_have_app_window());
+        options.scope = Some("whole_app".to_owned());
+        options.product_kind = Some("content_site".to_owned());
+        assert!(!options.should_have_app_window());
+    }
+
+    #[test]
     fn a_focused_design_edit_shows_only_the_named_screens_and_their_findings() {
         let mut design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
         design.screens.push(design.screens[0].clone());
+        design.app_window = Some(AppWindow {
+            left: 80,
+            top: 60,
+            width: 1280,
+            height: 780,
+        });
         let focused = focused_design_json(&design, &[1], false).unwrap();
         let value: serde_json::Value = serde_json::from_str(&focused).unwrap();
         assert_eq!(value["screen_count"], design.screens.len());
         assert_eq!(value["screens"].as_array().unwrap().len(), 1);
         assert_eq!(value["screens"][0]["index"], 1);
+        assert_eq!(value["app_window"]["width"], 1280);
+        assert_eq!(value["app_window"]["height"], 780);
         let request = SessionRequest {
             request: "A landing page.".to_owned(),
             conversation: String::new(),
@@ -4175,7 +4383,7 @@ mod tests {
         sessions
             .append_message(
                 "talk",
-                ChatMessage::user("Tighten the hero.", Some("talk-candidate-1")),
+                ChatMessage::user("[screen 1] Tighten the hero.", Some("talk-candidate-1")),
             )
             .await
             .unwrap();
@@ -4213,7 +4421,7 @@ mod tests {
         sessions
             .append_message(
                 "talk",
-                ChatMessage::user("Tighten the hero.", Some("talk-candidate-1")),
+                ChatMessage::user("[screen 1] Tighten the hero.", Some("talk-candidate-1")),
             )
             .await
             .unwrap();
@@ -4227,18 +4435,14 @@ mod tests {
         assert!(reports[0].contains("Modified screen 1"));
         let messages = sessions.messages("talk").await.unwrap();
         let completion = messages.last().unwrap();
-        assert!(
-            completion
-                .content
-                .starts_with(crate::edit_report::EDIT_REPORT_PREFIX)
-        );
+        assert!(completion.content.starts_with(EDIT_REPORT_PREFIX));
         assert!(completion.content.contains("Modified screen 1"));
         assert!(!completion.content.contains("I wrote"));
         assert_eq!(completion.artifacts, ["talk-candidate-1"]);
         let edited = designs.load("talk-candidate-1").await.unwrap().unwrap();
         assert!(edited.screens[0].html.contains("Tighter"));
         let text = server.requests()[1].to_string();
-        assert!(text.contains("Apply this change: Tighten the hero."));
+        assert!(text.contains("Apply this change: [screen 1] Tighten the hero."));
         let planner = server.requests()[0].to_string();
         assert!(planner.contains("Artifacts named this turn: talk-candidate-1"));
     }
@@ -4271,8 +4475,11 @@ mod tests {
         sessions
             .append_message(
                 "talk",
-                ChatMessage::user("[candidate 1] [candidate 3] Tighten the hero.", None)
-                    .with_pinned(pinned),
+                ChatMessage::user(
+                    "[candidate 1] [candidate 3] [screen 1] Tighten the hero.",
+                    None,
+                )
+                .with_pinned(pinned),
             )
             .await
             .unwrap();
@@ -4418,7 +4625,7 @@ mod tests {
         sessions
             .append_message(
                 "talk",
-                ChatMessage::user("[candidate 1] Tighten the hero.", None)
+                ChatMessage::user("[candidate 1] [screen 1] Tighten the hero.", None)
                     .with_pinned(vec!["talk-candidate-1".to_owned()]),
             )
             .await

@@ -6,7 +6,7 @@
 //! screen index in the design as it was before the edit. The server applies
 //! the patch and validates the result.
 
-use design_model::{Design, Screen, Theme};
+use design_model::{AppWindow, Design, Screen, Theme};
 use serde::Deserialize;
 
 /// One screen operation in a patch.
@@ -33,6 +33,9 @@ pub struct DesignPatch {
     /// New theme, when it changes.
     #[serde(default)]
     pub theme: Option<Theme>,
+    /// Shared app-window bounds, changed only when the whole shell must change.
+    #[serde(default)]
+    pub app_window: Option<AppWindow>,
     /// Screen operations. Indexes refer to the design before the edit.
     #[serde(default)]
     pub screens: Vec<ScreenPatch>,
@@ -48,7 +51,12 @@ Reply with only a JSON patch, not the whole design:\n\
 Every index is zero-based and refers to the design as it is now, before your changes. \
 A replacement carries the complete screen: html, css, and notes, changed or not. \
 \"screen\": null deletes that screen. \"insert\": true puts the new screen before that index; \
-an index equal to the screen count appends. Omit title, theme, and untouched screens.";
+an index equal to the screen count appends. Omit title, theme, and untouched screens. \
+Preserve app_window and each data-swift-design-window marker. \
+Only change shared window bounds when requested. To change them, include \
+\"app_window\":{\"left\":80,\"top\":60,\"width\":1280,\"height\":780}. \
+This changes the window on every screen in this candidate. \
+When adding app_window to a legacy design, mark one top-level shell on every screen.";
 
 /// Extracts and parses the patch JSON from a model reply.
 pub fn parse_patch(content: &str) -> Result<DesignPatch, String> {
@@ -73,6 +81,9 @@ pub fn apply_patch(design: &Design, patch: DesignPatch) -> Result<Design, String
     }
     if let Some(theme) = patch.theme {
         result.theme = theme;
+    }
+    if let Some(app_window) = patch.app_window {
+        result.app_window = Some(app_window);
     }
     let count = design.screens.len();
     let mut replacements: Vec<Option<Option<Screen>>> = (0..count).map(|_| None).collect();
@@ -163,6 +174,34 @@ mod tests {
         let patch =
             parse_patch("{\"screens\":[{\"index\":9,\"insert\":true,\"screen\":null}]}").unwrap();
         assert!(apply_patch(&original, patch).is_err());
+    }
+
+    #[test]
+    fn a_shared_window_patch_applies_once_to_the_candidate() {
+        let mut original = design();
+        for screen in &mut original.screens {
+            screen.html = "<article data-swift-design-window><h2>Screen</h2></article>".to_owned();
+        }
+        let patch = parse_patch(r#"{"app_window":{"left":80,"top":60,"width":1280,"height":780}}"#)
+            .unwrap();
+        let patched = apply_patch(&original, patch).unwrap();
+        assert_eq!(
+            patched.app_window,
+            Some(AppWindow {
+                left: 80,
+                top: 60,
+                width: 1280,
+                height: 780
+            })
+        );
+        assert_eq!(patched.screens, original.screens);
+        assert!(patched.validate().is_empty());
+        assert_eq!(
+            apply_patch(&patched, parse_patch("{}").unwrap())
+                .unwrap()
+                .app_window,
+            patched.app_window
+        );
     }
 
     #[test]

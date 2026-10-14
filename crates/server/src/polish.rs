@@ -2,24 +2,27 @@
 //! validates.
 //!
 //! Validation checks that a design is safe and well formed. Polish checks
-//! that it looks right. When Chrome is available, the rendered design runs
-//! a layout audit in the browser (overflowing boxes, content off the
-//! screen, tiny text, overlapping text blocks, empty screens, low
-//! contrast, long lines) and the findings go to the model together with
-//! screen screenshots. An improved design that validates replaces the
-//! original. The audit script itself is `render::AUDIT_SCRIPT`. The deck
-//! twin, `deck_polish.rs`, shares the audit and the parser and differs in
-//! wording only.
+//! that it looks right. Demo completion requires a complete Chrome audit.
+//! Hard layout errors go through bounded tweaking rounds and block completion
+//! if they remain. The exact chosen version is measured again before saving.
+//! Cosmetic warnings remain best-effort. Rendered screenshots accompany the
+//! generation review when the model supports images. The audit script itself
+//! is `render::AUDIT_SCRIPT`. Other artifact pipelines share the script and
+//! finding vocabulary but retain their existing completion policies.
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use design_model::Design;
+use design_model::markup::layout_declarations;
 use serde::Deserialize;
 
-use crate::model_client::LogSink;
-use crate::patch::PATCH_FORMAT;
+use crate::patch::{PATCH_FORMAT, apply_patch, parse_patch};
 use crate::screenshots::{dump_design_dom, find_chrome};
 
 /// One finding from the in-browser audit script.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Finding {
     /// Zero-based screen or slide index.
     pub(crate) screen: usize,
@@ -27,7 +30,7 @@ pub(crate) struct Finding {
     #[serde(default)]
     pub(crate) node: String,
     /// `overflow`, `off_screen`, `overfull`, `tiny_text`, `overlap`,
-    /// `empty`, `contrast`, `long_lines`, or `static_control`.
+    /// `empty`, `contrast`, `long_lines`, `static_control`, `alignment`, or `window_geometry`.
     #[serde(default)]
     pub(crate) kind: String,
     /// What was measured.
@@ -86,38 +89,10 @@ pub fn can_audit() -> bool {
     find_chrome().is_some()
 }
 
-/// Layout findings measured in a browser. Empty when no Chrome is
-/// installed or the audit fails; both are logged.
-pub async fn dom_findings(
-    design: &Design,
-    base_url: &str,
-    label: &str,
-    log: &LogSink,
-) -> Vec<String> {
-    if find_chrome().is_none() {
-        log(&format!(
-            "{label}: no Chrome found for the layout audit; reviewing from JSON only"
-        ));
-        return Vec::new();
-    }
-    match dump_design_dom(design, base_url).await {
-        Ok(dom) => {
-            let findings = parse_findings(&dom);
-            if findings.is_empty() && !dom.contains("data-swift-design-findings") {
-                log(&format!("{label}: the layout audit returned no report"));
-            }
-            findings
-        }
-        Err(error) => {
-            log(&format!("{label}: layout audit failed: {error}"));
-            Vec::new()
-        }
-    }
-}
-
 /// Reads the audit report out of a dumped DOM: the JSON in the
 /// `data-swift-design-findings` attribute on `<html>`. The findings
 /// come ordered by severity and capped per kind, see `prioritized`.
+#[cfg(test)]
 pub fn parse_findings(dom: &str) -> Vec<String> {
     prioritized(raw_findings(dom))
         .iter()
@@ -135,10 +110,10 @@ pub(crate) const FINDINGS_PER_KIND_LIMIT: usize = 6;
 /// and the model fixed none of them.
 fn kind_rank(kind: &str) -> usize {
     match kind {
-        "overfull" => 0,
+        "window_geometry" | "overfull" => 0,
         "off_screen" => 1,
         "overflow" => 2,
-        "overlap" => 3,
+        "overlap" | "alignment" => 3,
         "static_control" => 4,
         "empty" => 5,
         "contrast" => 6,
@@ -192,25 +167,237 @@ pub(crate) fn prioritized(findings: Vec<Finding>) -> Vec<Finding> {
 /// The audit findings in a dumped DOM, as records. Empty when the page
 /// carries no report or the report does not parse.
 pub(crate) fn raw_findings(dom: &str) -> Vec<Finding> {
+    measured_findings(dom).unwrap_or_default()
+}
+
+/// Reads a report without treating a missing or malformed audit as clean.
+fn measured_findings(dom: &str) -> Option<Vec<Finding>> {
     let marker = "data-swift-design-findings=\"";
-    let Some(start) = dom.find(marker) else {
-        return Vec::new();
-    };
+    let start = dom.find(marker)?;
     let rest = &dom[start + marker.len()..];
-    let Some(end) = rest.find('"') else {
-        return Vec::new();
-    };
+    let end = rest.find('"')?;
     let json = rest[..end]
         .replace("&quot;", "\"")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&amp;", "&");
-    serde_json::from_str(&json).unwrap_or_default()
+    serde_json::from_str(&json).ok()
+}
+
+/// The browser boundary used by mandatory demo audits.
+pub(crate) type DemoDomRunner = Arc<
+    dyn Fn(Design, String) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Runs the real browser without exposing browser errors or paths to session records.
+pub(crate) fn chrome_dom_runner() -> DemoDomRunner {
+    Arc::new(|design, base_url| {
+        Box::pin(async move {
+            dump_design_dom(&design, &base_url).await.map_err(|error| {
+                tracing::warn!(%error, "demo layout audit failed");
+                "Could not run the browser layout audit. Check Chrome and retry.".to_owned()
+            })
+        })
+    })
+}
+
+/// A complete browser measurement of one exact design version.
+pub(crate) struct DemoAudit {
+    findings: Vec<Finding>,
+}
+
+impl DemoAudit {
+    /// Reads a valid report and verifies that every screen was measured.
+    pub(crate) fn from_dom(dom: &str, screen_count: usize) -> Result<Self, String> {
+        let findings = measured_findings(dom).ok_or_else(|| {
+            "The layout audit returned no valid report. Retry the run.".to_owned()
+        })?;
+        let marker = "data-swift-design-audited-screens=\"";
+        let coverage = dom.find(marker).and_then(|start| {
+            let rest = &dom[start + marker.len()..];
+            let end = rest.find('"')?;
+            serde_json::from_str::<Vec<usize>>(&rest[..end].replace("&quot;", "\"")).ok()
+        });
+        let expected: Vec<usize> = (0..screen_count).collect();
+        if coverage.as_ref() != Some(&expected)
+            || findings
+                .iter()
+                .any(|finding| finding.screen >= screen_count || !is_known_finding(&finding.kind))
+        {
+            return Err("The layout audit did not measure every screen. Retry the run.".to_owned());
+        }
+        Ok(Self { findings })
+    }
+
+    /// Returns prioritized instructions for all screens or a focused edit.
+    pub(crate) fn instructions(&self, indexes: Option<&[usize]>) -> Vec<String> {
+        prioritized(
+            self.findings
+                .iter()
+                .filter(|finding| indexes.is_none_or(|indexes| indexes.contains(&finding.screen)))
+                .cloned()
+                .collect(),
+        )
+        .iter()
+        .map(format_finding)
+        .collect()
+    }
+
+    /// Returns only layout blockers for repair rounds after a focused user edit.
+    pub(crate) fn layout_instructions(&self, indexes: &[usize]) -> Vec<String> {
+        prioritized(
+            self.findings
+                .iter()
+                .filter(|finding| indexes.contains(&finding.screen) && is_blocking(&finding.kind))
+                .cloned()
+                .collect(),
+        )
+        .iter()
+        .map(format_finding)
+        .collect()
+    }
+
+    /// Scores hard layout errors before optional visual improvements.
+    pub(crate) fn score(&self, indexes: Option<&[usize]>) -> (usize, usize) {
+        let findings: Vec<&Finding> = self
+            .findings
+            .iter()
+            .filter(|finding| indexes.is_none_or(|indexes| indexes.contains(&finding.screen)))
+            .collect();
+        (
+            findings
+                .iter()
+                .filter(|finding| is_blocking(&finding.kind))
+                .count(),
+            findings.len(),
+        )
+    }
+
+    /// Blocks completion while any measured layout error remains on any screen.
+    pub(crate) fn require_layout_clean(&self) -> Result<(), String> {
+        self.require_layout_clean_on(None)
+    }
+
+    /// Verifies the touched screens without claiming that untouched legacy screens are clean.
+    pub(crate) fn require_layout_clean_on(&self, indexes: Option<&[usize]>) -> Result<(), String> {
+        let blockers: Vec<String> = self
+            .findings
+            .iter()
+            .filter(|finding| {
+                is_blocking(&finding.kind)
+                    && indexes.is_none_or(|indexes| indexes.contains(&finding.screen))
+            })
+            .map(|finding| {
+                format!(
+                    "screen {} {} at {}: {}",
+                    finding.screen + 1,
+                    finding.kind,
+                    finding.node,
+                    finding.detail
+                )
+            })
+            .take(8)
+            .collect();
+        if blockers.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "Layout verification failed after tweaking. No verified final version was saved. {}",
+            blockers.join("; ")
+        ))
+    }
+}
+
+/// Applies a layout-only tweak without inserting, deleting, or touching unrequested screens.
+pub(crate) fn apply_tweak(
+    design: &Design,
+    content: &str,
+    indexes: Option<&[usize]>,
+) -> Result<Design, String> {
+    let patch = parse_patch(content)?;
+    if patch.screens.iter().any(|operation| {
+        operation.insert
+            || operation.screen.is_none()
+            || indexes.is_some_and(|indexes| !indexes.contains(&operation.index))
+    }) {
+        return Err("A layout tweak must replace only the requested screens. Do not insert or delete screens.".to_owned());
+    }
+    if indexes.is_some_and(|indexes| indexes.len() < design.screens.len())
+        && patch
+            .theme
+            .as_ref()
+            .is_some_and(|theme| theme != &design.theme)
+    {
+        return Err("A focused layout tweak must not change the shared theme.".to_owned());
+    }
+    let improved = apply_patch(design, patch)?;
+    if !improved.validate().is_empty() || !respects_layout_contracts(design, &improved) {
+        return Err("The tweak failed validation or changed a layout contract.".to_owned());
+    }
+    Ok(improved)
+}
+
+/// Prevents a tweak from hiding a failure by deleting its layout contract.
+pub(crate) fn respects_layout_contracts(before: &Design, after: &Design) -> bool {
+    if before.viewport != after.viewport
+        || before.app_window != after.app_window
+        || before.screens.len() != after.screens.len()
+    {
+        return false;
+    }
+    before
+        .screens
+        .iter()
+        .zip(&after.screens)
+        .all(|(before, after)| {
+            let mut remaining = layout_declarations(&after.html);
+            layout_declarations(&before.html)
+                .into_iter()
+                .all(|declaration| {
+                    let Some(index) = remaining
+                        .iter()
+                        .position(|candidate| candidate == &declaration)
+                    else {
+                        return false;
+                    };
+                    remaining.remove(index);
+                    true
+                })
+        })
+}
+
+fn is_known_finding(kind: &str) -> bool {
+    is_blocking(kind)
+        || matches!(
+            kind,
+            "tiny_text" | "contrast" | "long_lines" | "static_control"
+        )
+}
+
+fn is_blocking(kind: &str) -> bool {
+    matches!(
+        kind,
+        "window_geometry"
+            | "overflow"
+            | "off_screen"
+            | "overfull"
+            | "overlap"
+            | "alignment"
+            | "empty"
+    )
 }
 
 /// The fix advice for one finding kind.
 pub(crate) fn finding_advice(kind: &str) -> &'static str {
     match kind {
+        "window_geometry" => {
+            "preserve app_window and its top-level shell marker; reduce overflowing content so every screen renders the shared bounds without shrinking"
+        }
+        "alignment" => {
+            "align the declared group edges or dimensions; use equal gaps on the declared axis; preserve intentional unmarked offsets"
+        }
         "overflow" => "shorten the text, enlarge the box, or reduce the font size",
         "off_screen" => "move or shrink it so it stays inside the canvas",
         "tiny_text" => "use a larger font size",
@@ -266,7 +453,9 @@ pub fn polish_prompt(design_json: &str, findings: &[String], image_count: usize)
          overlap or touch, uneven margins, misaligned edges, inconsistent sizes for the same \
          role across screens, low contrast between text and background, screens that are too \
          dense or too empty, and a weak title screen. Keep the concept, the outline, and the \
-         content. Do not add or delete screens. Change only the screens that need it.\n",
+         content. Preserve app_window and all shell markers. Keep the shared window bounds, \
+         window chrome, header height, and sidebar width. Fix overflowing content instead of \
+         resizing one window. Preserve data-layout-align and data-layout-gap declarations. Completion is blocked by unresolved overflow, off-screen content, overlap, shrinking, or declared alignment errors. Your reply is rendered and measured again. Do not add or delete screens. Change only the screens that need it.\n",
     );
     prompt.push_str(PATCH_FORMAT);
     prompt.push_str(" When nothing needs a change, reply with {}.");
@@ -274,10 +463,124 @@ pub fn polish_prompt(design_json: &str, findings: &[String], image_count: usize)
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     use crate::render::AUDIT_SCRIPT;
+
+    #[test]
+    fn mandatory_audits_reject_missing_malformed_or_incomplete_reports() {
+        for dom in [
+            "<html>",
+            "<html data-swift-design-findings=\"bad\">",
+            "<html data-swift-design-findings=\"[]\">",
+            "<html data-swift-design-findings=\"[]\" data-swift-design-audited-screens=\"[0]\">",
+        ] {
+            assert!(DemoAudit::from_dom(dom, 2).is_err());
+        }
+        assert!(DemoAudit::from_dom("<html data-swift-design-findings=\"[]\" data-swift-design-audited-screens=\"[0,1]\">", 2).is_ok());
+    }
+
+    #[test]
+    fn incomplete_or_unknown_finding_records_are_not_a_successful_audit() {
+        for finding in [
+            r#"{"screen":2,"kind":"overflow"}"#,
+            r#"{"screen":0,"kind":"unknown_error"}"#,
+            r#"{"screen":0}"#,
+        ] {
+            let dom = format!(
+                "<html data-swift-design-findings=\"[{}]\" data-swift-design-audited-screens=\"[0]\">",
+                finding.replace('"', "&quot;")
+            );
+            assert!(DemoAudit::from_dom(&dom, 1).is_err());
+        }
+    }
+
+    #[test]
+    fn hard_layout_errors_cannot_be_saved_as_best_effort() {
+        for kind in [
+            "window_geometry",
+            "overflow",
+            "off_screen",
+            "overfull",
+            "overlap",
+            "alignment",
+            "empty",
+        ] {
+            let dom = format!(
+                "<html data-swift-design-findings=\"[{{&quot;screen&quot;:0,&quot;kind&quot;:&quot;{kind}&quot;}}]\" data-swift-design-audited-screens=\"[0]\">"
+            );
+            let audit = DemoAudit::from_dom(&dom, 1).unwrap();
+            assert!(audit.require_layout_clean().is_err());
+            assert_eq!(audit.score(None), (1, 1));
+            assert!(audit.instructions(None).len() == 1);
+            assert!(audit.instructions(Some(&[1])).is_empty());
+        }
+        assert!(finding_advice("window_geometry").contains("preserve app_window"));
+    }
+
+    #[test]
+    fn tweaks_cannot_delete_insert_or_replace_untouched_screens() {
+        let design: Design =
+            serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap();
+        assert!(apply_tweak(&design, r#"{"screens":[{"index":0,"screen":null}]}"#, None).is_err());
+        let screen = serde_json::to_value(&design.screens[0]).unwrap();
+        let insertion =
+            serde_json::json!({"screens":[{"index":0,"insert":true,"screen":screen}]}).to_string();
+        assert!(apply_tweak(&design, &insertion, None).is_err());
+        let replacement = serde_json::json!({"screens":[{"index":1,"screen":screen}]}).to_string();
+        assert!(apply_tweak(&design, &replacement, Some(&[0])).is_err());
+        assert!(apply_tweak(&design, &replacement, Some(&[1])).is_ok());
+    }
+
+    #[test]
+    fn tweaks_cannot_remove_alignment_contracts_or_resize_the_canvas() {
+        let mut before: Design =
+            serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap();
+        before.screens[0].html =
+            "<div data-layout-align='left'><p>One</p><p>Two</p></div>".to_owned();
+        let mut after = before.clone();
+        assert!(respects_layout_contracts(&before, &after));
+        after.screens[0].html = "<div><p>One</p><p>Two</p></div>".to_owned();
+        assert!(!respects_layout_contracts(&before, &after));
+        after = before.clone();
+        after.viewport.width += 100;
+        assert!(!respects_layout_contracts(&before, &after));
+    }
+
+    #[test]
+    fn focused_verification_does_not_claim_untouched_legacy_errors_are_clean() {
+        let audit = DemoAudit {
+            findings: vec![Finding {
+                screen: 1,
+                node: String::new(),
+                kind: "overflow".to_owned(),
+                detail: "legacy clipping".to_owned(),
+            }],
+        };
+        assert!(audit.require_layout_clean_on(Some(&[0])).is_ok());
+        assert!(audit.require_layout_clean_on(Some(&[1])).is_err());
+        assert!(audit.require_layout_clean().is_err());
+        assert_eq!(audit.score(Some(&[0])), (0, 0));
+        assert!(audit.layout_instructions(&[0]).is_empty());
+        assert_eq!(audit.layout_instructions(&[1]).len(), 1);
+    }
+
+    #[test]
+    fn optional_visual_findings_do_not_block_layout_verification() {
+        let audit = DemoAudit {
+            findings: vec![Finding {
+                screen: 0,
+                node: String::new(),
+                kind: "contrast".to_owned(),
+                detail: "low contrast".to_owned(),
+            }],
+        };
+        assert!(audit.require_layout_clean().is_ok());
+        assert_eq!(audit.score(None), (0, 1));
+        assert!(audit.layout_instructions(&[0]).is_empty());
+    }
 
     #[test]
     fn findings_are_read_from_the_dumped_dom() {

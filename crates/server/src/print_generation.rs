@@ -15,8 +15,9 @@ use design_model::{Orientation, Print, PrintSize, Sheet};
 use crate::candidates::{candidate_id, next_candidate_number};
 use crate::concepts::{Concept, concept_note};
 use crate::edit_focus::{
-    EditFix, EditInput, EditOrder, MergeInput, findings_for, findings_note, fix_instruction,
-    focus_note, fresh_note, merge_note, merge_sources, referenced_indexes, touched_indexes,
+    EditFix, EditInput, EditOrder, MergeInput, conversation_block, findings_for, findings_note,
+    fix_instruction, focus_note, fresh_note, merge_note, merge_sources, referenced_indexes,
+    touched_indexes,
 };
 use crate::edit_report::saved_edit_report;
 use crate::events::ChangeNotifier;
@@ -24,12 +25,19 @@ use crate::generation::{
     ArtifactRequest, Attachments, CONTINUE_DRAFT_SHARE, ContinueChunk, DRAFT_SHARE,
     GenerationContext, GenerationEngine, GenerationOutcome, GenerationStop, GenerationTask,
     ShareSink, candidate_template, complete_array_items, continue_chunks, failure_message,
-    stop_to_string, template_note, user_content_with_images, writing_effort,
+    stop_to_string, template_note, trailing_continue_ids, user_content_with_images, writing_effort,
 };
 use crate::instructions::PRINT_RULES;
 use crate::model_client::LogSink;
+use crate::parallel_edit::EditExecution;
+use crate::polish::{PolishStop, can_audit, polish_round_limit};
+use crate::print_patch::{PATCH_FORMAT, apply_patch, parse_patch};
+use crate::print_polish::{dom_findings, polish_prompt};
 use crate::prints::{PENDING_SHEET_CLASS, PrintStore, is_pending_sheet};
+use crate::render::escape_html;
 use crate::request::{SessionRequest, request_input};
+use crate::screenshots::{POLISH_IMAGE_LIMIT, find_chrome, screenshot_sheet, supports_vision};
+use crate::templates::Template;
 
 /// The sheets each continuation chunk has produced so far, shared
 /// between the chunks that run at once.
@@ -46,7 +54,7 @@ struct PrintCandidateRequest<'request> {
     print_id: String,
     /// The template the candidate takes its look from, when the options
     /// name one.
-    template: Option<&'request crate::templates::Template>,
+    template: Option<&'request Template>,
     /// The candidates to combine, when this candidate is a merge.
     merge: Option<&'request MergeInput>,
 }
@@ -74,11 +82,11 @@ impl GenerationEngine {
         };
         let messages = self
             .sessions
-            .messages(session_id)
+            .messages_for_run(session_id)
             .await
             .map_err(|error| error.to_string())?;
         let mut previews = Vec::new();
-        for print_id in crate::generation::trailing_continue_ids(&messages) {
+        for print_id in trailing_continue_ids(&messages) {
             // A print that is no longer a preview was finished
             // already, by this run or an earlier one.
             if let Ok(Some(print)) = prints.load(&print_id).await
@@ -417,8 +425,7 @@ impl GenerationEngine {
             .into_iter()
             .filter(|index| *index < print.sheets.len())
             .collect();
-        let measured =
-            crate::print_polish::dom_findings(&print, &self.base_url(), &label, log).await;
+        let measured = dom_findings(&print, &self.base_url(), &label, log).await;
         let findings = findings_for(&measured, "sheets", &indexes);
         let total = print.sheets.len();
         let (print_json, note) = if indexes.is_empty() {
@@ -452,16 +459,24 @@ impl GenerationEngine {
         let request = ArtifactRequest {
             effort,
             label,
-            parse: Box::new(move |content| {
-                crate::print_patch::apply_patch(
-                    &original,
-                    crate::print_patch::parse_patch(content)?,
-                )
-            }),
+            parse: Box::new(move |content| apply_patch(&original, parse_patch(content)?)),
             progress: self.shared_progress(&[print_id.to_owned()], 5, 95).pop(),
             live: None,
         };
-        let edited = self.request_valid(client, messages, &request, log).await?;
+        let edited = self
+            .request_edit(
+                client,
+                EditExecution {
+                    original: &print,
+                    messages,
+                    input: &input,
+                    indexes: &indexes,
+                    is_fresh: order.is_fresh,
+                    request: &request,
+                },
+                log,
+            )
+            .await?;
         // A fix can make a new problem. The touched sheets are measured
         // again, and the model tweaks them until they measure clean or
         // the effort's rounds run out.
@@ -719,25 +734,24 @@ impl GenerationEngine {
         let label = &context.label;
         // Without Chrome nothing can be measured, and a round would
         // ask the model to fix findings that were never taken.
-        if !crate::polish::can_audit() {
+        if !can_audit() {
             log(&format!(
                 "{label}: {}",
-                crate::polish::PolishStop::NotMeasured.describe(0, 0)
+                PolishStop::NotMeasured.describe(0, 0)
             ));
             context.report(1.0);
             return Ok(print);
         }
-        let limit = crate::polish::polish_round_limit(&context.effort);
+        let limit = polish_round_limit(&context.effort);
         // `limit` is at least 1, so the loop always measures once and
         // `best_count` is always set before it is read.
         let mut best = print.clone();
         let mut best_count = usize::MAX;
         let mut previous_count: Option<usize> = None;
-        let mut stop = crate::polish::PolishStop::OutOfRounds;
+        let mut stop = PolishStop::OutOfRounds;
         let mut rounds_taken = 0usize;
         for round in 1..=limit {
-            let findings =
-                crate::print_polish::dom_findings(&print, &self.base_url(), label, log).await;
+            let findings = dom_findings(&print, &self.base_url(), label, log).await;
             if findings.len() < best_count {
                 best_count = findings.len();
                 best = print.clone();
@@ -745,13 +759,13 @@ impl GenerationEngine {
             // Nothing measures wrong: another round would spend a model
             // call to change a print that is already good.
             if findings.is_empty() {
-                stop = crate::polish::PolishStop::Clean;
+                stop = PolishStop::Clean;
                 break;
             }
             // The last round did not reduce the findings, so the next
             // will not either.
             if previous_count.is_some_and(|before| findings.len() >= before) {
-                stop = crate::polish::PolishStop::NoImprovement;
+                stop = PolishStop::NoImprovement;
                 break;
             }
             previous_count = Some(findings.len());
@@ -763,7 +777,7 @@ impl GenerationEngine {
                 images.len()
             ));
             let print_json = serde_json::to_string(&print).map_err(|error| error.to_string())?;
-            let prompt = crate::print_polish::polish_prompt(&print_json, &findings, images.len());
+            let prompt = polish_prompt(&print_json, &findings, images.len());
             let messages = vec![
                 serde_json::json!({ "role": "system", "content": print_system_prompt() }),
                 serde_json::json!({
@@ -780,8 +794,7 @@ impl GenerationEngine {
                     None,
                 )
                 .await?;
-            let improved = crate::print_patch::parse_patch(&content)
-                .and_then(|patch| crate::print_patch::apply_patch(&print, patch));
+            let improved = parse_patch(&content).and_then(|patch| apply_patch(&print, patch));
             match improved {
                 Ok(improved) if improved.validate().is_empty() => print = improved,
                 Ok(_) => log(&format!(
@@ -813,30 +826,29 @@ impl GenerationEngine {
         log: &LogSink,
     ) -> Result<Print, String> {
         let label = &fix.context.label;
-        if fix.indexes.is_empty() || !crate::polish::can_audit() {
+        if fix.indexes.is_empty() || !can_audit() {
             fix.context.report(1.0);
             return Ok(print);
         }
-        let limit = crate::polish::polish_round_limit(&fix.context.effort);
+        let limit = polish_round_limit(&fix.context.effort);
         let mut best = print.clone();
         let mut best_count = usize::MAX;
         let mut previous_count: Option<usize> = None;
-        let mut stop = crate::polish::PolishStop::OutOfRounds;
+        let mut stop = PolishStop::OutOfRounds;
         let mut rounds_taken = 0usize;
         for round in 1..=limit {
-            let measured =
-                crate::print_polish::dom_findings(&print, &self.base_url(), label, log).await;
+            let measured = dom_findings(&print, &self.base_url(), label, log).await;
             let findings = findings_for(&measured, "sheets", &fix.indexes);
             if findings.len() < best_count {
                 best_count = findings.len();
                 best = print.clone();
             }
             if findings.is_empty() {
-                stop = crate::polish::PolishStop::Clean;
+                stop = PolishStop::Clean;
                 break;
             }
             if previous_count.is_some_and(|before| findings.len() >= before) {
-                stop = crate::polish::PolishStop::NoImprovement;
+                stop = PolishStop::NoImprovement;
                 break;
             }
             previous_count = Some(findings.len());
@@ -878,8 +890,7 @@ impl GenerationEngine {
                     break;
                 }
             };
-            let improved = crate::print_patch::parse_patch(&content)
-                .and_then(|patch| crate::print_patch::apply_patch(&print, patch));
+            let improved = parse_patch(&content).and_then(|patch| apply_patch(&print, patch));
             match improved {
                 Ok(improved) if improved.validate().is_empty() => print = improved,
                 Ok(_) => log(&format!(
@@ -904,26 +915,23 @@ impl GenerationEngine {
     /// most `POLISH_IMAGE_LIMIT`. Empty when the model cannot see images
     /// or no Chrome is installed.
     async fn sheet_images(&self, print: &Print, label: &str, log: &LogSink) -> Vec<Vec<u8>> {
-        if !crate::screenshots::supports_vision(self.model.model()) {
+        if !supports_vision(self.model.model()) {
             return Vec::new();
         }
-        if crate::screenshots::find_chrome().is_none() {
+        if find_chrome().is_none() {
             log(&format!(
                 "{label}: no Chrome found for sheet images; reviewing from JSON only"
             ));
             return Vec::new();
         }
         let base_url = self.base_url();
-        let count = print
-            .sheets
-            .len()
-            .min(crate::screenshots::POLISH_IMAGE_LIMIT);
+        let count = print.sheets.len().min(POLISH_IMAGE_LIMIT);
         let mut tasks = tokio::task::JoinSet::new();
         for index in 0..count {
             let print = print.clone();
             let base_url = base_url.clone();
             tasks.spawn(async move {
-                let shot = crate::screenshots::screenshot_sheet(&print, index, &base_url).await;
+                let shot = screenshot_sheet(&print, index, &base_url).await;
                 (index, shot)
             });
         }
@@ -1067,7 +1075,7 @@ fn placeholder_sheet(title: &str) -> Sheet {
         html: format!(
             "<div class=\"{PENDING_SHEET_CLASS} pending\"><p class=\"pending-label\">Writing</p>\
              <h2 class=\"pending-title\">{}</h2></div>",
-            crate::render::escape_html(title),
+            escape_html(title),
         ),
         css: Some(
             ".pending { display: flex; flex-direction: column; align-items: center; \
@@ -1304,9 +1312,9 @@ fn print_edit_prompt(request: &SessionRequest, input: &EditInput<'_>) -> String 
         note = input.note,
         request = request_input(request),
         critique = input.instruction.trim(),
-        conversation = crate::edit_focus::conversation_block(input.conversation),
+        conversation = conversation_block(input.conversation),
         findings = findings_note(input.findings),
-        format = crate::print_patch::PATCH_FORMAT
+        format = PATCH_FORMAT
     )
 }
 
@@ -1704,7 +1712,7 @@ mod tests {
             .sessions
             .append_message(
                 "report",
-                ChatMessage::user("Tighten the title.", Some("report-candidate-1")),
+                ChatMessage::user("[sheet 1] Tighten the title.", Some("report-candidate-1")),
             )
             .await
             .unwrap();

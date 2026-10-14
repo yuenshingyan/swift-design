@@ -291,6 +291,11 @@ pub fn DesignChat(
         .unwrap_or_default();
     let has_draft = !draft().trim().is_empty();
     let can_send = is_model_chosen && (has_draft || !comments().is_empty());
+    let send_label = if agent_run().is_some_and(|run| run.is_running) {
+        "Queue"
+    } else {
+        "Send"
+    };
     rsx! {
         section { class: "conversation editor-chat",
             div { id: "editor-thread", class: "thread",
@@ -304,6 +309,13 @@ pub fn DesignChat(
                     div {
                         key: "{index}",
                         class: if message.role == "user" { "bubble user" } else { "bubble agent" },
+                        if message.is_queued {
+                            small {
+                                class: "queued-prompt",
+                                title: "Runs after the current turn, using the latest saved candidate",
+                                "Queued"
+                            }
+                        }
                         p { "{message.content}" }
                     }
                 }
@@ -506,7 +518,7 @@ pub fn DesignChat(
                             },
                         }
                         SendButton {
-                            label: "Send",
+                            label: send_label,
                             is_enabled: can_send,
                             on_send: move |_| send.call(()),
                         }
@@ -671,8 +683,9 @@ pub(crate) fn has_page_reference(text: &str, unit: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        comment_line, comment_summary, has_page_reference, mention_at, mention_matches,
-        message_with_comments, page_title, reference_for, remove_mention, should_follow_thread,
+        SCROLL_TO_LATEST, comment_line, comment_summary, has_page_reference, mention_at,
+        mention_matches, message_with_comments, page_title, reference_for, remove_mention,
+        should_follow_thread,
     };
 
     #[test]
@@ -691,9 +704,9 @@ mod tests {
 
     #[test]
     fn scrolling_targets_one_thread_after_the_dom_update() {
-        assert!(super::SCROLL_TO_LATEST.contains("document.getElementById(id)"));
-        assert!(!super::SCROLL_TO_LATEST.contains("querySelector('.thread')"));
-        assert!(super::SCROLL_TO_LATEST.contains("requestAnimationFrame"));
+        assert!(SCROLL_TO_LATEST.contains("document.getElementById(id)"));
+        assert!(!SCROLL_TO_LATEST.contains("querySelector('.thread')"));
+        assert!(SCROLL_TO_LATEST.contains("requestAnimationFrame"));
     }
 
     #[test]

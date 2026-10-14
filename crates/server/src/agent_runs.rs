@@ -23,13 +23,25 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::oneshot;
 
+use crate::AppState;
 use crate::api_error;
+use crate::artworks::ArtworkStore;
+use crate::campaigns::CampaignStore;
+use crate::capture::capture_urls;
+use crate::decks::DeckStore;
 use crate::designs::DesignStore;
+use crate::documents::DocumentStore;
 use crate::events::ChangeNotifier;
-use crate::generation::{GenerationEngine, GenerationOutcome};
-use crate::model_client::{self, TokenUsage};
-use crate::sessions::{RunMode, RunRecord, SessionStore, run_mode_for};
+use crate::generation::{DesignProgressSink, GenerationEngine, GenerationOutcome, ProgressSink};
+use crate::mailings::MailingStore;
+use crate::model_client::{self, LogSink, TokenUsage, UsageSink};
+use crate::prints::PrintStore;
+use crate::sessions::{RunMode, RunRecord, Session, SessionStore, run_mode_for};
 use crate::settings::SettingsStore;
+use crate::socials::SocialStore;
+use crate::templates::TemplateStore;
+use crate::time::rfc3339_now;
+use crate::uploads::UploadStore;
 
 /// Most log bytes kept in memory. Older output is dropped from the
 /// front.
@@ -64,6 +76,9 @@ pub enum StartError {
     /// A run is already active.
     #[error("a run is already active")]
     AlreadyRunning,
+    /// Another start already consumed the waiting prompt.
+    #[error("no queued prompt remains")]
+    NoQueuedPrompt,
     /// No model is configured.
     #[error("{0}")]
     NotConfigured(String),
@@ -87,6 +102,7 @@ impl StartError {
 struct RunState {
     log: String,
     is_running: bool,
+    is_queue_paused: bool,
     exit_code: Option<i32>,
     active_agent: Option<String>,
     session_id: Option<String>,
@@ -112,17 +128,17 @@ pub struct AgentRunner {
     custom_command: Option<String>,
     settings: SettingsStore,
     designs: DesignStore,
-    decks: Option<crate::decks::DeckStore>,
-    documents: Option<crate::documents::DocumentStore>,
-    socials: Option<crate::socials::SocialStore>,
-    prints: Option<crate::prints::PrintStore>,
-    mailings: Option<crate::mailings::MailingStore>,
-    campaigns: Option<crate::campaigns::CampaignStore>,
-    artworks: Option<crate::artworks::ArtworkStore>,
+    decks: Option<DeckStore>,
+    documents: Option<DocumentStore>,
+    socials: Option<SocialStore>,
+    prints: Option<PrintStore>,
+    mailings: Option<MailingStore>,
+    campaigns: Option<CampaignStore>,
+    artworks: Option<ArtworkStore>,
     sessions: SessionStore,
     address: String,
-    templates: Option<crate::templates::TemplateStore>,
-    uploads: Option<crate::uploads::UploadStore>,
+    templates: Option<TemplateStore>,
+    uploads: Option<UploadStore>,
     state: Arc<Mutex<RunState>>,
     notifier: ChangeNotifier,
 }
@@ -156,6 +172,7 @@ impl AgentRunner {
             state: Arc::new(Mutex::new(RunState {
                 log: String::new(),
                 is_running: false,
+                is_queue_paused: false,
                 exit_code: None,
                 active_agent: None,
                 session_id: None,
@@ -172,59 +189,59 @@ impl AgentRunner {
     }
 
     /// Lets deck sessions write their candidates to the deck store.
-    pub fn with_decks(mut self, decks: crate::decks::DeckStore) -> Self {
+    pub fn with_decks(mut self, decks: DeckStore) -> Self {
         self.decks = Some(decks);
         self
     }
 
     /// Lets document sessions write their candidates to the document
     /// store.
-    pub fn with_documents(mut self, documents: crate::documents::DocumentStore) -> Self {
+    pub fn with_documents(mut self, documents: DocumentStore) -> Self {
         self.documents = Some(documents);
         self
     }
 
     /// Lets social sessions write their candidates to the social store.
-    pub fn with_socials(mut self, socials: crate::socials::SocialStore) -> Self {
+    pub fn with_socials(mut self, socials: SocialStore) -> Self {
         self.socials = Some(socials);
         self
     }
 
     /// Lets print sessions write their candidates to the print store.
-    pub fn with_prints(mut self, prints: crate::prints::PrintStore) -> Self {
+    pub fn with_prints(mut self, prints: PrintStore) -> Self {
         self.prints = Some(prints);
         self
     }
 
     /// Lets mailing sessions write their candidates to the mailing
     /// store.
-    pub fn with_mailings(mut self, mailings: crate::mailings::MailingStore) -> Self {
+    pub fn with_mailings(mut self, mailings: MailingStore) -> Self {
         self.mailings = Some(mailings);
         self
     }
 
     /// Lets campaign sessions write their candidates to the campaign
     /// store.
-    pub fn with_campaigns(mut self, campaigns: crate::campaigns::CampaignStore) -> Self {
+    pub fn with_campaigns(mut self, campaigns: CampaignStore) -> Self {
         self.campaigns = Some(campaigns);
         self
     }
 
     /// Lets artwork sessions write their candidates to the artwork
     /// store.
-    pub fn with_artworks(mut self, artworks: crate::artworks::ArtworkStore) -> Self {
+    pub fn with_artworks(mut self, artworks: ArtworkStore) -> Self {
         self.artworks = Some(artworks);
         self
     }
 
     /// Lets runs style their candidates from a saved template.
-    pub fn with_templates(mut self, templates: crate::templates::TemplateStore) -> Self {
+    pub fn with_templates(mut self, templates: TemplateStore) -> Self {
         self.templates = Some(templates);
         self
     }
 
     /// Lets runs attach the user's uploads to model requests.
-    pub fn with_uploads(mut self, uploads: crate::uploads::UploadStore) -> Self {
+    pub fn with_uploads(mut self, uploads: UploadStore) -> Self {
         self.uploads = Some(uploads);
         self
     }
@@ -311,6 +328,20 @@ impl AgentRunner {
     /// Starts a run for `session_id`. The mode comes from the session
     /// state.
     pub async fn start(&self, session_id: &str) -> Result<(), StartError> {
+        self.start_turn(session_id, false, true).await
+    }
+
+    /// Starts an explicit Finish request without consuming an ordinary queued prompt.
+    pub async fn start_continue(&self, session_id: &str) -> Result<(), StartError> {
+        self.start_turn(session_id, false, false).await
+    }
+
+    async fn start_turn(
+        &self,
+        session_id: &str,
+        is_automatic: bool,
+        should_consume: bool,
+    ) -> Result<(), StartError> {
         let session = self
             .sessions
             .read(session_id)
@@ -322,58 +353,46 @@ impl AgentRunner {
         let mode = run_mode_for(session.state).ok_or(StartError::WrongState {
             state: session.state,
         })?;
+        // Freeze whether this start consumes a prompt before reserving the runner.
+        // Prompts arriving after the reservation belong to a later turn.
+        let has_queued = should_consume
+            && self
+                .sessions
+                .has_queued_messages(session_id)
+                .await
+                .map_err(|error| StartError::Storage(error.to_string()))?;
         let (name, launch) = self.resolve(session_id, mode).await?;
-        // A shell command is spawned before the lock so the guard never
-        // crosses an await.
-        let mut shell_process = None;
-        if let ResolvedLaunch::Shell(command) = &launch {
-            {
-                let state = self
-                    .state
-                    .lock()
-                    .map_err(|_| StartError::Storage("run state lock poisoned".to_owned()))?;
-                if state.is_running {
-                    return Err(StartError::AlreadyRunning);
-                }
-            }
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned());
-            let process = Command::new(shell)
-                .arg("-lc")
-                .arg(command)
-                .env("SWIFT_DESIGN_SESSION_ID", session_id)
-                .env("SWIFT_DESIGN_RUN_MODE", mode.as_str())
-                .env("SWIFT_DESIGN_ARTIFACT_KIND", session.artifact_kind.as_str())
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|error| {
-                    StartError::NotConfigured(format!(
-                        "failed to start the custom command: {error}"
-                    ))
-                })?;
-            self.record_run_start(session_id, mode, "custom").await;
-            shell_process = Some(process);
-        }
         let (stop_sender, stop_receiver) = oneshot::channel();
         {
             let mut state = self
                 .state
                 .lock()
                 .map_err(|_| StartError::Storage("run state lock poisoned".to_owned()))?;
-            if state.is_running {
+            if state.is_running || (is_automatic && state.is_queue_paused) {
                 return Err(StartError::AlreadyRunning);
             }
+            state.is_queue_paused = false;
             mark_running(&mut state, &name, session_id, mode, stop_sender);
             if let ResolvedLaunch::Generation(engine) = &launch {
                 state.context_window = engine.context_window();
             }
         }
+        if let Err(error) = self.prepare_queued_turn(session_id, has_queued).await {
+            self.clear_failed_start();
+            return Err(error);
+        }
         match launch {
-            ResolvedLaunch::Shell(_) => {
-                if let Some(process) = shell_process.take() {
-                    self.spawn_shell_tasks(session_id.to_owned(), mode, process, stop_receiver);
-                }
+            ResolvedLaunch::Shell(command) => {
+                self.record_run_start(session_id, mode, "custom").await;
+                let process = match self.launch_shell(&command, &session, mode) {
+                    Ok(process) => process,
+                    Err(error) => {
+                        settle_shell(&self.sessions, session_id, mode, Some(1), false).await;
+                        self.clear_failed_start();
+                        return Err(error);
+                    }
+                };
+                self.spawn_shell_tasks(session_id.to_owned(), mode, process, stop_receiver);
             }
             ResolvedLaunch::Generation(engine) => {
                 self.spawn_generation_task(*engine, session_id.to_owned(), stop_receiver);
@@ -381,6 +400,98 @@ impl AgentRunner {
         }
         self.notifier.notify();
         Ok(())
+    }
+
+    async fn prepare_queued_turn(&self, id: &str, has_queued: bool) -> Result<(), StartError> {
+        if !has_queued {
+            return Ok(());
+        }
+        let message = self
+            .sessions
+            .activate_next_message(id)
+            .await
+            .map_err(|error| StartError::Storage(error.to_string()))?
+            .ok_or(StartError::NoQueuedPrompt)?;
+        if let Some(uploads) = &self.uploads
+            && !message.is_regenerate
+        {
+            capture_urls(uploads, id, &message.content).await;
+        }
+        Ok(())
+    }
+
+    fn clear_failed_start(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.is_running = false;
+            state.stop_sender = None;
+        }
+        self.notifier.notify();
+    }
+
+    fn launch_shell(
+        &self,
+        command: &str,
+        session: &Session,
+        mode: RunMode,
+    ) -> Result<tokio::process::Child, StartError> {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned());
+        Command::new(shell)
+            .arg("-lc")
+            .arg(command)
+            .env("SWIFT_DESIGN_SESSION_ID", &session.id)
+            .env("SWIFT_DESIGN_RUN_MODE", mode.as_str())
+            .env("SWIFT_DESIGN_ARTIFACT_KIND", session.artifact_kind.as_str())
+            .kill_on_drop(true)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                StartError::NotConfigured(format!("failed to start the custom command: {error}"))
+            })
+    }
+
+    /// Schedules pending turns only after the previous run released the runner.
+    fn schedule_pending(&self) {
+        let runner = self.clone();
+        tokio::spawn(async move {
+            runner.start_pending().await;
+        });
+    }
+
+    async fn start_pending(&self) {
+        let Ok(sessions) = self.sessions.list().await else {
+            return;
+        };
+        for session in sessions {
+            let can_resume = session.state == WorkflowState::Clarifying
+                && self
+                    .sessions
+                    .has_requested_resume(&session.id)
+                    .await
+                    .unwrap_or(false);
+            if !matches!(
+                session.state,
+                WorkflowState::Reviewing | WorkflowState::Intake
+            ) && !can_resume
+            {
+                continue;
+            }
+            if !self
+                .sessions
+                .has_queued_messages(&session.id)
+                .await
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            match self.start_turn(&session.id, true, true).await {
+                Ok(()) | Err(StartError::AlreadyRunning) => return,
+                Err(error) => {
+                    tracing::debug!(session_id = %session.id, %error, "queued turn waits")
+                }
+            }
+        }
     }
 
     /// Records a run start for an external command, so its history
@@ -392,7 +503,7 @@ impl AgentRunner {
             runtime: runtime.to_owned(),
             provider: None,
             model: None,
-            started_at: crate::time::rfc3339_now(),
+            started_at: rfc3339_now(),
             finished_at: None,
             result: None,
             error: None,
@@ -439,6 +550,7 @@ impl AgentRunner {
         let state = Arc::clone(&self.state);
         let notifier = self.notifier.clone();
         let sessions = self.sessions.clone();
+        let runner = self.clone();
         tokio::spawn(async move {
             let (status, stopped) = tokio::select! {
                 status = process.wait() => (status.ok(), false),
@@ -458,6 +570,7 @@ impl AgentRunner {
                 state.stop_sender = None;
             }
             notifier.notify();
+            runner.schedule_pending();
         });
     }
 
@@ -471,11 +584,13 @@ impl AgentRunner {
         let log = self.log_sink();
         let engine = engine
             .with_usage_sink(self.usage_sink())
+            .with_retry_log(Arc::clone(&log))
             .with_progress_sink(self.progress_sink())
             .with_design_progress_sink(self.design_progress_sink());
         let state = Arc::clone(&self.state);
         let notifier = self.notifier.clone();
         let sessions = self.sessions.clone();
+        let runner = self.clone();
         tokio::spawn(async move {
             let end = tokio::select! {
                 result = engine.run(&session_id, Arc::clone(&log)) => {
@@ -490,18 +605,19 @@ impl AgentRunner {
                 state.stop_sender = None;
             }
             notifier.notify();
+            runner.schedule_pending();
         });
     }
 
     /// A log sink that appends to the run log.
-    fn log_sink(&self) -> crate::model_client::LogSink {
+    fn log_sink(&self) -> LogSink {
         let state = Arc::clone(&self.state);
         let notifier = self.notifier.clone();
         Arc::new(move |line: &str| Self::append_log(&state, &notifier, line))
     }
 
     /// A usage sink that records the token counts.
-    fn usage_sink(&self) -> crate::model_client::UsageSink {
+    fn usage_sink(&self) -> UsageSink {
         let state = Arc::clone(&self.state);
         let notifier = self.notifier.clone();
         Arc::new(move |usage: TokenUsage| {
@@ -514,7 +630,7 @@ impl AgentRunner {
     }
 
     /// A progress sink that records how far the turn is.
-    fn progress_sink(&self) -> crate::generation::ProgressSink {
+    fn progress_sink(&self) -> ProgressSink {
         let state = Arc::clone(&self.state);
         let notifier = self.notifier.clone();
         Arc::new(move |percent: u8| {
@@ -529,7 +645,7 @@ impl AgentRunner {
     }
 
     /// A per-design progress sink.
-    fn design_progress_sink(&self) -> crate::generation::DesignProgressSink {
+    fn design_progress_sink(&self) -> DesignProgressSink {
         let state = Arc::clone(&self.state);
         let notifier = self.notifier.clone();
         Arc::new(move |design_id: &str, percent: u8| {
@@ -561,13 +677,16 @@ impl AgentRunner {
         }
     }
 
-    /// Stops the active run. Does nothing when no run is active.
+    /// Stops the active run and pauses queued turns, including between runs.
     pub fn stop(&self) {
-        if let Ok(mut state) = self.state.lock()
-            && let Some(sender) = state.stop_sender.take()
-        {
-            let _ = sender.send(());
+        if let Ok(mut state) = self.state.lock() {
+            // The pause also covers the idle gap between two queued turns.
+            state.is_queue_paused = true;
+            if let Some(sender) = state.stop_sender.take() {
+                let _ = sender.send(());
+            }
         }
+        self.notifier.notify();
     }
 
     /// A JSON snapshot of the run for the studio.
@@ -580,6 +699,7 @@ impl AgentRunner {
                     .unwrap_or(state.log.len());
                 serde_json::json!({
                     "is_running": state.is_running,
+                    "is_queue_paused": state.is_queue_paused,
                     "exit_code": state.exit_code,
                     "log_tail": &state.log[boundary..],
                     "active_agent": state.active_agent,
@@ -594,6 +714,7 @@ impl AgentRunner {
             }
             Err(_) => serde_json::json!({
                 "is_running": false,
+                "is_queue_paused": true,
                 "exit_code": null,
                 "log_tail": "",
                 "active_agent": null,
@@ -632,6 +753,24 @@ async fn halt(sessions: &SessionStore, session_id: &str, message: Option<String>
     if session.state.is_halted() {
         return;
     }
+    if let Ok(records) = sessions.runs(session_id).await
+        && let Some(record) = records.last().filter(|record| record.finished_at.is_none())
+    {
+        let result = if message.is_some() {
+            "failed"
+        } else {
+            "stopped"
+        };
+        let _ = sessions
+            .finish_run(
+                session_id,
+                &record.run_id,
+                result,
+                message.clone(),
+                Vec::new(),
+            )
+            .await;
+    }
     let event = match message {
         Some(_) => design_model::WorkflowEvent::RunFailed,
         None => design_model::WorkflowEvent::RunStopped,
@@ -653,7 +792,7 @@ async fn settle_built_in(
     sessions: &SessionStore,
     session_id: &str,
     end: RunEnd,
-    log: &crate::model_client::LogSink,
+    log: &LogSink,
 ) -> i32 {
     let outcome = match end {
         RunEnd::Stopped => {
@@ -704,6 +843,13 @@ async fn settle_shell(
     }
     match code {
         Some(0) => {
+            if let Ok(records) = sessions.runs(session_id).await
+                && let Some(record) = records.last()
+            {
+                let _ = sessions
+                    .finish_run(session_id, &record.run_id, "succeeded", None, Vec::new())
+                    .await;
+            }
             if mode == RunMode::Generation && session.state == WorkflowState::Generating {
                 let _ = sessions
                     .apply(session_id, design_model::WorkflowEvent::GenerationSucceeded)
@@ -748,7 +894,7 @@ struct StartRequest {
 }
 
 /// The `/agent-runs` route table.
-pub fn routes() -> Router<crate::AppState> {
+pub fn routes() -> Router<AppState> {
     Router::new().route("/agent-runs", get(get_run).post(start_run).delete(stop_run))
 }
 
@@ -785,10 +931,12 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use crate::agent_runs::AgentRunner;
+    use design_model::WorkflowState;
+
+    use crate::agent_runs::{AgentRunner, StartError};
     use crate::designs::DesignStore;
     use crate::events::ChangeNotifier;
-    use crate::sessions::{NewSession, SessionStore};
+    use crate::sessions::{ChatMessage, NewSession, SessionStore};
     use crate::settings::SettingsStore;
 
     fn command_runner(directory: &TempDir, command: &str) -> (AgentRunner, SessionStore) {
@@ -816,6 +964,251 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         runner.status()
+    }
+
+    fn queued_prompt(content: &str) -> ChatMessage {
+        let mut message = ChatMessage::user(content, None);
+        message.is_queued = true;
+        message
+    }
+
+    async fn generating_session(sessions: &SessionStore) {
+        sessions
+            .create(NewSession::demo("talk", "Talk", "A workspace."))
+            .await
+            .unwrap();
+        sessions
+            .apply("talk", design_model::WorkflowEvent::GenerationStarted)
+            .await
+            .unwrap();
+    }
+
+    async fn wait_for_turns(runner: &AgentRunner, sessions: &SessionStore, count: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let runs = sessions.runs("talk").await.unwrap();
+                if runs.len() == count
+                    && runs.iter().all(|run| run.finished_at.is_some())
+                    && !runner.is_running_session("talk")
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_prompts_start_in_fifo_order_only_after_the_active_turn_finishes() {
+        let directory = TempDir::new().unwrap();
+        let (runner, sessions) = command_runner(&directory, "sleep 0.2");
+        generating_session(&sessions).await;
+        runner.start("talk").await.unwrap();
+        sessions
+            .append_message("talk", queued_prompt("First queued prompt"))
+            .await
+            .unwrap();
+        sessions
+            .append_message("talk", queued_prompt("Second queued prompt"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            runner.start("talk").await,
+            Err(StartError::AlreadyRunning)
+        ));
+        assert!(sessions.messages_for_run("talk").await.unwrap().is_empty());
+        assert_eq!(sessions.runs("talk").await.unwrap().len(), 1);
+        wait_for_turns(&runner, &sessions, 3).await;
+        let messages = sessions.messages("talk").await.unwrap();
+        assert!(messages.iter().all(|message| !message.is_queued));
+        assert_eq!(messages[0].content, "First queued prompt");
+        assert_eq!(messages[1].content, "Second queued prompt");
+    }
+
+    #[tokio::test]
+    async fn answered_turns_resume_before_their_queued_followups() {
+        let directory = TempDir::new().unwrap();
+        let (runner, sessions) = command_runner(&directory, "sleep 0.2");
+        generating_session(&sessions).await;
+        sessions
+            .apply("talk", design_model::WorkflowEvent::QuestionsAsked)
+            .await
+            .unwrap();
+        sessions
+            .append_message("talk", ChatMessage::user("Current prompt", None))
+            .await
+            .unwrap();
+        sessions
+            .append_message("talk", queued_prompt("Later prompt"))
+            .await
+            .unwrap();
+        sessions.queue_answered_turn("talk").await.unwrap();
+        runner.start_pending().await;
+        assert_eq!(
+            sessions
+                .messages_for_run("talk")
+                .await
+                .unwrap()
+                .last()
+                .unwrap()
+                .content,
+            "Current prompt"
+        );
+        assert!(sessions.has_queued_messages("talk").await.unwrap());
+        sessions
+            .apply("talk", design_model::WorkflowEvent::GenerationStarted)
+            .await
+            .unwrap();
+        wait_for_turns(&runner, &sessions, 2).await;
+        assert_eq!(
+            sessions
+                .messages_for_run("talk")
+                .await
+                .unwrap()
+                .last()
+                .unwrap()
+                .content,
+            "Later prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_requests_do_not_consume_an_ordinary_queued_prompt() {
+        let directory = TempDir::new().unwrap();
+        let (runner, sessions) = command_runner(&directory, "sleep 5");
+        generating_session(&sessions).await;
+        sessions
+            .append_message("talk", queued_prompt("Waiting edit"))
+            .await
+            .unwrap();
+        sessions
+            .append_message(
+                "talk",
+                ChatMessage::continue_request("Finish", "talk-candidate-1"),
+            )
+            .await
+            .unwrap();
+        runner.start_continue("talk").await.unwrap();
+        assert!(sessions.has_queued_messages("talk").await.unwrap());
+        assert!(
+            sessions
+                .messages_for_run("talk")
+                .await
+                .unwrap()
+                .last()
+                .unwrap()
+                .is_continue
+        );
+        runner.stop();
+        wait_for_turns(&runner, &sessions, 1).await;
+    }
+
+    #[tokio::test]
+    async fn rapid_queued_turns_finish_the_correct_run_records() {
+        let directory = TempDir::new().unwrap();
+        let (runner, sessions) = command_runner(&directory, "true");
+        generating_session(&sessions).await;
+        for index in 0..12 {
+            sessions
+                .append_message("talk", queued_prompt(&format!("Prompt {index}")))
+                .await
+                .unwrap();
+        }
+        runner.start("talk").await.unwrap();
+        wait_for_turns(&runner, &sessions, 12).await;
+        assert!(!sessions.has_queued_messages("talk").await.unwrap());
+        assert!(
+            sessions
+                .runs("talk")
+                .await
+                .unwrap()
+                .iter()
+                .all(|run| run.result.as_deref() == Some("succeeded"))
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_between_turns_pauses_the_queue_until_an_explicit_start() {
+        let directory = TempDir::new().unwrap();
+        let (runner, sessions) = command_runner(&directory, "true");
+        generating_session(&sessions).await;
+        sessions
+            .apply("talk", design_model::WorkflowEvent::GenerationSucceeded)
+            .await
+            .unwrap();
+        sessions
+            .append_message("talk", queued_prompt("Waiting prompt"))
+            .await
+            .unwrap();
+        runner.stop();
+        runner.start_pending().await;
+        assert!(sessions.runs("talk").await.unwrap().is_empty());
+        assert!(runner.status()["is_queue_paused"].as_bool().unwrap());
+        runner.start("talk").await.unwrap();
+        wait_for_turns(&runner, &sessions, 1).await;
+        assert!(!runner.status()["is_queue_paused"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn stopping_a_turn_keeps_the_pending_prompts_queued() {
+        let directory = TempDir::new().unwrap();
+        let (runner, sessions) = command_runner(&directory, "sleep 5");
+        generating_session(&sessions).await;
+        runner.start("talk").await.unwrap();
+        sessions
+            .append_message("talk", queued_prompt("Keep this request"))
+            .await
+            .unwrap();
+        runner.stop();
+        wait_for_turns(&runner, &sessions, 1).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(sessions.has_queued_messages("talk").await.unwrap());
+        assert_eq!(sessions.runs("talk").await.unwrap().len(), 1);
+        assert_eq!(
+            sessions.read("talk").await.unwrap().unwrap().state,
+            WorkflowState::Stopped
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_turn_does_not_start_its_pending_prompts() {
+        let directory = TempDir::new().unwrap();
+        let (runner, sessions) = command_runner(&directory, "sleep 0.1; exit 1");
+        generating_session(&sessions).await;
+        runner.start("talk").await.unwrap();
+        sessions
+            .append_message("talk", queued_prompt("Keep this request"))
+            .await
+            .unwrap();
+        wait_for_turns(&runner, &sessions, 1).await;
+        assert!(sessions.has_queued_messages("talk").await.unwrap());
+        assert_eq!(
+            sessions.read("talk").await.unwrap().unwrap().state,
+            WorkflowState::Error
+        );
+    }
+
+    #[tokio::test]
+    async fn questions_pause_the_queue_until_the_user_responds() {
+        let directory = TempDir::new().unwrap();
+        let (runner, sessions) = command_runner(&directory, "sleep 0.1");
+        generating_session(&sessions).await;
+        runner.start("talk").await.unwrap();
+        sessions
+            .append_message("talk", queued_prompt("Keep this request"))
+            .await
+            .unwrap();
+        sessions
+            .apply("talk", design_model::WorkflowEvent::QuestionsAsked)
+            .await
+            .unwrap();
+        wait_for_turns(&runner, &sessions, 1).await;
+        assert!(sessions.has_queued_messages("talk").await.unwrap());
+        runner.start("talk").await.unwrap();
+        wait_for_turns(&runner, &sessions, 2).await;
+        assert!(!sessions.has_queued_messages("talk").await.unwrap());
     }
 
     #[tokio::test]

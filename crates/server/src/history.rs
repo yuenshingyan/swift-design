@@ -64,7 +64,7 @@ impl HistoryStore {
         content: &[u8],
     ) -> anyhow::Result<String> {
         tokio::fs::create_dir_all(self.design_directory(id)).await?;
-        let stamp = self.free_stamp(id, &stamp_from_unix(unix_seconds)).await;
+        let stamp = self.free_stamp(id, &stamp_from_unix(unix_seconds)).await?;
         tokio::fs::write(self.path_of(id, &stamp), content).await?;
         self.prune(id).await?;
         Ok(stamp)
@@ -72,17 +72,21 @@ impl HistoryStore {
 
     /// `base` when no snapshot uses it yet, else `base-2`, `base-3`, …
     /// so two saves in one second keep two snapshots.
-    async fn free_stamp(&self, id: &str, base: &str) -> String {
-        let mut stamp = base.to_owned();
-        let mut suffix = 2;
-        while tokio::fs::try_exists(self.path_of(id, &stamp))
-            .await
-            .unwrap_or(false)
-        {
-            stamp = format!("{base}-{suffix}");
-            suffix += 1;
-        }
-        stamp
+    async fn free_stamp(&self, id: &str, base: &str) -> anyhow::Result<String> {
+        // A pruned base must not reset the counter and discard the newest save.
+        let latest = self
+            .stamps(id)
+            .await?
+            .iter()
+            .filter(|stamp| snapshot_order(stamp).0 == base)
+            .map(|stamp| snapshot_order(stamp).1)
+            .max()
+            .unwrap_or(0);
+        Ok(if latest == 0 {
+            base.to_owned()
+        } else {
+            format!("{base}-{}", latest + 1)
+        })
     }
 
     /// Deletes the oldest snapshots past `SNAPSHOT_LIMIT`.
@@ -113,7 +117,7 @@ impl HistoryStore {
                 stamps.push(stamp.to_owned());
             }
         }
-        stamps.sort_by(|left, right| right.cmp(left));
+        stamps.sort_by(|left, right| snapshot_order(right).cmp(&snapshot_order(left)));
         Ok(stamps)
     }
 
@@ -166,6 +170,15 @@ impl HistoryStore {
     }
 }
 
+fn snapshot_order(stamp: &str) -> (&str, u64) {
+    let base = stamp.get(..20).unwrap_or(stamp);
+    let number = stamp
+        .get(21..)
+        .and_then(|suffix| suffix.parse().ok())
+        .unwrap_or(1);
+    (base, number)
+}
+
 /// True for a stamp this store could have written: digits, `T`, `Z`,
 /// and hyphens only. That excludes path separators and `.` segments.
 pub fn is_valid_stamp(stamp: &str) -> bool {
@@ -212,6 +225,25 @@ mod tests {
         assert_eq!(store.list("talking").await.unwrap().len(), 1);
         // Deleting an id with no history is not an error.
         store.delete("talk").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rapid_saves_list_the_actual_latest_snapshot_first() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HistoryStore::new(directory.path().join("history"));
+        let mut latest = String::new();
+        for index in 0..SNAPSHOT_LIMIT + 12 {
+            latest = store
+                .snapshot_at("talk", 1_000_000_000, index.to_string().as_bytes())
+                .await
+                .unwrap();
+        }
+        let snapshots = store.list("talk").await.unwrap();
+        assert_eq!(snapshots.len(), SNAPSHOT_LIMIT);
+        assert_eq!(snapshots[0].stamp, latest);
+        assert!(
+            snapshot_order("2001-09-09T01-46-40Z-10") > snapshot_order("2001-09-09T01-46-40Z-9")
+        );
     }
 
     #[test]

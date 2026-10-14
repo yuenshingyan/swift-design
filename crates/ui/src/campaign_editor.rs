@@ -230,7 +230,9 @@ fn LoadedCampaignEditor(
                             && from != to
                             && to < campaign.peek().ads.len()
                         {
-                            campaign.with_mut(|campaign| move_screen(&mut campaign.ads, from, to));
+                            campaign.with_mut(|campaign| {
+                                move_screen(&mut campaign.ads, &mut campaign.outline, from, to)
+                            });
                             dragged.set(Some(to));
                             selected.set(to);
                             selected_node.set(None);

@@ -114,8 +114,10 @@ mod tests {
             design: None,
             question_set: None,
             is_continue,
+            is_queued: false,
             at: None,
             artifacts: Vec::new(),
+            snapshot_stamps: None,
         }
     }
 

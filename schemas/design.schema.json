@@ -4,6 +4,17 @@
   "description": "A complete design: one theme and one viewport applied to an ordered\nlist of screens.",
   "type": "object",
   "properties": {
+    "app_window": {
+      "description": "The shared app window inside the viewport. Choose its bounds once\nper candidate. Each screen must then have exactly one\ntop-level non-void element marked `data-swift-design-window`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AppWindow"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "outline": {
       "description": "The screen titles of the complete design, in order. A preview design\nlists more titles than it has screens: the app continues it from\nthis list later. Leave it empty when the design is complete.",
       "type": "array",
@@ -53,6 +64,43 @@
     "screens"
   ],
   "$defs": {
+    "AppWindow": {
+      "description": "The app window rectangle inside a design viewport.",
+      "type": "object",
+      "properties": {
+        "height": {
+          "description": "Window height in px.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "left": {
+          "description": "Distance from the viewport left edge in px.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "top": {
+          "description": "Distance from the viewport top edge in px.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "width": {
+          "description": "Window width in px.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "left",
+        "top",
+        "width",
+        "height"
+      ]
+    },
     "FontSet": {
       "description": "Default CSS font family names.",
       "type": "object",

@@ -226,7 +226,9 @@ fn LoadedArtworkEditor(artwork_id: String, initial: Artwork, on_back: EventHandl
                             && from != to
                             && to < artwork.peek().covers.len()
                         {
-                            artwork.with_mut(|artwork| move_screen(&mut artwork.covers, from, to));
+                            artwork.with_mut(|artwork| {
+                                move_screen(&mut artwork.covers, &mut artwork.outline, from, to)
+                            });
                             dragged.set(Some(to));
                             selected.set(to);
                             selected_node.set(None);

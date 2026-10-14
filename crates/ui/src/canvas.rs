@@ -18,7 +18,7 @@ use dioxus::prelude::*;
 
 use crate::api;
 use crate::icons;
-use crate::settings::stepped_screen;
+use crate::settings::{artifact_project, stepped_screen};
 
 /// The card stage height in rem for a tab full of cards: the floor.
 const CARD_STAGE_HEIGHT_REM: f64 = 13.5;
@@ -113,7 +113,7 @@ pub(crate) fn cards_from_designs(
 ) -> Vec<CanvasCard> {
     let mut mine: Vec<CanvasCard> = designs
         .iter()
-        .filter(|summary| crate::settings::artifact_project(&summary.id) == session_id)
+        .filter(|summary| artifact_project(&summary.id) == session_id)
         .map(|summary| CanvasCard {
             id: summary.id.clone(),
             title: summary.title.clone(),
@@ -136,7 +136,7 @@ pub(crate) fn cards_from_decks(
 ) -> Vec<CanvasCard> {
     let mut mine: Vec<CanvasCard> = decks
         .iter()
-        .filter(|summary| crate::settings::artifact_project(&summary.id) == session_id)
+        .filter(|summary| artifact_project(&summary.id) == session_id)
         .map(|summary| CanvasCard {
             id: summary.id.clone(),
             title: summary.title.clone(),
@@ -160,7 +160,7 @@ pub(crate) fn cards_from_documents(
 ) -> Vec<CanvasCard> {
     let mut mine: Vec<CanvasCard> = documents
         .iter()
-        .filter(|summary| crate::settings::artifact_project(&summary.id) == session_id)
+        .filter(|summary| artifact_project(&summary.id) == session_id)
         .map(|summary| CanvasCard {
             id: summary.id.clone(),
             title: summary.title.clone(),
@@ -183,7 +183,7 @@ pub(crate) fn cards_from_socials(
 ) -> Vec<CanvasCard> {
     let mut mine: Vec<CanvasCard> = socials
         .iter()
-        .filter(|summary| crate::settings::artifact_project(&summary.id) == session_id)
+        .filter(|summary| artifact_project(&summary.id) == session_id)
         .map(|summary| CanvasCard {
             id: summary.id.clone(),
             title: summary.title.clone(),
@@ -206,7 +206,7 @@ pub(crate) fn cards_from_prints(
 ) -> Vec<CanvasCard> {
     let mut mine: Vec<CanvasCard> = prints
         .iter()
-        .filter(|summary| crate::settings::artifact_project(&summary.id) == session_id)
+        .filter(|summary| artifact_project(&summary.id) == session_id)
         .map(|summary| CanvasCard {
             id: summary.id.clone(),
             title: summary.title.clone(),
@@ -230,7 +230,7 @@ pub(crate) fn cards_from_mailings(
 ) -> Vec<CanvasCard> {
     let mut mine: Vec<CanvasCard> = mailings
         .iter()
-        .filter(|summary| crate::settings::artifact_project(&summary.id) == session_id)
+        .filter(|summary| artifact_project(&summary.id) == session_id)
         .map(|summary| CanvasCard {
             id: summary.id.clone(),
             title: summary.title.clone(),
@@ -254,7 +254,7 @@ pub(crate) fn cards_from_campaigns(
 ) -> Vec<CanvasCard> {
     let mut mine: Vec<CanvasCard> = campaigns
         .iter()
-        .filter(|summary| crate::settings::artifact_project(&summary.id) == session_id)
+        .filter(|summary| artifact_project(&summary.id) == session_id)
         .map(|summary| CanvasCard {
             id: summary.id.clone(),
             title: summary.title.clone(),
@@ -278,7 +278,7 @@ pub(crate) fn cards_from_artworks(
 ) -> Vec<CanvasCard> {
     let mut mine: Vec<CanvasCard> = artworks
         .iter()
-        .filter(|summary| crate::settings::artifact_project(&summary.id) == session_id)
+        .filter(|summary| artifact_project(&summary.id) == session_id)
         .map(|summary| CanvasCard {
             id: summary.id.clone(),
             title: summary.title.clone(),
@@ -533,7 +533,7 @@ pub(crate) fn queued_finishes(messages: &[api::ChatMessage], is_running: bool) -
         return ids;
     }
     for message in messages.iter().rev() {
-        if message.role != "user" {
+        if message.role != "user" || message.is_queued {
             continue;
         }
         if !message.is_continue {
@@ -1051,6 +1051,10 @@ fn PlaceholderCard(
 
 #[cfg(test)]
 mod tests {
+    use design_model::{LANDSCAPE_VIEWPORT, PORTRAIT_VIEWPORT, SQUARE_VIEWPORT, STORY_VIEWPORT};
+
+    use crate::api::{DeckSummary, DesignSummary, SocialSummary};
+
     use super::*;
 
     #[test]
@@ -1071,9 +1075,19 @@ mod tests {
             design: design.map(str::to_owned),
             question_set: None,
             is_continue,
+            is_queued: false,
             at: None,
             artifacts: Vec::new(),
+            snapshot_stamps: None,
         }
+    }
+
+    #[test]
+    fn pending_prompts_do_not_hide_finishes_joining_the_active_turn() {
+        let mut pending = message("user", None, false);
+        pending.is_queued = true;
+        let messages = vec![message("user", Some("a"), true), pending];
+        assert!(queued_finishes(&messages, true).contains("a"));
     }
 
     #[test]
@@ -1098,10 +1112,6 @@ mod tests {
         assert_eq!(key_step(&Key::Enter), None);
         assert_eq!(key_step(&Key::ArrowUp), None);
     }
-    use design_model::{LANDSCAPE_VIEWPORT, PORTRAIT_VIEWPORT, SQUARE_VIEWPORT, STORY_VIEWPORT};
-
-    use crate::api::{DeckSummary, DesignSummary, SocialSummary};
-
     fn phone() -> Viewport {
         Viewport {
             width: 390,

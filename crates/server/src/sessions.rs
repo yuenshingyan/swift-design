@@ -7,6 +7,7 @@
 //! run records. The workflow state is authoritative and changes only
 //! through `apply`, which calls `design_model::transition`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -17,7 +18,16 @@ use design_model::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::designs::is_valid_design_id;
+use crate::artworks::ArtworkSummary;
+use crate::campaigns::CampaignSummary;
+use crate::decks::DeckSummary;
+use crate::designs::{DesignSummary, is_valid_design_id};
+use crate::documents::DocumentSummary;
+use crate::files::write_atomically;
+use crate::mailings::MailingSummary;
+use crate::prints::PrintSummary;
+use crate::socials::SocialSummary;
+use crate::time::{rfc3339_now, unix_now_seconds};
 
 /// The candidate-id marker: a session id may not contain it, so a
 /// session id and a candidate id never collide.
@@ -182,6 +192,15 @@ pub struct RunOptions {
 }
 
 impl RunOptions {
+    /// True for known app products outside the standalone landing-page scope.
+    pub fn should_have_app_window(&self) -> bool {
+        self.scope.as_deref() != Some("landing_page")
+            && matches!(
+                self.product_kind.as_deref(),
+                Some("consumer_app" | "business_app" | "developer_tool" | "dashboard")
+            )
+    }
+
     /// The stored value of the axis whose option is `key`, or `None`
     /// for a key that names no axis.
     pub fn axis(&self, key: &str) -> Option<&Option<String>> {
@@ -377,6 +396,12 @@ pub struct ChatMessage {
     /// planner and rewrites them without their old markup.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_regenerate: bool,
+    /// True while this prompt waits for its own turn. Running engines ignore it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_queued: bool,
+    /// True when validated answers requested resumption of this waiting turn.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_resume: bool,
     /// When the turn was recorded, RFC 3339. Set on append.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
@@ -385,6 +410,9 @@ pub struct ChatMessage {
     /// before it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<String>,
+    /// Exact pre-edit snapshots, independent of when a queued prompt arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_stamps: Option<HashMap<String, String>>,
 }
 
 impl ChatMessage {
@@ -400,6 +428,9 @@ impl ChatMessage {
             at: None,
             artifacts: Vec::new(),
             pinned: Vec::new(),
+            is_queued: false,
+            is_resume: false,
+            snapshot_stamps: None,
         }
     }
 
@@ -432,6 +463,9 @@ impl ChatMessage {
             at: None,
             artifacts: Vec::new(),
             pinned: Vec::new(),
+            is_queued: false,
+            is_resume: false,
+            snapshot_stamps: None,
         }
     }
 
@@ -459,9 +493,22 @@ impl ChatMessage {
             at: None,
             artifacts: Vec::new(),
             pinned: Vec::new(),
+            is_queued: false,
+            is_resume: false,
+            snapshot_stamps: None,
         }
     }
 }
+
+fn run_sort_key(id: &str) -> (u64, u64) {
+    id.split_once('-')
+        .and_then(|(seconds, number)| Some((seconds.parse().ok()?, number.parse().ok()?)))
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+#[path = "queued_messages_tests.rs"]
+mod queued_messages_tests;
 
 /// One recorded set of answers.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -626,28 +673,28 @@ pub struct SessionView {
     pub runs: Vec<RunRecord>,
     /// The designs that belong to this session. Empty unless the session
     /// is a demo session.
-    pub designs: Vec<crate::designs::DesignSummary>,
+    pub designs: Vec<DesignSummary>,
     /// The decks that belong to this session. Empty unless the session
     /// is a deck session.
-    pub decks: Vec<crate::decks::DeckSummary>,
+    pub decks: Vec<DeckSummary>,
     /// The documents that belong to this session. Empty unless the
     /// session is a document session.
-    pub documents: Vec<crate::documents::DocumentSummary>,
+    pub documents: Vec<DocumentSummary>,
     /// The socials that belong to this session. Empty unless the
     /// session is a social session.
-    pub socials: Vec<crate::socials::SocialSummary>,
+    pub socials: Vec<SocialSummary>,
     /// The prints that belong to this session. Empty unless the
     /// session is a print session.
-    pub prints: Vec<crate::prints::PrintSummary>,
+    pub prints: Vec<PrintSummary>,
     /// The mailings that belong to this session. Empty unless the
     /// session is a mailing session.
-    pub mailings: Vec<crate::mailings::MailingSummary>,
+    pub mailings: Vec<MailingSummary>,
     /// The campaigns that belong to this session. Empty unless the
     /// session is a campaign session.
-    pub campaigns: Vec<crate::campaigns::CampaignSummary>,
+    pub campaigns: Vec<CampaignSummary>,
     /// The artworks that belong to this session. Empty unless the
     /// session is an artwork session.
-    pub artworks: Vec<crate::artworks::ArtworkSummary>,
+    pub artworks: Vec<ArtworkSummary>,
 }
 
 /// What went wrong in a session operation.
@@ -731,7 +778,7 @@ impl SessionStore {
         if self.session_path(id).exists() {
             return Err(SessionError::AlreadyExists { id: id.to_owned() });
         }
-        let now = crate::time::rfc3339_now();
+        let now = rfc3339_now();
         let session = Session {
             id: id.to_owned(),
             title: new.title.to_owned(),
@@ -774,7 +821,7 @@ impl SessionStore {
             .await
             .map_err(SessionError::io)?;
         let json = serde_json::to_string_pretty(session).map_err(SessionError::io)?;
-        crate::files::write_atomically(&self.session_path(&session.id), &json)
+        write_atomically(&self.session_path(&session.id), &json)
             .await
             .map_err(SessionError::io)
     }
@@ -834,7 +881,7 @@ impl SessionStore {
             .await
             .map_err(SessionError::io)?;
         session.id = new.to_owned();
-        session.updated_at = crate::time::rfc3339_now();
+        session.updated_at = rfc3339_now();
         self.write_session(&session).await?;
         Ok(true)
     }
@@ -856,7 +903,7 @@ impl SessionStore {
             session.error = None;
         }
         session.state = next;
-        session.updated_at = crate::time::rfc3339_now();
+        session.updated_at = rfc3339_now();
         self.write_session(&session).await?;
         Ok(session)
     }
@@ -886,7 +933,7 @@ impl SessionStore {
         let _guard = self.write_lock.lock().await;
         let mut session = self.require(id).await?;
         edit(&mut session);
-        session.updated_at = crate::time::rfc3339_now();
+        session.updated_at = rfc3339_now();
         self.write_session(&session).await?;
         Ok(session)
     }
@@ -919,11 +966,11 @@ impl SessionStore {
             .await
             .map_err(SessionError::io)?;
         let json = serde_json::to_string_pretty(set).map_err(SessionError::io)?;
-        crate::files::write_atomically(&self.question_set_path(id, number), &json)
+        write_atomically(&self.question_set_path(id, number), &json)
             .await
             .map_err(SessionError::io)?;
         session.latest_question_set = Some(number);
-        session.updated_at = crate::time::rfc3339_now();
+        session.updated_at = rfc3339_now();
         self.write_session(&session).await?;
         Ok(number)
     }
@@ -967,7 +1014,7 @@ impl SessionStore {
         records.push(AnswerRecord {
             question_set,
             answers,
-            at: crate::time::rfc3339_now(),
+            at: rfc3339_now(),
         });
         self.write_json(&self.answers_path(id), &records).await
     }
@@ -1014,7 +1061,7 @@ impl SessionStore {
         let _guard = self.write_lock.lock().await;
         let mut messages = self.messages(id).await?;
         if message.at.is_none() {
-            message.at = Some(crate::time::rfc3339_now());
+            message.at = Some(rfc3339_now());
         }
         messages.push(message);
         self.write_json(&self.messages_path(id), &messages).await
@@ -1025,6 +1072,87 @@ impl SessionStore {
         self.read_json(&self.messages_path(id)).await
     }
 
+    /// The conversation visible to a run, without waiting prompts.
+    pub async fn messages_for_run(&self, id: &str) -> Result<Vec<ChatMessage>, SessionError> {
+        Ok(self
+            .messages(id)
+            .await?
+            .into_iter()
+            .filter(|message| !message.is_queued)
+            .collect())
+    }
+
+    /// True when at least one prompt waits for a turn.
+    pub async fn has_queued_messages(&self, id: &str) -> Result<bool, SessionError> {
+        Ok(self
+            .messages(id)
+            .await?
+            .iter()
+            .any(|message| message.is_queued))
+    }
+
+    /// True when validated answers requested a paused turn to resume.
+    pub async fn has_requested_resume(&self, id: &str) -> Result<bool, SessionError> {
+        Ok(self
+            .messages(id)
+            .await?
+            .iter()
+            .any(|message| message.is_queued && message.is_resume))
+    }
+
+    /// Places the current prompt ahead of waiting follow-ups after its answers arrive.
+    pub async fn queue_answered_turn(&self, id: &str) -> Result<(), SessionError> {
+        let _guard = self.write_lock.lock().await;
+        let mut messages = self.messages(id).await?;
+        if messages
+            .iter()
+            .any(|message| message.is_queued && message.is_resume)
+        {
+            return Ok(());
+        }
+        let index = messages.iter().rposition(|message| {
+            message.role == "user" && !message.is_queued && !message.is_continue
+        });
+        let mut message = if let Some(index) = index {
+            messages.remove(index)
+        } else {
+            let session = self
+                .read(id)
+                .await?
+                .ok_or_else(|| SessionError::NotFound { id: id.to_owned() })?;
+            let mut message = ChatMessage::user(&session.request, session.chosen_design.as_deref());
+            message.at = Some(session.created_at);
+            message
+        };
+        message.is_queued = true;
+        message.is_resume = true;
+        let index = messages
+            .iter()
+            .position(|message| message.is_queued)
+            .unwrap_or(messages.len());
+        messages.insert(index, message);
+        self.write_json(&self.messages_path(id), &messages).await
+    }
+
+    /// Activates the oldest waiting prompt and places it after the completed turn.
+    /// Keeps its original timestamp, candidate targets, and regeneration action.
+    pub async fn activate_next_message(
+        &self,
+        id: &str,
+    ) -> Result<Option<ChatMessage>, SessionError> {
+        let _guard = self.write_lock.lock().await;
+        let mut messages = self.messages(id).await?;
+        let Some(index) = messages.iter().position(|message| message.is_queued) else {
+            return Ok(None);
+        };
+        let mut message = messages.remove(index);
+        message.is_queued = false;
+        message.is_resume = false;
+        messages.push(message.clone());
+        self.write_json(&self.messages_path(id), &messages).await?;
+        Ok(Some(message))
+    }
+
     /// Records the start of a run. Returns its id.
     pub async fn start_run(&self, id: &str, mut record: RunRecord) -> Result<String, SessionError> {
         let _guard = self.write_lock.lock().await;
@@ -1033,9 +1161,9 @@ impl SessionStore {
             .await
             .map_err(SessionError::io)?;
         let existing = self.runs(id).await?.len();
-        record.run_id = format!("{}-{}", crate::time::unix_now_seconds(), existing + 1);
+        record.run_id = format!("{}-{}", unix_now_seconds(), existing + 1);
         let json = serde_json::to_string_pretty(&record).map_err(SessionError::io)?;
-        crate::files::write_atomically(&directory.join(format!("{}.json", record.run_id)), &json)
+        write_atomically(&directory.join(format!("{}.json", record.run_id)), &json)
             .await
             .map_err(SessionError::io)?;
         Ok(record.run_id)
@@ -1055,12 +1183,12 @@ impl SessionStore {
         let Some(mut record) = self.read_json_file::<RunRecord>(&path).await? else {
             return Ok(());
         };
-        record.finished_at = Some(crate::time::rfc3339_now());
+        record.finished_at = Some(rfc3339_now());
         record.result = Some(result.to_owned());
         record.error = error;
         record.artifacts = artifacts;
         let json = serde_json::to_string_pretty(&record).map_err(SessionError::io)?;
-        crate::files::write_atomically(&path, &json)
+        write_atomically(&path, &json)
             .await
             .map_err(SessionError::io)
     }
@@ -1110,7 +1238,11 @@ impl SessionStore {
                 records.push(record);
             }
         }
-        records.sort_by(|first, second| first.run_id.cmp(&second.run_id));
+        records.sort_by(|first, second| {
+            run_sort_key(&first.run_id)
+                .cmp(&run_sort_key(&second.run_id))
+                .then_with(|| first.run_id.cmp(&second.run_id))
+        });
         Ok(records)
     }
 
@@ -1121,7 +1253,7 @@ impl SessionStore {
                 .map_err(SessionError::io)?;
         }
         let json = serde_json::to_string_pretty(value).map_err(SessionError::io)?;
-        crate::files::write_atomically(path, &json)
+        write_atomically(path, &json)
             .await
             .map_err(SessionError::io)
     }
@@ -1255,6 +1387,24 @@ mod tests {
         assert_eq!(back, message);
         let plain = serde_json::to_value(ChatMessage::user("Hi.", None)).unwrap();
         assert!(plain.get("is_regenerate").is_none());
+    }
+
+    #[test]
+    fn known_app_products_require_one_window_contract_except_for_landing_pages() {
+        for kind in [
+            "consumer_app",
+            "business_app",
+            "developer_tool",
+            "dashboard",
+        ] {
+            let mut options = RunOptions {
+                product_kind: Some(kind.to_owned()),
+                ..RunOptions::default()
+            };
+            assert!(options.should_have_app_window());
+            options.scope = Some("landing_page".to_owned());
+            assert!(!options.should_have_app_window());
+        }
     }
 
     #[test]
@@ -1589,7 +1739,7 @@ mod tests {
                     runtime: "built-in".to_owned(),
                     provider: Some("openai".to_owned()),
                     model: Some("gpt-5".to_owned()),
-                    started_at: crate::time::rfc3339_now(),
+                    started_at: rfc3339_now(),
                     finished_at: None,
                     result: None,
                     error: None,
@@ -1706,7 +1856,7 @@ mod tests {
             runtime: "built-in".to_owned(),
             provider: None,
             model: None,
-            started_at: crate::time::rfc3339_now(),
+            started_at: rfc3339_now(),
             finished_at: None,
             result: None,
             error: None,

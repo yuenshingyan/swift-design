@@ -5,7 +5,7 @@
 //! the node inspector, the theme form, and the history section with
 //! the design editor; what differs is the document type, the
 //! `/documents` routes, the page vocabulary, the paper control, and
-//! the exports: PDF and DOCX beside the HTML file.
+//! the exports: PDF, DOCX, and PNG files beside the HTML file.
 
 use design_model::{ArtifactKind, Document, Page, Paper, Theme};
 use dioxus::document;
@@ -230,8 +230,9 @@ fn LoadedDocumentEditor(
                             && from != to
                             && to < document.peek().pages.len()
                         {
-                            document
-                                .with_mut(|document| move_screen(&mut document.pages, from, to));
+                            document.with_mut(|document| {
+                                move_screen(&mut document.pages, &mut document.outline, from, to)
+                            });
                             dragged.set(Some(to));
                             selected.set(to);
                             selected_node.set(None);
@@ -383,6 +384,7 @@ fn LoadedDocumentEditor(
                         span { class: "divider" }
                         DocumentExportGroup {
                             document_id: document_id.clone(),
+                            selected: selected(),
                             can_export_with_chrome,
                         }
                         button {
@@ -737,60 +739,114 @@ fn LoadedDocumentEditor(
     }
 }
 
-/// The document toolbar's export group: the HTML file, the
-/// Chrome-backed PDF, and the DOCX file.
-#[component]
-fn DocumentExportGroup(document_id: String, can_export_with_chrome: bool) -> Element {
-    rsx! {
-        div { class: "export-group",
-            a {
-                class: "button",
-                href: "/documents/{document_id}/export",
-                title: "Export as one HTML file",
-                span { dangerous_inner_html: icons::DOWNLOAD }
-                "HTML"
-            }
-            ChromeExportLink {
-                href: format!("/documents/{document_id}/export.pdf"),
-                label: "PDF",
-                title: "Export as a PDF, one sheet per page",
-                is_enabled: can_export_with_chrome,
-            }
-            a {
-                class: "button",
-                href: "/documents/{document_id}/export.docx",
-                title: "Export as a Word file",
-                span { dangerous_inner_html: icons::DOWNLOAD }
-                "DOCX"
-            }
-        }
+/// The href of the PNG export: one page's image when scoped, the zip
+/// of every page otherwise.
+fn png_export_href(document_id: &str, only: Option<usize>) -> String {
+    match only {
+        Some(index) => format!("/documents/{document_id}/pages/{}.png", index + 1),
+        None => format!("/documents/{document_id}/export.zip"),
     }
 }
 
-/// One export link that needs Chrome on the server: a link when Chrome
-/// is there, a disabled cell with the install hint otherwise.
+/// The download name of a scoped page image, matching the zip entry.
+fn page_download_name(document_id: &str, index: usize) -> String {
+    format!("{document_id}-page-{}.png", index + 1)
+}
+
+/// The label of the menu that downloads the page on display.
+fn page_export_label(index: usize) -> String {
+    format!("Page {}", index + 1)
+}
+
+/// The document toolbar's export menus: `All` downloads the whole
+/// document, and `Page N` downloads the page on display.
 #[component]
-fn ChromeExportLink(
-    href: String,
-    label: &'static str,
-    title: &'static str,
-    is_enabled: bool,
+fn DocumentExportGroup(
+    document_id: String,
+    selected: usize,
+    can_export_with_chrome: bool,
 ) -> Element {
-    if is_enabled {
-        return rsx! {
-            a { class: "button", href: "{href}", title: "{title}",
-                span { dangerous_inner_html: icons::DOWNLOAD }
-                "{label}"
-            }
-        };
-    }
+    let mut is_all_menu_open = use_signal(|| false);
+    let mut is_unit_menu_open = use_signal(|| false);
+    let unit_label = page_export_label(selected);
     rsx! {
-        span {
-            class: "export-cell",
-            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
-            a { class: "button", "aria-disabled": "true",
+        div { class: "unit-export",
+            button {
+                title: "Download the whole document",
+                onclick: move |_| is_all_menu_open.set(!is_all_menu_open()),
                 span { dangerous_inner_html: icons::DOWNLOAD }
-                "{label}"
+                "All"
+            }
+            if is_all_menu_open() {
+                div {
+                    class: "menu-backdrop",
+                    onclick: move |_| is_all_menu_open.set(false),
+                }
+                div { class: "toolbar-menu unit-export-menu",
+                    a {
+                        href: "/documents/{document_id}/export",
+                        onclick: move |_| is_all_menu_open.set(false),
+                        "Download as HTML"
+                    }
+                    a {
+                        href: "/documents/{document_id}/export.docx",
+                        onclick: move |_| is_all_menu_open.set(false),
+                        "Download as DOCX"
+                    }
+                    if can_export_with_chrome {
+                        a {
+                            href: "/documents/{document_id}/export.pdf",
+                            onclick: move |_| is_all_menu_open.set(false),
+                            "Download as PDF"
+                        }
+                        a {
+                            href: png_export_href(&document_id, None),
+                            onclick: move |_| is_all_menu_open.set(false),
+                            "Download as PNG zip"
+                        }
+                    } else {
+                        a {
+                            "aria-disabled": "true",
+                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                            "Download as PDF"
+                        }
+                        a {
+                            "aria-disabled": "true",
+                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                            "Download as PNG zip"
+                        }
+                    }
+                }
+            }
+        }
+        div { class: "unit-export",
+            button {
+                title: "Download only the page on display",
+                onclick: move |_| is_unit_menu_open.set(!is_unit_menu_open()),
+                span { dangerous_inner_html: icons::DOWNLOAD }
+                "{unit_label}"
+            }
+            if is_unit_menu_open() {
+                div {
+                    class: "menu-backdrop",
+                    onclick: move |_| is_unit_menu_open.set(false),
+                }
+                div { class: "toolbar-menu unit-export-menu",
+                    if can_export_with_chrome {
+                        a {
+                            href: png_export_href(&document_id, Some(selected)),
+                            download: page_download_name(&document_id, selected),
+                            onclick: move |_| is_unit_menu_open.set(false),
+                            "Download as PNG"
+                        }
+                    } else {
+                        a {
+                            "aria-disabled": "true",
+                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                            "Download as PNG"
+                        }
+                    }
+                }
             }
         }
     }
@@ -859,8 +915,8 @@ mod tests {
     use design_model::{Document, FontSet, Page, Palette, Paper, Theme};
 
     use super::{
-        DocumentPreviewMode, default_page, field_count, outline_title, page_label,
-        paper_option_label,
+        DocumentPreviewMode, default_page, field_count, outline_title, page_download_name,
+        page_export_label, page_label, paper_option_label, png_export_href,
     };
 
     #[test]
@@ -939,5 +995,19 @@ mod tests {
     fn paper_options_name_the_paper_and_its_canvas() {
         assert_eq!(paper_option_label(Paper::A4), "A4 · 794 × 1123");
         assert_eq!(paper_option_label(Paper::Letter), "Letter · 816 × 1056");
+    }
+
+    #[test]
+    fn png_exports_name_the_page_in_href_and_filename() {
+        assert_eq!(
+            png_export_href("launch", None),
+            "/documents/launch/export.zip"
+        );
+        assert_eq!(
+            png_export_href("launch", Some(1)),
+            "/documents/launch/pages/2.png"
+        );
+        assert_eq!(page_download_name("launch", 1), "launch-page-2.png");
+        assert_eq!(page_export_label(1), "Page 2");
     }
 }

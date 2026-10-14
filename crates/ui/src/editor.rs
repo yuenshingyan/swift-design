@@ -7,12 +7,13 @@
 //! text is editable in place, and a right-click menu applies quick
 //! actions in the iframe's DOM. After every change the iframe posts the
 //! screen's HTML back, and this editor stores it as `screens[i].html` and
-//! saves. No HTML is parsed or mutated in WASM. Field badges show who
+//! saves. Reordering remaps local screen links before saving. Field badges show who
 //! wrote the title, theme, css, and notes: the agent, or the user.
 
 use design_model::transition::MAX_TRANSITION_MS;
 use design_model::{
-    ArtifactKind, Design, Screen, Theme, Transition, TransitionAxis, TransitionEffect, Viewport,
+    ArtifactKind, Design, LinkedUnit, Screen, Theme, Transition, TransitionAxis, TransitionEffect,
+    Viewport, reorder_units,
 };
 use dioxus::document;
 use dioxus::prelude::*;
@@ -410,6 +411,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
     let mut pending_screen_delete = use_signal(|| Option::<usize>::None);
     // The tile whose Redo waits for its second click.
     let mut pending_redo = use_signal(|| Option::<usize>::None);
+    let settings = use_resource(|| async { api::fetch_settings().await.ok() });
 
     let authors_id = design_id.clone();
     use_future(move || {
@@ -516,7 +518,9 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                             && from != to
                             && to < design.peek().screens.len()
                         {
-                            design.with_mut(|design| move_screen(&mut design.screens, from, to));
+                            design.with_mut(|design| {
+                                move_screen(&mut design.screens, &mut design.outline, from, to)
+                            });
                             dragged.set(Some(to));
                             selected.set(to);
                             selected_node.set(None);
@@ -590,6 +594,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
 
     let screen_count = design().screens.len();
     let outline_count = design().outline.len();
+    let can_export_with_chrome = settings().flatten().is_none_or(|view| view.has_chrome);
     // The render page fits the screen to its frame, so a frame with the
     // canvas ratio shows the screen edge to edge. Every thumbnail is
     // the same height, and as wide as the ratio says.
@@ -645,11 +650,14 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                     }
                     span { class: "divider" }
                     span { class: "preview-heading", "{selected() + 1} / {screen_count}" }
-                    div { class: "canvas-tabs preview-modes", role: "tablist",
+                    div {
+                        class: "canvas-tabs preview-modes",
+                        role: "group",
+                        aria_label: "Demo preview controls",
                         for candidate in PreviewMode::ALL {
                             button {
                                 key: "{candidate.label()}",
-                                role: "tab",
+                                aria_pressed: "{mode() == candidate}",
                                 class: if mode() == candidate { "canvas-tab open" } else { "canvas-tab" },
                                 title: "{candidate.title()}",
                                 onclick: move |_| {
@@ -657,6 +665,23 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                                     selected_node.set(None);
                                 },
                                 span { class: "tab-name", "{candidate.label()}" }
+                            }
+                        }
+                        if is_dirty() {
+                            button {
+                                class: "canvas-tab",
+                                disabled: true,
+                                title: "Wait for changes to save before viewing the demo",
+                                "View"
+                            }
+                        } else {
+                            a {
+                                class: "canvas-tab",
+                                href: view_href(&design_id),
+                                target: "_blank",
+                                rel: "noopener noreferrer",
+                                title: "View the full demo in a new tab",
+                                "View"
                             }
                         }
                     }
@@ -672,14 +697,10 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                             "Properties"
                         }
                         span { class: "divider" }
-                        div { class: "export-group",
-                            a {
-                                class: "button",
-                                href: "/designs/{design_id}/export",
-                                title: "Export as one HTML file",
-                                span { dangerous_inner_html: icons::DOWNLOAD }
-                                "HTML"
-                            }
+                        DesignExportGroup {
+                            design_id: design_id.clone(),
+                            selected: selected(),
+                            can_export_with_chrome,
                         }
                         button {
                             class: "toolbar-more",
@@ -1659,13 +1680,113 @@ fn RequiredColorField(
     }
 }
 
-/// Moves the item at `from` to position `to`, shifting the others.
-pub(crate) fn move_screen<T>(screens: &mut Vec<T>, from: usize, to: usize) {
-    if from == to || from >= screens.len() || to >= screens.len() {
-        return;
+/// The href of the PNG export: one screen's image when scoped, the zip
+/// of every screen otherwise.
+fn png_export_href(design_id: &str, only: Option<usize>) -> String {
+    match only {
+        Some(index) => format!("/designs/{design_id}/screens/{}.png", index + 1),
+        None => format!("/designs/{design_id}/export.zip"),
     }
-    let screen = screens.remove(from);
-    screens.insert(to, screen);
+}
+
+/// The download name of a scoped screen image, matching the zip entry.
+fn screen_download_name(design_id: &str, index: usize) -> String {
+    format!("{design_id}-screen-{}.png", index + 1)
+}
+
+/// The design toolbar's export menus: `All` downloads the whole design,
+/// and `Screen N` downloads the screen on display.
+#[component]
+fn DesignExportGroup(design_id: String, selected: usize, can_export_with_chrome: bool) -> Element {
+    let mut is_all_menu_open = use_signal(|| false);
+    let mut is_unit_menu_open = use_signal(|| false);
+    let unit_label = screen_export_label(selected);
+    rsx! {
+        div { class: "unit-export",
+            button {
+                title: "Download the whole design",
+                onclick: move |_| is_all_menu_open.set(!is_all_menu_open()),
+                span { dangerous_inner_html: icons::DOWNLOAD }
+                "All"
+            }
+            if is_all_menu_open() {
+                div {
+                    class: "menu-backdrop",
+                    onclick: move |_| is_all_menu_open.set(false),
+                }
+                div { class: "toolbar-menu unit-export-menu",
+                    a {
+                        href: "/designs/{design_id}/export",
+                        onclick: move |_| is_all_menu_open.set(false),
+                        "Download as HTML"
+                    }
+                    if can_export_with_chrome {
+                        a {
+                            href: png_export_href(&design_id, None),
+                            onclick: move |_| is_all_menu_open.set(false),
+                            "Download as PNG zip"
+                        }
+                    } else {
+                        a {
+                            "aria-disabled": "true",
+                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                            "Download as PNG zip"
+                        }
+                    }
+                }
+            }
+        }
+        div { class: "unit-export",
+            button {
+                title: "Download only the screen on display",
+                onclick: move |_| is_unit_menu_open.set(!is_unit_menu_open()),
+                span { dangerous_inner_html: icons::DOWNLOAD }
+                "{unit_label}"
+            }
+            if is_unit_menu_open() {
+                div {
+                    class: "menu-backdrop",
+                    onclick: move |_| is_unit_menu_open.set(false),
+                }
+                div { class: "toolbar-menu unit-export-menu",
+                    if can_export_with_chrome {
+                        a {
+                            href: png_export_href(&design_id, Some(selected)),
+                            download: screen_download_name(&design_id, selected),
+                            onclick: move |_| is_unit_menu_open.set(false),
+                            "Download as PNG"
+                        }
+                    } else {
+                        a {
+                            "aria-disabled": "true",
+                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
+                            "Download as PNG"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Opens the full saved demo without editor panels or editing scripts.
+fn view_href(design_id: &str) -> String {
+    format!("/designs/{design_id}/render")
+}
+
+/// The label of the menu that downloads the screen on display.
+fn screen_export_label(index: usize) -> String {
+    format!("Screen {}", index + 1)
+}
+
+/// Moves a unit while preserving navigation destinations and preview outline order.
+pub(crate) fn move_screen<T: LinkedUnit>(
+    screens: &mut Vec<T>,
+    outline: &mut Vec<String>,
+    from: usize,
+    to: usize,
+) {
+    reorder_units(screens, outline, from, to);
 }
 
 /// Short label for a thumbnail: position, then the first heading text,
@@ -1933,8 +2054,9 @@ mod tests {
         ThumbnailState, default_screen, effect_uses_motion, field_count, first_heading,
         font_options, history_label, image_upload_paths, move_screen, navigation_target,
         node_reference, optional, outline_entry, outline_title, page_reference, pin_reference,
-        preview_panes, preview_stage_class, screen_label, selection_paths, selection_reference,
-        strip_summary, strip_tags, thumbnail_class, toggle_pin,
+        png_export_href, preview_panes, preview_stage_class, screen_download_name,
+        screen_export_label, screen_label, selection_paths, selection_reference, strip_summary,
+        strip_tags, thumbnail_class, toggle_pin, view_href,
     };
 
     #[test]
@@ -2038,6 +2160,20 @@ mod tests {
     }
 
     #[test]
+    fn png_exports_name_the_screen_in_href_and_filename() {
+        assert_eq!(
+            png_export_href("launch", None),
+            "/designs/launch/export.zip"
+        );
+        assert_eq!(
+            png_export_href("launch", Some(1)),
+            "/designs/launch/screens/2.png"
+        );
+        assert_eq!(screen_download_name("launch", 1), "launch-screen-2.png");
+        assert_eq!(screen_export_label(1), "Screen 2");
+    }
+
+    #[test]
     fn a_dragged_tile_is_current_only_when_selected() {
         let dragging = ThumbnailState {
             is_dragging: true,
@@ -2090,6 +2226,7 @@ mod tests {
 
     fn design() -> design_model::Design {
         design_model::Design {
+            app_window: None,
             transition: None,
             title: "T".to_owned(),
             theme: design_model::Theme {
@@ -2225,18 +2362,54 @@ mod tests {
     }
 
     #[test]
+    fn view_opens_the_full_demo_without_scoping_or_editing() {
+        assert_eq!(
+            view_href("demo-candidate-2"),
+            "/designs/demo-candidate-2/render"
+        );
+    }
+
+    #[test]
+    fn drag_reorder_keeps_button_destinations_and_outline_titles() {
+        let mut screens = vec![default_screen(), default_screen(), default_screen()];
+        for screen in &mut screens {
+            screen.html = "<a href='#screen-2'>Open details</a>".to_owned();
+        }
+        let mut outline = vec![
+            "Home".to_owned(),
+            "Details".to_owned(),
+            "Settings".to_owned(),
+            "Next".to_owned(),
+        ];
+        move_screen(&mut screens, &mut outline, 1, 2);
+        assert!(
+            screens
+                .iter()
+                .all(|screen| screen.html.contains("href='#screen-3'"))
+        );
+        assert_eq!(outline, ["Home", "Settings", "Details", "Next"]);
+        move_screen(&mut screens, &mut outline, 2, 0);
+        assert!(
+            screens
+                .iter()
+                .all(|screen| screen.html.contains("href='#screen-1'"))
+        );
+        assert_eq!(outline, ["Details", "Home", "Settings", "Next"]);
+    }
+
+    #[test]
     fn move_screen_shifts_the_others() {
         let mut screens = vec![default_screen(), default_screen(), default_screen()];
         for (index, screen) in screens.iter_mut().enumerate() {
             screen.notes = Some(index.to_string());
         }
-        move_screen(&mut screens, 0, 2);
+        move_screen(&mut screens, &mut Vec::new(), 0, 2);
         let order: Vec<String> = screens
             .iter()
             .map(|screen| screen.notes.clone().unwrap())
             .collect();
         assert_eq!(order, ["1", "2", "0"]);
-        move_screen(&mut screens, 5, 0);
+        move_screen(&mut screens, &mut Vec::new(), 5, 0);
         assert_eq!(screens.len(), 3);
     }
 

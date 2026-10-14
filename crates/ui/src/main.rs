@@ -328,6 +328,9 @@ button.primary.send-button { display: inline-flex; align-items: center; justify-
   border-top: 1px solid #F0EEE9; padding-top: 0.5625rem; }
 .status-card .usage-line button { margin-left: auto; font-size: 0.75rem;
   padding: 0.25rem 0.6rem; border-radius: var(--r-control); }
+.status-card .usage-line button.stop-control { display: inline-flex; align-items: center;
+  justify-content: center; width: 2rem; height: 2rem; padding: 0; flex: none; border-radius: 50%; }
+.stop-control span { display: flex; }
 .question-hint { margin: 0; font-size: 0.75rem; color: var(--muted); }
 .agent-log { margin: 0; font-family: var(--mono); font-size: 0.68rem; color: var(--faint);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
@@ -502,10 +505,10 @@ button.primary.send-button { display: inline-flex; align-items: center; justify-
 .canvas-tabs { display: inline-flex; align-self: flex-start; gap: 0.125rem; padding: 0.1875rem;
   margin-bottom: 0.75rem; border: 1px solid var(--hairline); border-radius: var(--r-panel);
   background: var(--sunken); }
-button.canvas-tab { display: inline-flex; align-items: baseline; gap: 0.4rem; padding: 0.3rem 0.75rem;
+button.canvas-tab, a.canvas-tab { display: inline-flex; align-items: baseline; gap: 0.4rem; padding: 0.3rem 0.75rem;
   border: 1px solid transparent; border-radius: var(--r-button); background: transparent;
-  box-shadow: none; font-family: var(--mono); font-size: 0.75rem; color: var(--muted); }
-button.canvas-tab:hover:not(:disabled) { color: var(--ink); background: transparent;
+  box-shadow: none; font-family: var(--mono); font-size: 0.75rem; color: var(--muted); text-decoration: none; }
+button.canvas-tab:hover:not(:disabled), a.canvas-tab:hover { color: var(--ink); background: transparent;
   border-color: transparent; }
 button.canvas-tab.open { background: var(--raised); color: var(--ink); border-color: var(--hairline);
   box-shadow: var(--sh-control); }

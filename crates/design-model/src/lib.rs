@@ -37,6 +37,7 @@ pub mod markup;
 pub mod page;
 pub mod print;
 pub mod question;
+pub mod reorder;
 pub mod run_questions;
 pub mod screen;
 pub mod sheet;
@@ -62,7 +63,7 @@ pub use campaign::{
 pub use cover::Cover;
 pub use deck::{DECK_HEIGHT, DECK_VIEWPORT, DECK_WIDTH, Deck};
 pub use deck_questions::{DECK_SCENARIOS, DECK_VARIETY_LEVELS, is_deck_scenario};
-pub use design::Design;
+pub use design::{AppWindow, Design};
 pub use document::{A4_VIEWPORT, Document, LETTER_VIEWPORT, PAGE_COUNT_LIMIT, Paper};
 pub use email::Email;
 pub use frame::Frame;
@@ -79,6 +80,7 @@ pub use question::{
     QuestionAnswer, QuestionKind, QuestionOption, QuestionSetError, validate_answers,
     validate_question_set,
 };
+pub use reorder::{LinkedUnit, reorder_units};
 pub use run_questions::{
     AD_KINDS, AD_SIZES, ARTWORK_AXES, AUDIENCES, AppAxis, CAMPAIGN_AXES, COLOR_MODES, COVER_KINDS,
     COVER_SIZES, CUSTOM_ANSWER_LIMIT, DATA_STATES, DECK_AXES, DEMO_AXES, DEMO_SCOPES,
@@ -245,6 +247,7 @@ pub(crate) mod test_support {
                 css: Some(".title { font-size: 96px; }".to_owned()),
                 notes: None,
             }],
+            app_window: None,
             outline: Vec::new(),
             transition: None,
         }
