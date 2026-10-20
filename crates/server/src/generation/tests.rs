@@ -182,6 +182,49 @@ async fn the_planner_reads_the_users_source_files() {
     assert!(planner_call.contains("iOS developers new to Swift"));
 }
 
+#[tokio::test]
+async fn gpt_6_planner_receives_the_adopted_screenshot_as_an_image() {
+    let server = FakeModelServer::start().await;
+    server.push_text(r#"{"reply":"Which style?","generate":false}"#);
+    let directory = tempfile::tempdir().unwrap();
+    let designs = DesignStore::new(directory.path().join("designs"));
+    let sessions = SessionStore::new(directory.path().join("sessions"));
+    let uploads = UploadStore::new(directory.path().join("uploads"));
+    let screenshot = b"\x89PNG\r\n\x1a\n screenshot payload";
+    uploads
+        .save(crate::uploads::DRAFT_SCOPE, "image.png", screenshot)
+        .await
+        .unwrap();
+    uploads.adopt("talk").await.unwrap();
+    fresh_session(&sessions, "Use the attached screenshot.").await;
+    let mut configuration = server.configuration();
+    configuration.model = "gpt-6-astra".to_owned();
+    let engine = GenerationEngine::new(
+        configuration,
+        designs,
+        sessions,
+        None,
+        "http://127.0.0.1:3000".to_owned(),
+        ChangeNotifier::new(),
+    )
+    .with_uploads(uploads);
+    engine.run("talk", silent_log()).await.unwrap();
+    let requests = server.requests();
+    let parts = requests[0]["messages"][1]["content"].as_array().unwrap();
+    let image = parts
+        .iter()
+        .find(|part| part["type"] == "image_url")
+        .unwrap();
+    assert_eq!(
+        image["image_url"]["url"],
+        format!(
+            "data:image/png;base64,{}",
+            crate::export::base64_encode(screenshot)
+        )
+    );
+    assert!(!requests[0].to_string().contains("cannot see here"));
+}
+
 #[test]
 fn an_office_file_reaches_the_prompt_as_its_text() {
     let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));

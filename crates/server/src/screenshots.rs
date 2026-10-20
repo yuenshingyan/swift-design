@@ -122,6 +122,7 @@ pub fn supports_vision(model: &str) -> bool {
         "gpt-4o",
         "gpt-4.1",
         "gpt-5",
+        "gpt-6",
         "o3",
         "o4",
         "claude",
