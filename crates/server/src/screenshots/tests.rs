@@ -1,5 +1,72 @@
+#![allow(clippy::unwrap_used)]
+
 use super::routes::image_number;
 use super::*;
+
+#[test]
+fn chrome_discovery_finds_the_app_managed_browser_without_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let chrome = directory
+        .path()
+        .join("swift-design/chrome/chrome-linux64/chrome");
+    std::fs::create_dir_all(chrome.parent().unwrap()).unwrap();
+    std::fs::write(&chrome, b"browser").unwrap();
+    assert_eq!(
+        find_chrome_in(None, Some(directory.path().to_owned()), None),
+        Some(chrome.clone())
+    );
+
+    let custom = directory.path().join("custom-chrome");
+    std::fs::write(&custom, b"custom browser").unwrap();
+    assert_eq!(
+        find_chrome_in(
+            Some(custom.clone()),
+            Some(directory.path().to_owned()),
+            None
+        ),
+        Some(custom),
+    );
+    // An explicit broken override must not silently use another browser.
+    assert_eq!(
+        find_chrome_in(
+            Some(directory.path().join("missing")),
+            Some(directory.path().to_owned()),
+            None
+        ),
+        None,
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn chrome_preflight_requires_a_successful_script_report() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let chrome = directory.path().join("chrome");
+    for (script, should_pass) in [
+        (
+            "#!/bin/sh\nprintf '<html data-swift-browser-check=\"ok\"></html>'",
+            true,
+        ),
+        ("#!/bin/sh\nprintf '<html></html>'", false),
+        ("#!/bin/sh\nexit 1", false),
+    ] {
+        std::fs::write(&chrome, script).unwrap();
+        std::fs::set_permissions(&chrome, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = check_chrome(&chrome).await;
+        assert_eq!(result.is_ok(), should_pass, "{result:?}");
+        if let Err(message) = result {
+            assert!(message.starts_with("Cannot start the demo:"));
+            assert!(!message.contains(&directory.path().display().to_string()));
+        }
+    }
+    assert!(
+        check_chrome(&directory.path().join("missing"))
+            .await
+            .is_err()
+    );
+}
 
 #[test]
 fn image_numbers_come_from_png_names() {

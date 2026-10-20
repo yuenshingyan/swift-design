@@ -159,6 +159,15 @@ what you need. Pressing **Create** asks whether to build a software demo, a
 deck, a document, a social post, a print piece, an email, a display
 ad campaign, or cover art. The agent runs on your own model account.
 
+On Linux, the server automatically finds the app-managed browser at
+`$XDG_DATA_HOME/swift-design/chrome/chrome-linux64/chrome`, with
+`$HOME/.local/share` as the default data directory. System Chrome/Chromium
+locations and `PATH` are also checked. `SWIFT_DESIGN_CHROME` is an optional
+explicit override, not required for the app-managed installation. Before a
+built-in demo run sends any model requests, the server checks that Chrome can
+launch and execute JavaScript. A missing or broken browser blocks the run with
+a setup error instead of failing after generation.
+
 The design editor has two modes on a tab pair: **Play** (the default) and **Edit**. In
 Edit a click selects a node. In Play a click acts as it would for a user:
 a link to `#screen-3` opens screen 3, a `<details>` menu opens, and a
