@@ -9,6 +9,20 @@ use super::{
     is_start_offered, pin_candidates, pinned_reference, progress_label,
 };
 
+#[test]
+fn run_settings_only_appear_inside_the_open_question_card() {
+    let source = include_str!("workspace.rs");
+    assert_eq!(source.matches("RunSettings {").count(), 1);
+    let question_card = source
+        .split("if let Some((_number, set)) = open_set_card {")
+        .nth(1)
+        .expect("the workbench renders an open question card")
+        .split("if !is_asking && is_canvas_shown")
+        .next()
+        .expect("the question card precedes the canvas");
+    assert!(question_card.contains("RunSettings {"));
+}
+
 fn ids() -> Vec<String> {
     vec![
         "talk-candidate-1".to_owned(),
