@@ -1,3 +1,5 @@
+use crate::uploads::{AttachButton, AttachmentChips, PasteUploads, pending_uploads};
+
 use super::helpers::{
     chat_placeholder, is_chat_open, is_start_offered, pinned_reference, set_answers,
 };
@@ -42,6 +44,20 @@ pub(crate) fn SessionWorkspace(
     let mut mention_closed_on = use_signal(|| Option::<String>::None);
     let caret = use_signal(|| 0usize);
 
+    let mut uploads = use_signal(Vec::<api::UploadSummary>::new);
+    let mut sent_upload_names = use_signal(|| Option::<Vec<String>>::None);
+    let refresh_uploads = use_callback({
+        let session_id = session_id.clone();
+        move |_: ()| {
+            let session_id = session_id.clone();
+            spawn(async move {
+                if let Ok(listing) = api::fetch_uploads(&session_id).await {
+                    uploads.set(listing);
+                }
+            });
+        }
+    });
+
     // The live loop: refetch on every server change.
     {
         let session_id = session_id.clone();
@@ -50,6 +66,16 @@ pub(crate) fn SessionWorkspace(
             async move {
                 let mut seen = 0u64;
                 loop {
+                    // Seed sent files before mounting the composer, so a quick
+                    // paste cannot be mistaken for an earlier attachment.
+                    if let Ok(listing) = api::fetch_uploads(&session_id).await {
+                        if sent_upload_names.peek().is_none() {
+                            sent_upload_names.set(Some(
+                                listing.iter().map(|upload| upload.name.clone()).collect(),
+                            ));
+                        }
+                        uploads.set(listing);
+                    }
                     match api::fetch_session(&session_id).await {
                         Ok(fetched) => view.set(Some(fetched)),
                         Err(message) => error.set(Some(message)),
@@ -290,12 +316,19 @@ pub(crate) fn SessionWorkspace(
                 Some(reference) => format!("{reference} {text}"),
                 None => text,
             };
+            let sent_names = uploads
+                .read()
+                .iter()
+                .map(|upload| upload.name.clone())
+                .collect();
             // Every message is a turn: the planner answers, asks,
             // writes, or edits the pinned or chosen candidates.
             spawn(async move {
                 let sent = api::send_session_message_about(&session_id, &content, &targets).await;
                 if let Err(message) = sent {
                     error.set(Some(message));
+                } else {
+                    sent_upload_names.set(Some(sent_names));
                 }
             });
         }
@@ -632,7 +665,29 @@ pub(crate) fn SessionWorkspace(
                             }
                         },
                     }
+                    PasteUploads {
+                        key: "{session_id}",
+                        scope: session_id.clone(),
+                        on_uploaded: move |_| {
+                            error.set(None);
+                            refresh_uploads.call(());
+                        },
+                        on_error: move |message| error.set(Some(message)),
+                    }
+                    AttachmentChips {
+                        uploads: pending_uploads(&uploads(), &sent_upload_names().unwrap_or_default()),
+                        on_changed: move |_| refresh_uploads.call(()),
+                        on_error: move |message| error.set(Some(message)),
+                    }
                     div { class: "chat-controls",
+                        AttachButton {
+                            scope: session_id.clone(),
+                            on_uploaded: move |_| {
+                                error.set(None);
+                                refresh_uploads.call(());
+                            },
+                            on_error: move |message| error.set(Some(message)),
+                        }
                         ModelChip {
                             settings,
                             is_configuring,

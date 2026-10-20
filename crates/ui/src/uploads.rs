@@ -161,10 +161,19 @@ if (previous) {
 
 // Reads the transfer items in order: a folder as an entry to walk, a
 // file as itself.
-const rootsOf = (data) => {
+const rootsOf = (data, isPaste = false) => {
   const roots = [];
   for (const item of Array.from((data && data.items) || [])) {
     if (item.kind !== 'file') { continue; }
+    // Clipboard screenshots reuse image.png. Keep each paste distinct so
+    // it neither overwrites an earlier reference nor looks already sent.
+    if (isPaste && item.type.startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) {
+        roots.push({ file: new File([file], 'paste-' + crypto.randomUUID() + '-' + file.name, { type: file.type }) });
+        continue;
+      }
+    }
     const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
     if (entry) { roots.push({ entry }); continue; }
     const file = item.getAsFile();
@@ -174,7 +183,7 @@ const rootsOf = (data) => {
 };
 
 const onPaste = (event) => {
-  const roots = rootsOf(event.clipboardData);
+  const roots = rootsOf(event.clipboardData, true);
   if (!roots.length) { return; }
   // The paste carries files, so it must not also type into the box.
   event.preventDefault();
@@ -541,6 +550,15 @@ mod tests {
         assert_eq!(format_size(512), "512 B");
         assert_eq!(format_size(3 * 1024 + 410), "3.4 KB");
         assert_eq!(format_size(1_258_291), "1.2 MB");
+    }
+
+    #[test]
+    fn pasted_images_get_distinct_names_without_renaming_dropped_files() {
+        assert!(LISTEN_FOR_FILES.contains("rootsOf(event.clipboardData, true)"));
+        assert!(LISTEN_FOR_FILES.contains("rootsOf(event.dataTransfer)"));
+        assert!(LISTEN_FOR_FILES.contains("if (isPaste && item.type.startsWith('image/'))"));
+        assert!(LISTEN_FOR_FILES.contains("'paste-' + crypto.randomUUID() + '-' + file.name"));
+        assert!(LISTEN_FOR_FILES.contains("{ type: file.type }"));
     }
 
     #[test]

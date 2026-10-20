@@ -70,7 +70,10 @@ opens with the setup card. The planner adds its own questions to that card, or
 adds none. **Skip the questions and generate** writes straight away.
 
 Source files reach a run three ways: the `+` button, a paste into the page, or
-a drop onto the page. A paste or a drop can carry a folder. The app walks the
+a drop onto the page. These controls work on the landing page, in the session
+chat, and in artifact editors. Clipboard screenshots can be pasted directly;
+landing-page attachments follow the new session, and later uploads belong to
+the open session. A paste or a drop can carry a folder. The app walks the
 folder, keeps the path in each stored name, and skips hidden entries,
 `node_modules`, `target`, `dist`, files above 45 MB, and everything past 200
 files. It reports what it skipped.

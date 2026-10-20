@@ -25,6 +25,8 @@ fn window_sizes_follow_the_viewport() {
 #[test]
 fn vision_support_follows_the_model_name() {
     assert!(supports_vision("gpt-5-mini"));
+    assert!(supports_vision("gpt-6-astra"));
+    assert!(supports_vision("openai/GPT-6-ASTRA"));
     assert!(supports_vision("claude-sonnet-5"));
     assert!(supports_vision("google/gemini-2.5-flash"));
     assert!(!supports_vision("llama-3.3-70b-versatile"));
