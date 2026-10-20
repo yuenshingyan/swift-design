@@ -90,12 +90,33 @@ const PATH_NAMES: [&str; 5] = [
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// The Chrome binary to use: `SWIFT_DESIGN_CHROME`, a known location, or
-/// a name on `PATH`. `None` when nothing is installed.
+/// The Chrome binary to use: an explicit override, the app-managed
+/// installation, a known system location, or a name on `PATH`.
 pub fn find_chrome() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var(CHROME_ENVIRONMENT_VARIABLE) {
-        let path = PathBuf::from(path);
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")));
+    find_chrome_in(
+        std::env::var_os(CHROME_ENVIRONMENT_VARIABLE).map(PathBuf::from),
+        data_home,
+        std::env::var_os("PATH"),
+    )
+}
+
+fn find_chrome_in(
+    override_path: Option<PathBuf>,
+    data_home: Option<PathBuf>,
+    search_path: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    if let Some(path) = override_path {
         return path.is_file().then_some(path);
+    }
+    if let Some(directory) = data_home {
+        let path = directory.join("swift-design/chrome/chrome-linux64/chrome");
+        if path.is_file() {
+            return Some(path);
+        }
     }
     for path in KNOWN_PATHS {
         let path = PathBuf::from(path);
@@ -103,7 +124,7 @@ pub fn find_chrome() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    let search_path = std::env::var_os("PATH")?;
+    let search_path = search_path?;
     for directory in std::env::split_paths(&search_path) {
         for name in PATH_NAMES {
             let candidate = directory.join(name);
@@ -113,6 +134,19 @@ pub fn find_chrome() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Checks browser startup and script execution before a paid demo run.
+pub(crate) async fn check_chrome(chrome: &std::path::Path) -> Result<(), String> {
+    let url = "data:text/html,<script>document.documentElement.setAttribute('data-swift-browser-check','ok')</script>";
+    match run_chrome_dump(chrome, url, Viewport::default()).await {
+        Ok(dom) if dom.contains("data-swift-browser-check=\"ok\"") => Ok(()),
+        Ok(_) => Err("Cannot start the demo: Chrome did not execute the browser check; repair the browser installation and retry.".to_owned()),
+        Err(error) => {
+            tracing::warn!(%error, "Chrome preflight failed before model requests");
+            Err("Cannot start the demo: Chrome could not complete the browser check; repair the browser installation and retry.".to_owned())
+        }
+    }
 }
 
 /// True when the model can read images, judged from its name.
@@ -558,6 +592,7 @@ fn chrome_command(
         .arg("--no-default-browser-check")
         .arg(format!("--virtual-time-budget={virtual_time_budget_ms}"))
         .arg(format!("--window-size={}", window_size(viewport)))
+        .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
     command

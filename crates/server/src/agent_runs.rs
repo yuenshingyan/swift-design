@@ -22,7 +22,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use design_model::WorkflowState;
+use design_model::{ArtifactKind, WorkflowState};
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -41,6 +41,7 @@ use crate::generation::{DesignProgressSink, GenerationEngine, GenerationOutcome,
 use crate::mailings::MailingStore;
 use crate::model_client::{self, LogSink, TokenUsage, UsageSink};
 use crate::prints::PrintStore;
+use crate::screenshots::{check_chrome, find_chrome};
 use crate::sessions::{RunMode, RunRecord, Session, SessionStore, run_mode_for};
 use crate::settings::SettingsStore;
 use crate::socials::SocialStore;
@@ -400,7 +401,12 @@ impl AgentRunner {
                 self.spawn_shell_tasks(session_id.to_owned(), mode, process, stop_receiver);
             }
             ResolvedLaunch::Generation(engine) => {
-                self.spawn_generation_task(*engine, session_id.to_owned(), stop_receiver);
+                self.spawn_generation_task(
+                    *engine,
+                    session_id.to_owned(),
+                    session.artifact_kind,
+                    stop_receiver,
+                );
             }
         }
         self.notifier.notify();
@@ -584,6 +590,7 @@ impl AgentRunner {
         &self,
         engine: GenerationEngine,
         session_id: String,
+        kind: ArtifactKind,
         stop_receiver: oneshot::Receiver<()>,
     ) {
         let log = self.log_sink();
@@ -597,8 +604,20 @@ impl AgentRunner {
         let sessions = self.sessions.clone();
         let runner = self.clone();
         tokio::spawn(async move {
+            // Keep preflight inside the cancellable run so failures reach the
+            // session UI, including runs started automatically after Create.
+            let run = async {
+                if kind == ArtifactKind::Demo {
+                    log("checking Chrome before model requests");
+                    let chrome = find_chrome().ok_or_else(|| {
+                        "Cannot start the demo: Chrome is missing; restore the app-managed browser or install Chrome/Chromium and retry.".to_owned()
+                    })?;
+                    check_chrome(&chrome).await?;
+                }
+                engine.run(&session_id, Arc::clone(&log)).await
+            };
             let end = tokio::select! {
-                result = engine.run(&session_id, Arc::clone(&log)) => {
+                result = run => {
                     RunEnd::Finished(result.map(|_: GenerationOutcome| ()))
                 }
                 _ = stop_receiver => RunEnd::Stopped,
