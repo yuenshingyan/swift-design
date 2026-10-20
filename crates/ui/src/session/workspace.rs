@@ -751,17 +751,6 @@ pub(crate) fn SessionWorkspace(
                         }
                     }
                 }
-                // Before the first candidates, the demo's run settings sit
-                // where the candidates will be.
-                if !is_asking && session.artifact_kind == ArtifactKind::Demo && cards.is_empty()
-                    && can_chat
-                {
-                    RunSettings {
-                        session_id: session_id.clone(),
-                        options: session.options.clone(),
-                        on_error: move |message| error.set(Some(message)),
-                    }
-                }
                 if !is_asking && is_canvas_shown(state, !cards.is_empty()) {
                     CandidateCanvas {
                         session_id: session_id.clone(),
