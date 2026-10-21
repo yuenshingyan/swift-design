@@ -22,8 +22,7 @@ use crate::designs::{DesignStore, PENDING_SCREEN_CLASS, is_pending_screen};
 use crate::documents::DocumentStore;
 use crate::edit_focus::{
     EditFix, EditInput, EditOrder, MergeInput, conversation_block, findings_for, findings_note,
-    fix_instruction, focus_note, fresh_note, merge_note, merge_sources, referenced_indexes,
-    touched_indexes,
+    fix_instruction, focus_note, fresh_note, merge_note, merge_sources, touched_indexes,
 };
 use crate::edit_report::{EDIT_REPORT_PREFIX, saved_edit_report};
 use crate::events::ChangeNotifier;

@@ -1,5 +1,7 @@
 use super::*;
 
+const EDIT_PLAN: &str = r#"{"instruction":"[screen 1] Tighten the hero.","screens":[0],"minimum_new_screens":0,"requirements":["Tighten the hero"]}"#;
+
 #[test]
 fn fresh_app_candidates_require_shared_window_bounds_but_landing_pages_do_not() {
     let mut options = low_effort_options();
@@ -133,7 +135,9 @@ fn a_progress_group_takes_shares_as_they_start() {
 async fn an_edit_on_a_preview_is_not_a_continue() {
     let server = FakeModelServer::start().await;
     server.push_text(r#"{"reply":"Tightening the hero.","edit":true}"#);
+    server.push_text(EDIT_PLAN);
     server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:64px;}"}}]}"#);
+    server.push_text("[true]");
     let directory = tempfile::tempdir().unwrap();
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
@@ -173,7 +177,9 @@ async fn an_edit_on_a_preview_is_not_a_continue() {
 async fn a_chat_request_with_a_design_open_patches_that_design() {
     let server = FakeModelServer::start().await;
     server.push_text(r#"{"reply":"Tightening the hero.","edit":true}"#);
+    server.push_text(EDIT_PLAN);
     server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:64px;}"}}]}"#);
+    server.push_text("[true]");
     let directory = tempfile::tempdir().unwrap();
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
@@ -211,7 +217,7 @@ async fn a_chat_request_with_a_design_open_patches_that_design() {
     assert_eq!(completion.artifacts, ["talk-candidate-1"]);
     let edited = designs.load("talk-candidate-1").await.unwrap().unwrap();
     assert!(edited.screens[0].html.contains("Tighter"));
-    let text = server.requests()[1].to_string();
+    let text = server.requests()[2].to_string();
     assert!(text.contains("Apply this change: [screen 1] Tighten the hero."));
     let planner = server.requests()[0].to_string();
     assert!(planner.contains("Artifacts named this turn: talk-candidate-1"));
@@ -221,9 +227,10 @@ async fn a_chat_request_with_a_design_open_patches_that_design() {
 async fn a_message_with_pinned_candidates_patches_each_of_them() {
     let server = FakeModelServer::start().await;
     server.push_text(r#"{"reply":"Tightening both.","edit":true}"#);
-    // Each edit takes a patch reply and one fix-round reply.
-    for _ in 0..4 {
+    for _ in 0..2 {
+        server.push_text(EDIT_PLAN);
         server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:64px;}"}}]}"#);
+        server.push_text("[true]");
     }
     let directory = tempfile::tempdir().unwrap();
     let designs = DesignStore::new(directory.path().join("designs"));
@@ -386,7 +393,9 @@ async fn a_merge_across_canvases_is_refused() {
 async fn a_merge_with_one_pin_is_an_edit() {
     let server = FakeModelServer::start().await;
     server.push_text(r#"{"reply":"Changing it.","merge":true}"#);
+    server.push_text(EDIT_PLAN);
     server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:64px;}"}}]}"#);
+    server.push_text("[true]");
     let directory = tempfile::tempdir().unwrap();
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
@@ -415,8 +424,10 @@ async fn a_merge_with_one_pin_is_an_edit() {
 #[tokio::test]
 async fn a_regenerated_screen_is_written_without_its_old_markup() {
     let server = FakeModelServer::start().await;
-    // No planner turn: the request names its screen itself.
+    // No turn planner: the edit requirements are resolved directly.
+    server.push_text(EDIT_PLAN);
     server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Fresh</h1>","css":".title{font-size:64px;}"}}]}"#);
+    server.push_text("[true]");
     let directory = tempfile::tempdir().unwrap();
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
@@ -438,7 +449,7 @@ async fn a_regenerated_screen_is_written_without_its_old_markup() {
         .await
         .unwrap();
     assert!(matches!(outcome, GenerationOutcome::Edited { .. }));
-    let text = server.requests()[0].to_string();
+    let text = server.requests()[1].to_string();
     assert!(text.contains("Write screen 1 of"));
     assert!(text.contains("anew"));
     assert!(!text.contains("Old hero markup"));

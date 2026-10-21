@@ -699,5 +699,6 @@ impl GenerationEngine {
 }
 
 mod continue_run;
+mod edit_requirements;
 mod request;
 mod work;

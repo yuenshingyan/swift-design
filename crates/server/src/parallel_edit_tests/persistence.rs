@@ -1,5 +1,95 @@
 use super::*;
 
+#[tokio::test]
+async fn extension_requires_additions_and_feature_coverage_before_saving() {
+    for (adds_page, coverage, should_save) in [
+        (false, "[true]", false),
+        (true, "[false]", false),
+        (true, "[]", false),
+        (true, "not JSON", false),
+        (true, "[true]", true),
+    ] {
+        let original = sample_design();
+        let fake = ParallelFakeModel::start(None).await;
+        fake.push_text(r#"{"edit":true}"#.into());
+        fake.push_text(r#"{"instruction":"Extend candidate 4: modify Task details and add connected Notifications.","screens":[],"minimum_new_screens":1,"requirements":["Task discussion and connected Notifications"]}"#.into());
+        fake.auto_worker_patches(
+            ArtifactKind::Demo,
+            &serde_json::to_value(&original).unwrap(),
+            "worker",
+        );
+        let mut screen = original.screens[0].clone();
+        screen.html = format!(
+            "<a href='#screen-{}'>Notifications</a><p>Discussion</p>",
+            original.screens.len() + 1
+        );
+        let mut operations = vec![json!({"index": 0, "screen": screen})];
+        if adds_page {
+            screen.name = "Notifications".into();
+            screen.html = "<a href='#screen-1'>Task</a>".into();
+            operations
+                .push(json!({"index": original.screens.len(), "insert": true, "screen": screen}));
+        }
+        fake.push_text(json!({"screens": operations}).to_string());
+        fake.push_text(coverage.into());
+        let candidate = ReviewingCandidate::new(&fake);
+        candidate
+            .seed(
+                &original,
+                "Extend the demo with discussions and Notifications.",
+            )
+            .await;
+        candidate
+            .sessions
+            .append_message(
+                "talk",
+                ChatMessage::user("Only do this in candidate 4.", Some("talk-candidate-1")),
+            )
+            .await
+            .unwrap();
+        let before = tokio::fs::read(candidate.path()).await.unwrap();
+        let result = candidate.engine.clone().run("talk", log_sink()).await;
+        assert_eq!(result.is_ok(), should_save, "{result:?}");
+        let planning = request_text(&fake.requests()[1]);
+        assert!(planning.contains("discussions and Notifications"));
+        assert!(planning.contains("Only do this in candidate 4"));
+        assert_eq!(
+            fake.state.worker_count.load(Ordering::SeqCst),
+            original.screens.len()
+        );
+        assert_eq!(fake.state.coordinator_count.load(Ordering::SeqCst), 1);
+        if should_save {
+            let saved = candidate
+                .designs
+                .load("talk-candidate-1")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.screens.len(), original.screens.len() + 1);
+            assert!(saved.screens[0].html.contains("Discussion"));
+        } else {
+            assert_eq!(tokio::fs::read(candidate.path()).await.unwrap(), before);
+            assert!(
+                candidate
+                    .designs
+                    .history("talk-candidate-1")
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                !candidate
+                    .sessions
+                    .messages("talk")
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|message| message.content.starts_with(EDIT_REPORT_PREFIX))
+            );
+        }
+    }
+}
+
 pub(super) async fn verify_queued_edit_baseline(
     candidate: &ReviewingCandidate,
     fake: &ParallelFakeModel,
@@ -18,12 +108,14 @@ pub(super) async fn verify_queued_edit_baseline(
         .unwrap();
     fake.watch_baseline(&candidate.path()).await;
     fake.push_text(r#"{"reply":"Applying the queued change.","edit":true}"#.to_owned());
+    fake.push_text(EDIT_PLAN.to_owned());
     fake.auto_worker_patches(
         ArtifactKind::Demo,
         &serde_json::to_value(baseline).unwrap(),
         "queued worker",
     );
     fake.push_text(r#"{"title":"Queued workspace","screens":[]}"#.to_owned());
+    fake.push_text("[true]".to_owned());
     candidate
         .engine
         .clone()
@@ -54,6 +146,7 @@ pub(super) async fn an_unrepaired_layout_after_parallel_editing_does_not_replace
     let original = sample_design();
     let fake = ParallelFakeModel::start(None).await;
     fake.push_text(r#"{"reply":"Editing selected screens.","edit":true}"#.to_owned());
+    fake.push_text(EDIT_PLAN.to_owned());
     fake.auto_worker_patches(
         ArtifactKind::Demo,
         &serde_json::to_value(&original).unwrap(),
@@ -111,6 +204,7 @@ pub(super) async fn coordination_failure_leaves_the_real_saved_candidate_and_his
     let original = sample_design();
     let fake = ParallelFakeModel::start(None).await;
     fake.push_text(r#"{"reply":"Editing selected screens.","edit":true}"#.to_owned());
+    fake.push_text(EDIT_PLAN.to_owned());
     fake.auto_worker_patches(
         ArtifactKind::Demo,
         &serde_json::to_value(&original).unwrap(),

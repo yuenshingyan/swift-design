@@ -132,6 +132,15 @@ Every new candidate takes the next free number: a later run adds candidates afte
 
 In `reviewing`, the chat is the edit input: type what should change and press **Send**. With a candidate chosen, the change is applied to it; otherwise new candidates are written.
 
+Demo edits first resolve the current request and its clarifications into a screen
+scope and deliverable checklist. Candidate selection does not prohibit adding
+screens. Existing-screen workers still run in parallel (up to four); a serial
+coordination pass connects their changes and adds requested screens. Before saving,
+structural checks enforce required additions and protect unselected screens, then
+a model reviews the final markup against the checklist and original request.
+Incomplete or unreviewable edits fail without replacing the saved demo. This
+review is separate from browser layout checks and is not proof of backend behavior.
+
 ## Architecture
 
 The harness may use a local CLI agent or a remote API, but workflow state, answers, artifacts, and user decisions remain under application control.
