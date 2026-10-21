@@ -39,6 +39,8 @@ use crate::test_support::{
     sample_campaign, sample_deck, sample_document, sample_mailing, sample_print, sample_social,
 };
 
+const EDIT_PLAN: &str = r#"{"instruction":"Update all screens.","screens":[],"minimum_new_screens":0,"requirements":["Update all screens"]}"#;
+
 #[derive(Clone)]
 struct ParallelFakeModel {
     url: String,

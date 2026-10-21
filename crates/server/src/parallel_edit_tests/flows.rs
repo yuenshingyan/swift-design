@@ -274,12 +274,14 @@ async fn a_systemic_edit_saves_only_after_coordination_and_reports_the_final_cha
     let barrier = Arc::new(Barrier::new(PARALLEL_EDIT_LIMIT + 1));
     let fake = ParallelFakeModel::start(Some(Arc::clone(&barrier))).await;
     fake.push_text(r#"{"reply":"Editing the workspace.","edit":true}"#.to_owned());
+    fake.push_text(EDIT_PLAN.to_owned());
     fake.auto_worker_patches(
         ArtifactKind::Demo,
         &serde_json::to_value(&original).unwrap(),
         "worker",
     );
     fake.push_text(r#"{"title":"Coordinated workspace","screens":[]}"#.to_owned());
+    fake.push_text("[true]".to_owned());
     let candidate = ReviewingCandidate::new(&fake);
     candidate.seed(&original, "Update all screens.").await;
     fake.watch_baseline(&candidate.path()).await;

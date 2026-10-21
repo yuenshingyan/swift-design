@@ -535,15 +535,20 @@ impl GenerationEngine {
             .ok_or_else(|| {
                 GenerationStop::Failed(format!("design `{design_id}` does not exist"))
             })?;
-        let instruction = order.instruction;
         let label = format!("edit {design_id}");
-        // A change that names screens is about those screens: the model
-        // sees only them. A change that names none is systemic. A
-        // regenerate sees the named screens without their markup.
-        let indexes: Vec<usize> = referenced_indexes(instruction, "screen")
-            .into_iter()
-            .filter(|index| *index < design.screens.len())
-            .collect();
+        log(&format!("{label}: resolving edit requirements and scope"));
+        let plan = self
+            .plan_demo_edit(client, &design, order, context.effort())
+            .await
+            .map_err(GenerationStop::Failed)?;
+        let instruction = plan.instruction.as_str();
+        // Structural edits need the full artifact in coordination. Workers remain
+        // isolated; the requirements check protects unselected existing screens.
+        let indexes = if plan.minimum_new_screens > 0 {
+            Vec::new()
+        } else {
+            plan.screens.clone()
+        };
         log(&format!("{label}: checking layout before editing"));
         let measured = self.audit_demo(&design).await?.instructions(None);
         let findings = findings_for(&measured, "screens", &indexes);
@@ -615,6 +620,15 @@ impl GenerationEngine {
         };
         let final_design = self
             .fix_edited_design(client, edited, &fix, log)
+            .await
+            .map_err(GenerationStop::Failed)?;
+        plan.check_structure(&design, &final_design)
+            .map_err(GenerationStop::Failed)?;
+        log(&format!(
+            "{}: reviewing requested feature coverage before saving",
+            request.label
+        ));
+        self.verify_demo_edit(client, &plan, &final_design, context.effort())
             .await
             .map_err(GenerationStop::Failed)?;
         let mut report = saved_edit_report(design_id, context.request.kind, &design, &final_design)

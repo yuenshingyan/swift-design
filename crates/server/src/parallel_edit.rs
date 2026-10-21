@@ -353,7 +353,10 @@ fn page_messages<T: ParallelEditable>(
         "{}\nParallel edit worker. Assigned unit index (zero-based): {index}.\n{fresh}\
          Apply the user's change to this {unit} only. Return its patch or an empty patch if no change is needed. \
          Keep shared values unchanged. Do not insert, delete, or reorder units. \
-         Defer shared theme, navigation reconciliation, and new or removed units to the coordination pass.\n",
+         Defer shared theme, navigation reconciliation, and new or removed units to the coordination pass. \
+         This is a worker-local assignment, NOT a restriction on the user's overall request. \
+         Never ask the user to resolve this delegation boundary. Implement relevant changes here; \
+         the coordinator is responsible for requested additions and cross-unit flows.\n",
         focus_note(
             unit,
             plural,
@@ -394,7 +397,10 @@ fn coordination_messages<T: ParallelEditable>(
     let note = format!(
         "Coordinate the parallel edits. The shown artifact already contains the completed worker edits.\n\
          {scope}Keep their completed work. Fix only inconsistencies and unfinished cross-unit requirements. \
-         Do not rewrite every {unit} again. Return only a coordination patch. Return an empty patch if the combined result needs no reconciliation.\n"
+         Complete the entire resolved user brief, including modifying existing units AND adding connected units when requested. \
+         Worker-local restrictions do not prohibit additions here. Preserve candidate selection; candidate numbers are not unit indexes. \
+         Do not substitute layout fixes for feature work. Append new units to preserve existing indexes. \
+         Do not rewrite every {unit} again. Return only a coordination patch. Return an empty patch only if all requested work is already complete.\n"
     );
     let note = if T::KIND == ArtifactKind::Demo {
         format!(
