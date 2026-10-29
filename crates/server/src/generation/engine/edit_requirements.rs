@@ -16,6 +16,12 @@ pub(super) struct DemoEditRequirements {
     source: String,
 }
 
+pub(super) struct DemoEditEvidence<'a> {
+    pub candidate_id: &'a str,
+    pub before: &'a Design,
+    pub after: &'a Design,
+}
+
 impl DemoEditRequirements {
     fn validate(&self, design: &Design) -> Result<(), String> {
         if self.instruction.trim().is_empty()
@@ -87,7 +93,7 @@ impl GenerationEngine {
             .collect();
         let messages = vec![
             json!({"role": "system", "content":
-            "Resolve the current demo edit requirements. Return JSON only with instruction (a self-contained actionable brief), screens (zero-based existing screen indexes explicitly restricted by the user, or [] for candidate-wide work), minimum_new_screens (minimum additions the user requires, 0 if none), and requirements (a nonempty checklist of independently verifiable deliverables). Read the latest instruction together with the conversation: a clarification such as 'only candidate 4' retains the preceding feature request. Candidate numbers are NOT screen numbers. Ignore prior completed tasks and assistant-invented restrictions. Extending a demo can require BOTH modifying existing screens and adding connected screens; preserve both in the checklist. Include every requested feature, responsive variant, and relevant interaction/state requirement; do not substitute layout repairs. Distinguish proposed concepts from implemented features. A reference to an existing screen does not forbid requested additions. When additions are required, append them to preserve existing indexes. Do not invent restrictions from worker assignments. This is planning, not evidence of completion."}),
+            "Resolve the current demo edit requirements. Return JSON only with instruction (a self-contained actionable brief), screens (zero-based existing screen indexes explicitly restricted by the user, or [] for candidate-wide work), minimum_new_screens (minimum additions the user requires, 0 if none), and requirements (a nonempty checklist of independently verifiable deliverables). Read the latest instruction together with the conversation: a clarification such as 'only candidate 4' retains the preceding feature request. Candidate numbers are NOT screen numbers. Ignore prior completed tasks and assistant-invented restrictions. Extending a demo can require BOTH modifying existing screens and adding connected screens; preserve both in the checklist. Include every requested feature, responsive variant, and relevant interaction/state requirement; do not substitute layout repairs. Distinguish proposed concepts from implemented features. A reference to an existing screen does not forbid requested additions. When additions are required, append them to preserve existing indexes. Do not invent restrictions from worker assignments. Candidate write isolation is enforced by the server, not a visual deliverable; do not put it in the checklist. For restyling, preservation means retaining the existing content and behavior, not requiring identical HTML/CSS or implementing missing backend features. This is planning, not evidence of completion."}),
             json!({"role": "user", "content": format!(
                 "Conversation:\n{}\nLatest instruction:\n{}\nRegenerate selected screens: {}\nExisting screens:\n{}",
                 order.conversation, order.instruction, order.is_fresh, json!(inventory)
@@ -114,15 +120,16 @@ impl GenerationEngine {
         &self,
         client: &reqwest::Client,
         plan: &DemoEditRequirements,
-        design: &Design,
+        evidence: DemoEditEvidence<'_>,
         effort: &str,
     ) -> Result<(), String> {
         let messages = vec![
             json!({"role": "system", "content":
-            "Review demo requirement coverage before saving. Return only a JSON array of booleans, one per checklist item in order. Judge actual HTML/CSS, navigation destinations and interaction states, not notes or promises. A layout-only patch does not implement feature demos. Mark missing, partial, disconnected, or unverifiable requirements false. Compare the checklist with the original conversation and latest request; if the plan omitted requested work, mark all items false rather than accepting a narrowed brief. Evaluate only the current task and its clarifications, not earlier completed tasks or assistant-invented restrictions; the latest user requirements resolve conflicts. Proposed demo interactions need not have a backend, but must be present in the artifact. This review is not a browser or backend test."}),
+            "Review demo requirement coverage before saving. Return only a JSON array of booleans, one per checklist item in order. Judge actual HTML/CSS, navigation destinations and interaction states, not notes or promises. For a styling-only request, theme/CSS-only changes are valid. Require new features or screens only when requested by the current task; a layout-only patch is insufficient only when feature work was requested. Mark missing, partial, disconnected, or unverifiable requirements false. Compare the checklist with the original conversation and latest request; if the plan omitted requested work, mark all items false rather than accepting a narrowed brief. Evaluate only the current task and its clarifications, not earlier completed tasks or assistant-invented restrictions; the latest user requirements resolve conflicts. Proposed demo interactions need not have a backend, but must be present in the artifact. For preservation requirements, compare the before and after artifacts; do not demand identical markup for a styling change, new backend functionality, or responsive behavior absent from the baseline. Candidate isolation is a server-enforced fact: the pending write can only save the identified candidate, not other candidates. Do not reject a candidate-scope checklist item because other candidates are not supplied. This review is not a browser or backend test."}),
             json!({"role": "user", "content": format!(
-                "Original request:\n{}\nEdit brief:\n{}\nChecklist:\n{}\nFinal artifact:\n{}",
-                plan.source, plan.instruction, json!(plan.requirements), json!(design)
+                "Pending save target (server-enforced): {}\nOriginal request:\n{}\nEdit brief:\n{}\nChecklist:\n{}\nBefore artifact:\n{}\nAfter artifact:\n{}",
+                evidence.candidate_id, plan.source, plan.instruction, json!(plan.requirements),
+                json!(evidence.before), json!(evidence.after)
             )}),
         ];
         let reply = self.model.chat(client, &messages, effort).await?;

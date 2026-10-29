@@ -484,7 +484,13 @@ impl GenerationEngine {
         // turns do. Planning blind is what produced questions the files
         // already answered.
         let attachments = self.load_attachments(&context.session_id, log).await;
-        let input = planner_input(&context.request, &messages, candidate_count, &targets);
+        let mut input = planner_input(&context.request, &messages, candidate_count, &targets);
+        let runs = self
+            .sessions
+            .runs(session_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        input.push_str(&crate::planner::recent_run_note(&runs));
         let request = vec![
             serde_json::json!({ "role": "system", "content": planner_prompt(context.request.kind) }),
             self.user_message(&input, &attachments),
