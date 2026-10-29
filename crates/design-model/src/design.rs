@@ -49,7 +49,7 @@ pub struct Design {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outline: Vec<String>,
     /// How the presentation moves from one screen to the next. Leave it
-    /// out for a design that scrolls instead of animating.
+    /// out to switch screens instantly without scrolling between them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<Transition>,
 }

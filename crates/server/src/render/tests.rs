@@ -374,14 +374,16 @@ fn print_mode_emits_page_rules_and_the_fit_script_only() {
 }
 
 #[test]
-fn a_design_without_a_transition_renders_the_plain_scroll_page() {
-    let html = render_design(&sample_design(), false);
-    assert!(!html.contains("data-swift-design-effect="));
-    assert!(!html.contains("--swift-design-in"));
-    assert!(html.contains(
-        "<main class=\"design\" data-swift-design-width=\"1440\" data-swift-design-height=\"900\">"
-    ));
-    assert!(html.contains("scroll-snap-type: y mandatory"));
+fn a_design_without_a_transition_switches_instantly_without_wheel_navigation() {
+    let design = sample_design();
+    assert!(design.transition.is_none());
+    let html = render_design(&design, false);
+    assert!(html.contains("data-swift-design-effect=\"none\""));
+    assert!(html.contains("data-swift-design-duration=\"0\""));
+    assert!(html.contains("data-swift-design-wheel-navigation=\"false\""));
+    assert!(html.contains("scroll-snap-type: none; --swift-design-sign"));
+    assert!(html.contains("design.dataset.swiftDesignWheelNavigation !== 'false'"));
+    assert!(html.contains("if (effect) { stack(target, sign); return; }"));
 }
 
 #[test]
@@ -394,6 +396,7 @@ fn a_transition_adds_the_design_attributes_and_the_stacked_rules() {
     });
     let html = render_design(&design, false);
     assert!(html.contains("data-swift-design-effect=\"cover\""));
+    assert!(!html.contains("data-swift-design-wheel-navigation=\"false\""));
     assert!(html.contains("data-swift-design-axis=\"horizontal\""));
     assert!(html.contains("data-swift-design-duration=\"620\""));
     assert!(html.contains("--swift-design-duration: 620ms"));
@@ -416,6 +419,7 @@ fn the_none_effect_cuts_whatever_duration_the_design_asks_for() {
     let html = render_design(&design, false);
     assert!(html.contains("data-swift-design-duration=\"0\""));
     assert!(html.contains("--swift-design-duration: 0ms"));
+    assert!(html.contains("data-swift-design-wheel-navigation=\"false\""));
 }
 
 #[test]

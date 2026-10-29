@@ -1,8 +1,7 @@
 //! Page transition settings: how one screen gives way to the next.
 //!
-//! A design without a `transition` scrolls, which is what every design did
-//! before this field existed. A design with one stacks its screens and
-//! animates between them.
+//! Demos without a `transition` switch screens instantly. Decks without one
+//! retain their scrolling layout. Explicit settings select the effect.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

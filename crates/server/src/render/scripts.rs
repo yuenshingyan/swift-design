@@ -168,7 +168,7 @@ pub(crate) const LAYOUT_SCRIPT: &str = r##"(() => {
 
 /// Moves between screens with ArrowLeft/ArrowRight and PageUp/PageDown,
 /// and opens screen N on a click on a link to `#screen-N` (counted from
-/// 1). A design with no transition scrolls. A design with one stacks its frames
+/// 1). A page with no effect attribute scrolls. A page with one stacks its frames
 /// and swaps the `data-swift-design-state` attribute, which the transition
 /// CSS animates. On a single-screen page inside the editor, asks the
 /// editor instead. A page that follows a presenter (`isFollowing`)
@@ -226,7 +226,7 @@ document.addEventListener('keydown', (event) => {
   if (!isNext && !isPrevious) { return; }
   step(isNext ? 1 : -1);
 });
-if (effect && !isFollowing) {
+if (effect && !isFollowing && design.dataset.swiftDesignWheelNavigation !== 'false') {
   let wheelAt = 0;
   window.addEventListener('wheel', (event) => {
     const amount = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
