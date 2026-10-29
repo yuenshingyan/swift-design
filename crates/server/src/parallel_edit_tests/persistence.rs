@@ -1,6 +1,113 @@
 use super::*;
 
 #[tokio::test]
+async fn theme_review_has_comparison_evidence_and_failure_reaches_follow_up_chat() {
+    for accepted in [true, false] {
+        let original = sample_design();
+        let fake = ParallelFakeModel::start(None).await;
+        fake.push_text(r#"{"edit":true}"#.into());
+        fake.push_text(r#"{"instruction":"Use a light theme without changing content or navigation.","screens":[],"minimum_new_screens":0,"requirements":["Light theme","Preserve existing content and navigation","Leave other candidates unchanged"]}"#.into());
+        fake.auto_worker_patches(ArtifactKind::Demo, &json!(original), "worker");
+        let mut theme = json!(original.theme);
+        theme["colors"]["background"] = json!("#ffffff");
+        fake.push_text(json!({"theme": theme}).to_string());
+        fake.push_text(json!([true, accepted, true]).to_string());
+        let candidate = ReviewingCandidate::new(&fake);
+        candidate.seed(&original, "I want a light-theme.").await;
+        candidate
+            .designs
+            .save("talk-candidate-2", &original)
+            .await
+            .unwrap();
+        let result = candidate.engine.clone().run("talk", log_sink()).await;
+        assert_eq!(result.is_ok(), accepted, "{result:?}");
+        assert_eq!(
+            fake.state.worker_count.load(Ordering::SeqCst),
+            original.screens.len()
+        );
+        let requests = fake.requests();
+        let review = requests.last().unwrap();
+        let text = review["messages"][1]["content"].as_str().unwrap();
+        assert!(text.contains("Pending save target (server-enforced): talk-candidate-1"));
+        let (before, after) = text
+            .split_once("Before artifact:\n")
+            .unwrap()
+            .1
+            .split_once("\nAfter artifact:\n")
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(before).unwrap(),
+            json!(original)
+        );
+        let proposed: design_model::Design = serde_json::from_str(after).unwrap();
+        assert_eq!(json!(proposed.theme), theme);
+        assert_eq!(proposed.screens[0].html, original.screens[0].html);
+        let saved = candidate
+            .designs
+            .load("talk-candidate-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved, if accepted { proposed } else { original.clone() });
+        assert_eq!(
+            candidate
+                .designs
+                .load("talk-candidate-2")
+                .await
+                .unwrap()
+                .unwrap(),
+            original
+        );
+        assert!(
+            candidate
+                .designs
+                .history("talk-candidate-2")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        if !accepted {
+            let error = result.unwrap_err();
+            assert!(error.contains("Preserve existing content and navigation"));
+            assert!(
+                candidate
+                    .designs
+                    .history("talk-candidate-1")
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            for event in [
+                design_model::WorkflowEvent::RunFailed,
+                design_model::WorkflowEvent::Recovered {
+                    to: design_model::WorkflowState::Reviewing,
+                },
+            ] {
+                candidate.sessions.apply("talk", event).await.unwrap();
+            }
+            candidate
+                .sessions
+                .append_message("talk", ChatMessage::user("WTF?", Some("talk-candidate-1")))
+                .await
+                .unwrap();
+            fake.push_text(
+                r#"{"reply":"The recorded preservation check rejected the edit."}"#.into(),
+            );
+            candidate
+                .engine
+                .clone()
+                .run("talk", log_sink())
+                .await
+                .unwrap();
+            let requests = fake.requests();
+            let follow_up = request_text(requests.last().unwrap());
+            assert!(follow_up.contains(&error));
+            assert!(follow_up.contains("Recorded session run outcomes"));
+        }
+    }
+}
+
+#[tokio::test]
 async fn extension_requires_additions_and_feature_coverage_before_saving() {
     for (adds_page, coverage, should_save) in [
         (false, "[true]", false),

@@ -137,9 +137,14 @@ scope and deliverable checklist. Candidate selection does not prohibit adding
 screens. Existing-screen workers still run in parallel (up to four); a serial
 coordination pass connects their changes and adds requested screens. Before saving,
 structural checks enforce required additions and protect unselected screens, then
-a model reviews the final markup against the checklist and original request.
+a model compares the original and proposed markup against the checklist and
+request. Preservation checks use that baseline; they do not require identical
+markup or new functionality for a restyle. Candidate isolation is enforced by
+the server's save target, not inferred by the reviewer from other candidates.
 Incomplete or unreviewable edits fail without replacing the saved demo. This
 review is separate from browser layout checks and is not proof of backend behavior.
+Follow-up chat receives the five most recent completed run outcomes, including
+recorded failures, so it can explain a rejected edit without asking you to diagnose it.
 
 ## Architecture
 

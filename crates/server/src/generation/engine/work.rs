@@ -1,3 +1,4 @@
+use super::edit_requirements::DemoEditEvidence;
 use super::*;
 
 impl GenerationEngine {
@@ -628,9 +629,18 @@ impl GenerationEngine {
             "{}: reviewing requested feature coverage before saving",
             request.label
         ));
-        self.verify_demo_edit(client, &plan, &final_design, context.effort())
-            .await
-            .map_err(GenerationStop::Failed)?;
+        self.verify_demo_edit(
+            client,
+            &plan,
+            DemoEditEvidence {
+                candidate_id: design_id,
+                before: &design,
+                after: &final_design,
+            },
+            context.effort(),
+        )
+        .await
+        .map_err(GenerationStop::Failed)?;
         let mut report = saved_edit_report(design_id, context.request.kind, &design, &final_design)
             .map_err(GenerationStop::Failed)?;
         let verified: Vec<String> = fix
