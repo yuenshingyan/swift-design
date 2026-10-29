@@ -185,7 +185,10 @@ a setup error instead of failing after generation.
 The design editor has two modes on a tab pair: **Play** (the default) and **Edit**. In
 Edit a click selects a node. In Play a click acts as it would for a user:
 a link to `#screen-3` opens screen 3, a `<details>` menu opens, and a
-checkbox or radio toggle flips. A demo carries no script. Flows are links
+checkbox or radio toggle flips. Full-demo View and exported HTML switch screens
+instantly by default; wheel scrolling stays within the current screen. Explicit
+page animations remain available in the transition picker. Deck defaults are unchanged.
+A demo carries no script. Flows are links
 between screens, and widgets are CSS states. The deck editor, the
 document editor, the social editor, the print editor, the mailing
 editor, the campaign editor, and the artwork editor have the same pair

@@ -712,6 +712,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                             },
                         }
                         TransitionForm {
+                            default_cut: true,
                             transition: design().transition,
                             on_change: move |transition: Option<Transition>| {
                                 design.with_mut(|design| design.transition = transition);

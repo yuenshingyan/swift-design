@@ -90,9 +90,12 @@ pub fn render_design_with(design: &Design, options: RenderOptions) -> String {
     // A single-screen page has nothing to transition to, so the editor
     // preview, thumbnails, and screenshots keep the plain scroll page.
     // A print has one screen per page, so it never transitions either.
-    let transition = (options.only_screen.is_none() && !options.is_print)
-        .then_some(design.transition)
-        .flatten();
+    let transition = (options.only_screen.is_none() && !options.is_print).then(|| {
+        design.transition.unwrap_or(Transition {
+            effect: TransitionEffect::None,
+            ..Transition::default()
+        })
+    });
     let mut main_attributes = String::new();
     if let Some(app_window) = &design.app_window {
         main_attributes.push_str(&format!(
@@ -106,6 +109,10 @@ pub fn render_design_with(design: &Design, options: RenderOptions) -> String {
     }
     if let Some(transition) = transition {
         main_attributes.push_str(&design_attributes(transition));
+        if transition.effect == TransitionEffect::None {
+            // Instant app navigation uses links/keys, not scrolling between screens.
+            main_attributes.push_str(" data-swift-design-wheel-navigation=\"false\"");
+        }
     }
     let transition_style = transition.map(transition_styles).unwrap_or_default();
     let print_style = if options.is_print {

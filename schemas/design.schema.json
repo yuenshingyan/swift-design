@@ -38,7 +38,7 @@
       "type": "string"
     },
     "transition": {
-      "description": "How the presentation moves from one screen to the next. Leave it\nout for a design that scrolls instead of animating.",
+      "description": "How the presentation moves from one screen to the next. Leave it\nout to switch screens instantly without scrolling between them.",
       "anyOf": [
         {
           "$ref": "#/$defs/Transition"

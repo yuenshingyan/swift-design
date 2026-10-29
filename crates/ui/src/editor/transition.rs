@@ -3,14 +3,19 @@ use super::*;
 /// The page transition picker: the effect between screens, the direction
 /// they travel, and how long the move takes.
 ///
-/// `None` is a real choice: a design with no transition scrolls, which is
-/// what a design did before this field existed.
+/// Demos default to an instant cut; decks retain their optional scroll layout.
 #[component]
 pub(crate) fn TransitionForm(
     transition: Option<Transition>,
     on_change: EventHandler<Option<Transition>>,
+    #[props(default)] default_cut: bool,
 ) -> Element {
-    let current = transition;
+    let current = transition.or_else(|| {
+        default_cut.then_some(Transition {
+            effect: TransitionEffect::None,
+            ..Transition::default()
+        })
+    });
     let effect = current.map(|transition| transition.effect);
     let axis = current.unwrap_or_default().axis;
     let duration = current.unwrap_or_default().duration_ms;
@@ -26,11 +31,13 @@ pub(crate) fn TransitionForm(
         div { class: "sheet-section",
             div { class: "head", "Page transition" }
             div { class: "effect-chips",
-                button {
-                    class: if effect.is_none() { "selected" } else { "" },
-                    title: "No transition: the design scrolls",
-                    onclick: move |_| pick_effect.call("scroll"),
-                    "Scroll"
+                if !default_cut {
+                    button {
+                        class: if effect.is_none() { "selected" } else { "" },
+                        title: "No transition: the deck scrolls",
+                        onclick: move |_| pick_effect.call("scroll"),
+                        "Scroll"
+                    }
                 }
                 for (value, label) in TRANSITION_EFFECTS {
                     button {
