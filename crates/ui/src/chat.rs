@@ -64,21 +64,14 @@ pub(crate) fn failed_edit_index(
         .then_some(index)
 }
 
-/// A failed edit's explanation and manual retry, shared by both chat views.
+/// A compact failure notice and manual retry, shared by both chat views.
 #[component]
-pub(crate) fn FailedEditCard(
-    session_id: String,
-    message: Option<String>,
-    is_running: bool,
-) -> Element {
+pub(crate) fn FailedEditCard(session_id: String, is_running: bool) -> Element {
     let mut is_retrying = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
     rsx! {
         div { class: "error-card",
             p { class: "error-title", "The edit failed" }
-            if let Some(message) = message {
-                p { "{message}" }
-            }
             button {
                 class: "primary",
                 disabled: is_running || is_retrying(),
@@ -144,7 +137,6 @@ pub fn DesignChat(
     let session_id = artifact_project(&design_id);
     let mut messages = use_signal(Vec::<api::ChatMessage>::new);
     let mut session_state = use_signal(|| WorkflowState::Reviewing);
-    let mut session_error = use_signal(|| Option::<String>::None);
     let mut chosen_design = use_signal(|| Option::<String>::None);
     let mut agent_run = use_signal(|| Option::<api::AgentRun>::None);
     let mut settings = use_signal(|| Option::<api::SettingsView>::None);
@@ -233,7 +225,6 @@ pub fn DesignChat(
                 loop {
                     if let Ok(view) = api::fetch_session(&session_id).await {
                         session_state.set(view.session.state);
-                        session_error.set(view.session.error);
                         chosen_design.set(view.session.chosen_design);
                         options.set(Some(view.session.options));
                         messages.set(view.messages);
@@ -390,7 +381,6 @@ pub fn DesignChat(
                     if failed_edit == Some(index) {
                         FailedEditCard {
                             session_id: session_id.clone(),
-                            message: session_error(),
                             is_running,
                         }
                     }
@@ -763,6 +753,37 @@ mod tests {
         mention_at, mention_matches, message_with_comments, page_title, reference_for,
         remove_mention, should_follow_thread,
     };
+
+    #[test]
+    fn failed_edit_card_renders_a_compact_notice_and_retry() {
+        use dioxus::prelude::*;
+
+        fn card() -> Element {
+            super::FailedEditCard(super::FailedEditCardProps {
+                session_id: "test-session".into(),
+                is_running: false,
+            })
+        }
+
+        let mut dom = VirtualDom::new(card);
+        let mutations = dom.rebuild_to_vec();
+        let rendered = format!(
+            "{:?} {mutations:?}",
+            dom.get_scope(ScopeId::APP)
+                .expect("app scope")
+                .root_node()
+                .template
+                .roots
+        );
+        assert!(rendered.contains("The edit failed"));
+        let app = dom.get_scope(ScopeId::APP).expect("app scope");
+        let retry = &app.root_node().dynamic_nodes[0];
+        let dioxus::dioxus_core::DynamicNode::Fragment(nodes) = retry else {
+            panic!("retry label must be rendered");
+        };
+        assert!(format!("{:?}", nodes[0].template.roots).contains("Retry edit"));
+        assert!(!rendered.contains("Cannot save incomplete demo edit"));
+    }
 
     fn edit_request() -> crate::api::ChatMessage {
         crate::api::ChatMessage {

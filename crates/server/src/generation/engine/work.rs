@@ -554,56 +554,60 @@ impl GenerationEngine {
         log(&format!("{label}: checking layout before editing"));
         let measured = self.audit_demo(&design).await?.instructions(None);
         let findings = findings_for(&measured, "screens", &indexes);
-        let total = design.screens.len();
-        let (design_json, note) = if indexes.is_empty() {
-            (serde_json::to_string(&design), String::new())
-        } else if order.is_fresh {
-            (
-                focused_design_json(&design, &indexes, true),
-                fresh_note("screen", "screens", &indexes, total),
-            )
-        } else {
-            (
-                focused_design_json(&design, &indexes, false),
-                focus_note("screen", "screens", &indexes, total),
-            )
-        };
-        let design_json = design_json.map_err(|error| GenerationStop::Failed(error.to_string()))?;
-        let input = EditInput {
-            instruction,
-            artifact_json: &design_json,
-            note: &note,
-            findings: &findings,
-            conversation: order.conversation,
-        };
-        let original = design.clone();
-        let effort = context.effort().to_owned();
-        let request = ArtifactRequest {
-            effort,
-            label,
-            parse: Box::new(move |content| apply_patch(&original, parse_patch(content)?)),
-            progress: self.shared_progress(&[design_id.to_owned()], 5, 95).pop(),
-            live: None,
-        };
+        let mut draft = design.clone();
         let mut correction = String::new();
         let mut attempt = 0;
-        let (final_design, fix) = loop {
+        let mut previous_missing = None;
+        let progress = self.shared_progress(&[design_id.to_owned()], 5, 95).pop();
+        let (final_design, verified_indexes) = loop {
+            // Fresh regeneration drops old markup only once; corrections must
+            // see and repair the latest draft, including newly added screens.
+            let is_fresh = order.is_fresh && attempt == 0;
+            let total = draft.screens.len();
+            let (design_json, note) = if indexes.is_empty() {
+                (serde_json::to_string(&draft), String::new())
+            } else if is_fresh {
+                (
+                    focused_design_json(&draft, &indexes, true),
+                    fresh_note("screen", "screens", &indexes, total),
+                )
+            } else {
+                (
+                    focused_design_json(&draft, &indexes, false),
+                    focus_note("screen", "screens", &indexes, total),
+                )
+            };
+            let design_json =
+                design_json.map_err(|error| GenerationStop::Failed(error.to_string()))?;
+            let correction_instruction = format!("{instruction}\n{correction}");
+            let input = EditInput {
+                instruction: &correction_instruction,
+                artifact_json: &design_json,
+                note: &note,
+                findings: &findings,
+                conversation: order.conversation,
+            };
+            let original = draft.clone();
+            let request = ArtifactRequest {
+                effort: context.effort().to_owned(),
+                label: label.clone(),
+                parse: Box::new(move |content| apply_patch(&original, parse_patch(content)?)),
+                progress: progress.clone(),
+                live: None,
+            };
             let messages = vec![
                 serde_json::json!({ "role": "system", "content": system_prompt() }),
-                self.user_message(
-                    &format!("{}\n{}", edit_prompt(&context.request, &input), correction),
-                    &attachments,
-                ),
+                self.user_message(&edit_prompt(&context.request, &input), &attachments),
             ];
             let edited = self
                 .request_edit(
                     client,
                     EditExecution {
-                        original: &design,
+                        original: &draft,
                         messages,
                         input: &input,
                         indexes: &indexes,
-                        is_fresh: order.is_fresh,
+                        is_fresh,
                         request: &request,
                     },
                     log,
@@ -650,30 +654,38 @@ impl GenerationEngine {
                 .await
                 .map_err(GenerationStop::Failed)?;
             if failures.is_empty() {
-                break (final_design, fix);
+                break (final_design, fix.indexes);
             }
-            if attempt == 1 {
+            let stop_reason = if attempt == 3 {
+                Some("the three-correction-round limit was reached")
+            } else if previous_missing.is_some_and(|count| failures.len() >= count) {
+                Some("requirement coverage did not improve")
+            } else {
+                None
+            };
+            if let Some(reason) = stop_reason {
                 return Err(GenerationStop::Failed(format!(
-                    "Cannot save incomplete demo edit after one correction attempt: {}",
+                    "Cannot save incomplete demo edit after {attempt} correction round(s): {reason}; remaining issues: {}",
                     failures.join("; ")
                 )));
             }
-            // Regenerate against the saved baseline so discarded edits never become
-            // an implicit source of truth or alter unselected screens.
+            previous_missing = Some(failures.len());
             correction = format!(
-                "The previous attempt failed requirement review. Correct these issues while satisfying the entire original brief:\n{}",
+                "Repair the supplied latest draft rather than starting over. Preserve completed work and satisfy the entire acceptance contract. The last review found {} incomplete checklist items:\n{}",
+                failures.len(),
                 failures.join("\n")
             );
-            log(&format!(
-                "{}: correcting incomplete requirement coverage",
-                request.label
-            ));
+            draft = final_design;
             attempt += 1;
+            log(&format!(
+                "{}: correction round {attempt}/3; {} incomplete checklist items",
+                request.label,
+                failures.len()
+            ));
         };
         let mut report = saved_edit_report(design_id, context.request.kind, &design, &final_design)
             .map_err(GenerationStop::Failed)?;
-        let verified: Vec<String> = fix
-            .indexes
+        let verified: Vec<String> = verified_indexes
             .iter()
             .map(|index| (index + 1).to_string())
             .collect();

@@ -142,9 +142,18 @@ request. Preservation checks use that baseline; they do not require identical
 markup or new functionality for a restyle. Candidate isolation is enforced by
 the server's save target, not inferred by the reviewer from other candidates.
 Planning, editing, and review receive the same session reference attachments.
-Review returns specific reasons for unmet requirements; one correction attempt
-uses that feedback before a final review. Missing or unreadable required references
-produce a reference-verification error instead of an incomplete-edit verdict.
+Planning, writing, correction, and review share an acceptance contract that separates
+rendered designs from implementation specifications. Complete component/state
+specifications are accepted when the request permits them; missing visual controls
+or responsive layouts cannot be replaced by promises. The renderer's restrictions
+remain unchanged, and explicitly required executable behavior it cannot support
+is reported separately rather than retried indefinitely.
+Review returns specific reasons for unmet requirements. Up to three correction
+rounds repair the latest draft while preservation checks still use the saved
+original. Corrections stop early if the number of incomplete checklist items does
+not decrease. Only a passing draft is saved; stopping or cancellation leaves the
+saved candidate intact. Missing or unreadable required references produce a
+reference-verification error instead of an incomplete-edit verdict.
 Incomplete or unreviewable edits fail without replacing the saved demo. Both the
 editor chat and session workspace show **Retry edit** beside the failed candidate
 request while the session is in error. It retries that request without adding a new

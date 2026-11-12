@@ -156,10 +156,17 @@ async fn extension_requires_additions_and_feature_coverage_before_saving() {
             operations
                 .push(json!({"index": original.screens.len(), "insert": true, "screen": screen}));
         }
+        let mut worker_design = original.clone();
+        if adds_page {
+            worker_design
+                .screens
+                .push(serde_json::from_value(operations[1]["screen"].clone()).unwrap());
+        }
+        fake.auto_worker_patches(ArtifactKind::Demo, &json!(worker_design), "worker");
         fake.push_text(json!({"screens": operations}).to_string());
         fake.push_text(coverage.into());
         if let Some(retry) = retry_coverage {
-            fake.push_text(json!({"screens": operations}).to_string());
+            fake.push_text(json!({"screens": [operations[0].clone()]}).to_string());
             fake.push_text(retry.into());
         }
         let candidate = ReviewingCandidate::new(&fake);
@@ -185,7 +192,12 @@ async fn extension_requires_additions_and_feature_coverage_before_saving() {
         assert!(planning.contains("Only do this in candidate 4"));
         assert_eq!(
             fake.state.worker_count.load(Ordering::SeqCst),
-            original.screens.len() * if retry_coverage.is_some() { 2 } else { 1 }
+            original.screens.len()
+                + if retry_coverage.is_some() {
+                    worker_design.screens.len()
+                } else {
+                    0
+                }
         );
         assert_eq!(
             fake.state.coordinator_count.load(Ordering::SeqCst),

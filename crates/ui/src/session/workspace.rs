@@ -471,7 +471,6 @@ pub(crate) fn SessionWorkspace(
                                 if failed_edit == Some(index) {
                                     FailedEditCard {
                                         session_id: session_id.clone(),
-                                        message: session.error.clone(),
                                         is_running,
                                     }
                                 }

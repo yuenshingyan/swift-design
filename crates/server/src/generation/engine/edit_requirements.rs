@@ -6,10 +6,16 @@ use serde_json::json;
 
 use super::super::{Attachments, EditOrder, GenerationEngine};
 
+// This contract is included in planning, writing, correction, and review so
+// the reviewer cannot silently raise the implementation fidelity after writing.
+pub(super) const DEMO_ACCEPTANCE_CONTRACT: &str = "Demo acceptance contract: This artifact is an HTML/CSS design prototype, not a production application. The renderer allows links between screens, details, checkbox/radio inputs and CSS states. It forbids scripts, event handlers, forms, buttons and editable text/date/time inputs. Do not change these restrictions. Distinguish rendered visual deliverables from implementation specifications in every checklist item. Require visible control designs, labelled input representations, responsive layouts and explicit state designs where requested; prose promising to design them later is insufficient. When the user permits designs or component specifications, accept complete, concrete specifications of those states and transitions, including persistent selection, automatic loading, date validation, duplicate prevention and clearing stale results; do not demand executable behavior the renderer forbids. Specifications must identify controls, state appearance, triggers, transitions and accessibility, not merely repeat the request. Do not replace requested high-fidelity desktop/mobile layouts with breakpoint prose alone. Preserve baseline navigation; do not demand routes absent from the baseline or invent missing destinations. Only classify a requirement as unsupported when the user explicitly requires executable behavior beyond this format and does not permit a design/specification alternative. Never silently drop such a requirement or claim backend integration.";
+
 #[derive(Deserialize)]
 struct DemoEditReview {
     coverage: Vec<RequirementReview>,
     reference_error: Option<String>,
+    #[serde(default)]
+    unsupported_requirements: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -78,6 +84,12 @@ impl DemoEditRequirements {
             }
             return Err(format!("Cannot verify demo edit reference: {reason}"));
         }
+        if !review.unsupported_requirements.is_empty() {
+            return Err(format!(
+                "Cannot complete demo edit: unsupported executable requirements: {}; approve a design/specification alternative or a separate renderer change.",
+                review.unsupported_requirements.join("; ")
+            ));
+        }
         if review.coverage.len() != self.requirements.len() {
             return Err("Cannot verify demo edit: the review omitted requirements.".into());
         }
@@ -120,6 +132,11 @@ impl GenerationEngine {
                 order.conversation, order.instruction, order.is_fresh, json!(inventory)
             ), attachments),
         ];
+        let mut messages = messages;
+        messages[0]["content"] = json!(format!(
+            "{}\n{DEMO_ACCEPTANCE_CONTRACT}",
+            messages[0]["content"].as_str().unwrap_or_default()
+        ));
         let reply = self.model.chat(client, &messages, effort).await?;
         let mut plan: DemoEditRequirements = serde_json::from_str(&reply).map_err(|_| {
             "Cannot plan demo edit: expected a JSON requirements object.".to_owned()
@@ -130,6 +147,7 @@ impl GenerationEngine {
             plan.instruction = order.instruction.to_owned();
         }
         plan.validate(design)?;
+        plan.instruction = format!("{}\n{DEMO_ACCEPTANCE_CONTRACT}", plan.instruction);
         plan.source = format!(
             "{}\nLatest instruction: {}",
             order.conversation, order.instruction
@@ -146,13 +164,18 @@ impl GenerationEngine {
     ) -> Result<Vec<String>, String> {
         let messages = vec![
             json!({"role": "system", "content":
-            "Review demo requirement coverage before saving. Return only a JSON object with coverage (one object per checklist item in order, each with complete: boolean and reason: string) and reference_error (null unless a required reference cannot be inspected, then a specific explanation and recovery action). Explain each incomplete item with concrete evidence and an actionable correction. Use the attached references when judging theme matching; do not invent reference colors or fonts. If a required reference is missing or unreadable, report reference_error rather than treating it as an incomplete edit. Judge actual HTML/CSS, navigation destinations and interaction states, not notes or promises. For a styling-only request, theme/CSS-only changes are valid. Require new features or screens only when requested by the current task; a layout-only patch is insufficient only when feature work was requested. Mark missing, partial, disconnected, or unverifiable requirements false. Compare the checklist with the original conversation and latest request; if the plan omitted requested work, mark all items false rather than accepting a narrowed brief. Evaluate only the current task and its clarifications, not earlier completed tasks or assistant-invented restrictions; the latest user requirements resolve conflicts. Proposed demo interactions need not have a backend, but must be present in the artifact. For preservation requirements, compare the before and after artifacts; do not demand identical markup for a styling change, new backend functionality, or responsive behavior absent from the baseline. Candidate isolation is a server-enforced fact: the pending write can only save the identified candidate, not other candidates. Do not reject a candidate-scope checklist item because other candidates are not supplied. This review is not a browser or backend test."}),
+            "Review demo requirement coverage before saving. Return only a JSON object with coverage (one object per checklist item in order, each with complete: boolean and reason: string) and reference_error (null unless a required reference cannot be inspected, then a specific explanation and recovery action), plus unsupported_requirements (an array of explicitly requested executable capabilities the renderer cannot support, empty otherwise). Explain each incomplete item with concrete evidence and an actionable correction. Use the attached references when judging theme matching; do not invent reference colors or fonts. If a required reference is missing or unreadable, report reference_error rather than treating it as an incomplete edit. Judge rendered visual requirements from HTML/CSS and navigation; judge specification-based requirements from complete concrete component/state specifications when the user permits them, not promises of future work. For a styling-only request, theme/CSS-only changes are valid. Require new features or screens only when requested by the current task; a layout-only patch is insufficient only when feature work was requested. Mark missing, partial, disconnected, or unverifiable requirements false. Compare the checklist with the original conversation and latest request; if the plan omitted requested work, mark all items false rather than accepting a narrowed brief. Evaluate only the current task and its clarifications, not earlier completed tasks or assistant-invented restrictions; the latest user requirements resolve conflicts. Requested supported demo interactions must be present in the artifact; renderer-forbidden behavior may instead have a concrete implementation specification when the task permits it. For preservation requirements, compare the before and after artifacts; do not demand identical markup for a styling change, new backend functionality, or responsive behavior absent from the baseline. Candidate isolation is a server-enforced fact: the pending write can only save the identified candidate, not other candidates. Do not reject a candidate-scope checklist item because other candidates are not supplied. This review is not a browser or backend test."}),
             self.user_message(&format!(
                 "Pending save target (server-enforced): {}\nOriginal request:\n{}\nEdit brief:\n{}\nChecklist:\n{}\nBefore artifact:\n{}\nAfter artifact:\n{}",
                 evidence.candidate_id, plan.source, plan.instruction, json!(plan.requirements),
                 json!(evidence.before), json!(evidence.after)
             ), evidence.attachments),
         ];
+        let mut messages = messages;
+        messages[0]["content"] = json!(format!(
+            "{}\n{DEMO_ACCEPTANCE_CONTRACT}",
+            messages[0]["content"].as_str().unwrap_or_default()
+        ));
         let reply = self.model.chat(client, &messages, effort).await?;
         let review: DemoEditReview = serde_json::from_str(&reply)
             .map_err(|_| "Cannot verify demo edit: expected a JSON coverage review.".to_owned())?;
