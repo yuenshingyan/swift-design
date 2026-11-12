@@ -382,6 +382,47 @@ async fn retry_restores_the_state_before_the_error() {
 }
 
 #[tokio::test]
+async fn retry_failed_edit_preserves_the_original_instruction_and_candidate() {
+    let directory = TempDir::new().unwrap();
+    let application = test_application(&directory);
+    create(&application, "talk").await;
+    let sessions = SessionStore::new(directory.path().join("data/sessions"));
+    sessions
+        .apply("talk", design_model::WorkflowEvent::GenerationStarted)
+        .await
+        .unwrap();
+    sessions
+        .apply("talk", design_model::WorkflowEvent::GenerationSucceeded)
+        .await
+        .unwrap();
+    sessions
+        .append_message(
+            "talk",
+            crate::sessions::ChatMessage::user(
+                "[screen 2] Match the theme.",
+                Some("talk-candidate-1"),
+            ),
+        )
+        .await
+        .unwrap();
+    sessions
+        .apply("talk", design_model::WorkflowEvent::RunFailed)
+        .await
+        .unwrap();
+    let before = view(&application, "talk").await;
+    let (status, _) = send(application.clone(), "POST", "/sessions/talk/retry", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let after = view(&application, "talk").await;
+    assert_eq!(after["session"]["state"], "reviewing");
+    assert_eq!(after["messages"], before["messages"]);
+    assert_eq!(after["messages"][0]["design"], "talk-candidate-1");
+    assert_eq!(
+        after["messages"][0]["content"],
+        "[screen 2] Match the theme."
+    );
+}
+
+#[tokio::test]
 async fn a_message_after_an_error_recovers_the_session() {
     let directory = TempDir::new().unwrap();
     let application = test_application(&directory);

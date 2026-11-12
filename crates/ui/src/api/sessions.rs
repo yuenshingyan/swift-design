@@ -34,6 +34,9 @@ pub struct ChatMessage {
     /// The design the turn is about, when it names one.
     #[serde(default)]
     pub design: Option<String>,
+    /// Candidate ids explicitly pinned to this request.
+    #[serde(default)]
+    pub pinned: Vec<String>,
     /// The number of the question set this turn posed, when it did.
     #[serde(default)]
     pub question_set: Option<u32>,

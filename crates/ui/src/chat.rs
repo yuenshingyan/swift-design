@@ -8,6 +8,8 @@
 use dioxus::document;
 use dioxus::prelude::*;
 
+use design_model::WorkflowState;
+
 use crate::api;
 use crate::chat_controls::{ModelChip, SendButton, with_effort};
 use crate::prompt_history::{PromptHistory, prompt_entries};
@@ -41,6 +43,66 @@ pub(crate) fn use_follow_thread(thread_id: &'static str, message_count: Option<u
             let _ = script.send(thread_id);
         }
     }));
+}
+
+/// Finds the latest candidate request when its session has failed.
+pub(crate) fn failed_edit_index(
+    state: WorkflowState,
+    messages: &[api::ChatMessage],
+    chosen_design: Option<&str>,
+) -> Option<usize> {
+    if state != WorkflowState::Error {
+        return None;
+    }
+    let index = messages
+        .iter()
+        .rposition(|message| message.role == "user")?;
+    let message = &messages[index];
+    ((message.design.is_some() || !message.pinned.is_empty() || chosen_design.is_some())
+        && !message.is_continue
+        && !message.is_queued)
+        .then_some(index)
+}
+
+/// A failed edit's explanation and manual retry, shared by both chat views.
+#[component]
+pub(crate) fn FailedEditCard(
+    session_id: String,
+    message: Option<String>,
+    is_running: bool,
+) -> Element {
+    let mut is_retrying = use_signal(|| false);
+    let mut error = use_signal(|| Option::<String>::None);
+    rsx! {
+        div { class: "error-card",
+            p { class: "error-title", "The edit failed" }
+            if let Some(message) = message {
+                p { "{message}" }
+            }
+            button {
+                class: "primary",
+                disabled: is_running || is_retrying(),
+                onclick: move |_| {
+                    if is_running || is_retrying() {
+                        return;
+                    }
+                    is_retrying.set(true);
+                    error.set(None);
+                    let session_id = session_id.clone();
+                    spawn(async move {
+                        if let Err(message) = api::retry_session(&session_id).await {
+                            error.set(Some(message));
+                        }
+                        is_retrying.set(false);
+                    });
+                },
+                if is_retrying() { "Retrying…" } else { "Retry edit" }
+            }
+            if let Some(message) = error() {
+                p { class: "error", "{message}" }
+            }
+        }
+    }
 }
 
 /// The chat column for one design.
@@ -81,6 +143,9 @@ pub fn DesignChat(
 ) -> Element {
     let session_id = artifact_project(&design_id);
     let mut messages = use_signal(Vec::<api::ChatMessage>::new);
+    let mut session_state = use_signal(|| WorkflowState::Reviewing);
+    let mut session_error = use_signal(|| Option::<String>::None);
+    let mut chosen_design = use_signal(|| Option::<String>::None);
     let mut agent_run = use_signal(|| Option::<api::AgentRun>::None);
     let mut settings = use_signal(|| Option::<api::SettingsView>::None);
     let mut is_configuring = use_signal(|| false);
@@ -167,6 +232,9 @@ pub fn DesignChat(
                 let mut seen = 0u64;
                 loop {
                     if let Ok(view) = api::fetch_session(&session_id).await {
+                        session_state.set(view.session.state);
+                        session_error.set(view.session.error);
+                        chosen_design.set(view.session.chosen_design);
                         options.set(Some(view.session.options));
                         messages.set(view.messages);
                     }
@@ -289,6 +357,7 @@ pub fn DesignChat(
     let running_placeholder = agent_run()
         .map(|run| format!("{} Your next request queues up.", phase_name(&run)))
         .unwrap_or_default();
+    let failed_edit = failed_edit_index(session_state(), &messages(), chosen_design().as_deref());
     let has_draft = !draft().trim().is_empty();
     let can_send = is_model_chosen && (has_draft || !comments().is_empty());
     let send_label = if agent_run().is_some_and(|run| run.is_running) {
@@ -317,6 +386,13 @@ pub fn DesignChat(
                             }
                         }
                         p { "{message.content}" }
+                    }
+                    if failed_edit == Some(index) {
+                        FailedEditCard {
+                            session_id: session_id.clone(),
+                            message: session_error(),
+                            is_running,
+                        }
                     }
                 }
                 if let Some(run) = agent_run() {
@@ -683,10 +759,106 @@ pub(crate) fn has_page_reference(text: &str, unit: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        SCROLL_TO_LATEST, comment_line, comment_summary, has_page_reference, mention_at,
-        mention_matches, message_with_comments, page_title, reference_for, remove_mention,
-        should_follow_thread,
+        SCROLL_TO_LATEST, comment_line, comment_summary, failed_edit_index, has_page_reference,
+        mention_at, mention_matches, message_with_comments, page_title, reference_for,
+        remove_mention, should_follow_thread,
     };
+
+    fn edit_request() -> crate::api::ChatMessage {
+        crate::api::ChatMessage {
+            role: "user".into(),
+            content: "[screen 2] Match the theme".into(),
+            design: Some("candidate-2".into()),
+            pinned: Vec::new(),
+            question_set: None,
+            is_continue: false,
+            is_queued: false,
+            at: None,
+            artifacts: Vec::new(),
+            snapshot_stamps: None,
+        }
+    }
+
+    #[test]
+    fn failed_edit_retry_uses_the_original_candidate_request() {
+        let messages = vec![
+            crate::api::ChatMessage {
+                design: Some("candidate-1".into()),
+                ..edit_request()
+            },
+            crate::api::ChatMessage {
+                role: "assistant".into(),
+                ..edit_request()
+            },
+            edit_request(),
+            crate::api::ChatMessage {
+                role: "assistant".into(),
+                ..edit_request()
+            },
+        ];
+        let index = failed_edit_index(design_model::WorkflowState::Error, &messages, None);
+        assert_eq!(index, Some(2));
+        assert_eq!(
+            messages[index.expect("failed edit index")]
+                .design
+                .as_deref(),
+            Some("candidate-2")
+        );
+        assert_eq!(
+            failed_edit_index(design_model::WorkflowState::Reviewing, &messages, None),
+            None
+        );
+        assert_eq!(
+            failed_edit_index(design_model::WorkflowState::Generating, &messages, None),
+            None
+        );
+    }
+
+    #[test]
+    fn failed_edit_retry_supports_pinned_and_chosen_candidates() {
+        use design_model::WorkflowState;
+        let mut request = edit_request();
+        request.design = None;
+        assert_eq!(
+            failed_edit_index(
+                WorkflowState::Error,
+                &[request.clone()],
+                Some("candidate-1")
+            ),
+            Some(0)
+        );
+        request.pinned = vec!["candidate-1".into(), "candidate-2".into()];
+        assert_eq!(
+            failed_edit_index(WorkflowState::Error, &[request], None),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn retry_edit_is_not_offered_for_other_requests_or_queued_work() {
+        use design_model::WorkflowState;
+        for request in [
+            crate::api::ChatMessage {
+                design: None,
+                ..edit_request()
+            },
+            crate::api::ChatMessage {
+                is_continue: true,
+                ..edit_request()
+            },
+            crate::api::ChatMessage {
+                is_queued: true,
+                ..edit_request()
+            },
+        ] {
+            let messages = vec![request];
+            assert_eq!(
+                failed_edit_index(WorkflowState::Error, &messages, None),
+                None
+            );
+        }
+        assert_eq!(failed_edit_index(WorkflowState::Error, &[], None), None);
+    }
 
     #[test]
     fn follows_the_initial_conversation_and_new_messages() {

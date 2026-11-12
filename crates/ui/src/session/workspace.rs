@@ -1,3 +1,4 @@
+use crate::chat::{FailedEditCard, failed_edit_index};
 use crate::uploads::{AttachButton, AttachmentChips, PasteUploads, pending_uploads};
 
 use super::helpers::{
@@ -389,7 +390,9 @@ pub(crate) fn SessionWorkspace(
         move |_: ()| {
             let session_id = session_id.clone();
             spawn(async move {
-                let _ = api::retry_session(&session_id).await;
+                if let Err(message) = api::retry_session(&session_id).await {
+                    error.set(Some(message));
+                }
             });
         }
     });
@@ -404,6 +407,11 @@ pub(crate) fn SessionWorkspace(
         }
     };
 
+    let failed_edit = failed_edit_index(
+        state,
+        &session_view.messages,
+        session.chosen_design.as_deref(),
+    );
     let has_queued = session_view
         .messages
         .iter()
@@ -459,6 +467,13 @@ pub(crate) fn SessionWorkspace(
                                         }
                                     }
                                     p { "{message.content}" }
+                                }
+                                if failed_edit == Some(index) {
+                                    FailedEditCard {
+                                        session_id: session_id.clone(),
+                                        message: session.error.clone(),
+                                        is_running,
+                                    }
                                 }
                                 if let Some(since) = revert_since {
                                     button {
@@ -555,7 +570,7 @@ pub(crate) fn SessionWorkspace(
                             }
                         }
                     }
-                    if state == WorkflowState::Error {
+                    if state == WorkflowState::Error && failed_edit.is_none() {
                         div { class: "error-card",
                             p { class: "error-title", "The run failed" }
                             if let Some(message) = &session.error {
@@ -563,6 +578,7 @@ pub(crate) fn SessionWorkspace(
                             }
                             button {
                                 class: "primary",
+                                disabled: is_running,
                                 onclick: move |_| resume.call(()),
                                 "Retry"
                             }

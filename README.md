@@ -141,8 +141,15 @@ a model compares the original and proposed markup against the checklist and
 request. Preservation checks use that baseline; they do not require identical
 markup or new functionality for a restyle. Candidate isolation is enforced by
 the server's save target, not inferred by the reviewer from other candidates.
-Incomplete or unreviewable edits fail without replacing the saved demo. This
-review is separate from browser layout checks and is not proof of backend behavior.
+Planning, editing, and review receive the same session reference attachments.
+Review returns specific reasons for unmet requirements; one correction attempt
+uses that feedback before a final review. Missing or unreadable required references
+produce a reference-verification error instead of an incomplete-edit verdict.
+Incomplete or unreviewable edits fail without replacing the saved demo. Both the
+editor chat and session workspace show **Retry edit** beside the failed candidate
+request while the session is in error. It retries that request without adding a new
+prompt and is disabled while a run is active. This review is separate from browser
+layout checks and is not proof of backend behavior.
 Follow-up chat receives the five most recent completed run outcomes, including
 recorded failures, so it can explain a rejected edit without asking you to diagnose it.
 

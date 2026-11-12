@@ -538,8 +538,9 @@ impl GenerationEngine {
             })?;
         let label = format!("edit {design_id}");
         log(&format!("{label}: resolving edit requirements and scope"));
+        let attachments = self.load_attachments(&context.session_id, log).await;
         let plan = self
-            .plan_demo_edit(client, &design, order, context.effort())
+            .plan_demo_edit(client, &design, order, (&attachments, context.effort()))
             .await
             .map_err(GenerationStop::Failed)?;
         let instruction = plan.instruction.as_str();
@@ -568,7 +569,6 @@ impl GenerationEngine {
             )
         };
         let design_json = design_json.map_err(|error| GenerationStop::Failed(error.to_string()))?;
-        let attachments = self.load_attachments(&context.session_id, log).await;
         let input = EditInput {
             instruction,
             artifact_json: &design_json,
@@ -576,10 +576,6 @@ impl GenerationEngine {
             findings: &findings,
             conversation: order.conversation,
         };
-        let messages = vec![
-            serde_json::json!({ "role": "system", "content": system_prompt() }),
-            self.user_message(&edit_prompt(&context.request, &input), &attachments),
-        ];
         let original = design.clone();
         let effort = context.effort().to_owned();
         let request = ArtifactRequest {
@@ -589,58 +585,91 @@ impl GenerationEngine {
             progress: self.shared_progress(&[design_id.to_owned()], 5, 95).pop(),
             live: None,
         };
-        let edited = self
-            .request_edit(
-                client,
-                EditExecution {
-                    original: &design,
-                    messages,
-                    input: &input,
-                    indexes: &indexes,
-                    is_fresh: order.is_fresh,
-                    request: &request,
-                },
-                log,
-            )
-            .await?;
-        // A fix can make a new problem. The touched screens are measured
-        // again, and the model tweaks them until they measure clean or
-        // the effort's rounds run out.
-        let touched = if design.theme != edited.theme
-            || design.viewport != edited.viewport
-            || design.app_window != edited.app_window
-        {
-            (0..edited.screens.len()).collect()
-        } else {
-            touched_indexes(&design.screens, &edited.screens, &indexes)
+        let mut correction = String::new();
+        let mut attempt = 0;
+        let (final_design, fix) = loop {
+            let messages = vec![
+                serde_json::json!({ "role": "system", "content": system_prompt() }),
+                self.user_message(
+                    &format!("{}\n{}", edit_prompt(&context.request, &input), correction),
+                    &attachments,
+                ),
+            ];
+            let edited = self
+                .request_edit(
+                    client,
+                    EditExecution {
+                        original: &design,
+                        messages,
+                        input: &input,
+                        indexes: &indexes,
+                        is_fresh: order.is_fresh,
+                        request: &request,
+                    },
+                    log,
+                )
+                .await?;
+            // A fix can make a new problem. The touched screens are measured
+            // again, and the model tweaks them until they measure clean or
+            // the effort's rounds run out.
+            let touched = if design.theme != edited.theme
+                || design.viewport != edited.viewport
+                || design.app_window != edited.app_window
+            {
+                (0..edited.screens.len()).collect()
+            } else {
+                touched_indexes(&design.screens, &edited.screens, &indexes)
+            };
+            let fix = EditFix {
+                request: &context.request,
+                context: &request,
+                indexes: touched,
+            };
+            let final_design = self
+                .fix_edited_design(client, edited, &fix, log)
+                .await
+                .map_err(GenerationStop::Failed)?;
+            plan.check_structure(&design, &final_design)
+                .map_err(GenerationStop::Failed)?;
+            log(&format!(
+                "{}: reviewing requested feature coverage before saving",
+                request.label
+            ));
+            let failures = self
+                .verify_demo_edit(
+                    client,
+                    &plan,
+                    DemoEditEvidence {
+                        candidate_id: design_id,
+                        before: &design,
+                        after: &final_design,
+                        attachments: &attachments,
+                    },
+                    context.effort(),
+                )
+                .await
+                .map_err(GenerationStop::Failed)?;
+            if failures.is_empty() {
+                break (final_design, fix);
+            }
+            if attempt == 1 {
+                return Err(GenerationStop::Failed(format!(
+                    "Cannot save incomplete demo edit after one correction attempt: {}",
+                    failures.join("; ")
+                )));
+            }
+            // Regenerate against the saved baseline so discarded edits never become
+            // an implicit source of truth or alter unselected screens.
+            correction = format!(
+                "The previous attempt failed requirement review. Correct these issues while satisfying the entire original brief:\n{}",
+                failures.join("\n")
+            );
+            log(&format!(
+                "{}: correcting incomplete requirement coverage",
+                request.label
+            ));
+            attempt += 1;
         };
-        let fix = EditFix {
-            request: &context.request,
-            context: &request,
-            indexes: touched,
-        };
-        let final_design = self
-            .fix_edited_design(client, edited, &fix, log)
-            .await
-            .map_err(GenerationStop::Failed)?;
-        plan.check_structure(&design, &final_design)
-            .map_err(GenerationStop::Failed)?;
-        log(&format!(
-            "{}: reviewing requested feature coverage before saving",
-            request.label
-        ));
-        self.verify_demo_edit(
-            client,
-            &plan,
-            DemoEditEvidence {
-                candidate_id: design_id,
-                before: &design,
-                after: &final_design,
-            },
-            context.effort(),
-        )
-        .await
-        .map_err(GenerationStop::Failed)?;
         let mut report = saved_edit_report(design_id, context.request.kind, &design, &final_design)
             .map_err(GenerationStop::Failed)?;
         let verified: Vec<String> = fix

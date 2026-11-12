@@ -281,7 +281,10 @@ async fn a_systemic_edit_saves_only_after_coordination_and_reports_the_final_cha
         "worker",
     );
     fake.push_text(r#"{"title":"Coordinated workspace","screens":[]}"#.to_owned());
-    fake.push_text("[true]".to_owned());
+    fake.push_text(
+        r#"{"coverage":[{"complete":true,"reason":"Screens updated"}],"reference_error":null}"#
+            .to_owned(),
+    );
     let candidate = ReviewingCandidate::new(&fake);
     candidate.seed(&original, "Update all screens.").await;
     fake.watch_baseline(&candidate.path()).await;

@@ -20,6 +20,7 @@ fn message(role: &str, design: Option<&str>, is_continue: bool) -> api::ChatMess
         role: role.to_owned(),
         content: String::new(),
         design: design.map(str::to_owned),
+        pinned: Vec::new(),
         question_set: None,
         is_continue,
         is_queued: false,

@@ -11,7 +11,17 @@ async fn theme_review_has_comparison_evidence_and_failure_reaches_follow_up_chat
         let mut theme = json!(original.theme);
         theme["colors"]["background"] = json!("#ffffff");
         fake.push_text(json!({"theme": theme}).to_string());
-        fake.push_text(json!([true, accepted, true]).to_string());
+        let review = json!({"coverage": [
+            {"complete": true, "reason": "Light background applied"},
+            {"complete": accepted, "reason": "Restore the missing navigation link"},
+            {"complete": true, "reason": "Server-enforced isolation"}
+        ], "reference_error": null})
+        .to_string();
+        fake.push_text(review.clone());
+        if !accepted {
+            fake.push_text(json!({"theme": theme}).to_string());
+            fake.push_text(review);
+        }
         let candidate = ReviewingCandidate::new(&fake);
         candidate.seed(&original, "I want a light-theme.").await;
         candidate
@@ -23,7 +33,7 @@ async fn theme_review_has_comparison_evidence_and_failure_reaches_follow_up_chat
         assert_eq!(result.is_ok(), accepted, "{result:?}");
         assert_eq!(
             fake.state.worker_count.load(Ordering::SeqCst),
-            original.screens.len()
+            original.screens.len() * if accepted { 1 } else { 2 }
         );
         let requests = fake.requests();
         let review = requests.last().unwrap();
@@ -109,12 +119,21 @@ async fn theme_review_has_comparison_evidence_and_failure_reaches_follow_up_chat
 
 #[tokio::test]
 async fn extension_requires_additions_and_feature_coverage_before_saving() {
-    for (adds_page, coverage, should_save) in [
-        (false, "[true]", false),
-        (true, "[false]", false),
-        (true, "[]", false),
-        (true, "not JSON", false),
-        (true, "[true]", true),
+    const PASS: &str = r#"{"coverage":[{"complete":true,"reason":"Connected page present"}],"reference_error":null}"#;
+    const FAIL: &str = r#"{"coverage":[{"complete":false,"reason":"Add the notification control"}],"reference_error":null}"#;
+    for (adds_page, coverage, retry_coverage, should_save) in [
+        (false, PASS, None, false),
+        (true, FAIL, Some(FAIL), false),
+        (true, FAIL, Some(PASS), true),
+        (true, r#"{"coverage":[]}"#, None, false),
+        (true, "not JSON", None, false),
+        (
+            true,
+            r#"{"coverage":[],"reference_error":"Upload the missing screenshot"}"#,
+            None,
+            false,
+        ),
+        (true, PASS, None, true),
     ] {
         let original = sample_design();
         let fake = ParallelFakeModel::start(None).await;
@@ -139,6 +158,10 @@ async fn extension_requires_additions_and_feature_coverage_before_saving() {
         }
         fake.push_text(json!({"screens": operations}).to_string());
         fake.push_text(coverage.into());
+        if let Some(retry) = retry_coverage {
+            fake.push_text(json!({"screens": operations}).to_string());
+            fake.push_text(retry.into());
+        }
         let candidate = ReviewingCandidate::new(&fake);
         candidate
             .seed(
@@ -162,9 +185,19 @@ async fn extension_requires_additions_and_feature_coverage_before_saving() {
         assert!(planning.contains("Only do this in candidate 4"));
         assert_eq!(
             fake.state.worker_count.load(Ordering::SeqCst),
-            original.screens.len()
+            original.screens.len() * if retry_coverage.is_some() { 2 } else { 1 }
         );
-        assert_eq!(fake.state.coordinator_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fake.state.coordinator_count.load(Ordering::SeqCst),
+            if retry_coverage.is_some() { 2 } else { 1 }
+        );
+        if retry_coverage.is_some() {
+            assert!(
+                fake.requests()
+                    .iter()
+                    .any(|request| request_text(request).contains("Add the notification control"))
+            );
+        }
         if should_save {
             let saved = candidate
                 .designs
@@ -222,7 +255,10 @@ pub(super) async fn verify_queued_edit_baseline(
         "queued worker",
     );
     fake.push_text(r#"{"title":"Queued workspace","screens":[]}"#.to_owned());
-    fake.push_text("[true]".to_owned());
+    fake.push_text(
+        r#"{"coverage":[{"complete":true,"reason":"Screens updated"}],"reference_error":null}"#
+            .to_owned(),
+    );
     candidate
         .engine
         .clone()

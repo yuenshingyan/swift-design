@@ -137,7 +137,9 @@ async fn an_edit_on_a_preview_is_not_a_continue() {
     server.push_text(r#"{"reply":"Tightening the hero.","edit":true}"#);
     server.push_text(EDIT_PLAN);
     server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:64px;}"}}]}"#);
-    server.push_text("[true]");
+    server.push_text(
+        r#"{"coverage":[{"complete":true,"reason":"Hero updated"}],"reference_error":null}"#,
+    );
     let directory = tempfile::tempdir().unwrap();
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
@@ -179,7 +181,9 @@ async fn a_chat_request_with_a_design_open_patches_that_design() {
     server.push_text(r#"{"reply":"Tightening the hero.","edit":true}"#);
     server.push_text(EDIT_PLAN);
     server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:64px;}"}}]}"#);
-    server.push_text("[true]");
+    server.push_text(
+        r#"{"coverage":[{"complete":true,"reason":"Hero updated"}],"reference_error":null}"#,
+    );
     let directory = tempfile::tempdir().unwrap();
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
@@ -224,13 +228,69 @@ async fn a_chat_request_with_a_design_open_patches_that_design() {
 }
 
 #[tokio::test]
+async fn demo_edit_planning_and_review_receive_the_reference_screenshot() {
+    let server = FakeModelServer::start().await;
+    server.push_text(r#"{"edit":true}"#);
+    server.push_text(EDIT_PLAN);
+    server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1>Mint hero</h1>","css":"h1{color:#aaffcc}"}}]}"#);
+    server.push_text(
+        r#"{"coverage":[{"complete":true,"reason":"Matches reference"}],"reference_error":null}"#,
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let designs = DesignStore::new(directory.path().join("designs"));
+    let sessions = SessionStore::new(directory.path().join("sessions"));
+    let uploads = UploadStore::new(directory.path().join("uploads"));
+    let screenshot = b"\x89PNG\r\n\x1a\n theme reference";
+    uploads.save("talk", "theme.png", screenshot).await.unwrap();
+    let design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+    reviewing_session_with(&sessions, &designs, &design, 1).await;
+    sessions
+        .append_message(
+            "talk",
+            ChatMessage::user(
+                "[screen 1] Match the screenshot theme.",
+                Some("talk-candidate-1"),
+            ),
+        )
+        .await
+        .unwrap();
+    let mut configuration = server.configuration();
+    configuration.model = "gpt-6-astra".into();
+    GenerationEngine::new(
+        configuration,
+        designs,
+        sessions,
+        None,
+        "http://127.0.0.1:3000".into(),
+        ChangeNotifier::new(),
+    )
+    .with_demo_dom_runner(clean_demo_dom_runner())
+    .with_uploads(uploads)
+    .run("talk", silent_log())
+    .await
+    .unwrap();
+    let requests = server.requests();
+    assert_eq!(requests.len(), 4);
+    for request in &requests[1..] {
+        let parts = request["messages"][1]["content"].as_array().unwrap();
+        assert!(parts.iter().any(|part| part["image_url"]["url"]
+            == format!(
+                "data:image/png;base64,{}",
+                crate::export::base64_encode(screenshot)
+            )));
+    }
+}
+
+#[tokio::test]
 async fn a_message_with_pinned_candidates_patches_each_of_them() {
     let server = FakeModelServer::start().await;
     server.push_text(r#"{"reply":"Tightening both.","edit":true}"#);
     for _ in 0..2 {
         server.push_text(EDIT_PLAN);
         server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:64px;}"}}]}"#);
-        server.push_text("[true]");
+        server.push_text(
+            r#"{"coverage":[{"complete":true,"reason":"Hero updated"}],"reference_error":null}"#,
+        );
     }
     let directory = tempfile::tempdir().unwrap();
     let designs = DesignStore::new(directory.path().join("designs"));
@@ -395,7 +455,9 @@ async fn a_merge_with_one_pin_is_an_edit() {
     server.push_text(r#"{"reply":"Changing it.","merge":true}"#);
     server.push_text(EDIT_PLAN);
     server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:64px;}"}}]}"#);
-    server.push_text("[true]");
+    server.push_text(
+        r#"{"coverage":[{"complete":true,"reason":"Hero updated"}],"reference_error":null}"#,
+    );
     let directory = tempfile::tempdir().unwrap();
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
@@ -427,7 +489,9 @@ async fn a_regenerated_screen_is_written_without_its_old_markup() {
     // No turn planner: the edit requirements are resolved directly.
     server.push_text(EDIT_PLAN);
     server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Fresh</h1>","css":".title{font-size:64px;}"}}]}"#);
-    server.push_text("[true]");
+    server.push_text(
+        r#"{"coverage":[{"complete":true,"reason":"Hero updated"}],"reference_error":null}"#,
+    );
     let directory = tempfile::tempdir().unwrap();
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
