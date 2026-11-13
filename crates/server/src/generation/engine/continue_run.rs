@@ -157,10 +157,9 @@ impl GenerationEngine {
     }
 
     /// Writes the remaining screens of the preview design `design_id` in
-    /// chunks of `CONTINUE_CHUNK_SCREENS`. The design is saved after every
-    /// chunk, so the canvas shows it grow, then polished once it is
-    /// complete. Returns how many screens were added; 0 when the design is
-    /// complete already.
+    /// chunks of `CONTINUE_CHUNK_SCREENS`. A separate visual draft shows
+    /// progress while the saved preview remains protected until acceptance.
+    /// Returns how many screens were added; 0 when the design is complete already.
     pub(super) async fn continue_design(
         &self,
         client: &reqwest::Client,
@@ -204,10 +203,14 @@ impl GenerationEngine {
             chunks.iter().map(|_| Vec::new()).collect(),
         ));
         let saver = LiveSaver::new(self, design_id);
+        let live_preview = self.designs.start_preview(design_id, &self.notifier, None);
+        let completed: ChunkBoard = Arc::new(std::sync::Mutex::new(
+            chunks.iter().map(|_| Vec::new()).collect(),
+        ));
         let preview = design.clone();
         let show = {
             let board = Arc::clone(&board);
-            let saver = saver.clone();
+            let live_preview = live_preview.clone();
             let preview = preview.clone();
             let progress = Arc::clone(progress);
             let chunks = chunks.clone();
@@ -218,7 +221,7 @@ impl GenerationEngine {
                 let written: usize = board.iter().map(Vec::len).sum();
                 let done = written as f32 / (planned - start).max(1) as f32;
                 progress(CONTINUE_DRAFT_SHARE * done);
-                saver.offer(shown_design(&preview, &chunks, &board), written);
+                live_preview.show(&shown_design(&preview, &chunks, &board));
             })
         };
         let mut tasks = tokio::task::JoinSet::new();
@@ -228,6 +231,8 @@ impl GenerationEngine {
             let context = context.clone();
             let preview = preview.clone();
             let board = Arc::clone(&board);
+            let completed = Arc::clone(&completed);
+            let live_preview = live_preview.clone();
             let show = Arc::clone(&show);
             let log = Arc::clone(log);
             let label = label.clone();
@@ -253,9 +258,17 @@ impl GenerationEngine {
                     parse: Box::new(move |content| apply_continuation(&original, content)),
                     progress: None,
                     live: Some(Arc::new(move |text: &str| {
-                        let screens = partial_continuation_screens(written, text);
+                        if !live_preview.should_update() {
+                            return;
+                        }
+                        let screens =
+                            crate::generation::live_preview::preview_continuation_screens(
+                                written, text,
+                            )
+                            .unwrap_or_else(|| partial_continuation_screens(written, text));
                         if let Ok(mut board) = live_board.lock()
-                            && screens.len() > board[position].len()
+                            && !screens.is_empty()
+                            && screens != board[position]
                         {
                             board[position] = screens;
                         } else {
@@ -270,7 +283,10 @@ impl GenerationEngine {
                     .map_err(stop_to_string)?;
                 let screens: Vec<design_model::Screen> = continued.screens[written..].to_vec();
                 if let Ok(mut board) = board.lock() {
-                    board[position] = screens;
+                    board[position] = screens.clone();
+                }
+                if let Ok(mut completed) = completed.lock() {
+                    completed[position] = screens;
                 }
                 show();
                 Ok::<(), String>(())
@@ -287,22 +303,32 @@ impl GenerationEngine {
         for failure in &failures {
             log(&format!("{label}: {failure}"));
         }
+        if !failures.is_empty() {
+            let reason = failure_message(&failures, "the continuation could not finish");
+            let fallback = completed
+                .lock()
+                .ok()
+                .filter(|board| board.iter().any(|screens| !screens.is_empty()))
+                .map(|board| shown_design(&preview, &chunks, &board));
+            return match fallback {
+                Some(fallback) => Err(self
+                    .save_review_draft(design_id, &fallback, &reason, false)
+                    .await?),
+                None => Err(reason),
+            };
+        }
         let mut continued = preview.clone();
-        if let Ok(board) = board.lock() {
+        if let Ok(board) = completed.lock() {
             for screens in board.iter() {
                 continued.screens.extend(screens.iter().cloned());
             }
         }
         let added = continued.screens.len().saturating_sub(start);
         if added == 0 {
-            // The board only held placeholders; put the preview back so
-            // the design stays continuable.
-            if let Err(error) = saver.finish(&preview).await {
-                log(&format!("{label}: restoring the preview failed: {error}"));
-            }
+            // No accepted chunk changed the original preview.
             return Err(failure_message(&failures, "no screens were added"));
         }
-        // A failed chunk leaves the design continuable: the outline stays
+        // A short reply leaves the design continuable: the outline stays
         // until every title has a screen.
         if continued.screens.len() >= planned {
             continued.outline.clear();
@@ -318,7 +344,7 @@ impl GenerationEngine {
                 let polished = ((fraction - DRAFT_SHARE) / (1.0 - DRAFT_SHARE)).clamp(0.0, 1.0);
                 share(CONTINUE_DRAFT_SHARE + (1.0 - CONTINUE_DRAFT_SHARE) * polished);
             })),
-            live: None,
+            live: Some(live_preview.edit_sink(&continued)),
         };
         let fallback = continued.clone();
         let final_design = match self
@@ -403,6 +429,10 @@ impl GenerationEngine {
                     "content": user_content_with_images(&prompt, &images),
                 }),
             ];
+            let live = context
+                .live
+                .as_ref()
+                .map(|sink| crate::generation::live_preview::patch_sink(&design, Arc::clone(sink)));
             let started = std::time::Instant::now();
             let content = self
                 .model
@@ -410,7 +440,7 @@ impl GenerationEngine {
                     client,
                     self.model
                         .request_body(&messages, writing_effort(&context.effort)),
-                    None,
+                    live.as_deref(),
                 )
                 .await?;
             log(&format!(
@@ -515,13 +545,17 @@ impl GenerationEngine {
                 serde_json::json!({ "role": "system", "content": system_prompt() }),
                 serde_json::json!({ "role": "user", "content": edit_prompt(fix.request, &input) }),
             ];
+            let live =
+                fix.context.live.as_ref().map(|sink| {
+                    crate::generation::live_preview::patch_sink(&design, Arc::clone(sink))
+                });
             let reply = self
                 .model
                 .chat_with(
                     client,
                     self.model
                         .request_body(&messages, writing_effort(&fix.context.effort)),
-                    None,
+                    live.as_deref(),
                 )
                 .await;
             // A failed repair must report its cause, not masquerade as exhausted layout rounds.

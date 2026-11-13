@@ -281,7 +281,42 @@ fn CandidateCard(
         is_selected,
     });
     let ratio = card.ratio.clone();
-    let preview = card.preview_url(revision, current);
+    // Global events include unrelated chat/status changes. Demo frames only need a
+    // new address when their effective preview content actually changed.
+    let mut demo_content = use_signal(|| None::<(design_model::Design, bool)>);
+    let mut demo_revision = use_signal(|| 0u64);
+    let preview_id = id.clone();
+    let content = use_resource(use_reactive!(|revision| {
+        let id = preview_id.clone();
+        async move {
+            let _ = revision;
+            if kind != ArtifactKind::Demo {
+                return None;
+            }
+            match api::fetch_design_preview(&id).await {
+                Ok(Some(draft)) => Some((draft, true)),
+                Ok(None) => api::fetch_design(&id)
+                    .await
+                    .ok()
+                    .map(|saved| (saved, false)),
+                Err(_) => None,
+            }
+        }
+    }));
+    use_effect(move || {
+        if let Some(Some(fetched)) = content.read().as_ref()
+            && demo_content.peek().as_ref() != Some(fetched)
+        {
+            demo_content.set(Some(fetched.clone()));
+            demo_revision += 1;
+        }
+    });
+    let frame_revision = if kind == ArtifactKind::Demo {
+        demo_revision()
+    } else {
+        revision
+    };
+    let preview = card.preview_url(frame_revision, current);
     let remaining = card.remaining_count();
     // A preview waits for the rest of its outline. Finish in the bar
     // asks the app for it, and the run then shows its progress here.

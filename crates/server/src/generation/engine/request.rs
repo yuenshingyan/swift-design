@@ -24,6 +24,10 @@ impl GenerationEngine {
         ];
         let saver = LiveSaver::new(self, &request.design_id);
         let live_saver = saver.clone();
+        let preview = self
+            .designs
+            .start_preview(&request.design_id, &self.notifier, None);
+        let live_preview = preview.clone();
         let needs_app_window = request.context.options.should_have_app_window();
         let context = ArtifactRequest {
             effort: request.context.effort().to_owned(),
@@ -37,6 +41,12 @@ impl GenerationEngine {
             }),
             progress: Some(Arc::clone(progress)),
             live: Some(Arc::new(move |text: &str| {
+                if live_preview.should_update()
+                    && let Some(design) = crate::generation::live_preview::preview_design(text)
+                    && (!needs_app_window || design.app_window.is_some())
+                {
+                    live_preview.show(&design);
+                }
                 if let Some(design) = partial_design(text)
                     && (!needs_app_window || design.app_window.is_some())
                 {
@@ -46,6 +56,7 @@ impl GenerationEngine {
             })),
         };
         let draft = self.request_valid(client, messages, &context, log).await?;
+        preview.show(&draft);
         saver.offer(draft.clone(), draft.screens.len());
         let fallback = draft.clone();
         let polished = match self.polish_design(client, draft, &context, log).await {

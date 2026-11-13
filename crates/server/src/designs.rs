@@ -26,6 +26,11 @@ use crate::history::{HistoryStore, Snapshot, is_valid_stamp};
 use crate::sessions::{SessionStore, session_id_of_artifact, write_access};
 use crate::{api_error, provenance, render};
 
+mod previews;
+
+pub(crate) use previews::LivePreview;
+use previews::PreviewStore;
+
 /// The CSS class on a screen that holds the place of one the model has
 /// not written yet.
 ///
@@ -45,6 +50,8 @@ pub struct DesignStore {
     directory: PathBuf,
     /// Where each save keeps the previous file. `None` keeps no history.
     history: Option<HistoryStore>,
+    /// Run-owned visual drafts, never persisted or included in history.
+    previews: PreviewStore,
     /// Ids of malformed files already reported, so the listing warns
     /// once per file and not on every request.
     reported_malformed: Arc<Mutex<HashSet<String>>>,
@@ -78,6 +85,7 @@ impl DesignStore {
         Self {
             directory,
             history: None,
+            previews: PreviewStore::default(),
             reported_malformed: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -383,6 +391,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/designs/{id}/fork", post(fork_design))
         .route("/designs/{id}/render", get(render_stored_design))
+        .route("/designs/{id}/previews", get(get_preview))
         .route("/designs/{id}/authors", get(get_authors))
         .route("/designs/{id}/history", get(list_history))
         .route(
@@ -406,9 +415,28 @@ pub(crate) fn is_valid_design_id(id: &str) -> bool {
 /// Lists every stored design.
 async fn list_designs(State(store): State<DesignStore>) -> Response {
     match store.list().await {
-        Ok(summaries) => Json(summaries).into_response(),
+        Ok(mut summaries) => {
+            store.overlay_previews(&mut summaries);
+            Json(summaries).into_response()
+        }
         Err(error) => api_error::internal_error(&error),
     }
+}
+
+/// Returns only an active visual draft; saved designs stay on the ordinary route.
+async fn get_preview(State(store): State<DesignStore>, Path(id): Path<String>) -> Response {
+    if !is_valid_design_id(&id) {
+        return api_error::invalid_design_id(&id);
+    }
+    let mut response = match store.preview(&id) {
+        Some(preview) => Json(preview).into_response(),
+        None => api_error::design_not_found(&id),
+    };
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 /// Returns one stored design as JSON.
@@ -636,6 +664,9 @@ struct RenderQuery {
     /// parent window. Used by the editor preview.
     #[serde(default)]
     editable: bool,
+    /// Opts into an unverified visual draft; exports and ordinary renders stay saved-only.
+    #[serde(default)]
+    preview: bool,
     /// Render only this one-based screen. Used by thumbnails and the
     /// editor preview.
     #[serde(default)]
@@ -652,7 +683,13 @@ async fn render_stored_design(
     if !is_valid_design_id(&id) {
         return api_error::invalid_design_id(&id);
     }
-    match store.load(&id).await {
+    let preview = query.preview.then(|| store.preview(&id)).flatten();
+    let is_preview = preview.is_some();
+    let loaded = match preview {
+        Some(preview) => Ok(Some(preview.design)),
+        None => store.load(&id).await,
+    };
+    match loaded {
         Ok(Some(design)) => {
             let errors = design.validate();
             if !errors.is_empty() {
@@ -673,11 +710,22 @@ async fn render_stored_design(
                 None => None,
             };
             let options = render::RenderOptions {
-                is_editable: query.editable,
+                is_editable: query.editable && !is_preview,
                 only_screen,
                 ..render::RenderOptions::default()
             };
-            Html(render::render_design_with(&design, options)).into_response()
+            let mut html = render::render_design_with(&design, options);
+            if is_preview {
+                html = html.replace("</body>", "<aside style=\"position:fixed;top:8px;right:8px;z-index:2147483647;padding:5px 9px;border-radius:6px;background:#171b25;color:#fff;font:12px sans-serif;pointer-events:none\" aria-label=\"Unverified live draft\">Live draft — unverified</aside></body>");
+            }
+            let mut response = Html(html).into_response();
+            if query.preview {
+                response.headers_mut().insert(
+                    axum::http::header::CACHE_CONTROL,
+                    axum::http::HeaderValue::from_static("no-store"),
+                );
+            }
+            response
         }
         Ok(None) => api_error::design_not_found(&id),
         Err(error) => api_error::internal_error(&error),

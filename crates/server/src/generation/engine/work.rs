@@ -602,6 +602,11 @@ impl GenerationEngine {
         log(&format!("{label}: checking layout before editing"));
         let measured = self.audit_demo(&design).await?.instructions(None);
         let findings = findings_for(&measured, "screens", &indexes);
+        let preview = self.designs.start_preview(
+            design_id,
+            &self.notifier,
+            Some((design.clone(), plan.screens.clone())),
+        );
         let mut draft = design.clone();
         let mut correction = String::new();
         let mut attempt = 0;
@@ -645,7 +650,7 @@ impl GenerationEngine {
                 },
                 parse: Box::new(move |content| apply_patch(&original, parse_patch(content)?)),
                 progress: progress.clone(),
-                live: None,
+                live: Some(preview.edit_sink(&draft)),
             };
             let messages = vec![
                 serde_json::json!({ "role": "system", "content": system_prompt() }),
@@ -665,6 +670,7 @@ impl GenerationEngine {
                     log,
                 )
                 .await?;
+            preview.show(&edited);
             // A fix can make a new problem. The touched screens are measured
             // again, and the model tweaks them until they measure clean or
             // the effort's rounds run out.

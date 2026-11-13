@@ -128,10 +128,18 @@ Three more ways to work a candidate:
 - **Merge.** Pin two or more cards with `@` in the chat and say which parts to take from each, for example "the hero from candidate 1 and the pricing table from candidate 3". The planner writes one new candidate from those parts. The candidates of a merge must share a canvas.
 - **Redo a screen or a slide.** In the editor, the circular arrow on a thumbnail writes that screen or slide anew: the model sees its name and notes, not its old markup. One click arms the button, the second sends. The old version stays in the history.
 
-Live previews update at complete, validated screen boundaries, not for every model
-token. Required shared metadata must be available before a screen can be shown.
-Edits keep the saved candidate unchanged until acceptance, and an open editor
-reloads it when the run finishes; intermediate edits are not live previews.
+Demo candidates show **Live draft — unverified** previews during writing,
+correction and layout tweaking, including safe prefixes before an HTML string
+finishes. Updates are limited to five per second; shared metadata and safe markup
+must be available before anything renders. Parallel screen updates are combined,
+not shown as competing versions. Drafts are read-only in the editor and kept
+separate from saved data; dirty local changes take priority. Edits and continuations
+leave the saved candidate unchanged until acceptance. Only complete model replies
+can pass acceptance: completing markup for display never approves an edit.
+Temporary previews are cleared when a run finishes, fails or is cancelled; the UI
+returns to saved data. Validated work retained as **Needs review** is a separate
+candidate, not an overwrite. Exports, history and ordinary render URLs use saved
+data; `GET /designs/{id}/previews` and `render?preview=true` explicitly opt into drafts.
 The run status distinguishes **Reviewing candidates…** from **Tweaking candidates…**,
 including requirement review and correction rounds, rather than calling every phase writing.
 

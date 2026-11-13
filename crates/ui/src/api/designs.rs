@@ -51,6 +51,33 @@ pub async fn fetch_design(id: &str) -> Result<Design, String> {
     get_json(&format!("/designs/{id}")).await
 }
 
+/// Fetches a temporary draft without ever substituting it for saved data.
+pub async fn fetch_design_preview(id: &str) -> Result<Option<Design>, String> {
+    #[derive(Deserialize)]
+    struct PreviewResponse {
+        design: Design,
+    }
+    let url = format!("/designs/{id}/previews");
+    let response = built(Request::get(&url))?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.status() == 404 {
+        return Ok(None);
+    }
+    if !response.ok() {
+        return Err(format!(
+            "Cannot load live draft: status {}",
+            response.status()
+        ));
+    }
+    response
+        .json::<PreviewResponse>()
+        .await
+        .map(|preview| Some(preview.design))
+        .map_err(|error| error.to_string())
+}
+
 /// The CSS class the server puts on a placeholder screen.
 pub(crate) const PENDING_SCREEN_CLASS: &str = "swift-design-pending";
 

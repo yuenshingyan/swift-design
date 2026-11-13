@@ -408,6 +408,7 @@ fn trailing_regenerate(messages: &[ChatMessage]) -> Option<(String, String)> {
 mod artifacts;
 mod attachments;
 mod engine;
+pub(crate) mod live_preview;
 mod streaming;
 
 pub(crate) use artifacts::{

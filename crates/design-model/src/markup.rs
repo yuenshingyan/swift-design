@@ -125,6 +125,31 @@ pub fn html_problems(html: &str) -> Vec<String> {
     checker.problems
 }
 
+/// Completes a streamed HTML prefix for a read-only visual preview.
+///
+/// Drops an unfinished final tag and closes open elements using the ordinary
+/// safety checker. Forbidden tags and attributes are never repaired or allowed.
+/// This does not change validation of saved HTML.
+pub fn preview_html_prefix(html: &str) -> Option<String> {
+    let prefix = match (html.rfind('<'), html.rfind('>')) {
+        (Some(start), end) if end.is_none_or(|end| start > end) => &html[..start],
+        _ => html,
+    };
+    if prefix.trim().is_empty() {
+        return None;
+    }
+    let mut checker = HtmlChecker::new(prefix);
+    checker.scan();
+    if !checker.problems.is_empty() {
+        return None;
+    }
+    let mut result = prefix.to_owned();
+    for tag in checker.open.iter().rev() {
+        result.push_str(&format!("</{tag}>"));
+    }
+    html_problems(&result).is_empty().then_some(result)
+}
+
 /// Counts real `data-swift-design-window` markers in an HTML fragment.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WindowMarkerSummary {
@@ -237,6 +262,22 @@ impl<'html> HtmlChecker<'html> {
     }
 
     fn run(&mut self) {
+        self.scan();
+        let unclosed: Vec<String> = self
+            .open
+            .iter()
+            .filter(|name| !OPTIONAL_END_TAGS.contains(&name.as_str()))
+            .map(|name| format!("<{name}>"))
+            .collect();
+        if !unclosed.is_empty() {
+            self.problems.push(format!(
+                "unclosed tags: {}: close every tag",
+                unclosed.join(", ")
+            ));
+        }
+    }
+
+    fn scan(&mut self) {
         if self.source.contains('\0') {
             self.problems
                 .push("contains a NUL character: remove it".to_owned());
@@ -267,18 +308,6 @@ impl<'html> HtmlChecker<'html> {
                 }
                 _ => self.position += 1,
             }
-        }
-        let unclosed: Vec<String> = self
-            .open
-            .iter()
-            .filter(|name| !OPTIONAL_END_TAGS.contains(&name.as_str()))
-            .map(|name| format!("<{name}>"))
-            .collect();
-        if !unclosed.is_empty() {
-            self.problems.push(format!(
-                "unclosed tags: {}: close every tag",
-                unclosed.join(", ")
-            ));
         }
     }
 

@@ -127,7 +127,12 @@ pub(super) fn shown_design(
                 .get(chunk.first + offset)
                 .map(String::as_str)
                 .unwrap_or_default();
-            shown.screens.push(placeholder_screen(title));
+            let mut placeholder = placeholder_screen(title);
+            if preview.app_window.is_some() {
+                placeholder.html =
+                    format!("<div data-swift-design-window>{}</div>", placeholder.html);
+            }
+            shown.screens.push(placeholder);
         }
     }
     // The last chunk with screens ends the design. Padding after it would

@@ -378,6 +378,7 @@ mod tests {
         NodeStyles, PreviewMode, SelectedNode, SelectionEntry, pin_reference, preview_panes,
         selection_reference,
     };
+    use crate::editor::preview_design;
     use crate::editor::theme::{MONO_FONTS, TEXT_FONTS, font_options};
     use crate::editor::transition::effect_uses_motion;
 
@@ -551,6 +552,57 @@ mod tests {
             preview_stage_class(design_model::Viewport::default()),
             "preview-stage"
         );
+    }
+
+    #[test]
+    fn live_draft_is_separate_and_dirty_local_changes_win() {
+        let saved = design();
+        let mut draft = saved.clone();
+        draft.title = "Temporary".to_owned();
+        draft.screens[0].html = "<p>Live</p>".to_owned();
+        assert_eq!(preview_design(&saved, Some(&draft), false), &draft);
+        assert_eq!(preview_design(&saved, Some(&draft), true), &saved);
+        assert_eq!(saved.title, "T");
+    }
+
+    #[test]
+    fn clearing_or_accepting_a_draft_returns_to_saved_content() {
+        let original = design();
+        let mut accepted = original.clone();
+        accepted.title = "Accepted".to_owned();
+        assert_eq!(preview_design(&original, None, false), &original);
+        assert_eq!(preview_design(&accepted, None, false), &accepted);
+        assert_eq!(
+            preview_design(&original, Some(&accepted), false),
+            preview_design(&accepted, None, false),
+        );
+    }
+
+    #[test]
+    fn draft_only_editor_renders_read_only_preview_without_exports() {
+        use dioxus::prelude::*;
+
+        fn draft_editor() -> Element {
+            super::super::LoadedEditor(super::super::LoadedEditorProps {
+                design_id: "test-candidate-1".into(),
+                initial: design(),
+                initially_saved: false,
+                on_back: EventHandler::new(|_| {}),
+            })
+        }
+
+        let mut dom = VirtualDom::new(draft_editor);
+        let changes = dom.rebuild_to_vec();
+        let mutations = format!(
+            "{changes:?} {:?}",
+            dom.get_scope(ScopeId::APP).expect("app").root_node()
+        );
+        assert!(mutations.contains("Live draft — unverified"));
+        assert!(mutations.contains("preview=true"));
+        assert!(mutations.contains("readonly"));
+        assert!(!mutations.contains("editable=true"));
+        assert!(!mutations.contains("export.html"));
+        assert!(!mutations.contains("/history"));
     }
 
     fn design() -> design_model::Design {
