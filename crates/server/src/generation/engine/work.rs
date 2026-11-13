@@ -638,7 +638,11 @@ impl GenerationEngine {
             let original = draft.clone();
             let request = ArtifactRequest {
                 effort: context.effort().to_owned(),
-                label: label.clone(),
+                label: if attempt == 0 {
+                    label.clone()
+                } else {
+                    format!("{label}: correction round {attempt}/3")
+                },
                 parse: Box::new(move |content| apply_patch(&original, parse_patch(content)?)),
                 progress: progress.clone(),
                 live: None,

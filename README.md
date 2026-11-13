@@ -132,6 +132,8 @@ Live previews update at complete, validated screen boundaries, not for every mod
 token. Required shared metadata must be available before a screen can be shown.
 Edits keep the saved candidate unchanged until acceptance, and an open editor
 reloads it when the run finishes; intermediate edits are not live previews.
+The run status distinguishes **Reviewing candidates…** from **Tweaking candidates…**,
+including requirement review and correction rounds, rather than calling every phase writing.
 
 Every new candidate takes the next free number: a later run adds candidates after the ones the session has instead of overwriting them.
 

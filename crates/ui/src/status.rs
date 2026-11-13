@@ -50,11 +50,32 @@ pub(crate) fn phase_name(run: &api::AgentRun) -> String {
     if last.starts_with("model request: retrying attempt") {
         return "Retrying model request…".to_owned();
     }
-    if last.contains("tweak round") || last.contains("tweak reply") {
-        return "Tweaking layout…".to_owned();
-    }
-    if last.contains("checking layout") || last.contains("final layout verified") {
-        return "Checking layout…".to_owned();
+    // Usage and provider diagnostics can follow a phase announcement without
+    // ending it. Find the latest meaningful stage, stopping at a new write.
+    for line in run.log_tail.lines().rev() {
+        let line = line.trim().to_ascii_lowercase();
+        if line.contains("reviewing requested")
+            || line.contains("checking layout")
+            || line.contains("final layout verified")
+            || line.contains("final layout measured")
+        {
+            return "Reviewing candidates…".to_owned();
+        }
+        if line.contains("tweak round")
+            || line.contains("tweak reply")
+            || line.contains("fix round")
+            || line.contains("correction round")
+            || line.contains("correcting incomplete")
+        {
+            return "Tweaking candidates…".to_owned();
+        }
+        if line.contains(": requesting (round")
+            || line.starts_with("planning")
+            || line.starts_with("merging")
+            || line.contains(": editing ")
+        {
+            break;
+        }
     }
     match run.designs.len() {
         0 => {}
@@ -207,11 +228,31 @@ mod tests {
         let mut run = run();
         run.designs.insert("candidate-1".to_owned(), 45);
         run.log_tail = "candidate 1: checking layout before tweak 1".to_owned();
-        assert_eq!(phase_name(&run), "Checking layout…");
+        assert_eq!(phase_name(&run), "Reviewing candidates…");
         run.log_tail = "candidate 1: tweak round 1 of at most 3".to_owned();
-        assert_eq!(phase_name(&run), "Tweaking layout…");
+        assert_eq!(phase_name(&run), "Tweaking candidates…");
         run.log_tail = "candidate 1: final layout verified after 1 tweaking round(s)".to_owned();
-        assert_eq!(phase_name(&run), "Checking layout…");
+        assert_eq!(phase_name(&run), "Reviewing candidates…");
+    }
+
+    #[test]
+    fn review_and_correction_phases_survive_usage_updates() {
+        let mut running = run();
+        running.designs.insert("candidate-1".into(), 80);
+        running.log_tail = "edit candidate-1: reviewing requested feature coverage before saving\nusage: 100 tokens".into();
+        assert_eq!(phase_name(&running), "Reviewing candidates…");
+        running.log_tail = "edit candidate-1: correction round 2/3; 1 incomplete checklist items\nusage: 100 tokens".into();
+        assert_eq!(phase_name(&running), "Tweaking candidates…");
+        running.progress = Some(85);
+        assert_eq!(working_label(&running), "Tweaking candidates… 85%");
+    }
+
+    #[test]
+    fn starting_a_new_write_clears_an_earlier_review_phase() {
+        let mut running = run();
+        running.designs.insert("candidate-1".into(), 30);
+        running.log_tail = "candidate 1: final layout verified\ncandidate 2: requesting (round 1)\nusage: 100 tokens".into();
+        assert_eq!(phase_name(&running), "Writing a candidate…");
     }
 
     fn run() -> api::AgentRun {
@@ -262,7 +303,7 @@ mod tests {
         assert_eq!(phase_name(&merging), "Merging…");
         let mut polishing = run();
         polishing.log_tail = "candidate 1: fix round 2 failed: overfull".to_owned();
-        assert_eq!(phase_name(&polishing), "Polishing…");
+        assert_eq!(phase_name(&polishing), "Tweaking candidates…");
         let mut concepts = run();
         concepts.log_tail = "planning 3 concepts".to_owned();
         assert_eq!(phase_name(&concepts), "Planning candidates…");
