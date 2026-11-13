@@ -142,6 +142,14 @@ async fn correction_cannot_change_an_unselected_original_screen() {
     assert!(
         candidate
             .designs
+            .load("talk-candidate-2")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        candidate
+            .designs
             .history("talk-candidate-1")
             .await
             .unwrap()

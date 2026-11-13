@@ -15,7 +15,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use design_model::Design;
-use design_model::markup::layout_declarations;
 use serde::Deserialize;
 
 use crate::patch::{PATCH_FORMAT, apply_patch, parse_patch};
@@ -30,7 +29,8 @@ pub(crate) struct Finding {
     #[serde(default)]
     pub(crate) node: String,
     /// `overflow`, `off_screen`, `overfull`, `tiny_text`, `overlap`,
-    /// `empty`, `contrast`, `long_lines`, `static_control`, `alignment`, or `window_geometry`.
+    /// `empty`, `contrast`, `long_lines`, `static_control`, `alignment`,
+    /// `alignment_unmeasured`, `minor_overflow`, or `window_geometry`.
     #[serde(default)]
     pub(crate) kind: String,
     /// What was measured.
@@ -204,6 +204,7 @@ pub(crate) fn chrome_dom_runner() -> DemoDomRunner {
 }
 
 /// A complete browser measurement of one exact design version.
+#[derive(Debug)]
 pub(crate) struct DemoAudit {
     findings: Vec<Finding>,
 }
@@ -339,7 +340,7 @@ pub(crate) fn apply_tweak(
     Ok(improved)
 }
 
-/// Prevents a tweak from hiding a failure by deleting its layout contract.
+/// Preserves canvas and shared shell bounds while allowing obsolete polish annotations to change.
 pub(crate) fn respects_layout_contracts(before: &Design, after: &Design) -> bool {
     if before.viewport != after.viewport
         || before.app_window != after.app_window
@@ -347,45 +348,27 @@ pub(crate) fn respects_layout_contracts(before: &Design, after: &Design) -> bool
     {
         return false;
     }
-    before
-        .screens
-        .iter()
-        .zip(&after.screens)
-        .all(|(before, after)| {
-            let mut remaining = layout_declarations(&after.html);
-            layout_declarations(&before.html)
-                .into_iter()
-                .all(|declaration| {
-                    let Some(index) = remaining
-                        .iter()
-                        .position(|candidate| candidate == &declaration)
-                    else {
-                        return false;
-                    };
-                    remaining.remove(index);
-                    true
-                })
-        })
+    true
 }
 
 fn is_known_finding(kind: &str) -> bool {
     is_blocking(kind)
         || matches!(
             kind,
-            "tiny_text" | "contrast" | "long_lines" | "static_control"
+            "tiny_text"
+                | "contrast"
+                | "long_lines"
+                | "static_control"
+                | "alignment"
+                | "alignment_unmeasured"
+                | "minor_overflow"
         )
 }
 
 fn is_blocking(kind: &str) -> bool {
     matches!(
         kind,
-        "window_geometry"
-            | "overflow"
-            | "off_screen"
-            | "overfull"
-            | "overlap"
-            | "alignment"
-            | "empty"
+        "window_geometry" | "overflow" | "off_screen" | "overfull" | "overlap" | "empty"
     )
 }
 
@@ -396,9 +379,14 @@ pub(crate) fn finding_advice(kind: &str) -> &'static str {
             "preserve app_window and its top-level shell marker; reduce overflowing content so every screen renders the shared bounds without shrinking"
         }
         "alignment" => {
-            "align the declared group edges or dimensions; use equal gaps on the declared axis; preserve intentional unmarked offsets"
+            "review the measured group alignment; preserve intentional offsets and correct or remove obsolete annotations"
         }
-        "overflow" => "shorten the text, enlarge the box, or reduce the font size",
+        "alignment_unmeasured" => {
+            "not a measured layout defect: review the annotation only if this group should have enough visible children; do not add filler content to satisfy it"
+        }
+        "overflow" | "minor_overflow" => {
+            "shorten the text, enlarge the box, or reduce the font size"
+        }
         "off_screen" => "move or shrink it so it stays inside the canvas",
         "tiny_text" => "use a larger font size",
         "overlap" => "move or resize one of them",
@@ -455,7 +443,7 @@ pub fn polish_prompt(design_json: &str, findings: &[String], image_count: usize)
          dense or too empty, and a weak title screen. Keep the concept, the outline, and the \
          content. Preserve app_window and all shell markers. Keep the shared window bounds, \
          window chrome, header height, and sidebar width. Fix overflowing content instead of \
-         resizing one window. Preserve data-layout-align and data-layout-gap declarations. Completion is blocked by unresolved overflow, off-screen content, overlap, shrinking, or declared alignment errors. Your reply is rendered and measured again. Do not add or delete screens. Change only the screens that need it.\n",
+         resizing one window. Preserve applicable data-layout-align and data-layout-gap declarations, but correct or remove obsolete annotations when the group changes. Do not delete valid annotations merely to hide findings. Alignment and unmeasurable groups are advisory, not completion blockers. Serious clipping, off-screen content, overlap, empty screens and shared-shell violations must still be resolved. Your reply is rendered and measured again. Do not add or delete screens. Change only the screens that need it.\n",
     );
     prompt.push_str(PATCH_FORMAT);
     prompt.push_str(" When nothing needs a change, reply with {}.");
@@ -505,7 +493,6 @@ mod tests {
             "off_screen",
             "overfull",
             "overlap",
-            "alignment",
             "empty",
         ] {
             let dom = format!(
@@ -535,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn tweaks_cannot_remove_alignment_contracts_or_resize_the_canvas() {
+    fn tweaks_can_remove_obsolete_annotations_but_cannot_resize_the_canvas() {
         let mut before: Design =
             serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap();
         before.screens[0].html =
@@ -543,7 +530,7 @@ mod tests {
         let mut after = before.clone();
         assert!(respects_layout_contracts(&before, &after));
         after.screens[0].html = "<div><p>One</p><p>Two</p></div>".to_owned();
-        assert!(!respects_layout_contracts(&before, &after));
+        assert!(respects_layout_contracts(&before, &after));
         after = before.clone();
         after.viewport.width += 100;
         assert!(!respects_layout_contracts(&before, &after));
@@ -569,17 +556,27 @@ mod tests {
 
     #[test]
     fn optional_visual_findings_do_not_block_layout_verification() {
-        let audit = DemoAudit {
-            findings: vec![Finding {
-                screen: 0,
-                node: String::new(),
-                kind: "contrast".to_owned(),
-                detail: "low contrast".to_owned(),
-            }],
-        };
-        assert!(audit.require_layout_clean().is_ok());
-        assert_eq!(audit.score(None), (0, 1));
-        assert!(audit.layout_instructions(&[0]).is_empty());
+        for kind in [
+            "contrast",
+            "tiny_text",
+            "alignment",
+            "alignment_unmeasured",
+            "minor_overflow",
+        ] {
+            let audit = DemoAudit {
+                findings: vec![Finding {
+                    screen: 0,
+                    node: String::new(),
+                    kind: kind.to_owned(),
+                    detail: "Review this measurement".to_owned(),
+                }],
+            };
+            assert!(is_known_finding(kind));
+            assert!(audit.require_layout_clean().is_ok());
+            assert_eq!(audit.score(None), (0, 1));
+            assert!(audit.layout_instructions(&[0]).is_empty());
+            assert_eq!(audit.instructions(None).len(), 1);
+        }
     }
 
     #[test]

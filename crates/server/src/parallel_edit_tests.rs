@@ -6,6 +6,8 @@ mod corrections;
 mod flows;
 #[path = "parallel_edit_tests/persistence.rs"]
 mod persistence;
+#[path = "parallel_edit_tests/review_drafts.rs"]
+mod review_drafts;
 use persistence::verify_queued_edit_baseline;
 
 use std::collections::VecDeque;

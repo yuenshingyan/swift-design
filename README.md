@@ -128,6 +128,11 @@ Three more ways to work a candidate:
 - **Merge.** Pin two or more cards with `@` in the chat and say which parts to take from each, for example "the hero from candidate 1 and the pricing table from candidate 3". The planner writes one new candidate from those parts. The candidates of a merge must share a canvas.
 - **Redo a screen or a slide.** In the editor, the circular arrow on a thumbnail writes that screen or slide anew: the model sees its name and notes, not its old markup. One click arms the button, the second sends. The old version stays in the history.
 
+Live previews update at complete, validated screen boundaries, not for every model
+token. Required shared metadata must be available before a screen can be shown.
+Edits keep the saved candidate unchanged until acceptance, and an open editor
+reloads it when the run finishes; intermediate edits are not live previews.
+
 Every new candidate takes the next free number: a later run adds candidates after the ones the session has instead of overwriting them.
 
 In `reviewing`, the chat is the edit input: type what should change and press **Send**. With a candidate chosen, the change is applied to it; otherwise new candidates are written.
@@ -151,10 +156,27 @@ is reported separately rather than retried indefinitely.
 Review returns specific reasons for unmet requirements. Up to three correction
 rounds repair the latest draft while preservation checks still use the saved
 original. Corrections stop early if the number of incomplete checklist items does
-not decrease. Only a passing draft is saved; stopping or cancellation leaves the
-saved candidate intact. Missing or unreadable required references produce a
+not decrease. Only a passing draft replaces the selected candidate; stopping or
+cancellation leaves that saved candidate intact. Missing or unreadable required references produce a
 reference-verification error instead of an incomplete-edit verdict.
-Incomplete or unreviewable edits fail without replacing the saved demo. Both the
+Safety, valid markup, protected-screen scope and core requested deliverables are
+hard gates. Alignment differences, unmeasurable groups, contrast and small-text
+findings are advisory. Local clipping of at most 8 CSS pixels and at most 15% of
+the affected box dimension is also advisory; larger clipping, off-screen content,
+actual overlap, empty screens and shared-shell violations still block verified
+completion. Obsolete alignment annotations may be corrected or removed rather
+than forcing filler content into a layout.
+Demo edits with only advisory findings can save after requirement review, with
+**Needs review** notes instead of an unqualified layout-verification claim. If
+layout repair or its audit fails, a valid, scope-preserving draft is retained as a
+separate candidate titled **Needs review**, with its issues recorded in chat. It
+is not selected automatically and is not claimed as requirement-complete; the
+original remains unchanged. Failed continuation polish likewise restores the
+preview and retains its new work separately. Fresh generation keeps its validated
+draft under its already reserved candidate id, labelled **Needs review**; mere
+presence on disk never counts as a successfully completed generation. Invalid or
+out-of-scope drafts are never preserved.
+Incomplete or unreviewable requirements still block replacing the saved demo. Both the
 editor chat and session workspace show **Retry edit** beside the failed candidate
 request while the session is in error. It retries that request without adding a new
 prompt and is disabled while a run is active. This review is separate from browser

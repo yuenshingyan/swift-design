@@ -47,11 +47,16 @@ impl GenerationEngine {
         };
         let draft = self.request_valid(client, messages, &context, log).await?;
         saver.offer(draft.clone(), draft.screens.len());
+        let fallback = draft.clone();
         let polished = match self.polish_design(client, draft, &context, log).await {
             Ok(design) => design,
             Err(error) => {
                 saver.abort(None).await.map_err(GenerationStop::Failed)?;
-                return Err(GenerationStop::Failed(error));
+                let notice = self
+                    .save_review_draft(&request.design_id, &fallback, &error, true)
+                    .await
+                    .map_err(GenerationStop::Failed)?;
+                return Err(GenerationStop::Failed(notice));
             }
         };
         saver

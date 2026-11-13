@@ -320,6 +320,7 @@ impl GenerationEngine {
             })),
             live: None,
         };
+        let fallback = continued.clone();
         let final_design = match self
             .polish_design(client, continued, &polish_context, log)
             .await
@@ -327,7 +328,9 @@ impl GenerationEngine {
             Ok(design) => design,
             Err(error) => {
                 saver.abort(Some(&preview)).await?;
-                return Err(error);
+                return Err(self
+                    .save_review_draft(design_id, &fallback, &error, false)
+                    .await?);
             }
         };
         saver.finish(&final_design).await?;
@@ -429,10 +432,20 @@ impl GenerationEngine {
             "{label}: {}",
             stop.describe(rounds_taken, best_score.1)
         ));
-        self.audit_demo(&best).await?.require_layout_clean()?;
-        log(&format!(
-            "{label}: final layout verified after {rounds_taken} tweaking round(s)"
-        ));
+        let final_audit = self.audit_demo(&best).await?;
+        final_audit.require_layout_clean()?;
+        let warnings = final_audit.instructions(None);
+        if warnings.is_empty() {
+            log(&format!(
+                "{label}: final layout verified after {rounds_taken} tweaking round(s)"
+            ));
+        } else {
+            log(&format!(
+                "{label}: Needs review — {} advisory findings remain: {}",
+                warnings.len(),
+                warnings.join("; ")
+            ));
+        }
         context.report(1.0);
         Ok(best)
     }
@@ -440,14 +453,15 @@ impl GenerationEngine {
     /// Measures the touched screens of an edited design and asks the
     /// model to fix what Chrome finds, round after round: until the
     /// screens measure clean, a round does not help, or the effort's
-    /// round limit runs out. Verifies the best exact version before it can replace the saved design.
+    /// round limit runs out. Returns the best exact version and its audit so
+    /// callers can distinguish completion from a draft that needs review.
     pub(crate) async fn fix_edited_design(
         &self,
         client: &reqwest::Client,
         mut design: Design,
         fix: &EditFix<'_, Design>,
         log: &LogSink,
-    ) -> Result<Design, String> {
+    ) -> Result<(Design, DemoAudit), String> {
         let label = &fix.context.label;
         let limit = polish_round_limit(&fix.context.effort);
         let mut best = design.clone();
@@ -536,7 +550,6 @@ impl GenerationEngine {
             stop.describe(rounds_taken, best_score.0)
         ));
         let final_audit = self.audit_demo(&best).await?;
-        final_audit.require_layout_clean_on(Some(&fix.indexes))?;
         let unedited_errors = final_audit.score(None).0;
         if unedited_errors > 0 {
             log(&format!(
@@ -544,10 +557,10 @@ impl GenerationEngine {
             ));
         }
         log(&format!(
-            "{label}: final layout verified after {rounds_taken} tweaking round(s) on the touched screens"
+            "{label}: final layout measured after {rounds_taken} tweaking round(s) on the touched screens"
         ));
         fix.context.report(1.0);
-        Ok(best)
+        Ok((best, final_audit))
     }
 
     /// PNG screenshots of the design's screens for the polish pass, at most

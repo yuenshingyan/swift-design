@@ -600,6 +600,113 @@ async fn a_valid_design_reply_is_saved_as_a_candidate_and_recorded_on_the_run() 
 }
 
 #[tokio::test]
+async fn failed_continuation_polish_restores_the_preview_and_preserves_new_work_separately() {
+    let server = FakeModelServer::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let designs = DesignStore::new(directory.path().join("designs"));
+    let sessions = SessionStore::new(directory.path().join("sessions"));
+    set_up_session(&sessions, "Finish the demo.").await;
+    let mut preview: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+    preview.outline = preview
+        .screens
+        .iter()
+        .map(|screen| screen.name.clone())
+        .collect();
+    preview.outline.push("Statistics".into());
+    designs.save("talk-candidate-1", &preview).await.unwrap();
+    server.push_text(&serde_json::json!({"screens":[{"index":preview.screens.len(),"insert":true,"screen":preview.screens[0]}]}).to_string());
+    server.push_text("{}");
+    let session = sessions.read("talk").await.unwrap().unwrap();
+    let context = GenerationContext {
+        request: SessionRequest {
+            request: session.request,
+            conversation: String::new(),
+            kind: session.artifact_kind,
+            answers: Vec::new(),
+            options: session.options.clone(),
+        },
+        options: session.options,
+        session_id: "talk".into(),
+    };
+    let runner: crate::polish::DemoDomRunner = Arc::new(|design, _| {
+        let coverage: Vec<_> = (0..design.screens.len()).collect();
+        let dom = format!(
+            "<html data-swift-design-findings=\"[{{&quot;screen&quot;:3,&quot;kind&quot;:&quot;overflow&quot;,&quot;detail&quot;:&quot;Serious clipping&quot;}}]\" data-swift-design-audited-screens=\"{}\">",
+            serde_json::json!(coverage)
+        );
+        Box::pin(async move { Ok(dom) })
+    });
+    let engine = engine(&server, &designs, &sessions).with_demo_dom_runner(runner);
+    let outcomes = engine
+        .continue_artifacts(
+            &reqwest::Client::new(),
+            &context,
+            vec!["talk-candidate-1".into()],
+            &silent_log(),
+        )
+        .await;
+    let error = outcomes.into_iter().next().unwrap().1.unwrap_err();
+    assert!(error.contains("Needs review"));
+    assert_eq!(
+        designs.load("talk-candidate-1").await.unwrap().unwrap(),
+        preview
+    );
+    let draft = designs.load("talk-candidate-2").await.unwrap().unwrap();
+    assert!(draft.title.starts_with("Needs review"));
+    assert_eq!(draft.screens.len(), preview.screens.len() + 1);
+    assert_eq!(draft.screens[..preview.screens.len()], preview.screens);
+}
+
+#[tokio::test]
+async fn a_new_candidate_with_failed_polish_is_preserved_as_needs_review() {
+    let server = FakeModelServer::start().await;
+    server.push_text(WRITE_PLAN);
+    server.push_text(SAMPLE_DESIGN);
+    server.push_text("{}");
+    let directory = tempfile::tempdir().unwrap();
+    let designs = DesignStore::new(directory.path().join("designs"));
+    let sessions = SessionStore::new(directory.path().join("sessions"));
+    set_up_session(&sessions, "A landing page.").await;
+    let runner: crate::polish::DemoDomRunner = Arc::new(|design, _| {
+        let coverage: Vec<_> = (0..design.screens.len()).collect();
+        let findings = serde_json::json!([{"screen":0,"kind":"overflow","node":"div.panel","detail":"Serious clipping"}]);
+        let dom = format!(
+            "<html data-swift-design-findings=\"{}\" data-swift-design-audited-screens=\"{}\">",
+            findings.to_string().replace('"', "&quot;"),
+            serde_json::json!(coverage)
+        );
+        Box::pin(async move { Ok(dom) })
+    });
+    let error = engine(&server, &designs, &sessions)
+        .with_demo_dom_runner(runner)
+        .run("talk", silent_log())
+        .await
+        .unwrap_err();
+    assert!(error.contains("Needs review"));
+    assert!(error.contains("Serious clipping"));
+    tokio::task::yield_now().await;
+    let draft = designs.load("talk-candidate-1").await.unwrap().unwrap();
+    assert!(draft.title.starts_with("Needs review"));
+    assert_eq!(
+        draft.screens,
+        serde_json::from_str::<design_model::Design>(SAMPLE_DESIGN)
+            .unwrap()
+            .screens
+    );
+    let messages = sessions.messages("talk").await.unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.artifacts == ["talk-candidate-1"]
+                && message.content.contains("not a completed candidate"))
+    );
+    assert_eq!(
+        sessions.runs("talk").await.unwrap()[0].result.as_deref(),
+        Some("failed")
+    );
+}
+
+#[tokio::test]
 async fn a_needs_clarification_reply_moves_the_session_back_to_clarifying() {
     let server = FakeModelServer::start().await;
     server.push_text(WRITE_PLAN);

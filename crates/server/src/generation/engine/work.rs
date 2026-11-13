@@ -339,14 +339,14 @@ impl GenerationEngine {
                     .generate_candidate(&client, &request, &attachments, &share, &log)
                     .await?;
                 log(&format!("candidate {candidate_number}: saved as {id}"));
-                Ok::<(), GenerationStop>(())
+                Ok::<String, GenerationStop>(id)
             });
         }
         let mut saved = Vec::new();
         let mut failures = Vec::new();
         while let Some(outcome) = tasks.join_next().await {
             match outcome {
-                Ok(Ok(())) => {}
+                Ok(Ok(id)) => saved.push(id),
                 Ok(Err(GenerationStop::NeedsClarification(set))) => {
                     tasks.shutdown().await;
                     return Err(GenerationStop::NeedsClarification(set));
@@ -355,17 +355,13 @@ impl GenerationEngine {
                 Err(error) => failures.push(format!("candidate task failed: {error}")),
             }
         }
-        // Every candidate saves itself, so the written ids are those on
-        // disk under this base.
-        for id in &ids {
-            if matches!(self.designs.load(id).await, Ok(Some(_))) {
-                saved.push(id.clone());
-            }
-        }
+        // Presence on disk is not completion: failed polish may retain an
+        // explicitly unverified review draft under its reserved id.
+        let saved: Vec<_> = ids.into_iter().filter(|id| saved.contains(id)).collect();
         if saved.is_empty() {
             return Err(GenerationStop::Failed(failure_message(
                 &failures,
-                "no candidate reached the store",
+                "no candidate passed verification",
             )));
         }
         for failure in &failures {
@@ -520,6 +516,58 @@ impl GenerationEngine {
         }
     }
 
+    // Reuse a fresh generation's reserved id; fork edits and continuations so
+    // polish never overwrites the user's saved version or erases safe work.
+    pub(super) async fn save_review_draft(
+        &self,
+        source_id: &str,
+        design: &Design,
+        issue: &str,
+        is_new: bool,
+    ) -> Result<String, String> {
+        let session_id = session_id_of_artifact(source_id);
+        if !design.validate().is_empty() {
+            return Err("Cannot preserve review draft: the artifact failed validation.".into());
+        }
+        let id = if is_new {
+            source_id.to_owned()
+        } else {
+            let rows = self
+                .designs
+                .list()
+                .await
+                .map_err(|error| error.to_string())?;
+            let number = crate::candidates::next_candidate_number(
+                session_id,
+                rows.iter().map(|row| row.id.as_str()),
+            );
+            crate::candidates::candidate_id(session_id, number)
+        };
+        let mut draft = design.clone();
+        draft.title = format!("Needs review — {}", draft.title);
+        self.designs
+            .save(&id, &draft)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.notifier.notify();
+        let preservation = if is_new {
+            "This is a draft, not a completed candidate."
+        } else {
+            "The original candidate is unchanged."
+        };
+        let message = format!(
+            "Needs review: preserved draft `{id}`. {preservation} Layout and requirement completion are not verified.\n{issue}"
+        );
+        self.sessions
+            .append_message(
+                session_id,
+                ChatMessage::assistant(&message).with_artifacts(vec![id]),
+            )
+            .await
+            .map_err(|error| format!("{message}\nCannot record draft notice: {error}"))?;
+        Ok(message)
+    }
+
     pub(super) async fn edit_design(
         &self,
         client: &reqwest::Client,
@@ -559,7 +607,7 @@ impl GenerationEngine {
         let mut attempt = 0;
         let mut previous_missing = None;
         let progress = self.shared_progress(&[design_id.to_owned()], 5, 95).pop();
-        let (final_design, verified_indexes) = loop {
+        let (final_design, verified_indexes, layout_warnings) = loop {
             // Fresh regeneration drops old markup only once; corrections must
             // see and repair the latest draft, including newly added screens.
             let is_fresh = order.is_fresh && attempt == 0;
@@ -629,12 +677,30 @@ impl GenerationEngine {
                 context: &request,
                 indexes: touched,
             };
-            let final_design = self
-                .fix_edited_design(client, edited, &fix, log)
-                .await
-                .map_err(GenerationStop::Failed)?;
+            let fallback = edited.clone();
+            let polished = self.fix_edited_design(client, edited, &fix, log).await;
+            let (final_design, audit) = match polished {
+                Ok(result) => result,
+                Err(error) => {
+                    plan.check_structure(&design, &fallback)
+                        .map_err(GenerationStop::Failed)?;
+                    let notice = self
+                        .save_review_draft(design_id, &fallback, &error, false)
+                        .await
+                        .map_err(GenerationStop::Failed)?;
+                    return Err(GenerationStop::Failed(notice));
+                }
+            };
             plan.check_structure(&design, &final_design)
                 .map_err(GenerationStop::Failed)?;
+            if let Err(error) = audit.require_layout_clean_on(Some(&fix.indexes)) {
+                let notice = self
+                    .save_review_draft(design_id, &final_design, &error, false)
+                    .await
+                    .map_err(GenerationStop::Failed)?;
+                return Err(GenerationStop::Failed(notice));
+            }
+            let layout_warnings = audit.instructions(Some(&fix.indexes));
             log(&format!(
                 "{}: reviewing requested feature coverage before saving",
                 request.label
@@ -654,7 +720,7 @@ impl GenerationEngine {
                 .await
                 .map_err(GenerationStop::Failed)?;
             if failures.is_empty() {
-                break (final_design, fix.indexes);
+                break (final_design, fix.indexes, layout_warnings);
             }
             let stop_reason = if attempt == 3 {
                 Some("the three-correction-round limit was reached")
@@ -689,7 +755,9 @@ impl GenerationEngine {
             .iter()
             .map(|index| (index + 1).to_string())
             .collect();
-        if !verified.is_empty() {
+        if !layout_warnings.is_empty() {
+            report.push_str(&format!("\nNeeds review — advisory layout findings on the edited screens:\n{}\nNo blocking layout defects were measured; this is not a claim that all polish is verified.", layout_warnings.join("\n")));
+        } else if !verified.is_empty() {
             report.push_str(&format!("\nRendered layout verified on screen(s) {}. Untouched screens are not claimed as verified.", verified.join(", ")));
         }
         self.designs

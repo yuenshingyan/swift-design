@@ -150,7 +150,12 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
       const needs = [];
       if (overflowAxes.get(element).x) { needs.push(Math.round(element.scrollWidth) + 'px wide but the box is ' + Math.round(element.clientWidth) + 'px wide'); }
       if (overflowAxes.get(element).y) { needs.push(Math.round(element.scrollHeight) + 'px tall but the box is ' + Math.round(element.clientHeight) + 'px tall'); }
-      findings.push({ screen, node: name(element), kind: 'overflow', detail: 'content needs ' + needs.join(' and ') });
+      // A few clipped pixels are a review warning, not a reason to discard a design.
+      const axes = overflowAxes.get(element);
+      const severe = (excess, size) => excess > 8 || excess > size * 0.15;
+      const isSevere = (axes.x && severe(element.scrollWidth - element.clientWidth, element.clientWidth))
+        || (axes.y && severe(element.scrollHeight - element.clientHeight, element.clientHeight));
+      findings.push({ screen, node: name(element), kind: isSevere ? 'overflow' : 'minor_overflow', detail: 'content needs ' + needs.join(' and ') });
     });
     if (root.scrollHeight > root.clientHeight + 2 || root.scrollWidth > root.clientWidth + 2) {
       findings.push({ screen, node: 'root', kind: 'off_screen', detail: 'content runs past the ' + canvasWidth + ' by ' + canvasHeight + ' canvas (' + Math.round(root.scrollWidth) + ' by ' + Math.round(root.scrollHeight) + 'px)' });
@@ -205,7 +210,7 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
         } else {
           const children = visibleChildrenOf(element, rootRect);
           if (children.length < 2) {
-            findings.push({ screen, node: name(element), kind: 'alignment', detail: 'data-layout-align="' + align + '" needs at least 2 visible direct children' });
+            findings.push({ screen, node: name(element), kind: 'alignment_unmeasured', detail: 'data-layout-align="' + align + '" cannot be measured with fewer than 2 visible direct children' });
           } else {
             const values = children.map((child) => ({ child, value: axisValue(child.getBoundingClientRect(), align) / scale }));
             const expected = values[0].value;
@@ -226,7 +231,7 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
             return gap === 'x' ? ar.left - br.left : ar.top - br.top;
           });
           if (children.length < 3) {
-            findings.push({ screen, node: name(element), kind: 'alignment', detail: 'data-layout-gap="' + gap + '" needs at least 3 visible direct children' });
+            findings.push({ screen, node: name(element), kind: 'alignment_unmeasured', detail: 'data-layout-gap="' + gap + '" cannot be measured with fewer than 3 visible direct children' });
           } else {
             const gaps = [];
             for (let index = 1; index < children.length; index += 1) {
