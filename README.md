@@ -219,6 +219,31 @@ Two loops tighten a candidate. The **fix-round loop** feeds validation errors ba
 
 Designs, decks, documents, socials, prints, mailings, campaigns, and artworks are eight pipelines behind one workflow: separate types, stores, routes, renderers, prompts, and editors, with the shared helpers (history, provenance, CSS scoping, fonts, Chrome, the fix-round loop, the model client) used by all. See `CLAUDE.md` for the rules.
 
+Server artifact code is grouped under eight singular folders in
+`crates/server/src/`: `design/` (demos), `deck/`, `document/`, `social/`,
+`print/`, `mailing/`, `campaign/`, and `artwork/`. Each follows this layout:
+
+```text
+artwork/
+  mod.rs          # module declarations
+  core.rs         # persistence and CRUD routes
+  generation.rs   # artifact-specific generation pipeline
+  generation/     # prompts, pipeline implementation, streaming, and tests
+  patch.rs        # edit parsing and application
+  polish.rs       # artifact-specific visual review
+  render.rs       # artifact-specific HTML rendering
+```
+
+Existing nested modules stay with their owner. Deck presentation and PPTX live
+under `deck/`; DOCX lives under `document/`; email-client HTML lives under
+`mailing/`. The demo generation implementation is under `design/generation/`,
+including requirement review, continuation, and live previews. Shared workflow
+orchestration remains in `generation.rs` and `generation/`; common browser
+scripts/rendering primitives and review findings remain in `render.rs`,
+`render/`, and `polish.rs`. Imports use paths such as
+`crate::artwork::core::ArtworkStore` and `crate::artwork::patch::apply_patch`.
+HTTP routes, JSON formats, and storage directories are unchanged.
+
 ## Run it
 
 ```sh

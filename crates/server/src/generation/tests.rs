@@ -6,17 +6,18 @@ use design_model::{AppWindow, WorkflowState};
 
 use super::edit_targets;
 
-use super::artifacts::{candidate_plans, edit_prompt, focused_design_json, system_prompt};
+use super::artifacts::candidate_plans;
 use super::attachments::{
     ATTACHMENT_TEXT_TOTAL_LIMIT_BYTES, UploadAttachment, text_of, user_content_with_attachments,
 };
-use super::streaming::LiveSaver;
 use super::{
     ATTACHMENT_TEXT_LIMIT_BYTES, Attachments, GenerationContext, GenerationEngine,
     GenerationOutcome, ProgressGroup, ProgressSink, answers_since_last_write,
     trailing_continue_ids,
 };
-use crate::designs::DesignStore;
+use crate::design::core::DesignStore;
+use crate::design::generation::prompts::{edit_prompt, focused_design_json, system_prompt};
+use crate::design::generation::streaming::LiveSaver;
 use crate::edit_focus::EditInput;
 use crate::edit_report::EDIT_REPORT_PREFIX;
 use crate::events::ChangeNotifier;
@@ -636,7 +637,7 @@ async fn failed_continuation_polish_restores_the_preview_and_preserves_new_work_
         options: session.options,
         session_id: "talk".into(),
     };
-    let runner: crate::polish::DemoDomRunner = Arc::new(|design, _| {
+    let runner: crate::design::polish::DemoDomRunner = Arc::new(|design, _| {
         let coverage: Vec<_> = (0..design.screens.len()).collect();
         let dom = format!(
             "<html data-swift-design-findings=\"[{{&quot;screen&quot;:3,&quot;kind&quot;:&quot;overflow&quot;,&quot;detail&quot;:&quot;Serious clipping&quot;}}]\" data-swift-design-audited-screens=\"{}\">",
@@ -675,7 +676,7 @@ async fn a_new_candidate_with_failed_polish_is_preserved_as_needs_review() {
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     set_up_session(&sessions, "A landing page.").await;
-    let runner: crate::polish::DemoDomRunner = Arc::new(|design, _| {
+    let runner: crate::design::polish::DemoDomRunner = Arc::new(|design, _| {
         let coverage: Vec<_> = (0..design.screens.len()).collect();
         let findings = serde_json::json!([{"screen":0,"kind":"overflow","node":"div.panel","detail":"Serious clipping"}]);
         let dom = format!(

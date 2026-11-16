@@ -7,7 +7,7 @@ use tempfile::TempDir;
 use design_model::WorkflowState;
 
 use crate::agent_runs::{AgentRunner, StartError};
-use crate::designs::DesignStore;
+use crate::design::core::DesignStore;
 use crate::events::ChangeNotifier;
 use crate::sessions::{ChatMessage, NewSession, SessionStore};
 use crate::settings::SettingsStore;

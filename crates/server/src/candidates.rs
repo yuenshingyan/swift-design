@@ -18,18 +18,18 @@ use serde::Deserialize;
 
 use crate::AppState;
 use crate::api_error;
-use crate::artworks::ArtworkStore;
-use crate::campaigns::CampaignStore;
-use crate::decks::DeckStore;
-use crate::designs::{DesignStore, is_valid_design_id};
-use crate::documents::DocumentStore;
+use crate::artwork::core::ArtworkStore;
+use crate::campaign::core::CampaignStore;
+use crate::deck::core::DeckStore;
+use crate::design::core::{DesignStore, is_valid_design_id};
+use crate::document::core::DocumentStore;
 use crate::events::ChangeNotifier;
-use crate::mailings::MailingStore;
-use crate::prints::PrintStore;
+use crate::mailing::core::MailingStore;
+use crate::print::core::PrintStore;
 use crate::render::escape_html;
 use crate::session_routes::ArtifactStores;
 use crate::sessions::{CANDIDATE_MARKER, SessionStore};
-use crate::socials::SocialStore;
+use crate::social::core::SocialStore;
 
 /// Most variations one base id may have. Keeps generation cost bounded.
 pub const CANDIDATE_LIMIT: usize = 5;
@@ -587,11 +587,11 @@ mod tests {
     };
     use axum::http::StatusCode;
 
-    use crate::decks::DeckStore;
-    use crate::designs::DesignStore;
-    use crate::documents::DocumentStore;
+    use crate::deck::core::DeckStore;
+    use crate::design::core::DesignStore;
+    use crate::document::core::DocumentStore;
     use crate::sessions::SessionStore;
-    use crate::socials::SocialStore;
+    use crate::social::core::SocialStore;
     use crate::test_support::{
         sample_deck, sample_document, sample_social, send, test_application,
     };

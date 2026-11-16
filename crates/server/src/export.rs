@@ -78,27 +78,16 @@ use zip::{CompressionMethod, ZipWriter};
 
 use crate::AppState;
 use crate::api_error;
-use crate::artwork_render;
-use crate::artworks::{ArtworkStore, is_valid_artwork_id};
-use crate::campaign_render;
-use crate::campaigns::{CampaignStore, is_valid_campaign_id};
-use crate::deck_render;
-use crate::decks::{DeckStore, is_valid_deck_id};
-use crate::designs::{DesignStore, is_valid_design_id};
-use crate::document_render;
-use crate::documents::{DocumentStore, is_valid_document_id};
-use crate::docx;
-use crate::email_html;
-use crate::mailing_render;
-use crate::mailings::{MailingStore, is_valid_mailing_id};
-use crate::pptx;
-use crate::print_render;
-use crate::prints::{PrintStore, is_valid_print_id};
-use crate::render;
+use crate::artwork::core::{ArtworkStore, is_valid_artwork_id};
+use crate::campaign::core::{CampaignStore, is_valid_campaign_id};
+use crate::deck::core::{DeckStore, is_valid_deck_id};
+use crate::design::core::{DesignStore, is_valid_design_id};
+use crate::document::core::{DocumentStore, is_valid_document_id};
+use crate::mailing::core::{MailingStore, is_valid_mailing_id};
+use crate::print::core::{PrintStore, is_valid_print_id};
 use crate::screenshots;
 use crate::settings::SettingsStore;
-use crate::social_render;
-use crate::socials::{SocialStore, is_valid_social_id};
+use crate::social::core::{SocialStore, is_valid_social_id};
 use crate::uploads::{UploadStore, content_type_of, is_stored_name};
 
 /// The content type of a `.pptx` download.

@@ -70,11 +70,11 @@ pub(super) async fn export_print(
         return api_error::internal_error(&error);
     }
     let html = inline_google_fonts(
-        print_render::render_print_with(
+        crate::print::render::render_print_with(
             &print,
-            print_render::RenderOptions {
+            crate::print::render::RenderOptions {
                 only_sheet,
-                ..print_render::RenderOptions::default()
+                ..crate::print::render::RenderOptions::default()
             },
         ),
         fetch_as_browser,
@@ -144,12 +144,12 @@ pub(super) async fn build_print_pdf_response(
     if let Err(error) = inline_uploaded_sheet_images(&mut print, uploads).await {
         return api_error::internal_error(&error);
     }
-    let html = print_render::render_print_with(
+    let html = crate::print::render::render_print_with(
         &print,
-        print_render::RenderOptions {
+        crate::print::render::RenderOptions {
             is_print: true,
             only_sheet: scope.only,
-            ..print_render::RenderOptions::default()
+            ..crate::print::render::RenderOptions::default()
         },
     );
     match screenshots::print_html_to_pdf(&chrome, &html, print.viewport()).await {
@@ -283,11 +283,11 @@ pub(super) async fn export_campaign(
         return api_error::internal_error(&error);
     }
     let html = inline_google_fonts(
-        campaign_render::render_campaign_with(
+        crate::campaign::render::render_campaign_with(
             &campaign,
-            campaign_render::RenderOptions {
+            crate::campaign::render::RenderOptions {
                 only_ad,
-                ..campaign_render::RenderOptions::default()
+                ..crate::campaign::render::RenderOptions::default()
             },
         ),
         fetch_as_browser,
@@ -357,12 +357,12 @@ pub(super) async fn build_campaign_pdf_response(
     if let Err(error) = inline_uploaded_ad_images(&mut campaign, uploads).await {
         return api_error::internal_error(&error);
     }
-    let html = campaign_render::render_campaign_with(
+    let html = crate::campaign::render::render_campaign_with(
         &campaign,
-        campaign_render::RenderOptions {
+        crate::campaign::render::RenderOptions {
             is_print: true,
             only_ad: scope.only,
-            ..campaign_render::RenderOptions::default()
+            ..crate::campaign::render::RenderOptions::default()
         },
     );
     match screenshots::print_html_to_pdf(&chrome, &html, campaign.viewport()).await {
@@ -496,11 +496,11 @@ pub(super) async fn export_artwork(
         return api_error::internal_error(&error);
     }
     let html = inline_google_fonts(
-        artwork_render::render_artwork_with(
+        crate::artwork::render::render_artwork_with(
             &artwork,
-            artwork_render::RenderOptions {
+            crate::artwork::render::RenderOptions {
                 only_cover,
-                ..artwork_render::RenderOptions::default()
+                ..crate::artwork::render::RenderOptions::default()
             },
         ),
         fetch_as_browser,
@@ -570,12 +570,12 @@ pub(super) async fn build_artwork_pdf_response(
     if let Err(error) = inline_uploaded_cover_images(&mut artwork, uploads).await {
         return api_error::internal_error(&error);
     }
-    let html = artwork_render::render_artwork_with(
+    let html = crate::artwork::render::render_artwork_with(
         &artwork,
-        artwork_render::RenderOptions {
+        crate::artwork::render::RenderOptions {
             is_print: true,
             only_cover: scope.only,
-            ..artwork_render::RenderOptions::default()
+            ..crate::artwork::render::RenderOptions::default()
         },
     );
     match screenshots::print_html_to_pdf(&chrome, &html, artwork.viewport()).await {

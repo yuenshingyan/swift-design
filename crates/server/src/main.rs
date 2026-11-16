@@ -3,37 +3,17 @@
 
 mod agent_runs;
 mod api_error;
-mod artwork_generation;
-mod artwork_patch;
-mod artwork_polish;
-mod artwork_render;
-mod artworks;
+mod artwork;
 mod brand;
-mod campaign_generation;
-mod campaign_patch;
-mod campaign_polish;
-mod campaign_render;
-mod campaigns;
+mod campaign;
 mod candidates;
 mod capture;
 mod concepts;
-mod deck_generation;
-mod deck_patch;
-mod deck_polish;
-mod deck_render;
-mod decks;
-#[cfg(test)]
-mod demo_tweaks_tests;
-mod designs;
-mod document_generation;
-mod document_patch;
-mod document_polish;
-mod document_render;
-mod documents;
-mod docx;
+mod deck;
+mod design;
+mod document;
 mod edit_focus;
 mod edit_report;
-mod email_html;
 mod events;
 mod export;
 mod files;
@@ -41,25 +21,14 @@ mod generation;
 mod history;
 mod icon;
 mod instructions;
-mod mailing_generation;
-mod mailing_patch;
-mod mailing_polish;
-mod mailing_render;
-mod mailings;
+mod mailing;
 mod model_client;
 mod model_retry;
 mod office;
 mod parallel_edit;
-mod patch;
 mod planner;
 mod polish;
-mod pptx;
-mod presenter;
-mod print_generation;
-mod print_patch;
-mod print_polish;
-mod print_render;
-mod prints;
+mod print;
 mod projects;
 mod provenance;
 mod render;
@@ -69,11 +38,7 @@ mod screenshots;
 mod session_routes;
 mod sessions;
 mod settings;
-mod social_generation;
-mod social_patch;
-mod social_polish;
-mod social_render;
-mod socials;
+mod social;
 mod static_files;
 mod templates;
 #[cfg(test)]
@@ -92,18 +57,18 @@ use design_model::{Artwork, Campaign, Deck, Design, Document, Mailing, Print, So
 use tracing_subscriber::EnvFilter;
 
 use crate::agent_runs::AgentRunner;
-use crate::artworks::ArtworkStore;
-use crate::campaigns::CampaignStore;
-use crate::decks::DeckStore;
-use crate::designs::DesignStore;
-use crate::documents::DocumentStore;
+use crate::artwork::core::ArtworkStore;
+use crate::campaign::core::CampaignStore;
+use crate::deck::core::DeckStore;
+use crate::design::core::DesignStore;
+use crate::document::core::DocumentStore;
 use crate::events::ChangeNotifier;
 use crate::history::HistoryStore;
-use crate::mailings::MailingStore;
-use crate::prints::PrintStore;
+use crate::mailing::core::MailingStore;
+use crate::print::core::PrintStore;
 use crate::sessions::SessionStore;
 use crate::settings::SettingsStore;
-use crate::socials::SocialStore;
+use crate::social::core::SocialStore;
 use crate::static_files::UiDirectory;
 use crate::templates::TemplateStore;
 use crate::uploads::UploadStore;
@@ -369,15 +334,15 @@ fn router(state: AppState) -> Router {
         .merge(events::routes())
         .merge(icon::routes())
         .merge(instructions::routes())
-        .merge(designs::routes())
-        .merge(decks::routes())
-        .merge(documents::routes())
-        .merge(socials::routes())
-        .merge(prints::routes())
-        .merge(mailings::routes())
-        .merge(campaigns::routes())
-        .merge(artworks::routes())
-        .merge(presenter::routes())
+        .merge(crate::design::core::routes())
+        .merge(crate::deck::core::routes())
+        .merge(crate::document::core::routes())
+        .merge(crate::social::core::routes())
+        .merge(crate::print::core::routes())
+        .merge(crate::mailing::core::routes())
+        .merge(crate::campaign::core::routes())
+        .merge(crate::artwork::core::routes())
+        .merge(crate::deck::presenter::routes())
         .merge(projects::routes())
         .merge(export::routes())
         .merge(session_routes::routes())
@@ -398,7 +363,7 @@ async fn health() -> &'static str {
 async fn render_design(Json(design): Json<Design>) -> Response {
     let errors = design.validate();
     if errors.is_empty() {
-        return Html(render::render_design(&design, false)).into_response();
+        return Html(crate::design::render::render_design(&design, false)).into_response();
     }
     api_error::validation_failed(&errors)
 }
@@ -407,7 +372,7 @@ async fn render_design(Json(design): Json<Design>) -> Response {
 async fn render_deck(Json(deck): Json<Deck>) -> Response {
     let errors = deck.validate();
     if errors.is_empty() {
-        return Html(deck_render::render_deck(&deck, false)).into_response();
+        return Html(crate::deck::render::render_deck(&deck, false)).into_response();
     }
     api_error::deck_validation_failed(&errors)
 }
@@ -417,7 +382,7 @@ async fn render_deck(Json(deck): Json<Deck>) -> Response {
 async fn render_document(Json(document): Json<Document>) -> Response {
     let errors = document.validate();
     if errors.is_empty() {
-        return Html(document_render::render_document(&document, false)).into_response();
+        return Html(crate::document::render::render_document(&document, false)).into_response();
     }
     api_error::document_validation_failed(&errors)
 }
@@ -426,7 +391,7 @@ async fn render_document(Json(document): Json<Document>) -> Response {
 async fn render_social(Json(social): Json<Social>) -> Response {
     let errors = social.validate();
     if errors.is_empty() {
-        return Html(social_render::render_social(&social, false)).into_response();
+        return Html(crate::social::render::render_social(&social, false)).into_response();
     }
     api_error::social_validation_failed(&errors)
 }
@@ -435,7 +400,7 @@ async fn render_social(Json(social): Json<Social>) -> Response {
 async fn render_print(Json(print): Json<Print>) -> Response {
     let errors = print.validate();
     if errors.is_empty() {
-        return Html(print_render::render_print(&print, false)).into_response();
+        return Html(crate::print::render::render_print(&print, false)).into_response();
     }
     api_error::print_validation_failed(&errors)
 }
@@ -445,7 +410,7 @@ async fn render_print(Json(print): Json<Print>) -> Response {
 async fn render_mailing(Json(mailing): Json<Mailing>) -> Response {
     let errors = mailing.validate();
     if errors.is_empty() {
-        return Html(mailing_render::render_mailing(&mailing, false)).into_response();
+        return Html(crate::mailing::render::render_mailing(&mailing, false)).into_response();
     }
     api_error::mailing_validation_failed(&errors)
 }
@@ -455,7 +420,7 @@ async fn render_mailing(Json(mailing): Json<Mailing>) -> Response {
 async fn render_campaign(Json(campaign): Json<Campaign>) -> Response {
     let errors = campaign.validate();
     if errors.is_empty() {
-        return Html(campaign_render::render_campaign(&campaign, false)).into_response();
+        return Html(crate::campaign::render::render_campaign(&campaign, false)).into_response();
     }
     api_error::campaign_validation_failed(&errors)
 }
@@ -465,7 +430,7 @@ async fn render_campaign(Json(campaign): Json<Campaign>) -> Response {
 async fn render_artwork(Json(artwork): Json<Artwork>) -> Response {
     let errors = artwork.validate();
     if errors.is_empty() {
-        return Html(artwork_render::render_artwork(&artwork, false)).into_response();
+        return Html(crate::artwork::render::render_artwork(&artwork, false)).into_response();
     }
     api_error::artwork_validation_failed(&errors)
 }

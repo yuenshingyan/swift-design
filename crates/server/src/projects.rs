@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::AppState;
 use crate::api_error;
-use crate::designs::is_valid_design_id;
+use crate::design::core::is_valid_design_id;
 use crate::events::ChangeNotifier;
 use crate::session_routes::ArtifactStores;
 use crate::sessions::SessionStore;

@@ -4,6 +4,7 @@ use axum::body::to_bytes;
 use axum::http::{StatusCode, header};
 use design_model::Design;
 
+use crate::deck::pptx::ExportSources;
 use crate::export::{
     ExportScope, FONT_LINK_PREFIX, FontLink, attachment_disposition, base64_encode,
     build_deck_pdf_response, build_deck_zip_response, build_design_zip_response,
@@ -13,8 +14,6 @@ use crate::export::{
     inline_uploaded_page_images, inline_uploaded_slide_images, only_cover_index,
     pack_design_images, pack_unit_images, selected_screen_indexes, upload_references,
 };
-use crate::pptx::ExportSources;
-use crate::render;
 use crate::test_support::{
     SAMPLE_DECK, SAMPLE_DESIGN, SAMPLE_DOCUMENT, sample_artwork, sample_deck, sample_document,
     sample_social, send, test_application,
@@ -130,7 +129,7 @@ fn selected_png_zip_preserves_original_screen_numbers_and_exact_content() {
 #[tokio::test]
 async fn invalid_screen_selection_is_rejected_before_screenshot_work() {
     let directory = tempfile::tempdir().unwrap();
-    let store = crate::designs::DesignStore::new(directory.path().join("designs"));
+    let store = crate::design::core::DesignStore::new(directory.path().join("designs"));
     store.save("demo", &sample_design()).await.unwrap();
     let application = test_application(&directory);
     for selection in ["", "0", "999", "2-1", "1,,2", "bad"] {
@@ -506,7 +505,7 @@ async fn rewrite_keeps_the_rest_of_the_css_unchanged() {
 
 #[tokio::test]
 async fn a_fetch_error_keeps_the_original_html_and_link() {
-    let html = render::render_design(&sample_design(), false);
+    let html = crate::design::render::render_design(&sample_design(), false);
     assert!(html.contains(FONT_LINK_PREFIX));
     let result = inline_google_fonts(html.clone(), failing_fetch).await;
     assert_eq!(result, html);
@@ -514,7 +513,7 @@ async fn a_fetch_error_keeps_the_original_html_and_link() {
 
 #[tokio::test]
 async fn exported_html_holds_no_google_fonts_host_after_the_rewrite() {
-    let html = render::render_design(&sample_design(), false);
+    let html = crate::design::render::render_design(&sample_design(), false);
     let result = inline_google_fonts(html, fake_fetch).await;
     assert!(!result.contains("fonts.googleapis.com"));
     assert!(result.contains("<style>\n@font-face"));
@@ -524,7 +523,7 @@ async fn exported_html_holds_no_google_fonts_host_after_the_rewrite() {
 
 #[tokio::test]
 async fn exported_html_holds_no_gstatic_host_after_the_rewrite() {
-    let html = render::render_design(&sample_design(), false);
+    let html = crate::design::render::render_design(&sample_design(), false);
     let result = inline_google_fonts(html, fake_fetch).await;
     assert!(!result.contains("fonts.gstatic.com"));
     assert!(result.contains(&data_uri("a.woff2")));

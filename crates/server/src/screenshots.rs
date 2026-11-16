@@ -25,24 +25,17 @@ use design_model::{
 
 use crate::AppState;
 use crate::api_error;
-use crate::artwork_render;
-use crate::artworks::{ArtworkStore, is_valid_artwork_id};
-use crate::campaign_render;
-use crate::campaigns::{CampaignStore, is_valid_campaign_id};
-use crate::deck_render;
-use crate::decks::{DeckStore, is_valid_deck_id};
-use crate::designs::{DesignStore, is_valid_design_id};
-use crate::document_render;
-use crate::documents::{DocumentStore, is_valid_document_id};
+use crate::artwork::core::{ArtworkStore, is_valid_artwork_id};
+use crate::campaign::core::{CampaignStore, is_valid_campaign_id};
+use crate::deck::core::{DeckStore, is_valid_deck_id};
+use crate::design::core::{DesignStore, is_valid_design_id};
+use crate::design::render::{RenderOptions, render_design_with};
+use crate::document::core::{DocumentStore, is_valid_document_id};
 use crate::export::email_client_html;
-use crate::mailing_render;
-use crate::mailings::{MailingStore, is_valid_mailing_id};
-use crate::print_render;
-use crate::prints::{PrintStore, is_valid_print_id};
-use crate::render::{RenderOptions, render_design_with};
+use crate::mailing::core::{MailingStore, is_valid_mailing_id};
+use crate::print::core::{PrintStore, is_valid_print_id};
 use crate::settings::SettingsStore;
-use crate::social_render;
-use crate::socials::{SocialStore, is_valid_social_id};
+use crate::social::core::{SocialStore, is_valid_social_id};
 use crate::uploads::UploadStore;
 
 /// Environment variable that names the Chrome binary to use.
@@ -222,12 +215,12 @@ pub async fn screenshot_slide(
             "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
         )
     })?;
-    let html = deck_render::render_deck_with(
+    let html = crate::deck::render::render_deck_with(
         deck,
-        deck_render::RenderOptions {
+        crate::deck::render::RenderOptions {
             only_slide: Some(index),
             asset_origin: Some(base_url.to_owned()),
-            ..deck_render::RenderOptions::default()
+            ..crate::deck::render::RenderOptions::default()
         },
     );
     screenshot_html(&chrome, &with_base_href(&html, base_url), DECK_VIEWPORT).await
@@ -236,12 +229,12 @@ pub async fn screenshot_slide(
 /// Renders the whole deck with the layout audit script and returns the
 /// DOM after the audit ran, as Chrome dumps it.
 pub async fn dump_deck_dom(deck: &Deck, base_url: &str) -> anyhow::Result<String> {
-    let html = deck_render::render_deck_with(
+    let html = crate::deck::render::render_deck_with(
         deck,
-        deck_render::RenderOptions {
+        crate::deck::render::RenderOptions {
             is_auditing: true,
             asset_origin: Some(base_url.to_owned()),
-            ..deck_render::RenderOptions::default()
+            ..crate::deck::render::RenderOptions::default()
         },
     );
     dump_rendered_dom(&html, base_url, DECK_VIEWPORT).await
@@ -259,12 +252,12 @@ pub async fn screenshot_page(
             "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
         )
     })?;
-    let html = document_render::render_document_with(
+    let html = crate::document::render::render_document_with(
         document,
-        document_render::RenderOptions {
+        crate::document::render::RenderOptions {
             only_page: Some(index),
             asset_origin: Some(base_url.to_owned()),
-            ..document_render::RenderOptions::default()
+            ..crate::document::render::RenderOptions::default()
         },
     );
     screenshot_html(
@@ -278,12 +271,12 @@ pub async fn screenshot_page(
 /// Renders the whole document with the layout audit script and returns
 /// the DOM after the audit ran, as Chrome dumps it.
 pub async fn dump_document_dom(document: &Document, base_url: &str) -> anyhow::Result<String> {
-    let html = document_render::render_document_with(
+    let html = crate::document::render::render_document_with(
         document,
-        document_render::RenderOptions {
+        crate::document::render::RenderOptions {
             is_auditing: true,
             asset_origin: Some(base_url.to_owned()),
-            ..document_render::RenderOptions::default()
+            ..crate::document::render::RenderOptions::default()
         },
     );
     dump_rendered_dom(&html, base_url, document.viewport()).await
@@ -301,12 +294,12 @@ pub async fn screenshot_frame(
             "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
         )
     })?;
-    let html = social_render::render_social_with(
+    let html = crate::social::render::render_social_with(
         social,
-        social_render::RenderOptions {
+        crate::social::render::RenderOptions {
             only_frame: Some(index),
             asset_origin: Some(base_url.to_owned()),
-            ..social_render::RenderOptions::default()
+            ..crate::social::render::RenderOptions::default()
         },
     );
     screenshot_html(&chrome, &with_base_href(&html, base_url), social.viewport()).await
@@ -315,12 +308,12 @@ pub async fn screenshot_frame(
 /// Renders the whole social with the layout audit script and returns
 /// the DOM after the audit ran, as Chrome dumps it.
 pub async fn dump_social_dom(social: &Social, base_url: &str) -> anyhow::Result<String> {
-    let html = social_render::render_social_with(
+    let html = crate::social::render::render_social_with(
         social,
-        social_render::RenderOptions {
+        crate::social::render::RenderOptions {
             is_auditing: true,
             asset_origin: Some(base_url.to_owned()),
-            ..social_render::RenderOptions::default()
+            ..crate::social::render::RenderOptions::default()
         },
     );
     dump_rendered_dom(&html, base_url, social.viewport()).await
@@ -338,12 +331,12 @@ pub async fn screenshot_sheet(
             "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
         )
     })?;
-    let html = print_render::render_print_with(
+    let html = crate::print::render::render_print_with(
         print,
-        print_render::RenderOptions {
+        crate::print::render::RenderOptions {
             only_sheet: Some(index),
             asset_origin: Some(base_url.to_owned()),
-            ..print_render::RenderOptions::default()
+            ..crate::print::render::RenderOptions::default()
         },
     );
     screenshot_html(&chrome, &with_base_href(&html, base_url), print.viewport()).await
@@ -352,12 +345,12 @@ pub async fn screenshot_sheet(
 /// Renders the whole print with the layout audit script and returns
 /// the DOM after the audit ran, as Chrome dumps it.
 pub async fn dump_print_dom(print: &Print, base_url: &str) -> anyhow::Result<String> {
-    let html = print_render::render_print_with(
+    let html = crate::print::render::render_print_with(
         print,
-        print_render::RenderOptions {
+        crate::print::render::RenderOptions {
             is_auditing: true,
             asset_origin: Some(base_url.to_owned()),
-            ..print_render::RenderOptions::default()
+            ..crate::print::render::RenderOptions::default()
         },
     );
     dump_rendered_dom(&html, base_url, print.viewport()).await
@@ -375,12 +368,12 @@ pub async fn screenshot_email(
             "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
         )
     })?;
-    let html = mailing_render::render_mailing_with(
+    let html = crate::mailing::render::render_mailing_with(
         mailing,
-        mailing_render::RenderOptions {
+        crate::mailing::render::RenderOptions {
             only_email: Some(index),
             asset_origin: Some(base_url.to_owned()),
-            ..mailing_render::RenderOptions::default()
+            ..crate::mailing::render::RenderOptions::default()
         },
     );
     screenshot_html(
@@ -394,12 +387,12 @@ pub async fn screenshot_email(
 /// Renders the whole mailing with the layout audit script and returns
 /// the DOM after the audit ran, as Chrome dumps it.
 pub async fn dump_mailing_dom(mailing: &Mailing, base_url: &str) -> anyhow::Result<String> {
-    let html = mailing_render::render_mailing_with(
+    let html = crate::mailing::render::render_mailing_with(
         mailing,
-        mailing_render::RenderOptions {
+        crate::mailing::render::RenderOptions {
             is_auditing: true,
             asset_origin: Some(base_url.to_owned()),
-            ..mailing_render::RenderOptions::default()
+            ..crate::mailing::render::RenderOptions::default()
         },
     );
     dump_rendered_dom(&html, base_url, mailing.viewport()).await
@@ -417,12 +410,12 @@ pub async fn screenshot_ad(
             "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
         )
     })?;
-    let html = campaign_render::render_campaign_with(
+    let html = crate::campaign::render::render_campaign_with(
         campaign,
-        campaign_render::RenderOptions {
+        crate::campaign::render::RenderOptions {
             only_ad: Some(index),
             asset_origin: Some(base_url.to_owned()),
-            ..campaign_render::RenderOptions::default()
+            ..crate::campaign::render::RenderOptions::default()
         },
     );
     let html = with_fixed_canvas(&html, campaign.viewport());
@@ -454,12 +447,12 @@ fn with_fixed_canvas(html: &str, viewport: Viewport) -> String {
 /// Renders the whole campaign with the layout audit script and returns
 /// the DOM after the audit ran, as Chrome dumps it.
 pub async fn dump_campaign_dom(campaign: &Campaign, base_url: &str) -> anyhow::Result<String> {
-    let html = campaign_render::render_campaign_with(
+    let html = crate::campaign::render::render_campaign_with(
         campaign,
-        campaign_render::RenderOptions {
+        crate::campaign::render::RenderOptions {
             is_auditing: true,
             asset_origin: Some(base_url.to_owned()),
-            ..campaign_render::RenderOptions::default()
+            ..crate::campaign::render::RenderOptions::default()
         },
     );
     dump_rendered_dom(&html, base_url, campaign.viewport()).await
@@ -480,12 +473,12 @@ pub async fn screenshot_cover(
             "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
         )
     })?;
-    let html = artwork_render::render_artwork_with(
+    let html = crate::artwork::render::render_artwork_with(
         artwork,
-        artwork_render::RenderOptions {
+        crate::artwork::render::RenderOptions {
             only_cover: Some(index),
             asset_origin: Some(base_url.to_owned()),
-            ..artwork_render::RenderOptions::default()
+            ..crate::artwork::render::RenderOptions::default()
         },
     );
     screenshot_html(
@@ -499,12 +492,12 @@ pub async fn screenshot_cover(
 /// Renders the whole artwork with the layout audit script and returns
 /// the DOM after the audit ran, as Chrome dumps it.
 pub async fn dump_artwork_dom(artwork: &Artwork, base_url: &str) -> anyhow::Result<String> {
-    let html = artwork_render::render_artwork_with(
+    let html = crate::artwork::render::render_artwork_with(
         artwork,
-        artwork_render::RenderOptions {
+        crate::artwork::render::RenderOptions {
             is_auditing: true,
             asset_origin: Some(base_url.to_owned()),
-            ..artwork_render::RenderOptions::default()
+            ..crate::artwork::render::RenderOptions::default()
         },
     );
     dump_rendered_dom(&html, base_url, artwork.viewport()).await

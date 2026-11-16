@@ -1,0 +1,973 @@
+//! Design storage and the `/designs` CRUD routes.
+//!
+//! Designs live as `<id>.json` files in one directory. Agents may write
+//! files into that directory directly; every request re-reads the
+//! filesystem, so nothing goes stale. Every save first copies the
+//! current file into the `HistoryStore`, and `/designs/{id}/history`
+//! lists and restores those snapshots.
+
+use std::collections::{BTreeSet, HashSet};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use design_model::{Design, Screen};
+use serde::{Deserialize, Serialize};
+
+use crate::AppState;
+use crate::candidates::{candidate_id, copy_design, next_candidate_number};
+use crate::events::ChangeNotifier;
+use crate::files::write_atomically;
+use crate::history::{HistoryStore, Snapshot, is_valid_stamp};
+use crate::sessions::{SessionStore, session_id_of_artifact, write_access};
+use crate::{api_error, provenance};
+
+mod previews;
+
+pub(crate) use previews::LivePreview;
+use previews::PreviewStore;
+
+/// The CSS class on a screen that holds the place of one the model has
+/// not written yet.
+///
+/// A continuation saves these while its chunks run, so the canvas shows
+/// the gaps fill in. A finished design has none: the run replaces them,
+/// and `continue_design` drops any that a stopped run left behind.
+pub const PENDING_SCREEN_CLASS: &str = "swift-design-pending";
+
+/// True when a screen only holds the place of one still to be written.
+pub fn is_pending_screen(screen: &Screen) -> bool {
+    screen.html.contains(PENDING_SCREEN_CLASS)
+}
+
+/// Filesystem-backed design storage: one `<id>.json` file per design.
+#[derive(Clone)]
+pub struct DesignStore {
+    directory: PathBuf,
+    /// Where each save keeps the previous file. `None` keeps no history.
+    history: Option<HistoryStore>,
+    /// Run-owned visual drafts, never persisted or included in history.
+    previews: PreviewStore,
+    /// Ids of malformed files already reported, so the listing warns
+    /// once per file and not on every request.
+    reported_malformed: Arc<Mutex<HashSet<String>>>,
+}
+
+/// One row in the `GET /designs` listing.
+#[derive(Clone, Debug, Serialize)]
+pub struct DesignSummary {
+    /// File stem of the design file, used in `/designs/{id}` routes.
+    pub id: String,
+    /// Design title.
+    pub title: String,
+    /// Theme name, shown next to the id on chooser cards.
+    pub theme: String,
+    /// The px canvas of every screen, for preview frames.
+    pub viewport: design_model::Viewport,
+    /// Number of screens.
+    pub screen_count: usize,
+    /// Number of titles in the planned outline. More than `screen_count`
+    /// for a preview design; 0 when the design has no outline.
+    pub outline_count: usize,
+    /// Number of placeholder screens a running or stopped continuation
+    /// left in the design. 0 for a finished design.
+    pub pending_count: usize,
+}
+
+impl DesignStore {
+    /// Creates a store over `directory`. The directory may not exist yet;
+    /// it is created on the first save.
+    pub fn new(directory: PathBuf) -> Self {
+        Self {
+            directory,
+            history: None,
+            previews: PreviewStore::default(),
+            reported_malformed: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// Keeps a snapshot of the previous file in `history` on every save.
+    pub fn with_history(mut self, history: HistoryStore) -> Self {
+        self.history = Some(history);
+        self
+    }
+
+    /// Logs a malformed design file the first time it is seen.
+    fn report_malformed(&self, id: &str, error: &serde_json::Error) {
+        let is_first = self
+            .reported_malformed
+            .lock()
+            .map(|mut reported| reported.insert(id.to_owned()))
+            .unwrap_or(true);
+        if is_first {
+            tracing::warn!(
+                %id,
+                %error,
+                "skipping malformed design file: it does not match the current design schema; delete or regenerate it"
+            );
+        }
+    }
+
+    fn path_of(&self, id: &str) -> PathBuf {
+        self.directory.join(format!("{id}.json"))
+    }
+
+    fn authors_path_of(&self, id: &str) -> PathBuf {
+        self.directory.join(".authors").join(format!("{id}.json"))
+    }
+
+    /// Field paths the user changed in this design. Missing sidecar files
+    /// mean everything is agent-authored.
+    pub async fn user_paths(&self, id: &str) -> anyhow::Result<BTreeSet<String>> {
+        match tokio::fs::read_to_string(self.authors_path_of(id)).await {
+            Ok(raw) => Ok(serde_json::from_str(&raw)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeSet::new()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn save_user_paths(&self, id: &str, paths: &BTreeSet<String>) -> anyhow::Result<()> {
+        if paths.is_empty() {
+            return self.clear_user_paths(id).await;
+        }
+        let sidecar = self.authors_path_of(id);
+        if let Some(parent) = sidecar.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(sidecar, serde_json::to_string_pretty(paths)?).await?;
+        Ok(())
+    }
+
+    /// Removes the authorship sidecar. Used on delete and when a
+    /// candidate replaces a design wholesale.
+    pub async fn clear_user_paths(&self, id: &str) -> anyhow::Result<()> {
+        match tokio::fs::remove_file(self.authors_path_of(id)).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Updates the authorship sidecar after a save: marks the paths this
+    /// save changed as user or agent authored, and drops marks on
+    /// removed paths.
+    pub async fn record_authors(
+        &self,
+        id: &str,
+        previous: Option<&Design>,
+        current: &Design,
+        is_user: bool,
+    ) -> anyhow::Result<()> {
+        let mut user_paths = self.user_paths(id).await?;
+        match previous {
+            Some(previous) => {
+                let (changed, removed) = provenance::diff_paths(previous, current)?;
+                for path in removed {
+                    user_paths.remove(&path);
+                }
+                for path in changed {
+                    if is_user {
+                        user_paths.insert(path);
+                    } else {
+                        user_paths.remove(&path);
+                    }
+                }
+            }
+            None => {
+                user_paths = if is_user {
+                    provenance::field_paths(current)?.into_iter().collect()
+                } else {
+                    BTreeSet::new()
+                };
+            }
+        }
+        self.save_user_paths(id, &user_paths).await
+    }
+
+    /// Lists every parseable design, sorted by id. Malformed files are
+    /// logged and skipped so one bad file cannot break the listing.
+    pub async fn list(&self) -> anyhow::Result<Vec<DesignSummary>> {
+        let mut entries = match tokio::fs::read_dir(&self.directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut summaries = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            // A file can vanish between the directory read and this read
+            // when a delete is in progress. Skip it.
+            let raw = match tokio::fs::read_to_string(&path).await {
+                Ok(raw) => raw,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            match serde_json::from_str::<Design>(&raw) {
+                Ok(design) => summaries.push(DesignSummary {
+                    id: id.to_owned(),
+                    title: design.title,
+                    theme: design.theme.name,
+                    viewport: design.viewport,
+                    screen_count: design.screens.len(),
+                    pending_count: design
+                        .screens
+                        .iter()
+                        .filter(|screen| is_pending_screen(screen))
+                        .count(),
+                    outline_count: design.outline.len(),
+                }),
+                Err(error) => {
+                    self.report_malformed(id, &error);
+                }
+            }
+        }
+        summaries.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(summaries)
+    }
+
+    /// Loads one design. `Ok(None)` means no file with that id exists.
+    pub async fn load(&self, id: &str) -> anyhow::Result<Option<Design>> {
+        match tokio::fs::read_to_string(self.path_of(id)).await {
+            Ok(raw) => Ok(Some(serde_json::from_str(&raw)?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Writes one design as pretty-printed JSON, creating the directory
+    /// when needed. The previous file goes to the history store first.
+    pub async fn save(&self, id: &str, design: &Design) -> anyhow::Result<()> {
+        tokio::fs::create_dir_all(&self.directory).await?;
+        self.snapshot_current(id).await;
+        let json = serde_json::to_string_pretty(design)?;
+        write_atomically(&self.path_of(id), &(json + "\n")).await?;
+        Ok(())
+    }
+
+    /// Copies the current design file into the history store. A design with
+    /// no file yet has nothing to keep. A history failure is logged and
+    /// does not stop the save.
+    async fn snapshot_current(&self, id: &str) {
+        let Some(history) = &self.history else {
+            return;
+        };
+        let content = match tokio::fs::read(self.path_of(id)).await {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                tracing::warn!(%id, %error, "could not read the design file for its history snapshot");
+                return;
+            }
+        };
+        match history.snapshot(id, &content).await {
+            Ok(stamp) => {
+                tracing::debug!(%id, %stamp, size_bytes = content.len(), "design snapshot kept")
+            }
+            Err(error) => tracing::warn!(%id, %error, "could not keep the design history snapshot"),
+        }
+    }
+
+    /// The snapshots of one design, newest first. Empty without a history
+    /// store.
+    pub async fn history(&self, id: &str) -> anyhow::Result<Vec<Snapshot>> {
+        match &self.history {
+            Some(history) => history.list(id).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Writes the snapshot `stamp` back as the current design. `save`
+    /// keeps the current design as a new snapshot first. `Ok(None)` means
+    /// no snapshot with that stamp exists.
+    pub async fn restore(&self, id: &str, stamp: &str) -> anyhow::Result<Option<Design>> {
+        let Some(history) = &self.history else {
+            return Ok(None);
+        };
+        let Some(content) = history.read(id, stamp).await? else {
+            return Ok(None);
+        };
+        let design: Design = serde_json::from_slice(&content)?;
+        self.save(id, &design).await?;
+        Ok(Some(design))
+    }
+
+    /// Moves a design and its authorship sidecar to a new id. Returns
+    /// false when no design with the old id exists.
+    pub async fn rename(&self, old_id: &str, new_id: &str) -> anyhow::Result<bool> {
+        let Some(design) = self.load(old_id).await? else {
+            return Ok(false);
+        };
+        let user_paths = self.user_paths(old_id).await?;
+        self.save(new_id, &design).await?;
+        self.save_user_paths(new_id, &user_paths).await?;
+        // The history moves before the delete, because a delete now
+        // drops the history of the id it deletes.
+        if let Some(history) = &self.history
+            && let Err(error) = history.rename(old_id, new_id).await
+        {
+            tracing::warn!(old_id, new_id, %error, "could not move the design history");
+        }
+        self.delete(old_id).await?;
+        Ok(true)
+    }
+
+    /// Deletes one design, its authorship sidecar, and its history.
+    /// Returns false when no file with that id exists.
+    pub async fn delete(&self, id: &str) -> anyhow::Result<bool> {
+        self.clear_user_paths(id).await?;
+        // The history goes with the file. A later design with the same
+        // id is a different design and must start with no snapshots.
+        if let Some(history) = &self.history
+            && let Err(error) = history.delete(id).await
+        {
+            tracing::warn!(%id, %error, "could not delete the design history");
+        }
+        match tokio::fs::remove_file(self.path_of(id)).await {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Every stored design id, malformed files included. A session
+    /// delete must remove those too, so this reads the directory
+    /// instead of the listing.
+    async fn stored_ids(&self) -> anyhow::Result<Vec<String>> {
+        let mut entries = match tokio::fs::read_dir(&self.directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut ids = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            if let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) {
+                ids.push(id.to_owned());
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    /// Deletes every design of one session: the session's own design and
+    /// its candidates, with their sidecars and history. Returns how many
+    /// files went. Session ids come from the request text, so the same
+    /// request makes the same id: without this sweep a new session would
+    /// show the deleted session's candidates.
+    pub async fn delete_session(&self, session_id: &str) -> anyhow::Result<usize> {
+        let mut deleted = 0;
+        for id in self.stored_ids().await? {
+            if session_id_of_artifact(&id) != session_id {
+                continue;
+            }
+            if self.delete(&id).await? {
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
+    }
+}
+
+/// The `/designs` route table.
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/designs", get(list_designs))
+        .route(
+            "/designs/{id}",
+            get(get_design).put(put_design).delete(delete_design),
+        )
+        .route("/designs/{id}/fork", post(fork_design))
+        .route("/designs/{id}/render", get(render_stored_design))
+        .route("/designs/{id}/previews", get(get_preview))
+        .route("/designs/{id}/authors", get(get_authors))
+        .route("/designs/{id}/history", get(list_history))
+        .route(
+            "/designs/{id}/history/{stamp}/restore",
+            post(restore_history),
+        )
+}
+
+/// True for ids that are safe as file stems. The character allowlist
+/// blocks path traversal. `render` is reserved: `/designs/render` is the
+/// preview route.
+pub(crate) fn is_valid_design_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id != "render"
+        && id.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
+}
+
+/// Lists every stored design.
+async fn list_designs(State(store): State<DesignStore>) -> Response {
+    match store.list().await {
+        Ok(mut summaries) => {
+            store.overlay_previews(&mut summaries);
+            Json(summaries).into_response()
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Returns only an active visual draft; saved designs stay on the ordinary route.
+async fn get_preview(State(store): State<DesignStore>, Path(id): Path<String>) -> Response {
+    if !is_valid_design_id(&id) {
+        return api_error::invalid_design_id(&id);
+    }
+    let mut response = match store.preview(&id) {
+        Some(preview) => Json(preview).into_response(),
+        None => api_error::design_not_found(&id),
+    };
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// Returns one stored design as JSON.
+async fn get_design(State(store): State<DesignStore>, Path(id): Path<String>) -> Response {
+    if !is_valid_design_id(&id) {
+        return api_error::invalid_design_id(&id);
+    }
+    match store.load(&id).await {
+        Ok(Some(design)) => Json(design).into_response(),
+        Ok(None) => api_error::design_not_found(&id),
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Saves a design under the given id, or reports every validation error.
+/// Saves carrying the `x-swift-design-author: user` header mark their
+/// changed fields as user-authored; other saves count as agent writes.
+async fn put_design(
+    State(store): State<DesignStore>,
+    State(sessions): State<SessionStore>,
+    State(notifier): State<ChangeNotifier>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(design): Json<Design>,
+) -> Response {
+    if !is_valid_design_id(&id) {
+        return api_error::invalid_design_id(&id);
+    }
+    let is_user = headers
+        .get(provenance::AUTHOR_HEADER)
+        .and_then(|value| value.to_str().ok())
+        == Some("user");
+    // Gating: designs are written only while the session is generating,
+    // and the editor may also save while reviewing.
+    if let Err(message) = write_access(&sessions, &id, is_user).await {
+        return api_error::error_response(StatusCode::CONFLICT, &message, Vec::new());
+    }
+    let errors = design.validate();
+    if !errors.is_empty() {
+        return api_error::validation_failed(&errors);
+    }
+    let previous = match store.load(&id).await {
+        Ok(previous) => previous,
+        Err(error) => return api_error::internal_error(&error),
+    };
+    if let Err(response) = check_window_write(&sessions, &id, previous.as_ref(), &design).await {
+        return response;
+    }
+    if let Err(error) = store.save(&id, &design).await {
+        return api_error::internal_error(&error);
+    }
+    if let Err(error) = store
+        .record_authors(&id, previous.as_ref(), &design, is_user)
+        .await
+    {
+        return api_error::internal_error(&error);
+    }
+    notifier.notify();
+    tracing::info!(%id, screen_count = design.screens.len(), is_user, "design saved");
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Requires shared geometry on fresh app writes and preserves existing contracts.
+async fn check_window_write(
+    sessions: &SessionStore,
+    id: &str,
+    previous: Option<&Design>,
+    design: &Design,
+) -> Result<(), Response> {
+    if design.app_window.is_some() {
+        return Ok(());
+    }
+    let has_existing_window = previous.is_some_and(|design| design.app_window.is_some());
+    let needs_window = if previous.is_none() {
+        match sessions.read(session_id_of_artifact(id)).await {
+            Ok(Some(session)) => session.options.should_have_app_window(),
+            Ok(None) => false,
+            Err(error) => return Err(api_error::internal_error(&error.into())),
+        }
+    } else {
+        false
+    };
+    if has_existing_window || needs_window {
+        return Err(api_error::error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "This app candidate needs shared app_window bounds. Mark one top-level data-swift-design-window shell on every screen. Preserve existing bounds when editing.",
+            Vec::new(),
+        ));
+    }
+    Ok(())
+}
+
+/// Lists the field paths the user changed in this design.
+async fn get_authors(State(store): State<DesignStore>, Path(id): Path<String>) -> Response {
+    if !is_valid_design_id(&id) {
+        return api_error::invalid_design_id(&id);
+    }
+    match store.user_paths(&id).await {
+        Ok(paths) => Json(serde_json::json!({ "user_paths": paths })).into_response(),
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Lists the saved snapshots of one design, newest first.
+async fn list_history(State(store): State<DesignStore>, Path(id): Path<String>) -> Response {
+    if !is_valid_design_id(&id) {
+        return api_error::invalid_design_id(&id);
+    }
+    match store.load(&id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return api_error::design_not_found(&id),
+        Err(error) => return api_error::internal_error(&error),
+    }
+    match store.history(&id).await {
+        Ok(snapshots) => Json(snapshots).into_response(),
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Writes one snapshot back as the current design. The design as it is now
+/// becomes the newest snapshot.
+async fn restore_history(
+    State(store): State<DesignStore>,
+    State(sessions): State<SessionStore>,
+    State(notifier): State<ChangeNotifier>,
+    Path((id, stamp)): Path<(String, String)>,
+) -> Response {
+    if !is_valid_design_id(&id) {
+        return api_error::invalid_design_id(&id);
+    }
+    if let Err(message) = write_access(&sessions, &id, true).await {
+        return api_error::error_response(StatusCode::CONFLICT, &message, Vec::new());
+    }
+    if !is_valid_stamp(&stamp) {
+        return api_error::error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid history stamp `{stamp}`: use a stamp from GET /designs/{id}/history"),
+            Vec::new(),
+        );
+    }
+    match store.load(&id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return api_error::design_not_found(&id),
+        Err(error) => return api_error::internal_error(&error),
+    }
+    match store.restore(&id, &stamp).await {
+        Ok(Some(design)) => {
+            notifier.notify();
+            tracing::info!(%id, %stamp, screen_count = design.screens.len(), "design restored");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(None) => api_error::error_response(
+            StatusCode::NOT_FOUND,
+            &format!("unknown history stamp `{stamp}`: run GET /designs/{id}/history for the list"),
+            Vec::new(),
+        ),
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Deletes one stored design.
+async fn delete_design(
+    State(store): State<DesignStore>,
+    State(sessions): State<SessionStore>,
+    State(notifier): State<ChangeNotifier>,
+    Path(id): Path<String>,
+) -> Response {
+    if !is_valid_design_id(&id) {
+        return api_error::invalid_design_id(&id);
+    }
+    match store.delete(&id).await {
+        Ok(true) => {
+            sessions.forget_artifact(&id).await;
+            notifier.notify();
+            tracing::info!(%id, "design deleted");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => api_error::design_not_found(&id),
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Copies one candidate to the next free number of its session, as a
+/// new candidate, and answers its id. Refused while the session's run
+/// writes, so the number cannot race the run.
+async fn fork_design(
+    State(store): State<DesignStore>,
+    State(sessions): State<SessionStore>,
+    State(notifier): State<ChangeNotifier>,
+    Path(id): Path<String>,
+) -> Response {
+    if !is_valid_design_id(&id) {
+        return api_error::invalid_design_id(&id);
+    }
+    let base = session_id_of_artifact(&id).to_owned();
+    if let Ok(Some(session)) = sessions.read(&base).await
+        && session.state == design_model::WorkflowState::Generating
+    {
+        return api_error::error_response(
+            StatusCode::CONFLICT,
+            &format!("session `{base}` is generating: fork when the run ends"),
+            Vec::new(),
+        );
+    }
+    let rows = match store.list().await {
+        Ok(rows) => rows,
+        Err(error) => return api_error::internal_error(&error),
+    };
+    let number = next_candidate_number(&base, rows.iter().map(|row| row.id.as_str()));
+    let new_id = candidate_id(&base, number);
+    if let Err(response) = copy_design(&store, &id, &new_id).await {
+        return response;
+    }
+    // The session's updated_at moves, so the listing sorts it first.
+    let _ = sessions.update(&base, |_| {}).await;
+    notifier.notify();
+    tracing::info!(session_id = %base, from = %id, to = %new_id, "candidate forked");
+    Json(serde_json::json!({ "id": new_id })).into_response()
+}
+
+/// Query of `GET /designs/{id}/render`.
+#[derive(Debug, Deserialize)]
+struct RenderQuery {
+    /// With `editable=true`, the page reports in-place edits to the
+    /// parent window. Used by the editor preview.
+    #[serde(default)]
+    editable: bool,
+    /// Opts into an unverified visual draft; exports and ordinary renders stay saved-only.
+    #[serde(default)]
+    preview: bool,
+    /// Render only this one-based screen. Used by thumbnails and the
+    /// editor preview.
+    #[serde(default)]
+    screen: Option<usize>,
+}
+
+/// Renders one stored design to HTML, or reports every validation error.
+/// Agents that write design files directly use this route to check them.
+async fn render_stored_design(
+    State(store): State<DesignStore>,
+    Path(id): Path<String>,
+    Query(query): Query<RenderQuery>,
+) -> Response {
+    if !is_valid_design_id(&id) {
+        return api_error::invalid_design_id(&id);
+    }
+    let preview = query.preview.then(|| store.preview(&id)).flatten();
+    let is_preview = preview.is_some();
+    let loaded = match preview {
+        Some(preview) => Ok(Some(preview.design)),
+        None => store.load(&id).await,
+    };
+    match loaded {
+        Ok(Some(design)) => {
+            let errors = design.validate();
+            if !errors.is_empty() {
+                return api_error::validation_failed(&errors);
+            }
+            let only_screen = match query.screen {
+                Some(number) if number >= 1 && number <= design.screens.len() => Some(number - 1),
+                Some(number) => {
+                    return api_error::error_response(
+                        StatusCode::NOT_FOUND,
+                        &format!(
+                            "design `{id}` has no screen {number}: use 1 to {}",
+                            design.screens.len()
+                        ),
+                        Vec::new(),
+                    );
+                }
+                None => None,
+            };
+            let options = crate::design::render::RenderOptions {
+                is_editable: query.editable && !is_preview,
+                only_screen,
+                ..crate::design::render::RenderOptions::default()
+            };
+            let mut html = crate::design::render::render_design_with(&design, options);
+            if is_preview {
+                html = html.replace("</body>", "<aside style=\"position:fixed;top:8px;right:8px;z-index:2147483647;padding:5px 9px;border-radius:6px;background:#171b25;color:#fff;font:12px sans-serif;pointer-events:none\" aria-label=\"Unverified live draft\">Live draft — unverified</aside></body>");
+            }
+            let mut response = Html(html).into_response();
+            if query.preview {
+                response.headers_mut().insert(
+                    axum::http::header::CACHE_CONTROL,
+                    axum::http::HeaderValue::from_static("no-store"),
+                );
+            }
+            response
+        }
+        Ok(None) => api_error::design_not_found(&id),
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use axum::http::StatusCode;
+    use design_model::{AppWindow, Design};
+
+    use crate::design::core::{DesignStore, check_window_write, is_valid_design_id};
+    use crate::history::HistoryStore;
+    use crate::sessions::SessionStore;
+    use crate::test_support::{send, test_application};
+
+    fn sample_design() -> Design {
+        serde_json::from_str(include_str!("../../../../fixtures/sample-design.json")).unwrap()
+    }
+
+    fn store_with_history(directory: &std::path::Path) -> DesignStore {
+        DesignStore::new(directory.join("designs"))
+            .with_history(HistoryStore::new(directory.join("history")))
+    }
+
+    #[tokio::test]
+    async fn fresh_app_writes_require_shared_geometry_at_the_http_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let application = test_application(&directory);
+        let (status, _) = send(
+            application.clone(),
+            "POST",
+            "/sessions",
+            Some(r#"{"id":"app","request":"An app","options":{"product_kind":"business_app"}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, _) = send(application.clone(), "POST", "/sessions/app/generate", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let body = serde_json::to_string(&sample_design()).unwrap();
+        let (status, _) = send(
+            application.clone(),
+            "PUT",
+            "/designs/app-candidate-1",
+            Some(&body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let (status, _) = send(application, "GET", "/designs/app-candidate-1", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn old_designs_remain_editable_but_existing_window_contracts_cannot_disappear() {
+        let directory = tempfile::tempdir().unwrap();
+        let sessions = SessionStore::new(directory.path().join("sessions"));
+        let legacy = sample_design();
+        assert!(
+            check_window_write(&sessions, "app-candidate-1", Some(&legacy), &legacy)
+                .await
+                .is_ok()
+        );
+        let mut original = legacy.clone();
+        original.app_window = Some(AppWindow {
+            left: 80,
+            top: 60,
+            width: 1280,
+            height: 780,
+        });
+        assert!(
+            check_window_write(&sessions, "app-candidate-1", Some(&original), &legacy)
+                .await
+                .is_err()
+        );
+        assert!(
+            check_window_write(&sessions, "app-candidate-1", Some(&original), &original)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_first_save_writes_no_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_with_history(directory.path());
+        store.save("design", &sample_design()).await.unwrap();
+        assert!(store.history("design").await.unwrap().is_empty());
+        assert!(!directory.path().join("history/design").exists());
+    }
+
+    #[tokio::test]
+    async fn a_save_writes_a_snapshot_of_the_previous_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_with_history(directory.path());
+        let first = sample_design();
+        store.save("design", &first).await.unwrap();
+        let mut second = sample_design();
+        second.title = "Second".to_owned();
+        store.save("design", &second).await.unwrap();
+        let rows = store.history("design").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let snapshot = std::fs::read_to_string(
+            directory
+                .path()
+                .join(format!("history/design/{}.json", rows[0].stamp)),
+        )
+        .unwrap();
+        let kept: Design = serde_json::from_str(&snapshot).unwrap();
+        assert_eq!(kept.title, first.title);
+        assert_eq!(rows[0].size_bytes as usize, snapshot.len());
+    }
+
+    #[tokio::test]
+    async fn a_restore_returns_the_design_to_the_snapshot_and_keeps_the_current_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_with_history(directory.path());
+        store.save("design", &sample_design()).await.unwrap();
+        let mut edited = sample_design();
+        edited.title = "Edited".to_owned();
+        store.save("design", &edited).await.unwrap();
+        let stamp = store.history("design").await.unwrap()[0].stamp.clone();
+        let restored = store.restore("design", &stamp).await.unwrap().unwrap();
+        assert_eq!(restored.title, "Swift Design Overview");
+        assert_eq!(
+            store.load("design").await.unwrap().unwrap().title,
+            "Swift Design Overview"
+        );
+        let rows = store.history("design").await.unwrap();
+        assert_eq!(rows.len(), 2);
+        let newest = std::fs::read_to_string(
+            directory
+                .path()
+                .join(format!("history/design/{}.json", rows[0].stamp)),
+        )
+        .unwrap();
+        assert!(newest.contains("\"Edited\""));
+        assert!(
+            store
+                .restore("design", "2000-01-01T00-00-00Z")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delete_takes_the_history_with_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_with_history(directory.path());
+        store.save("design", &sample_design()).await.unwrap();
+        store.save("design", &sample_design()).await.unwrap();
+        assert_eq!(store.history("design").await.unwrap().len(), 1);
+        assert!(store.delete("design").await.unwrap());
+        assert!(store.history("design").await.unwrap().is_empty());
+        assert!(!directory.path().join("history/design").exists());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_session_takes_its_candidates_and_their_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_with_history(directory.path());
+        for id in [
+            "talk",
+            "talk-candidate-1",
+            "talk-candidate-2",
+            "talking-shop",
+        ] {
+            store.save(id, &sample_design()).await.unwrap();
+            // The second save gives the design a snapshot to leave behind.
+            store.save(id, &sample_design()).await.unwrap();
+        }
+        assert_eq!(store.delete_session("talk").await.unwrap(), 3);
+        let left: Vec<String> = store
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.id)
+            .collect();
+        assert_eq!(left, ["talking-shop"]);
+        assert!(!directory.path().join("history/talk-candidate-1").exists());
+        // A session id that only starts the same way keeps everything.
+        assert!(directory.path().join("history/talking-shop").exists());
+    }
+
+    #[tokio::test]
+    async fn a_rename_moves_the_history_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_with_history(directory.path());
+        store.save("old", &sample_design()).await.unwrap();
+        store.save("old", &sample_design()).await.unwrap();
+        assert!(store.rename("old", "new").await.unwrap());
+        assert!(!directory.path().join("history/old").exists());
+        assert_eq!(store.history("new").await.unwrap().len(), 1);
+        assert!(store.history("old").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_store_without_history_saves_and_restores_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DesignStore::new(directory.path().to_path_buf());
+        store.save("design", &sample_design()).await.unwrap();
+        store.save("design", &sample_design()).await.unwrap();
+        assert!(store.history("design").await.unwrap().is_empty());
+        assert!(
+            store
+                .restore("design", "2000-01-01T00-00-00Z")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn accepts_kebab_case_ids_and_rejects_everything_else() {
+        assert!(is_valid_design_id("overview"));
+        assert!(is_valid_design_id("q3-sales-2026"));
+        assert!(!is_valid_design_id(""));
+        assert!(!is_valid_design_id("render"));
+        assert!(!is_valid_design_id("Bad_Id"));
+        assert!(!is_valid_design_id("../escape"));
+        assert!(!is_valid_design_id(&"a".repeat(65)));
+    }
+
+    #[tokio::test]
+    async fn listing_skips_malformed_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DesignStore::new(directory.path().to_path_buf());
+        let design =
+            serde_json::from_str(include_str!("../../../../fixtures/sample-design.json")).unwrap();
+        store.save("good", &design).await.unwrap();
+        std::fs::write(directory.path().join("broken.json"), "not json").unwrap();
+        let summaries = store.list().await.unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, "good");
+        assert_eq!(summaries[0].screen_count, 3);
+    }
+
+    #[tokio::test]
+    async fn listing_an_absent_directory_returns_empty() {
+        let store = DesignStore::new("/nonexistent/swift-design-test".into());
+        assert!(store.list().await.unwrap().is_empty());
+    }
+}
