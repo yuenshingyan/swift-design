@@ -1,5 +1,14 @@
 use super::*;
 
+/// Model and source inputs shared by continuation chunk writers.
+struct ArtworkChunkRequest<'a> {
+    client: &'a reqwest::Client,
+    context: &'a GenerationContext,
+    preview: &'a Artwork,
+    attachments: &'a Arc<Attachments>,
+    log: &'a LogSink,
+}
+
 impl GenerationEngine {
     /// The artwork store, or the failure an artwork run reports
     /// without one.
@@ -490,14 +499,16 @@ impl GenerationEngine {
         let saver = ArtworkLiveSaver::new(artworks, &self.notifier, artwork_id);
         let board = self
             .write_artwork_chunks(
-                client,
-                context,
-                &artwork,
+                ArtworkChunkRequest {
+                    client,
+                    context,
+                    preview: &artwork,
+                    attachments,
+                    log,
+                },
                 &chunks,
-                attachments,
                 progress,
                 &saver,
-                log,
             )
             .await;
         let mut continued = artwork.clone();
@@ -544,18 +555,20 @@ impl GenerationEngine {
     /// Runs every continuation chunk of `preview` at the same time and
     /// returns the board with what each chunk wrote. A chunk that fails
     /// is logged and leaves its row empty.
-    #[allow(clippy::too_many_arguments)]
     async fn write_artwork_chunks(
         &self,
-        client: &reqwest::Client,
-        context: &GenerationContext,
-        preview: &Artwork,
+        request: ArtworkChunkRequest<'_>,
         chunks: &[ContinueChunk],
-        attachments: &Arc<Attachments>,
         progress: &ShareSink,
         saver: &ArtworkLiveSaver,
-        log: &LogSink,
     ) -> ArtworkChunkBoard {
+        let ArtworkChunkRequest {
+            client,
+            context,
+            preview,
+            attachments,
+            log,
+        } = request;
         let start = preview.covers.len();
         let planned = preview.outline.len();
         let board: ArtworkChunkBoard = Arc::new(std::sync::Mutex::new(
@@ -591,14 +604,16 @@ impl GenerationEngine {
             tasks.spawn(async move {
                 engine
                     .write_artwork_chunk(
-                        &client,
-                        &context,
-                        &preview,
+                        ArtworkChunkRequest {
+                            client: &client,
+                            context: &context,
+                            preview: &preview,
+                            attachments: &attachments,
+                            log: &log,
+                        },
                         (position, chunk),
-                        &attachments,
                         &board,
                         &show,
-                        &log,
                     )
                     .await
             });
@@ -615,18 +630,20 @@ impl GenerationEngine {
 
     /// Writes one continuation chunk into row `position` of the board,
     /// showing the artwork grow while the reply streams.
-    #[allow(clippy::too_many_arguments)]
     async fn write_artwork_chunk(
         &self,
-        client: &reqwest::Client,
-        context: &GenerationContext,
-        preview: &Artwork,
+        request: ArtworkChunkRequest<'_>,
         (position, chunk): (usize, ContinueChunk),
-        attachments: &Attachments,
         board: &ArtworkChunkBoard,
         show: &Arc<dyn Fn() + Send + Sync>,
-        log: &LogSink,
     ) -> Result<(), String> {
+        let ArtworkChunkRequest {
+            client,
+            context,
+            preview,
+            attachments,
+            log,
+        } = request;
         let artwork_json = serde_json::to_string(preview).map_err(|error| error.to_string())?;
         let messages = vec![
             serde_json::json!({ "role": "system", "content": artwork_system_prompt() }),
