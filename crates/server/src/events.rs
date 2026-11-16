@@ -89,7 +89,6 @@ async fn wait_for_change(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::events::ChangeNotifier;
 
@@ -108,10 +107,18 @@ mod tests {
         let notifier = ChangeNotifier::new();
         let mut receiver = notifier.subscribe();
         let waiter = tokio::spawn(async move {
-            receiver.changed().await.unwrap();
+            receiver
+                .changed()
+                .await
+                .expect("test change notification should arrive");
             *receiver.borrow()
         });
         notifier.notify();
-        assert_eq!(waiter.await.unwrap(), 1);
+        assert_eq!(
+            waiter
+                .await
+                .expect("test waiter task should complete without panicking"),
+            1
+        );
     }
 }

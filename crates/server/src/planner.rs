@@ -447,7 +447,6 @@ pub(crate) fn planner_input(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::sessions::RunOptions;
@@ -465,7 +464,7 @@ mod tests {
                     "error": if index == 6 { None } else { Some(format!("rejected-{index}")) },
                     "artifacts": if index == 6 { vec!["candidate-6"] } else { vec![] }
                 }))
-                .unwrap()
+                .expect("test JSON value should deserialize")
             })
             .collect();
         let note = recent_run_note(&runs);
@@ -482,7 +481,13 @@ mod tests {
         assert!(note.contains("rejected-5"));
         assert!(note.contains("succeeded"));
         assert!(note.contains("candidate-6"));
-        assert!(note.find("100-2").unwrap() < note.find("100-6").unwrap());
+        assert!(
+            note.find("100-2")
+                .expect("fixture should contain the expected match")
+                < note
+                    .find("100-6")
+                    .expect("fixture should contain the expected match")
+        );
     }
 
     fn exchange(number: usize) -> Vec<ChatMessage> {
@@ -557,7 +562,9 @@ mod tests {
             r#"Sure. {"reply":"Two things.","questions":[{"question":"Who is it for?","options":["Developers","Buyers"]},{"question":"","options":[]}],"generate":false,"edit":false}"#,
         );
         assert_eq!(plan.reply, "Two things.");
-        let set = plan.question_set.unwrap();
+        let set = plan
+            .question_set
+            .expect("test session should contain a question set");
         assert_eq!(set.questions.len(), 1);
         assert_eq!(set.questions[0].id, "q1");
         assert_eq!(set.questions[0].label, "Who is it for?");
@@ -574,7 +581,10 @@ mod tests {
         let plan = parse_plan(
             r#"{"questions":[{"question":"What should it cover?","options":["HIG","SwiftUI"],"multi":true}]}"#,
         );
-        let question = &plan.question_set.unwrap().questions[0];
+        let question = &plan
+            .question_set
+            .expect("test session should contain a question set")
+            .questions[0];
         assert_eq!(question.kind, QuestionKind::MultiSelect);
         // `Other` belongs to every select, not only the single-pick one.
         assert!(question.allow_other);
@@ -583,7 +593,10 @@ mod tests {
     #[test]
     fn a_question_without_multi_still_takes_one_option() {
         let plan = parse_plan(r#"{"questions":[{"question":"Who for?","options":["A","B"]}]}"#);
-        let question = &plan.question_set.unwrap().questions[0];
+        let question = &plan
+            .question_set
+            .expect("test session should contain a question set")
+            .questions[0];
         assert_eq!(question.kind, QuestionKind::SingleSelect);
         assert!(question.allow_other);
     }
@@ -599,7 +612,9 @@ mod tests {
     #[test]
     fn a_question_without_options_asks_for_text() {
         let plan = parse_plan(r#"{"questions":[{"question":"What is the product name?"}]}"#);
-        let set = plan.question_set.unwrap();
+        let set = plan
+            .question_set
+            .expect("test session should contain a question set");
         assert_eq!(set.questions[0].kind, QuestionKind::ShortText);
         assert!(!set.questions[0].allow_other);
     }
@@ -621,7 +636,10 @@ mod tests {
             r#"{"questions":[{"question":"a"},{"question":"b"},{"question":"c"},{"question":"d"}]}"#,
         );
         assert_eq!(
-            plan.question_set.unwrap().questions.len(),
+            plan.question_set
+                .expect("test session should contain a question set")
+                .questions
+                .len(),
             QUESTIONS_PER_TURN_LIMIT
         );
     }
@@ -630,7 +648,7 @@ mod tests {
     fn relaxing_a_set_makes_it_skippable() {
         let mut set = parse_plan(r#"{"questions":[{"question":"Who?","options":["A"]}]}"#)
             .question_set
-            .unwrap();
+            .expect("test session should contain a question set");
         set.can_proceed_with_assumptions = false;
         set.questions[0].required = true;
         relax_question_set(&mut set);

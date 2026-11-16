@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use design_model::transition::MAX_TRANSITION_MS;
 use design_model::{Design, Transition, TransitionAxis, TransitionEffect};
 use sha2::Digest;
@@ -12,7 +10,8 @@ use crate::render::{
 };
 
 fn sample_design() -> Design {
-    serde_json::from_str(include_str!("../../../../../fixtures/sample-design.json")).unwrap()
+    serde_json::from_str(include_str!("../../../../../fixtures/sample-design.json"))
+        .expect("test JSON should deserialize")
 }
 
 #[test]
@@ -69,8 +68,13 @@ fn theme_variables_fonts_and_scaling_are_present() {
 #[test]
 fn the_csp_hash_matches_the_emitted_script() {
     let html = render_design(&sample_design(), true);
-    let start = html.find("<script>").unwrap() + "<script>".len();
-    let end = html.find("</script>").unwrap();
+    let start = html
+        .find("<script>")
+        .expect("fixture should contain the expected match")
+        + "<script>".len();
+    let end = html
+        .find("</script>")
+        .expect("fixture should contain the expected match");
     let script = &html[start..end];
     let hash = base64_encode(&sha2::Sha256::digest(script.as_bytes()));
     assert!(html.contains(&format!("script-src 'sha256-{hash}'")));
@@ -235,8 +239,12 @@ fn app_window_script_stays_design_owned_and_runs_before_fit() {
             .contains("if (!windowElement.hasAttribute('data-swift-design-window-applied'))")
     );
     let html = render_design(&sample_design(), false);
-    let script_start = html.find(DESIGN_WINDOW_SCRIPT).unwrap();
-    let fit_start = html.find(FIT_SCRIPT).unwrap();
+    let script_start = html
+        .find(DESIGN_WINDOW_SCRIPT)
+        .expect("fixture should contain the expected match");
+    let fit_start = html
+        .find(FIT_SCRIPT)
+        .expect("fixture should contain the expected match");
     assert!(script_start < fit_start);
 }
 
@@ -297,7 +305,7 @@ async fn chat_wraps_long_messages_without_horizontal_scrolling() {
                 design_model::Viewport::default(),
             )
             .await
-            .unwrap();
+            .expect("Chrome should produce the rendered fixture DOM");
             assert!(
                 dom.contains("data-chat-fits=\"true\""),
                 "{class} at {width}px overflows"

@@ -63,7 +63,6 @@ impl Design {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::test_support::sample_design;
     use crate::{AppWindow, Design, Transition, TransitionAxis, TransitionEffect, Viewport};
@@ -71,17 +70,22 @@ mod tests {
     #[test]
     fn design_round_trips_through_json() {
         let design = sample_design();
-        let json = serde_json::to_string(&design).unwrap();
-        let restored: Design = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&design).expect("test value should serialize to JSON");
+        let restored: Design = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(design, restored);
     }
 
     #[test]
     fn a_design_without_a_viewport_loads_with_the_default() {
-        let mut value = serde_json::to_value(sample_design()).unwrap();
+        let mut value =
+            serde_json::to_value(sample_design()).expect("test value should convert to JSON");
         assert_eq!(value["viewport"]["width"], 1440);
-        value.as_object_mut().unwrap().remove("viewport");
-        let design: Design = serde_json::from_value(value).unwrap();
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("viewport");
+        let design: Design =
+            serde_json::from_value(value).expect("test JSON value should deserialize");
         assert_eq!(design.viewport, Viewport::default());
     }
 
@@ -93,7 +97,8 @@ mod tests {
 
     #[test]
     fn rejects_unknown_fields() {
-        let mut value = serde_json::to_value(sample_design()).unwrap();
+        let mut value =
+            serde_json::to_value(sample_design()).expect("test value should convert to JSON");
         value["extra"] = serde_json::json!(1);
         assert!(serde_json::from_value::<Design>(value).is_err());
     }
@@ -102,11 +107,15 @@ mod tests {
     fn an_outline_longer_than_the_screens_marks_a_preview() {
         let mut design = sample_design();
         assert!(!design.is_preview());
-        assert!(!serde_json::to_string(&design).unwrap().contains("outline"));
+        assert!(
+            !serde_json::to_string(&design)
+                .expect("test value should serialize to JSON")
+                .contains("outline")
+        );
         design.outline = vec!["Sample".to_owned(), "Next".to_owned()];
         assert!(design.is_preview());
-        let json = serde_json::to_string(&design).unwrap();
-        let restored: Design = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&design).expect("test value should serialize to JSON");
+        let restored: Design = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(restored.outline, design.outline);
         design.outline.truncate(1);
         assert!(!design.is_preview());
@@ -117,7 +126,7 @@ mod tests {
         let mut design = sample_design();
         assert!(
             !serde_json::to_string(&design)
-                .unwrap()
+                .expect("test value should serialize to JSON")
                 .contains("app_window")
         );
         design.app_window = Some(AppWindow {
@@ -126,16 +135,21 @@ mod tests {
             width: 800,
             height: 600,
         });
-        let json = serde_json::to_string(&design).unwrap();
-        let restored: Design = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&design).expect("test value should serialize to JSON");
+        let restored: Design = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(restored.app_window, design.app_window);
     }
 
     #[test]
     fn old_json_loads_without_app_window() {
-        let mut value = serde_json::to_value(sample_design()).unwrap();
-        value.as_object_mut().unwrap().remove("app_window");
-        let design: Design = serde_json::from_value(value).unwrap();
+        let mut value =
+            serde_json::to_value(sample_design()).expect("test value should convert to JSON");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("app_window");
+        let design: Design =
+            serde_json::from_value(value).expect("test JSON value should deserialize");
         assert_eq!(design.app_window, None);
     }
 
@@ -144,7 +158,7 @@ mod tests {
         let mut design = sample_design();
         assert!(
             !serde_json::to_string(&design)
-                .unwrap()
+                .expect("test value should serialize to JSON")
                 .contains("transition")
         );
         design.transition = Some(Transition {
@@ -152,8 +166,8 @@ mod tests {
             axis: TransitionAxis::Horizontal,
             duration_ms: 300,
         });
-        let json = serde_json::to_string(&design).unwrap();
-        let restored: Design = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&design).expect("test value should serialize to JSON");
+        let restored: Design = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(restored.transition, design.transition);
     }
 }

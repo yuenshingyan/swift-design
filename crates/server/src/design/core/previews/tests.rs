@@ -13,37 +13,52 @@ fn sample() -> Design {
     serde_json::from_str(include_str!(
         "../../../../../../fixtures/sample-design.json"
     ))
-    .unwrap()
+    .expect("test JSON should deserialize")
 }
 
 async fn body(response: Response) -> String {
     String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
             .await
-            .unwrap()
+            .expect("test response body should be readable as bytes")
             .to_vec(),
     )
-    .unwrap()
+    .expect("test bytes should contain valid UTF-8")
 }
 
 #[tokio::test]
 async fn live_preview_never_changes_saved_design_history_or_default_render() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = DesignStore::new(directory.path().join("designs"))
         .with_history(HistoryStore::new(directory.path().join("history")));
     let original = sample();
-    store.save("demo", &original).await.unwrap();
+    store
+        .save("demo", &original)
+        .await
+        .expect("test data should be saved successfully");
     let notifier = ChangeNotifier::new();
     let preview = store.start_preview("demo", &notifier, None);
     let mut draft = original.clone();
     draft.title = "Writing a temporary design".into();
     preview.show(&draft);
-    assert_eq!(store.load("demo").await.unwrap(), Some(original.clone()));
-    assert!(store.history("demo").await.unwrap().is_empty());
+    assert_eq!(
+        store
+            .load("demo")
+            .await
+            .expect("test record should load successfully"),
+        Some(original.clone())
+    );
+    assert!(
+        store
+            .history("demo")
+            .await
+            .expect("test history should be listed")
+            .is_empty()
+    );
     let saved: Design = serde_json::from_str(
         &body(get_design(State(store.clone()), Path("demo".into())).await).await,
     )
-    .unwrap();
+    .expect("test JSON should deserialize");
     assert_eq!(saved, original);
     let saved_render = body(
         render_stored_design(
@@ -75,16 +90,23 @@ async fn live_preview_never_changes_saved_design_history_or_default_render() {
     assert!(rendered.contains("Live draft — unverified"));
     assert!(!rendered.contains("swift-design-html"));
     let listed: Vec<serde_json::Value> =
-        serde_json::from_str(&body(list_designs(State(store.clone())).await).await).unwrap();
+        serde_json::from_str(&body(list_designs(State(store.clone())).await).await)
+            .expect("test JSON should deserialize");
     assert_eq!(listed[0]["title"], draft.title);
     drop(preview);
     assert!(store.preview("demo").is_none());
-    assert_eq!(store.load("demo").await.unwrap(), Some(original));
+    assert_eq!(
+        store
+            .load("demo")
+            .await
+            .expect("test record should load successfully"),
+        Some(original)
+    );
 }
 
 #[tokio::test]
 async fn new_draft_is_listed_without_creating_a_saved_file_and_disappears_on_drop() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = DesignStore::new(directory.path().join("not-created"));
     let preview = store.start_preview("demo", &ChangeNotifier::new(), None);
     preview.show(&sample());
@@ -97,11 +119,13 @@ async fn new_draft_is_listed_without_creating_a_saved_file_and_disappears_on_dro
     let response = get_preview(State(store.clone()), Path("demo".into())).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["cache-control"], "no-store");
-    let value: serde_json::Value = serde_json::from_str(&body(response).await).unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(&body(response).await).expect("test JSON should deserialize");
     assert_eq!(value["design"]["title"], sample().title);
     assert!(!directory.path().join("not-created").exists());
     let listed: Vec<serde_json::Value> =
-        serde_json::from_str(&body(list_designs(State(store.clone())).await).await).unwrap();
+        serde_json::from_str(&body(list_designs(State(store.clone())).await).await)
+            .expect("test JSON should deserialize");
     assert_eq!(listed.len(), 1);
     let clone = preview.clone();
     drop(preview);
@@ -128,7 +152,13 @@ fn stale_owner_cannot_publish_or_clear_a_newer_preview() {
     new.show(&newer);
     old.show(&sample());
     drop(old);
-    assert_eq!(store.preview("demo").unwrap().design, newer);
+    assert_eq!(
+        store
+            .preview("demo")
+            .expect("active test run should have a preview")
+            .design,
+        newer
+    );
     assert_eq!(*changes.borrow(), 3);
     new.show(&newer);
     assert_eq!(*changes.borrow(), 3);
@@ -153,11 +183,23 @@ fn unsafe_or_out_of_scope_updates_leave_the_current_preview_unchanged() {
     let mut outside = original.clone();
     outside.screens[1].name = "Unselected change".into();
     preview.show(&outside);
-    assert_eq!(store.preview("demo").unwrap().design, original);
+    assert_eq!(
+        store
+            .preview("demo")
+            .expect("active test run should have a preview")
+            .design,
+        original
+    );
     let mut allowed = original.clone();
     allowed.screens[0].html = "<h1>Allowed edit</h1>".into();
     preview.show(&allowed);
-    assert_eq!(store.preview("demo").unwrap().design, allowed);
+    assert_eq!(
+        store
+            .preview("demo")
+            .expect("active test run should have a preview")
+            .design,
+        allowed
+    );
 }
 
 #[tokio::test]
@@ -168,14 +210,22 @@ async fn cancelling_a_run_drops_its_preview() {
     let task = tokio::spawn(async move {
         let preview = running_store.start_preview("demo", &ChangeNotifier::new(), None);
         preview.show(&sample());
-        ready.send(()).unwrap();
+        ready
+            .send(())
+            .expect("test request should be sent successfully");
         std::future::pending::<()>().await;
         drop(preview);
     });
-    waiting.await.unwrap();
+    waiting
+        .await
+        .expect("test waiting task should complete without panicking");
     assert!(store.preview("demo").is_some());
     task.abort();
-    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(
+        task.await
+            .expect_err("cancelled preview task should return a cancellation error")
+            .is_cancelled()
+    );
     assert!(store.preview("demo").is_none());
 }
 
@@ -185,6 +235,10 @@ fn preview_parsing_is_throttled() {
     let preview = store.start_preview("demo", &ChangeNotifier::new(), None);
     assert!(preview.should_update());
     assert!(!preview.should_update());
-    *preview.0.last_attempt.lock().unwrap() = Instant::now() - Duration::from_millis(201);
+    *preview
+        .0
+        .last_attempt
+        .lock()
+        .expect("test mutex should not be poisoned") = Instant::now() - Duration::from_millis(201);
     assert!(preview.should_update());
 }

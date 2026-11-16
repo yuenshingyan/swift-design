@@ -2,12 +2,13 @@ use super::*;
 
 #[tokio::test]
 async fn a_campaign_session_lists_its_campaigns_and_chooses_from_the_campaign_store() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_campaign_session(&application, "launch").await;
     let (status, body) = send(application.clone(), "GET", "/sessions/launch", None).await;
     assert_eq!(status, StatusCode::OK);
-    let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let view: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
     assert_eq!(view["session"]["artifact_kind"], "campaign");
     let (status, _) = send(
         application.clone(),
@@ -18,12 +19,31 @@ async fn a_campaign_session_lists_its_campaigns_and_chooses_from_the_campaign_st
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (_, body) = send(application.clone(), "GET", "/sessions/launch", None).await;
-    let view: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(view["campaigns"].as_array().unwrap().len(), 1);
+    let view: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
+    assert_eq!(
+        view["campaigns"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        1
+    );
     assert_eq!(view["campaigns"][0]["size"], "medium_rectangle");
     assert_eq!(view["campaigns"][0]["ad_count"], 2);
-    assert_eq!(view["mailings"].as_array().unwrap().len(), 0);
-    assert_eq!(view["designs"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        view["mailings"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        0
+    );
+    assert_eq!(
+        view["designs"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        0
+    );
     let (status, body) = send(application.clone(), "GET", "/candidates/launch", None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Choose this campaign"));
@@ -44,7 +64,7 @@ async fn a_campaign_session_lists_its_campaigns_and_chooses_from_the_campaign_st
 
 #[tokio::test]
 async fn renders_a_valid_campaign_to_html() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (status, body) = send(
         test_application(&directory),
         "POST",
@@ -70,7 +90,7 @@ async fn renders_a_valid_campaign_to_html() {
 
 #[tokio::test]
 async fn saving_then_fetching_a_campaign_round_trips() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "launch").await;
     let (status, _) = send(
@@ -89,8 +109,15 @@ async fn saving_then_fetching_a_campaign_round_trips() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let campaign: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(campaign["ads"].as_array().unwrap().len(), 2);
+    let campaign: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
+    assert_eq!(
+        campaign["ads"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        2
+    );
     let (status, body) = send(application.clone(), "GET", "/campaigns", None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("\"ad_count\":2"));

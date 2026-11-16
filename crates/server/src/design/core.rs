@@ -733,7 +733,6 @@ async fn render_stored_design(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use axum::http::StatusCode;
     use design_model::{AppWindow, Design};
@@ -744,7 +743,8 @@ mod tests {
     use crate::test_support::{send, test_application};
 
     fn sample_design() -> Design {
-        serde_json::from_str(include_str!("../../../../fixtures/sample-design.json")).unwrap()
+        serde_json::from_str(include_str!("../../../../fixtures/sample-design.json"))
+            .expect("test JSON should deserialize")
     }
 
     fn store_with_history(directory: &std::path::Path) -> DesignStore {
@@ -754,7 +754,7 @@ mod tests {
 
     #[tokio::test]
     async fn fresh_app_writes_require_shared_geometry_at_the_http_boundary() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let application = test_application(&directory);
         let (status, _) = send(
             application.clone(),
@@ -766,7 +766,8 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED);
         let (status, _) = send(application.clone(), "POST", "/sessions/app/generate", None).await;
         assert_eq!(status, StatusCode::OK);
-        let body = serde_json::to_string(&sample_design()).unwrap();
+        let body =
+            serde_json::to_string(&sample_design()).expect("test value should serialize to JSON");
         let (status, _) = send(
             application.clone(),
             "PUT",
@@ -781,7 +782,7 @@ mod tests {
 
     #[tokio::test]
     async fn old_designs_remain_editable_but_existing_window_contracts_cannot_disappear() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let sessions = SessionStore::new(directory.path().join("sessions"));
         let legacy = sample_design();
         assert!(
@@ -810,83 +811,148 @@ mod tests {
 
     #[tokio::test]
     async fn the_first_save_writes_no_snapshot() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = store_with_history(directory.path());
-        store.save("design", &sample_design()).await.unwrap();
-        assert!(store.history("design").await.unwrap().is_empty());
+        store
+            .save("design", &sample_design())
+            .await
+            .expect("test data should be saved successfully");
+        assert!(
+            store
+                .history("design")
+                .await
+                .expect("test history should be listed")
+                .is_empty()
+        );
         assert!(!directory.path().join("history/design").exists());
     }
 
     #[tokio::test]
     async fn a_save_writes_a_snapshot_of_the_previous_content() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = store_with_history(directory.path());
         let first = sample_design();
-        store.save("design", &first).await.unwrap();
+        store
+            .save("design", &first)
+            .await
+            .expect("test data should be saved successfully");
         let mut second = sample_design();
         second.title = "Second".to_owned();
-        store.save("design", &second).await.unwrap();
-        let rows = store.history("design").await.unwrap();
+        store
+            .save("design", &second)
+            .await
+            .expect("test data should be saved successfully");
+        let rows = store
+            .history("design")
+            .await
+            .expect("test history should be listed");
         assert_eq!(rows.len(), 1);
         let snapshot = std::fs::read_to_string(
             directory
                 .path()
                 .join(format!("history/design/{}.json", rows[0].stamp)),
         )
-        .unwrap();
-        let kept: Design = serde_json::from_str(&snapshot).unwrap();
+        .expect("test content should be readable as text");
+        let kept: Design = serde_json::from_str(&snapshot).expect("test JSON should deserialize");
         assert_eq!(kept.title, first.title);
         assert_eq!(rows[0].size_bytes as usize, snapshot.len());
     }
 
     #[tokio::test]
     async fn a_restore_returns_the_design_to_the_snapshot_and_keeps_the_current_one() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = store_with_history(directory.path());
-        store.save("design", &sample_design()).await.unwrap();
+        store
+            .save("design", &sample_design())
+            .await
+            .expect("test data should be saved successfully");
         let mut edited = sample_design();
         edited.title = "Edited".to_owned();
-        store.save("design", &edited).await.unwrap();
-        let stamp = store.history("design").await.unwrap()[0].stamp.clone();
-        let restored = store.restore("design", &stamp).await.unwrap().unwrap();
+        store
+            .save("design", &edited)
+            .await
+            .expect("test data should be saved successfully");
+        let stamp = store
+            .history("design")
+            .await
+            .expect("test history should be listed")[0]
+            .stamp
+            .clone();
+        let restored = store
+            .restore("design", &stamp)
+            .await
+            .expect("test snapshot should restore successfully")
+            .expect("restored test snapshot should exist");
         assert_eq!(restored.title, "Swift Design Overview");
         assert_eq!(
-            store.load("design").await.unwrap().unwrap().title,
+            store
+                .load("design")
+                .await
+                .expect("test record should load successfully")
+                .expect("saved test record should exist")
+                .title,
             "Swift Design Overview"
         );
-        let rows = store.history("design").await.unwrap();
+        let rows = store
+            .history("design")
+            .await
+            .expect("test history should be listed");
         assert_eq!(rows.len(), 2);
         let newest = std::fs::read_to_string(
             directory
                 .path()
                 .join(format!("history/design/{}.json", rows[0].stamp)),
         )
-        .unwrap();
+        .expect("test content should be readable as text");
         assert!(newest.contains("\"Edited\""));
         assert!(
             store
                 .restore("design", "2000-01-01T00-00-00Z")
                 .await
-                .unwrap()
+                .expect("test snapshot should restore successfully")
                 .is_none()
         );
     }
 
     #[tokio::test]
     async fn a_delete_takes_the_history_with_it() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = store_with_history(directory.path());
-        store.save("design", &sample_design()).await.unwrap();
-        store.save("design", &sample_design()).await.unwrap();
-        assert_eq!(store.history("design").await.unwrap().len(), 1);
-        assert!(store.delete("design").await.unwrap());
-        assert!(store.history("design").await.unwrap().is_empty());
+        store
+            .save("design", &sample_design())
+            .await
+            .expect("test data should be saved successfully");
+        store
+            .save("design", &sample_design())
+            .await
+            .expect("test data should be saved successfully");
+        assert_eq!(
+            store
+                .history("design")
+                .await
+                .expect("test history should be listed")
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .delete("design")
+                .await
+                .expect("test record should be deleted")
+        );
+        assert!(
+            store
+                .history("design")
+                .await
+                .expect("test history should be listed")
+                .is_empty()
+        );
         assert!(!directory.path().join("history/design").exists());
     }
 
     #[tokio::test]
     async fn deleting_a_session_takes_its_candidates_and_their_history() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = store_with_history(directory.path());
         for id in [
             "talk",
@@ -894,15 +960,27 @@ mod tests {
             "talk-candidate-2",
             "talking-shop",
         ] {
-            store.save(id, &sample_design()).await.unwrap();
+            store
+                .save(id, &sample_design())
+                .await
+                .expect("test data should be saved successfully");
             // The second save gives the design a snapshot to leave behind.
-            store.save(id, &sample_design()).await.unwrap();
+            store
+                .save(id, &sample_design())
+                .await
+                .expect("test data should be saved successfully");
         }
-        assert_eq!(store.delete_session("talk").await.unwrap(), 3);
+        assert_eq!(
+            store
+                .delete_session("talk")
+                .await
+                .expect("test session should be deleted"),
+            3
+        );
         let left: Vec<String> = store
             .list()
             .await
-            .unwrap()
+            .expect("test records should be listed")
             .into_iter()
             .map(|summary| summary.id)
             .collect();
@@ -914,28 +992,64 @@ mod tests {
 
     #[tokio::test]
     async fn a_rename_moves_the_history_directory() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = store_with_history(directory.path());
-        store.save("old", &sample_design()).await.unwrap();
-        store.save("old", &sample_design()).await.unwrap();
-        assert!(store.rename("old", "new").await.unwrap());
+        store
+            .save("old", &sample_design())
+            .await
+            .expect("test data should be saved successfully");
+        store
+            .save("old", &sample_design())
+            .await
+            .expect("test data should be saved successfully");
+        assert!(
+            store
+                .rename("old", "new")
+                .await
+                .expect("test artifact should be renamed")
+        );
         assert!(!directory.path().join("history/old").exists());
-        assert_eq!(store.history("new").await.unwrap().len(), 1);
-        assert!(store.history("old").await.unwrap().is_empty());
+        assert_eq!(
+            store
+                .history("new")
+                .await
+                .expect("test history should be listed")
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .history("old")
+                .await
+                .expect("test history should be listed")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
     async fn a_store_without_history_saves_and_restores_nothing() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = DesignStore::new(directory.path().to_path_buf());
-        store.save("design", &sample_design()).await.unwrap();
-        store.save("design", &sample_design()).await.unwrap();
-        assert!(store.history("design").await.unwrap().is_empty());
+        store
+            .save("design", &sample_design())
+            .await
+            .expect("test data should be saved successfully");
+        store
+            .save("design", &sample_design())
+            .await
+            .expect("test data should be saved successfully");
+        assert!(
+            store
+                .history("design")
+                .await
+                .expect("test history should be listed")
+                .is_empty()
+        );
         assert!(
             store
                 .restore("design", "2000-01-01T00-00-00Z")
                 .await
-                .unwrap()
+                .expect("test snapshot should restore successfully")
                 .is_none()
         );
     }
@@ -953,13 +1067,17 @@ mod tests {
 
     #[tokio::test]
     async fn listing_skips_malformed_files() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = DesignStore::new(directory.path().to_path_buf());
-        let design =
-            serde_json::from_str(include_str!("../../../../fixtures/sample-design.json")).unwrap();
-        store.save("good", &design).await.unwrap();
-        std::fs::write(directory.path().join("broken.json"), "not json").unwrap();
-        let summaries = store.list().await.unwrap();
+        let design = serde_json::from_str(include_str!("../../../../fixtures/sample-design.json"))
+            .expect("test JSON should deserialize");
+        store
+            .save("good", &design)
+            .await
+            .expect("test data should be saved successfully");
+        std::fs::write(directory.path().join("broken.json"), "not json")
+            .expect("test fixture should be written successfully");
+        let summaries = store.list().await.expect("test records should be listed");
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].id, "good");
         assert_eq!(summaries[0].screen_count, 3);
@@ -968,6 +1086,12 @@ mod tests {
     #[tokio::test]
     async fn listing_an_absent_directory_returns_empty() {
         let store = DesignStore::new("/nonexistent/swift-design-test".into());
-        assert!(store.list().await.unwrap().is_empty());
+        assert!(
+            store
+                .list()
+                .await
+                .expect("test records should be listed")
+                .is_empty()
+        );
     }
 }

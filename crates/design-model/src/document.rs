@@ -110,7 +110,6 @@ impl Document {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::test_support::sample_document;
     use crate::{A4_VIEWPORT, Document, LETTER_VIEWPORT, Paper};
@@ -118,32 +117,44 @@ mod tests {
     #[test]
     fn document_round_trips_through_json() {
         let document = sample_document();
-        let json = serde_json::to_string(&document).unwrap();
+        let json = serde_json::to_string(&document).expect("test value should serialize to JSON");
         assert!(json.contains("\"pages\""));
         assert!(json.contains("\"paper\":\"a4\""));
         assert!(!json.contains("\"viewport\""));
-        let restored: Document = serde_json::from_str(&json).unwrap();
+        let restored: Document = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(document, restored);
     }
 
     #[test]
     fn rejects_unknown_document_fields() {
-        let mut value = serde_json::to_value(sample_document()).unwrap();
+        let mut value =
+            serde_json::to_value(sample_document()).expect("test value should convert to JSON");
         value["extra"] = serde_json::json!(1);
         assert!(serde_json::from_value::<Document>(value.clone()).is_err());
-        value.as_object_mut().unwrap().remove("extra");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("extra");
         value["viewport"] = serde_json::json!({"width": 794, "height": 1123});
         assert!(serde_json::from_value::<Document>(value.clone()).is_err());
-        value.as_object_mut().unwrap().remove("viewport");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("viewport");
         value["transition"] = serde_json::json!({"effect": "fade"});
         assert!(serde_json::from_value::<Document>(value).is_err());
     }
 
     #[test]
     fn the_paper_defaults_to_a4() {
-        let mut value = serde_json::to_value(sample_document()).unwrap();
-        value.as_object_mut().unwrap().remove("paper");
-        let restored: Document = serde_json::from_value(value).unwrap();
+        let mut value =
+            serde_json::to_value(sample_document()).expect("test value should convert to JSON");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("paper");
+        let restored: Document =
+            serde_json::from_value(value).expect("test JSON value should deserialize");
         assert_eq!(restored.paper, Paper::A4);
         assert_eq!(restored.viewport(), A4_VIEWPORT);
     }
@@ -154,13 +165,13 @@ mod tests {
         assert!(!document.is_preview());
         assert!(
             !serde_json::to_string(&document)
-                .unwrap()
+                .expect("test value should serialize to JSON")
                 .contains("outline")
         );
         document.outline = vec!["Sample".to_owned(), "Next".to_owned()];
         assert!(document.is_preview());
-        let json = serde_json::to_string(&document).unwrap();
-        let restored: Document = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&document).expect("test value should serialize to JSON");
+        let restored: Document = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(restored.outline, document.outline);
         document.outline.truncate(1);
         assert!(!document.is_preview());
@@ -173,7 +184,7 @@ mod tests {
             assert!(viewport.is_valid());
             assert!(viewport.width < viewport.height, "{}", paper.label());
             assert_eq!(Paper::from_name(paper.as_str()), Some(paper));
-            let json = serde_json::to_string(&paper).unwrap();
+            let json = serde_json::to_string(&paper).expect("test value should serialize to JSON");
             assert_eq!(json, format!("\"{}\"", paper.as_str()));
         }
         assert_eq!(A4_VIEWPORT.aspect_ratio_css(), "794 / 1123");

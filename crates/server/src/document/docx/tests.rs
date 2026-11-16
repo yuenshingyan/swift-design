@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use std::io::Read;
 
 use design_model::Paper;
@@ -255,10 +253,17 @@ fn the_package_unzips_with_every_part() {
             bytes: b"PNGDATA".to_vec(),
         }],
     };
-    let bytes = build_package(&input).unwrap();
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let bytes = build_package(&input).expect("test Office package should be built");
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .expect("test bytes should form a readable ZIP archive");
     let mut names: Vec<String> = (0..archive.len())
-        .map(|index| archive.by_index(index).unwrap().name().to_owned())
+        .map(|index| {
+            archive
+                .by_index(index)
+                .expect("ZIP should contain the entry at the expected index")
+                .name()
+                .to_owned()
+        })
         .collect();
     names.sort();
     assert_eq!(
@@ -276,38 +281,44 @@ fn the_package_unzips_with_every_part() {
     let mut body = String::new();
     archive
         .by_name("word/document.xml")
-        .unwrap()
+        .expect("ZIP should contain the named entry")
         .read_to_string(&mut body)
-        .unwrap();
+        .expect("test content should be readable as text");
     assert!(body.starts_with(XML_HEADER));
     assert!(body.contains("<w:pgSz w:w=\"11906\" w:h=\"16838\"/>"));
     assert_eq!(body.matches("<w:br w:type=\"page\"/>").count(), 2);
     let mut core = String::new();
     archive
         .by_name("docProps/core.xml")
-        .unwrap()
+        .expect("ZIP should contain the named entry")
         .read_to_string(&mut core)
-        .unwrap();
+        .expect("test content should be readable as text");
     assert!(core.contains("<dc:title>Swift Design Quarterly Report</dc:title>"));
 }
 
 #[tokio::test]
 async fn the_export_reads_pictures_from_the_uploads() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = UploadStore::new(directory.path().to_path_buf());
-    store.save("report", "chart.png", b"PNGDATA").await.unwrap();
+    store
+        .save("report", "chart.png", b"PNGDATA")
+        .await
+        .expect("test data should be saved successfully");
     let mut document = sample_document();
     document.pages[0].html =
         "<h1>T</h1><img src='/uploads/chart.png'><img src='/uploads/missing.png'>".to_owned();
-    let bytes = export_document(&document, &store).await.unwrap();
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let bytes = export_document(&document, &store)
+        .await
+        .expect("test document should export successfully");
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .expect("test bytes should form a readable ZIP archive");
     assert!(archive.by_name("word/media/image1.png").is_ok());
     assert!(archive.by_name("word/media/image2.png").is_err());
     let mut body = String::new();
     archive
         .by_name("word/document.xml")
-        .unwrap()
+        .expect("ZIP should contain the named entry")
         .read_to_string(&mut body)
-        .unwrap();
+        .expect("test content should be readable as text");
     assert_eq!(body.matches("<w:drawing>").count(), 1);
 }

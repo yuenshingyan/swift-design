@@ -2,12 +2,13 @@ use super::*;
 
 #[tokio::test]
 async fn a_print_session_lists_its_prints_and_chooses_from_the_print_store() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_print_session(&application, "poster").await;
     let (status, body) = send(application.clone(), "GET", "/sessions/poster", None).await;
     assert_eq!(status, StatusCode::OK);
-    let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let view: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
     assert_eq!(view["session"]["artifact_kind"], "print");
     let (status, _) = send(
         application.clone(),
@@ -18,13 +19,32 @@ async fn a_print_session_lists_its_prints_and_chooses_from_the_print_store() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (_, body) = send(application.clone(), "GET", "/sessions/poster", None).await;
-    let view: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(view["prints"].as_array().unwrap().len(), 1);
+    let view: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
+    assert_eq!(
+        view["prints"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        1
+    );
     assert_eq!(view["prints"][0]["size"], "a4");
     assert_eq!(view["prints"][0]["orientation"], "portrait");
     assert_eq!(view["prints"][0]["sheet_count"], 2);
-    assert_eq!(view["socials"].as_array().unwrap().len(), 0);
-    assert_eq!(view["designs"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        view["socials"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        0
+    );
+    assert_eq!(
+        view["designs"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        0
+    );
     let (status, body) = send(application.clone(), "GET", "/candidates/poster", None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Choose this print piece"));
@@ -45,7 +65,7 @@ async fn a_print_session_lists_its_prints_and_chooses_from_the_print_store() {
 
 #[tokio::test]
 async fn renders_a_valid_print_to_html() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (status, body) = send(
         test_application(&directory),
         "POST",
@@ -71,7 +91,7 @@ async fn renders_a_valid_print_to_html() {
 
 #[tokio::test]
 async fn saving_then_fetching_a_print_round_trips() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "poster").await;
     let (status, _) = send(
@@ -90,8 +110,15 @@ async fn saving_then_fetching_a_print_round_trips() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let print: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(print["sheets"].as_array().unwrap().len(), 2);
+    let print: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
+    assert_eq!(
+        print["sheets"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        2
+    );
     let (status, body) = send(application.clone(), "GET", "/prints", None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("\"sheet_count\":2"));

@@ -1,11 +1,10 @@
-#![allow(clippy::unwrap_used)]
-
 use super::*;
 
 use crate::test_support::{sample_deck, sample_document, sample_social, send, test_application};
 
 fn sample_design() -> design_model::Design {
-    serde_json::from_str(include_str!("../../../../fixtures/sample-design.json")).unwrap()
+    serde_json::from_str(include_str!("../../../../fixtures/sample-design.json"))
+        .expect("test JSON should deserialize")
 }
 
 #[test]
@@ -46,7 +45,7 @@ fn a_save_request_needs_exactly_one_source() {
         name: "x".to_owned(),
     };
     assert_eq!(
-        template_source(&deck).unwrap(),
+        template_source(&deck).expect("test template source should be available"),
         TemplateSource::Deck("talk".to_owned())
     );
     let document = SaveRequest {
@@ -61,7 +60,7 @@ fn a_save_request_needs_exactly_one_source() {
         name: "x".to_owned(),
     };
     assert_eq!(
-        template_source(&document).unwrap(),
+        template_source(&document).expect("test template source should be available"),
         TemplateSource::Document("report".to_owned())
     );
     let social = SaveRequest {
@@ -76,7 +75,7 @@ fn a_save_request_needs_exactly_one_source() {
         name: "x".to_owned(),
     };
     assert_eq!(
-        template_source(&social).unwrap(),
+        template_source(&social).expect("test template source should be available"),
         TemplateSource::Social("launch".to_owned())
     );
     let document_and_social = SaveRequest {
@@ -95,10 +94,15 @@ fn a_save_request_needs_exactly_one_source() {
 
 #[tokio::test]
 async fn a_template_saves_from_a_social() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let socials = SocialStore::new(directory.path().join("socials"));
-    socials.save("launch", &sample_social()).await.unwrap();
-    let style = social_style(&socials, "launch").await.ok().unwrap();
+    socials
+        .save("launch", &sample_social())
+        .await
+        .expect("test data should be saved successfully");
+    let style = social_style(&socials, "launch")
+        .await
+        .expect("social fixture should provide a template style");
     assert_eq!(style.viewport, design_model::PORTRAIT_VIEWPORT);
     assert_eq!(style.screens.len(), 3);
     assert!(style.screens[0].name.is_empty());
@@ -108,10 +112,15 @@ async fn a_template_saves_from_a_social() {
 
 #[tokio::test]
 async fn a_template_saves_from_a_document() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let documents = DocumentStore::new(directory.path().join("documents"));
-    documents.save("report", &sample_document()).await.unwrap();
-    let style = document_style(&documents, "report").await.ok().unwrap();
+    documents
+        .save("report", &sample_document())
+        .await
+        .expect("test data should be saved successfully");
+    let style = document_style(&documents, "report")
+        .await
+        .expect("document fixture should provide a template style");
     assert_eq!(style.viewport, design_model::A4_VIEWPORT);
     assert_eq!(style.screens.len(), 3);
     assert!(style.screens[0].name.is_empty());
@@ -121,10 +130,15 @@ async fn a_template_saves_from_a_document() {
 
 #[tokio::test]
 async fn a_template_saves_from_a_deck() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let decks = DeckStore::new(directory.path().join("decks"));
-    decks.save("talk", &sample_deck()).await.unwrap();
-    let style = deck_style(&decks, "talk").await.ok().unwrap();
+    decks
+        .save("talk", &sample_deck())
+        .await
+        .expect("test data should be saved successfully");
+    let style = deck_style(&decks, "talk")
+        .await
+        .expect("deck fixture should provide a template style");
     assert_eq!(style.viewport, DECK_VIEWPORT);
     assert_eq!(style.screens.len(), 3);
     assert!(style.screens[0].name.is_empty());
@@ -134,7 +148,7 @@ async fn a_template_saves_from_a_deck() {
 
 #[tokio::test]
 async fn a_screenless_template_renders_as_a_swatch_and_takes_the_default_mark() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let application = test_application(&directory);
     let store = TemplateStore::new(directory.path().join("templates"));
     let design = sample_design();
@@ -151,7 +165,7 @@ async fn a_screenless_template_renders_as_a_swatch_and_takes_the_default_mark() 
             is_default: false,
         })
         .await
-        .unwrap();
+        .expect("test data should be saved successfully");
     let (status, body) = send(
         application.clone(),
         "GET",
@@ -173,7 +187,14 @@ async fn a_screenless_template_renders_as_a_swatch_and_takes_the_default_mark() 
     assert!(body.contains("\"is_default\":true"));
     let (_, listing) = send(application.clone(), "GET", "/templates", None).await;
     assert!(listing.contains("\"is_default\":true"));
-    assert!(store.load("acme-1").await.unwrap().unwrap().is_default);
+    assert!(
+        store
+            .load("acme-1")
+            .await
+            .expect("test record should load successfully")
+            .expect("saved test record should exist")
+            .is_default
+    );
     let (status, _) = send(
         application.clone(),
         "PUT",
@@ -186,7 +207,7 @@ async fn a_screenless_template_renders_as_a_swatch_and_takes_the_default_mark() 
 
 #[tokio::test]
 async fn an_extraction_needs_a_name_one_source_and_a_model() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let application = test_application(&directory);
     let (status, body) = send(
         application.clone(),
@@ -227,9 +248,15 @@ fn template_ids_are_slugs_with_the_save_time() {
 
 #[tokio::test]
 async fn saved_templates_round_trip_and_list_newest_first() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = TemplateStore::new(directory.path().to_path_buf());
-    assert!(store.list().await.unwrap().is_empty());
+    assert!(
+        store
+            .list()
+            .await
+            .expect("test records should be listed")
+            .is_empty()
+    );
     let design = sample_design();
     let older = Template {
         id: "older".to_owned(),
@@ -248,9 +275,15 @@ async fn saved_templates_round_trip_and_list_newest_first() {
         saved_at: "2025-01-01T00:00:00Z".to_owned(),
         ..older.clone()
     };
-    store.save(&older).await.unwrap();
-    store.save(&newer).await.unwrap();
-    let listed = store.list().await.unwrap();
+    store
+        .save(&older)
+        .await
+        .expect("test data should be saved successfully");
+    store
+        .save(&newer)
+        .await
+        .expect("test data should be saved successfully");
+    let listed = store.list().await.expect("test records should be listed");
     assert_eq!(
         listed
             .iter()
@@ -258,10 +291,30 @@ async fn saved_templates_round_trip_and_list_newest_first() {
             .collect::<Vec<_>>(),
         vec!["newer", "older"]
     );
-    let loaded = store.load("older").await.unwrap().unwrap();
+    let loaded = store
+        .load("older")
+        .await
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert_eq!(loaded.theme, design.theme);
     assert_eq!(loaded.screens, design.screens);
-    assert!(store.delete("older").await.unwrap());
-    assert!(!store.delete("older").await.unwrap());
-    assert!(store.load("older").await.unwrap().is_none());
+    assert!(
+        store
+            .delete("older")
+            .await
+            .expect("test record should be deleted")
+    );
+    assert!(
+        !store
+            .delete("older")
+            .await
+            .expect("test record should be deleted")
+    );
+    assert!(
+        store
+            .load("older")
+            .await
+            .expect("test record should load successfully")
+            .is_none()
+    );
 }

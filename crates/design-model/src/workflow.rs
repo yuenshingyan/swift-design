@@ -199,7 +199,6 @@ pub fn transition(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::{
         Clarifying, ContinueRequested, Error, Generating, GenerationStarted, GenerationSucceeded,
@@ -234,8 +233,8 @@ mod tests {
 
     #[test]
     fn illegal_transitions_name_state_and_event() {
-        let error =
-            transition(WorkflowState::Intake, WorkflowEvent::GenerationSucceeded).unwrap_err();
+        let error = transition(WorkflowState::Intake, WorkflowEvent::GenerationSucceeded)
+            .expect_err("illegal workflow transition should be rejected");
         assert_eq!(
             error.to_string(),
             "event `generation_succeeded` is not allowed in state `intake`: it is allowed in generating"
@@ -302,21 +301,24 @@ mod tests {
     #[test]
     fn workflow_state_round_trips_as_snake_case() {
         for state in WorkflowState::ALL {
-            let json = serde_json::to_string(&state).unwrap();
+            let json = serde_json::to_string(&state).expect("test value should serialize to JSON");
             assert_eq!(json, format!("\"{}\"", state.as_str()));
-            assert_eq!(serde_json::from_str::<WorkflowState>(&json).unwrap(), state);
+            assert_eq!(
+                serde_json::from_str::<WorkflowState>(&json).expect("test JSON should deserialize"),
+                state
+            );
         }
         assert!(serde_json::from_str::<WorkflowState>("\"done\"").is_err());
         for old in ["\"brief_ready\"", "\"awaiting_approval\""] {
             assert_eq!(
-                serde_json::from_str::<WorkflowState>(old).unwrap(),
+                serde_json::from_str::<WorkflowState>(old).expect("test JSON should deserialize"),
                 WorkflowState::Clarifying
             );
         }
         let event = serde_json::to_string(&WorkflowEvent::Recovered {
             to: WorkflowState::Intake,
         })
-        .unwrap();
+        .expect("test value should serialize to JSON");
         assert_eq!(event, r#"{"event":"recovered","to":"intake"}"#);
     }
 

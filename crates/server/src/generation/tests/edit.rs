@@ -17,7 +17,8 @@ fn fresh_app_candidates_require_shared_window_bounds_but_landing_pages_do_not() 
 
 #[test]
 fn a_focused_design_edit_shows_only_the_named_screens_and_their_findings() {
-    let mut design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+    let mut design: design_model::Design =
+        serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize");
     design.screens.push(design.screens[0].clone());
     design.app_window = Some(AppWindow {
         left: 80,
@@ -25,10 +26,18 @@ fn a_focused_design_edit_shows_only_the_named_screens_and_their_findings() {
         width: 1280,
         height: 780,
     });
-    let focused = focused_design_json(&design, &[1], false).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&focused).unwrap();
+    let focused = focused_design_json(&design, &[1], false)
+        .expect("design fixture should produce focused JSON");
+    let value: serde_json::Value =
+        serde_json::from_str(&focused).expect("test JSON should deserialize");
     assert_eq!(value["screen_count"], design.screens.len());
-    assert_eq!(value["screens"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        value["screens"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        1
+    );
     assert_eq!(value["screens"][0]["index"], 1);
     assert_eq!(value["app_window"]["width"], 1280);
     assert_eq!(value["app_window"]["height"], 780);
@@ -62,15 +71,26 @@ fn a_focused_design_edit_shows_only_the_named_screens_and_their_findings() {
 #[tokio::test]
 async fn a_finish_pressed_mid_run_is_a_late_continue() {
     let server = FakeModelServer::start().await;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
-    let mut design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+    let mut design: design_model::Design =
+        serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize");
     design.outline = (1..=6).map(|number| format!("Screen {number}")).collect();
-    designs.save("talk-candidate-1", &design).await.unwrap();
-    designs.save("talk-candidate-2", &design).await.unwrap();
+    designs
+        .save("talk-candidate-1", &design)
+        .await
+        .expect("test data should be saved successfully");
+    designs
+        .save("talk-candidate-2", &design)
+        .await
+        .expect("test data should be saved successfully");
     set_up_session(&sessions, "A landing page.").await;
-    let session = sessions.read("talk").await.unwrap().unwrap();
+    let session = sessions
+        .read("talk")
+        .await
+        .expect("test data should be readable")
+        .expect("test data should be present");
     let context = GenerationContext {
         request: SessionRequest {
             request: session.request.clone(),
@@ -87,7 +107,7 @@ async fn a_finish_pressed_mid_run_is_a_late_continue() {
     sessions
         .append_message("talk", press("talk-candidate-1"))
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let started = vec!["talk-candidate-1".to_owned()];
     // Nothing new: the running continue is the only request.
     assert!(
@@ -100,7 +120,7 @@ async fn a_finish_pressed_mid_run_is_a_late_continue() {
     sessions
         .append_message("talk", press("talk-candidate-2"))
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     assert_eq!(
         engine.late_continue_ids(&context, &started).await,
         vec!["talk-candidate-2".to_owned()]
@@ -112,7 +132,12 @@ fn a_progress_group_takes_shares_as_they_start() {
     let reported = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let sink: ProgressSink = {
         let reported = Arc::clone(&reported);
-        Arc::new(move |percent| reported.lock().unwrap().push(percent))
+        Arc::new(move |percent| {
+            reported
+                .lock()
+                .expect("test mutex should not be poisoned")
+                .push(percent)
+        })
     };
     let group = ProgressGroup {
         shares: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -128,7 +153,10 @@ fn a_progress_group_takes_shares_as_they_start() {
     let second = group.share("b");
     second(0.0);
     second(0.5);
-    assert_eq!(*reported.lock().unwrap(), vec![100, 50, 75]);
+    assert_eq!(
+        *reported.lock().expect("test mutex should not be poisoned"),
+        vec![100, 50, 75]
+    );
 }
 
 #[tokio::test]
@@ -140,37 +168,45 @@ async fn an_edit_on_a_preview_is_not_a_continue() {
     server.push_text(
         r#"{"coverage":[{"complete":true,"reason":"Hero updated"}],"reference_error":null}"#,
     );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
-    let mut design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+    let mut design: design_model::Design =
+        serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize");
     design.outline = (1..=6).map(|number| format!("Screen {number}")).collect();
     assert!(design.is_preview());
-    designs.save("talk-candidate-1", &design).await.unwrap();
+    designs
+        .save("talk-candidate-1", &design)
+        .await
+        .expect("test data should be saved successfully");
     set_up_session(&sessions, "A landing page.").await;
     sessions
         .apply("talk", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     sessions
         .apply("talk", design_model::WorkflowEvent::GenerationSucceeded)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     sessions
         .append_message(
             "talk",
             ChatMessage::user("[screen 1] Tighten the hero.", Some("talk-candidate-1")),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     // The planner ran and the patch applied; nothing was continued.
     let planner = server.requests()[0].to_string();
     assert!(planner.contains("You plan software demos"));
-    let edited = designs.load("talk-candidate-1").await.unwrap().unwrap();
+    let edited = designs
+        .load("talk-candidate-1")
+        .await
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert!(edited.screens[0].html.contains("Tighter"));
     assert!(edited.is_preview());
 }
@@ -184,42 +220,55 @@ async fn a_chat_request_with_a_design_open_patches_that_design() {
     server.push_text(
         r#"{"coverage":[{"complete":true,"reason":"Hero updated"}],"reference_error":null}"#,
     );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
-    let design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
-    designs.save("talk-candidate-1", &design).await.unwrap();
+    let design: design_model::Design =
+        serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize");
+    designs
+        .save("talk-candidate-1", &design)
+        .await
+        .expect("test data should be saved successfully");
     set_up_session(&sessions, "A landing page.").await;
     sessions
         .apply("talk", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     sessions
         .apply("talk", design_model::WorkflowEvent::GenerationSucceeded)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     sessions
         .append_message(
             "talk",
             ChatMessage::user("[screen 1] Tighten the hero.", Some("talk-candidate-1")),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     let GenerationOutcome::Edited { reports, .. } = outcome else {
         panic!("expected a saved edit report");
     };
     assert!(reports[0].contains("Modified screen 1"));
-    let messages = sessions.messages("talk").await.unwrap();
-    let completion = messages.last().unwrap();
+    let messages = sessions
+        .messages("talk")
+        .await
+        .expect("test chat messages should be readable");
+    let completion = messages
+        .last()
+        .expect("test collection should contain a last item");
     assert!(completion.content.starts_with(EDIT_REPORT_PREFIX));
     assert!(completion.content.contains("Modified screen 1"));
     assert!(!completion.content.contains("I wrote"));
     assert_eq!(completion.artifacts, ["talk-candidate-1"]);
-    let edited = designs.load("talk-candidate-1").await.unwrap().unwrap();
+    let edited = designs
+        .load("talk-candidate-1")
+        .await
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert!(edited.screens[0].html.contains("Tighter"));
     let text = server.requests()[2].to_string();
     assert!(text.contains("Apply this change: [screen 1] Tighten the hero."));
@@ -236,13 +285,16 @@ async fn demo_edit_planning_and_review_receive_the_reference_screenshot() {
     server.push_text(
         r#"{"coverage":[{"complete":true,"reason":"Matches reference"}],"reference_error":null}"#,
     );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     let uploads = UploadStore::new(directory.path().join("uploads"));
     let screenshot = b"\x89PNG\r\n\x1a\n theme reference";
-    uploads.save("talk", "theme.png", screenshot).await.unwrap();
-    let design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+    uploads
+        .save("talk", "theme.png", screenshot)
+        .await
+        .expect("test data should be saved successfully");
+    let design = serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize");
     reviewing_session_with(&sessions, &designs, &design, 1).await;
     sessions
         .append_message(
@@ -253,7 +305,7 @@ async fn demo_edit_planning_and_review_receive_the_reference_screenshot() {
             ),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let mut configuration = server.configuration();
     configuration.model = "gpt-6-astra".into();
     GenerationEngine::new(
@@ -268,11 +320,13 @@ async fn demo_edit_planning_and_review_receive_the_reference_screenshot() {
     .with_uploads(uploads)
     .run("talk", silent_log())
     .await
-    .unwrap();
+    .expect("test generation run should complete successfully");
     let requests = server.requests();
     assert_eq!(requests.len(), 4);
     for request in &requests[1..] {
-        let parts = request["messages"][1]["content"].as_array().unwrap();
+        let parts = request["messages"][1]["content"]
+            .as_array()
+            .expect("test JSON value should be an array");
         assert!(parts.iter().any(|part| part["image_url"]["url"]
             == format!(
                 "data:image/png;base64,{}",
@@ -292,22 +346,32 @@ async fn a_message_with_pinned_candidates_patches_each_of_them() {
             r#"{"coverage":[{"complete":true,"reason":"Hero updated"}],"reference_error":null}"#,
         );
     }
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
-    let design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
-    designs.save("talk-candidate-1", &design).await.unwrap();
-    designs.save("talk-candidate-2", &design).await.unwrap();
-    designs.save("talk-candidate-3", &design).await.unwrap();
+    let design: design_model::Design =
+        serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize");
+    designs
+        .save("talk-candidate-1", &design)
+        .await
+        .expect("test data should be saved successfully");
+    designs
+        .save("talk-candidate-2", &design)
+        .await
+        .expect("test data should be saved successfully");
+    designs
+        .save("talk-candidate-3", &design)
+        .await
+        .expect("test data should be saved successfully");
     set_up_session(&sessions, "A landing page.").await;
     sessions
         .apply("talk", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     sessions
         .apply("talk", design_model::WorkflowEvent::GenerationSucceeded)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     let pinned = vec!["talk-candidate-1".to_owned(), "talk-candidate-3".to_owned()];
     sessions
         .append_message(
@@ -319,11 +383,11 @@ async fn a_message_with_pinned_candidates_patches_each_of_them() {
             .with_pinned(pinned),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     let GenerationOutcome::Edited {
         design_ids,
         reports,
@@ -343,13 +407,30 @@ async fn a_message_with_pinned_candidates_patches_each_of_them() {
             .iter()
             .all(|report| report.contains("Modified screen 1"))
     );
-    let messages = sessions.messages("talk").await.unwrap();
-    assert_eq!(messages.last().unwrap().artifacts, design_ids);
+    let messages = sessions
+        .messages("talk")
+        .await
+        .expect("test chat messages should be readable");
+    assert_eq!(
+        messages
+            .last()
+            .expect("test collection should contain a last item")
+            .artifacts,
+        design_ids
+    );
     for id in ["talk-candidate-1", "talk-candidate-3"] {
-        let edited = designs.load(id).await.unwrap().unwrap();
+        let edited = designs
+            .load(id)
+            .await
+            .expect("test record should load successfully")
+            .expect("saved test record should exist");
         assert!(edited.screens[0].html.contains("Tighter"), "{id}");
     }
-    let untouched = designs.load("talk-candidate-2").await.unwrap().unwrap();
+    let untouched = designs
+        .load("talk-candidate-2")
+        .await
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert!(!untouched.screens[0].html.contains("Tighter"));
     let planner = server.requests()[0].to_string();
     assert!(planner.contains("Artifacts named this turn: talk-candidate-1, talk-candidate-3"));
@@ -366,17 +447,17 @@ async fn reviewing_session_with(
         designs
             .save(&format!("talk-candidate-{number}"), design)
             .await
-            .unwrap();
+            .expect("test data should be saved successfully");
     }
     set_up_session(sessions, "A landing page.").await;
     sessions
         .apply("talk", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     sessions
         .apply("talk", design_model::WorkflowEvent::GenerationSucceeded)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
 }
 
 #[tokio::test]
@@ -386,10 +467,11 @@ async fn a_merge_of_two_pinned_candidates_writes_a_new_one() {
     server.push_text(SAMPLE_DESIGN);
     // The polish round, when Chrome can measure: no change.
     server.push_text(r#"{"screens":[]}"#);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
-    let design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+    let design: design_model::Design =
+        serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize");
     reviewing_session_with(&sessions, &designs, &design, 2).await;
     let pinned = vec!["talk-candidate-1".to_owned(), "talk-candidate-2".to_owned()];
     sessions
@@ -402,16 +484,22 @@ async fn a_merge_of_two_pinned_candidates_writes_a_new_one() {
             .with_pinned(pinned),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     let GenerationOutcome::Wrote { design_ids } = outcome else {
         panic!("expected a write");
     };
     assert_eq!(design_ids, vec!["talk-candidate-3".to_owned()]);
-    assert!(designs.load("talk-candidate-3").await.unwrap().is_some());
+    assert!(
+        designs
+            .load("talk-candidate-3")
+            .await
+            .expect("test record should load successfully")
+            .is_some()
+    );
     let text = server.requests()[1].to_string();
     assert!(text.contains("Combine these candidates into one design"));
     assert!(text.contains("Hero from 1, pricing from 2."));
@@ -424,14 +512,18 @@ async fn a_merge_of_two_pinned_candidates_writes_a_new_one() {
 async fn a_merge_across_canvases_is_refused() {
     let server = FakeModelServer::start().await;
     server.push_text(r#"{"reply":"Merging the two.","merge":true}"#);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
-    let design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+    let design: design_model::Design =
+        serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize");
     reviewing_session_with(&sessions, &designs, &design, 1).await;
     let mut phone = design.clone();
     phone.viewport = design_model::Viewport::for_platform("phone");
-    designs.save("talk-candidate-2", &phone).await.unwrap();
+    designs
+        .save("talk-candidate-2", &phone)
+        .await
+        .expect("test data should be saved successfully");
     let pinned = vec!["talk-candidate-1".to_owned(), "talk-candidate-2".to_owned()];
     sessions
         .append_message(
@@ -440,13 +532,19 @@ async fn a_merge_across_canvases_is_refused() {
                 .with_pinned(pinned),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let error = engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap_err();
+        .expect_err("merge across different canvases should be rejected");
     assert!(error.contains("different canvases"), "{error}");
-    assert!(designs.load("talk-candidate-3").await.unwrap().is_none());
+    assert!(
+        designs
+            .load("talk-candidate-3")
+            .await
+            .expect("test record should load successfully")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -458,10 +556,11 @@ async fn a_merge_with_one_pin_is_an_edit() {
     server.push_text(
         r#"{"coverage":[{"complete":true,"reason":"Hero updated"}],"reference_error":null}"#,
     );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
-    let design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+    let design: design_model::Design =
+        serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize");
     reviewing_session_with(&sessions, &designs, &design, 1).await;
     sessions
         .append_message(
@@ -470,16 +569,20 @@ async fn a_merge_with_one_pin_is_an_edit() {
                 .with_pinned(vec!["talk-candidate-1".to_owned()]),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     let GenerationOutcome::Edited { design_ids, .. } = outcome else {
         panic!("expected an edit");
     };
     assert_eq!(design_ids, vec!["talk-candidate-1".to_owned()]);
-    let edited = designs.load("talk-candidate-1").await.unwrap().unwrap();
+    let edited = designs
+        .load("talk-candidate-1")
+        .await
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert!(edited.screens[0].html.contains("Tighter"));
 }
 
@@ -492,10 +595,11 @@ async fn a_regenerated_screen_is_written_without_its_old_markup() {
     server.push_text(
         r#"{"coverage":[{"complete":true,"reason":"Hero updated"}],"reference_error":null}"#,
     );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
-    let mut design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+    let mut design: design_model::Design =
+        serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize");
     design.screens[0].html = "<h1>Old hero markup</h1>".to_owned();
     reviewing_session_with(&sessions, &designs, &design, 1).await;
     sessions
@@ -507,17 +611,21 @@ async fn a_regenerated_screen_is_written_without_its_old_markup() {
             ),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(outcome, GenerationOutcome::Edited { .. }));
     let text = server.requests()[1].to_string();
     assert!(text.contains("Write screen 1 of"));
     assert!(text.contains("anew"));
     assert!(!text.contains("Old hero markup"));
-    let edited = designs.load("talk-candidate-1").await.unwrap().unwrap();
+    let edited = designs
+        .load("talk-candidate-1")
+        .await
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert!(edited.screens[0].html.contains("Fresh"));
     assert_eq!(edited.screens.len(), design.screens.len());
 }
@@ -527,19 +635,20 @@ async fn a_later_run_numbers_after_the_candidates_the_session_has() {
     let server = FakeModelServer::start().await;
     server.push_text(WRITE_PLAN);
     server.push_text(SAMPLE_DESIGN);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
-    let design: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+    let design: design_model::Design =
+        serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize");
     reviewing_session_with(&sessions, &designs, &design, 2).await;
     sessions
         .append_message("talk", ChatMessage::user("Another take.", None))
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     let GenerationOutcome::Wrote { design_ids } = outcome else {
         panic!("expected a write");
     };

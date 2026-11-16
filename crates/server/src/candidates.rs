@@ -577,7 +577,6 @@ fn chooser_page(base: &str, kind: ArtifactKind, candidates: &[CandidateCard]) ->
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use design_model::ArtifactKind;
 
@@ -598,16 +597,21 @@ mod tests {
 
     #[tokio::test]
     async fn social_cards_carry_the_format_ratio_and_the_social_url() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let socials = SocialStore::new(directory.path().join("socials"));
         socials
             .save("launch-candidate-1", &sample_social())
             .await
-            .unwrap();
+            .expect("test data should be saved successfully");
         let mut story = sample_social();
         story.format = design_model::Format::Story;
-        socials.save("launch-candidate-2", &story).await.unwrap();
-        let cards = social_cards(&socials, "launch").await.unwrap();
+        socials
+            .save("launch-candidate-2", &story)
+            .await
+            .expect("test data should be saved successfully");
+        let cards = social_cards(&socials, "launch")
+            .await
+            .expect("social summary fixture should deserialize");
         assert_eq!(cards.len(), 2);
         assert_eq!(cards[0].preview_url, "/socials/launch-candidate-1/render");
         assert_eq!(cards[0].ratio, "1080 / 1350");
@@ -620,16 +624,21 @@ mod tests {
 
     #[tokio::test]
     async fn document_cards_carry_the_paper_ratio_and_the_document_url() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let documents = DocumentStore::new(directory.path().join("documents"));
         documents
             .save("report-candidate-1", &sample_document())
             .await
-            .unwrap();
+            .expect("test data should be saved successfully");
         let mut letter = sample_document();
         letter.paper = design_model::Paper::Letter;
-        documents.save("report-candidate-2", &letter).await.unwrap();
-        let cards = document_cards(&documents, "report").await.unwrap();
+        documents
+            .save("report-candidate-2", &letter)
+            .await
+            .expect("test data should be saved successfully");
+        let cards = document_cards(&documents, "report")
+            .await
+            .expect("document summary fixture should deserialize");
         assert_eq!(cards.len(), 2);
         assert_eq!(cards[0].preview_url, "/documents/report-candidate-1/render");
         assert_eq!(cards[0].ratio, "794 / 1123");
@@ -642,23 +651,30 @@ mod tests {
 
     #[tokio::test]
     async fn a_fork_takes_the_next_candidate_number_and_reads_as_agent_authored() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let designs = DesignStore::new(directory.path().join("designs"));
         let design: design_model::Design =
-            serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap();
-        designs.save("talk-candidate-1", &design).await.unwrap();
+            serde_json::from_str(include_str!("../../../fixtures/sample-design.json"))
+                .expect("test JSON should deserialize");
+        designs
+            .save("talk-candidate-1", &design)
+            .await
+            .expect("test data should be saved successfully");
         let mut edited = design.clone();
         edited.title = "Edited by hand".to_owned();
-        designs.save("talk-candidate-3", &edited).await.unwrap();
+        designs
+            .save("talk-candidate-3", &edited)
+            .await
+            .expect("test data should be saved successfully");
         designs
             .record_authors("talk-candidate-3", Some(&design), &edited, true)
             .await
-            .unwrap();
+            .expect("test authorship changes should be recorded");
         assert!(
             !designs
                 .user_paths("talk-candidate-3")
                 .await
-                .unwrap()
+                .expect("test authorship paths should be readable")
                 .is_empty()
         );
         let application = test_application(&directory);
@@ -671,13 +687,17 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body, r#"{"id":"talk-candidate-4"}"#);
-        let copy = designs.load("talk-candidate-4").await.unwrap().unwrap();
+        let copy = designs
+            .load("talk-candidate-4")
+            .await
+            .expect("test record should load successfully")
+            .expect("saved test record should exist");
         assert_eq!(copy.title, "Edited by hand");
         assert!(
             designs
                 .user_paths("talk-candidate-4")
                 .await
-                .unwrap()
+                .expect("test authorship paths should be readable")
                 .is_empty()
         );
         let (status, _) = send(
@@ -692,12 +712,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_deck_fork_is_refused_while_the_session_generates() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let decks = DeckStore::new(directory.path().join("decks"));
         decks
             .save("talk-candidate-1", &sample_deck())
             .await
-            .unwrap();
+            .expect("test data should be saved successfully");
         let application = test_application(&directory);
         let (status, body) = send(
             application.clone(),
@@ -720,7 +740,7 @@ mod tests {
         SessionStore::new(directory.path().join("data/sessions"))
             .apply("talk", design_model::WorkflowEvent::GenerationStarted)
             .await
-            .unwrap();
+            .expect("test workflow transition should apply");
         let (status, body) = send(
             application.clone(),
             "POST",
@@ -729,7 +749,13 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
-        assert!(decks.load("talk-candidate-3").await.unwrap().is_none());
+        assert!(
+            decks
+                .load("talk-candidate-3")
+                .await
+                .expect("test record should load successfully")
+                .is_none()
+        );
     }
 
     #[test]
@@ -751,29 +777,40 @@ mod tests {
 
     #[tokio::test]
     async fn cards_carry_the_right_preview_url_per_kind() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let designs = DesignStore::new(directory.path().join("designs"));
         let decks = DeckStore::new(directory.path().join("decks"));
         let design: design_model::Design =
-            serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap();
-        designs.save("talk-candidate-1", &design).await.unwrap();
-        designs.save("other-candidate-1", &design).await.unwrap();
+            serde_json::from_str(include_str!("../../../fixtures/sample-design.json"))
+                .expect("test JSON should deserialize");
+        designs
+            .save("talk-candidate-1", &design)
+            .await
+            .expect("test data should be saved successfully");
+        designs
+            .save("other-candidate-1", &design)
+            .await
+            .expect("test data should be saved successfully");
         decks
             .save("talk-candidate-1", &sample_deck())
             .await
-            .unwrap();
+            .expect("test data should be saved successfully");
         decks
             .save("talk-candidate-2", &sample_deck())
             .await
-            .unwrap();
-        let design_cards = design_cards(&designs, "talk").await.unwrap();
+            .expect("test data should be saved successfully");
+        let design_cards = design_cards(&designs, "talk")
+            .await
+            .expect("design summary fixture should deserialize");
         assert_eq!(design_cards.len(), 1);
         assert_eq!(
             design_cards[0].preview_url,
             "/designs/talk-candidate-1/render"
         );
         assert_eq!(design_cards[0].ratio, "1440 / 900");
-        let deck_cards = deck_cards(&decks, "talk").await.unwrap();
+        let deck_cards = deck_cards(&decks, "talk")
+            .await
+            .expect("deck summary fixture should deserialize");
         assert_eq!(deck_cards.len(), 2);
         assert_eq!(deck_cards[1].preview_url, "/decks/talk-candidate-2/render");
         assert_eq!(deck_cards[1].ratio, "1920 / 1080");

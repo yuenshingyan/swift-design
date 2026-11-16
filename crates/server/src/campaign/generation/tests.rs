@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use std::sync::Arc;
 
 use design_model::{ArtifactKind, WorkflowState};
@@ -25,11 +23,19 @@ const WRITE_PLAN: &str = r#"{"reply":"Writing it now.","generate":true}"#;
 #[test]
 fn a_focused_campaign_edit_shows_only_the_named_ads_and_their_findings() {
     let campaign = sample_campaign();
-    let focused = focused_campaign_json(&campaign, &[1], false).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&focused).unwrap();
+    let focused = focused_campaign_json(&campaign, &[1], false)
+        .expect("campaign fixture should produce focused JSON");
+    let value: serde_json::Value =
+        serde_json::from_str(&focused).expect("test JSON should deserialize");
     assert_eq!(value["ad_count"], campaign.ads.len());
     assert_eq!(value["size"], "medium_rectangle");
-    assert_eq!(value["ads"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        value["ads"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        1
+    );
     assert_eq!(value["ads"][0]["index"], 1);
     let request = SessionRequest {
         request: "A launch ad.".to_owned(),
@@ -121,7 +127,7 @@ async fn campaign_session(sessions: &SessionStore) {
                 .with_options(low_effort_options()),
         )
         .await
-        .unwrap();
+        .expect("test fixture should be created");
 }
 
 /// A campaign session past its setup card: the app's own questions
@@ -131,7 +137,7 @@ async fn set_up_campaign_session(sessions: &SessionStore) {
     sessions
         .apply("report", design_model::WorkflowEvent::QuestionsAsked)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
 }
 
 #[test]
@@ -150,7 +156,8 @@ fn campaign_system_prompt_carries_campaign_rules_the_schema_and_the_example() {
 #[test]
 fn partial_campaign_returns_complete_ads_only() {
     let text = r##"{"title":"T","theme":{"name":"m","colors":{"background":"#ffffff","text":"#1a1d21","accent":"#2f6fdd","muted":"#6b7480"},"fonts":{"heading":"Inter","body":"Inter","mono":"Inter"}},"size":"leaderboard","ads":[{"html":"<h1>One</h1>"},{"html":"<h1>Tw"##;
-    let campaign = partial_campaign(text).unwrap();
+    let campaign =
+        partial_campaign(text).expect("streamed campaign fixture should contain a safe preview");
     assert_eq!(campaign.ads.len(), 1);
     assert_eq!(campaign.size, design_model::AdSize::Leaderboard);
     assert!(partial_campaign("{\"title\":\"T\"").is_none());
@@ -162,10 +169,16 @@ fn continuation_ads_reject_a_short_reply() {
     preview.outline = vec!["A".to_owned(), "B".to_owned(), "C".to_owned()];
     assert!(apply_campaign_continuation(&preview, "{\"ads\":[]}").is_err());
     let patch = r#"{"ads":[{"index":2,"insert":true,"ad":{"html":"<h2>C</h2>"}}]}"#;
-    let continued = apply_campaign_continuation(&preview, patch).unwrap();
+    let continued = apply_campaign_continuation(&preview, patch)
+        .expect("campaign continuation should apply to the fixture");
     assert_eq!(continued.ads.len(), 3);
     assert!(continued.outline.is_empty());
-    assert_eq!(continuation_ads(2, patch).unwrap().len(), 1);
+    assert_eq!(
+        continuation_ads(2, patch)
+            .expect("continuation fixture should contain valid ads")
+            .len(),
+        1
+    );
     assert!(continuation_ads(2, "{\"slides\":[]}").is_err());
     assert!(parse_campaign("no json").is_err());
 }
@@ -190,13 +203,13 @@ async fn a_campaign_run_asks_the_apps_own_questions_before_it_writes() {
     let server = FakeModelServer::start().await;
     // The planner wants to write at once and asks nothing.
     server.push_text(WRITE_PLAN);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     campaign_session(&stores.sessions).await;
     let outcome = engine(&server, &stores)
         .run("report", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(
         outcome,
         GenerationOutcome::NeedsClarification { question_set: 1 }
@@ -205,8 +218,8 @@ async fn a_campaign_run_asks_the_apps_own_questions_before_it_writes() {
         .sessions
         .read_question_set("report", 1)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test question set should be readable")
+        .expect("test session should contain the saved question set");
     assert!(set.questions.is_empty());
     assert!(set.can_proceed_with_assumptions);
     assert_eq!(server.requests().len(), 1);
@@ -217,20 +230,20 @@ async fn a_valid_campaign_reply_is_saved_as_a_candidate() {
     let server = FakeModelServer::start().await;
     server.push_text(WRITE_PLAN);
     server.push_text(SAMPLE_CAMPAIGN);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     set_up_campaign_session(&stores.sessions).await;
     let outcome = engine(&server, &stores)
         .run("report", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
     assert!(
         stores
             .campaigns
             .load("report-candidate-1")
             .await
-            .unwrap()
+            .expect("test record should load successfully")
             .is_some()
     );
     assert!(
@@ -238,7 +251,7 @@ async fn a_valid_campaign_reply_is_saved_as_a_candidate() {
             .designs
             .load("report-candidate-1")
             .await
-            .unwrap()
+            .expect("test record should load successfully")
             .is_none()
     );
     let planner = server.requests()[0].to_string();
@@ -246,7 +259,11 @@ async fn a_valid_campaign_reply_is_saved_as_a_candidate() {
     let request = server.requests()[1].to_string();
     assert!(request.contains("campaigns as JSON campaigns"));
     assert!(request.contains("Build a campaign"));
-    let runs = stores.sessions.runs("report").await.unwrap();
+    let runs = stores
+        .sessions
+        .runs("report")
+        .await
+        .expect("test run records should be readable");
     assert_eq!(runs[0].artifacts, vec!["report-candidate-1"]);
 }
 
@@ -257,24 +274,24 @@ async fn a_chat_request_with_a_campaign_open_patches_that_campaign() {
     server.push_text(
             r#"{"ads":[{"index":0,"ad":{"html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:40px;}"}}]}"#,
         );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     stores
         .campaigns
         .save("report-candidate-1", &sample_campaign())
         .await
-        .unwrap();
+        .expect("test data should be saved successfully");
     campaign_session(&stores.sessions).await;
     stores
         .sessions
         .apply("report", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     stores
         .sessions
         .apply("report", design_model::WorkflowEvent::GenerationSucceeded)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     stores
         .sessions
         .append_message(
@@ -282,26 +299,42 @@ async fn a_chat_request_with_a_campaign_open_patches_that_campaign() {
             ChatMessage::user("[ad 1] Tighten the title.", Some("report-candidate-1")),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &stores)
         .run("report", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     let GenerationOutcome::Edited { reports, .. } = outcome else {
         panic!("expected a saved edit report");
     };
     assert!(reports[0].contains("Modified ad 1"));
-    let messages = stores.sessions.messages("report").await.unwrap();
-    assert!(messages.last().unwrap().content.contains("Modified ad 1"));
+    let messages = stores
+        .sessions
+        .messages("report")
+        .await
+        .expect("test chat messages should be readable");
+    assert!(
+        messages
+            .last()
+            .expect("test collection should contain a last item")
+            .content
+            .contains("Modified ad 1")
+    );
     let edited = stores
         .campaigns
         .load("report-candidate-1")
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert!(edited.ads[0].html.contains("Tighter"));
     assert_eq!(
-        stores.sessions.read("report").await.unwrap().unwrap().state,
+        stores
+            .sessions
+            .read("report")
+            .await
+            .expect("test data should be readable")
+            .expect("test data should be present")
+            .state,
         WorkflowState::Generating
     );
 }
@@ -313,19 +346,19 @@ async fn reviewing_campaign_session_with(stores: &Stores, count: usize) {
             .campaigns
             .save(&format!("report-candidate-{number}"), &sample_campaign())
             .await
-            .unwrap();
+            .expect("test data should be saved successfully");
     }
     set_up_campaign_session(&stores.sessions).await;
     stores
         .sessions
         .apply("report", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     stores
         .sessions
         .apply("report", design_model::WorkflowEvent::GenerationSucceeded)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
 }
 
 #[tokio::test]
@@ -335,7 +368,7 @@ async fn a_regenerated_ad_is_written_without_its_old_markup() {
     server.push_text(
             r#"{"ads":[{"index":0,"ad":{"html":"<h1 class='title'>Fresh</h1>","css":".title{font-size:40px;}"}}]}"#,
         );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     let mut campaign = sample_campaign();
     campaign.ads[0].html = "<h1>Old title markup</h1>".to_owned();
@@ -343,7 +376,7 @@ async fn a_regenerated_ad_is_written_without_its_old_markup() {
         .campaigns
         .save("report-candidate-1", &campaign)
         .await
-        .unwrap();
+        .expect("test data should be saved successfully");
     reviewing_campaign_session_with(&stores, 0).await;
     stores
         .sessions
@@ -352,11 +385,11 @@ async fn a_regenerated_ad_is_written_without_its_old_markup() {
             ChatMessage::regenerate_request("[ad 1] Write this ad anew.", "report-candidate-1"),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &stores)
         .run("report", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(outcome, GenerationOutcome::Edited { .. }));
     let text = server.requests()[0].to_string();
     assert!(text.contains("Write ad 1 of"));
@@ -365,8 +398,8 @@ async fn a_regenerated_ad_is_written_without_its_old_markup() {
         .campaigns
         .load("report-candidate-1")
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert!(edited.ads[0].html.contains("Fresh"));
     assert_eq!(edited.ads.len(), campaign.ads.len());
 }
@@ -378,7 +411,7 @@ async fn a_merge_of_two_pinned_campaigns_writes_a_new_one() {
     server.push_text(SAMPLE_CAMPAIGN);
     // The polish round, when Chrome can measure: no change.
     server.push_text(r#"{"ads":[]}"#);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     reviewing_campaign_session_with(&stores, 2).await;
     let pinned = vec![
@@ -396,11 +429,11 @@ async fn a_merge_of_two_pinned_campaigns_writes_a_new_one() {
             .with_pinned(pinned),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &stores)
         .run("report", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     let GenerationOutcome::Wrote { design_ids } = outcome else {
         panic!("expected a write");
     };
@@ -410,7 +443,7 @@ async fn a_merge_of_two_pinned_campaigns_writes_a_new_one() {
             .campaigns
             .load("report-candidate-3")
             .await
-            .unwrap()
+            .expect("test record should load successfully")
             .is_some()
     );
     let text = server.requests()[1].to_string();
@@ -424,7 +457,7 @@ async fn a_campaign_session_without_a_campaign_store_fails_plainly() {
     let server = FakeModelServer::start().await;
     server.push_text(WRITE_PLAN);
     server.push_text(SAMPLE_CAMPAIGN);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     set_up_campaign_session(&stores.sessions).await;
     let engine = GenerationEngine::new(
@@ -435,6 +468,9 @@ async fn a_campaign_session_without_a_campaign_store_fails_plainly() {
         "http://127.0.0.1:3000".to_owned(),
         ChangeNotifier::new(),
     );
-    let error = engine.run("report", silent_log()).await.unwrap_err();
+    let error = engine
+        .run("report", silent_log())
+        .await
+        .expect_err("campaign generation without its store should fail");
     assert!(error.contains("no campaign store"));
 }

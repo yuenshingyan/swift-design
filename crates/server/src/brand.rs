@@ -241,7 +241,6 @@ fn cut(text: String, limit: usize) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::test_support::FakeModelServer;
@@ -251,7 +250,7 @@ mod tests {
 
     #[test]
     fn a_reply_parses_into_a_theme_and_a_note() {
-        let style = parse_extracted_style(REPLY).unwrap();
+        let style = parse_extracted_style(REPLY).expect("extracted test style should parse");
         assert_eq!(style.theme.name, "Acme");
         assert_eq!(style.theme.colors.accent, "#635bff");
         assert_eq!(style.theme.fonts.mono, "JetBrains Mono");
@@ -261,16 +260,20 @@ mod tests {
     #[test]
     fn a_reply_with_a_bad_color_or_no_json_is_refused() {
         let bad = REPLY.replace("#635bff", "purple");
-        assert!(parse_extracted_style(&bad).unwrap_err().contains("accent"));
+        assert!(
+            parse_extracted_style(&bad)
+                .expect_err("invalid extracted style should be rejected")
+                .contains("accent")
+        );
         assert!(
             parse_extracted_style("no json")
-                .unwrap_err()
+                .expect_err("invalid extracted style should be rejected")
                 .contains("no JSON")
         );
         let empty_font = REPLY.replace("\"body\":\"Inter\"", "\"body\":\"\"");
         assert!(
             parse_extracted_style(&empty_font)
-                .unwrap_err()
+                .expect_err("invalid extracted style should be rejected")
                 .contains("body")
         );
         assert!(is_hex_color("#abc"));
@@ -282,7 +285,8 @@ mod tests {
         let server = FakeModelServer::start().await;
         server.push_text(REPLY);
         let client = ModelClient::new(server.configuration(), None);
-        let http = ModelClient::build_http_client().unwrap();
+        let http =
+            ModelClient::build_http_client().expect("test HTTP client should be constructed");
         let material = BrandMaterial {
             source: "https://acme.com".to_owned(),
             text: "Title: Acme\nPricing from $9".to_owned(),
@@ -292,7 +296,9 @@ mod tests {
                 b"PNG".to_vec(),
             )],
         };
-        let style = extract_style(&client, &http, &material).await.unwrap();
+        let style = extract_style(&client, &http, &material)
+            .await
+            .expect("test style extraction should complete");
         assert_eq!(style.theme.name, "Acme");
         let request = server.requests()[0].to_string();
         assert!(request.contains("Brand material from https://acme.com"));
@@ -305,42 +311,47 @@ mod tests {
 
     #[tokio::test]
     async fn uploads_outside_the_scope_and_binary_files_are_refused() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let uploads = UploadStore::new(directory.path().join("uploads"));
-        uploads.save("brand", "logo.png", b"PNG").await.unwrap();
+        uploads
+            .save("brand", "logo.png", b"PNG")
+            .await
+            .expect("test data should be saved successfully");
         uploads
             .save("brand", "voice.md", b"Plain and warm.")
             .await
-            .unwrap();
+            .expect("test data should be saved successfully");
         uploads
             .save("other", "secret.md", b"Not yours.")
             .await
-            .unwrap();
+            .expect("test data should be saved successfully");
         let material = material_from_uploads(
             &uploads,
             "brand",
             &["logo.png".to_owned(), "voice.md".to_owned()],
         )
         .await
-        .unwrap();
+        .expect("test uploads should provide template material");
         assert_eq!(material.images.len(), 1);
         assert!(material.text.contains("Plain and warm."));
         assert!(material.source.contains("logo.png"));
         let error = material_from_uploads(&uploads, "brand", &["secret.md".to_owned()])
             .await
-            .unwrap_err();
+            .expect_err("ineligible brand uploads should be rejected");
         assert!(error.contains("not a file of this session"));
         assert!(
             material_from_uploads(&uploads, "brand", &[])
                 .await
-                .unwrap_err()
+                .expect_err("ineligible brand uploads should be rejected")
                 .contains("at least one")
         );
     }
 
     #[tokio::test]
     async fn a_private_website_is_refused_before_chrome_runs() {
-        let error = material_from_url("http://127.0.0.1:1/").await.unwrap_err();
+        let error = material_from_url("http://127.0.0.1:1/")
+            .await
+            .expect_err("private website should be rejected before launching Chrome");
         assert!(error.contains("cannot be captured"));
     }
 }

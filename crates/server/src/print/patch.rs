@@ -122,12 +122,12 @@ pub fn apply_patch(print: &Print, patch: PrintPatch) -> Result<Print, String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     fn print() -> Print {
-        serde_json::from_str(include_str!("../../../../fixtures/sample-print.json")).unwrap()
+        serde_json::from_str(include_str!("../../../../fixtures/sample-print.json"))
+            .expect("test JSON should deserialize")
     }
 
     fn note_of(sheet: &Sheet) -> &str {
@@ -143,11 +143,12 @@ mod tests {
         inserted.notes = Some("inserted".to_owned());
         let patch = parse_patch(&format!(
             "{{\"title\":\"New\",\"sheets\":[{{\"index\":0,\"sheet\":{}}},{{\"index\":1,\"sheet\":null}},{{\"index\":2,\"insert\":true,\"sheet\":{}}}]}}",
-            serde_json::to_string(&replacement).unwrap(),
-            serde_json::to_string(&inserted).unwrap()
+            serde_json::to_string(&replacement).expect("test value should serialize to JSON"),
+            serde_json::to_string(&inserted).expect("test value should serialize to JSON")
         ))
-        .unwrap();
-        let patched = apply_patch(&original, patch).unwrap();
+        .expect("test patch should parse");
+        let patched =
+            apply_patch(&original, patch).expect("test patch should apply to the fixture");
         assert_eq!(patched.title, "New");
         assert_eq!(patched.sheets.len(), 2);
         assert_eq!(note_of(&patched.sheets[0]), "replaced");
@@ -158,18 +159,24 @@ mod tests {
     #[test]
     fn out_of_range_indexes_are_errors() {
         let original = print();
-        let patch = parse_patch("{\"sheets\":[{\"index\":7,\"sheet\":null}]}").unwrap();
-        let error = apply_patch(&original, patch).unwrap_err();
+        let patch = parse_patch("{\"sheets\":[{\"index\":7,\"sheet\":null}]}")
+            .expect("test patch should parse");
+        let error = apply_patch(&original, patch)
+            .expect_err("patch targeting an out-of-range unit should be rejected");
         assert!(error.contains("does not exist"));
-        let patch =
-            parse_patch("{\"sheets\":[{\"index\":9,\"insert\":true,\"sheet\":null}]}").unwrap();
+        let patch = parse_patch("{\"sheets\":[{\"index\":9,\"insert\":true,\"sheet\":null}]}")
+            .expect("test patch should parse");
         assert!(apply_patch(&original, patch).is_err());
     }
 
     #[test]
     fn an_empty_patch_keeps_the_print() {
         let original = print();
-        let patched = apply_patch(&original, parse_patch("Sure: {}").unwrap()).unwrap();
+        let patched = apply_patch(
+            &original,
+            parse_patch("Sure: {}").expect("test patch should parse"),
+        )
+        .expect("test patch should apply to the fixture");
         assert_eq!(patched, original);
         assert!(parse_patch("no json").is_err());
     }

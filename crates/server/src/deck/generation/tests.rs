@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use std::sync::Arc;
 
 use design_model::{ArtifactKind, WorkflowState};
@@ -25,10 +23,18 @@ const WRITE_PLAN: &str = r#"{"reply":"Writing it now.","generate":true}"#;
 #[test]
 fn a_focused_deck_edit_shows_only_the_named_slides_and_their_findings() {
     let deck = sample_deck();
-    let focused = focused_deck_json(&deck, &[1], false).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&focused).unwrap();
+    let focused =
+        focused_deck_json(&deck, &[1], false).expect("deck fixture should produce focused JSON");
+    let value: serde_json::Value =
+        serde_json::from_str(&focused).expect("test JSON should deserialize");
     assert_eq!(value["slide_count"], deck.slides.len());
-    assert_eq!(value["slides"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        value["slides"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        1
+    );
     assert_eq!(value["slides"][0]["index"], 1);
     let request = SessionRequest {
         request: "A talk.".to_owned(),
@@ -111,7 +117,7 @@ async fn deck_session(sessions: &SessionStore) {
                 .with_options(low_effort_options()),
         )
         .await
-        .unwrap();
+        .expect("test fixture should be created");
 }
 
 /// A deck session past its setup card: the app's own questions were
@@ -121,7 +127,7 @@ async fn set_up_deck_session(sessions: &SessionStore) {
     sessions
         .apply("talk", design_model::WorkflowEvent::QuestionsAsked)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
 }
 
 #[test]
@@ -138,7 +144,7 @@ fn deck_system_prompt_carries_deck_rules_the_schema_and_the_example() {
 #[test]
 fn partial_deck_returns_complete_slides_only() {
     let text = r##"{"title":"T","theme":{"name":"m","colors":{"background":"#101418","text":"#f5f5f5","accent":"#4f8cff","muted":"#8a94a6"},"fonts":{"heading":"Inter","body":"Inter","mono":"Inter"}},"slides":[{"html":"<h1>One</h1>"},{"html":"<h1>Tw"##;
-    let deck = partial_deck(text).unwrap();
+    let deck = partial_deck(text).expect("streamed deck fixture should contain a safe preview");
     assert_eq!(deck.slides.len(), 1);
     assert!(partial_deck("{\"title\":\"T\"").is_none());
 }
@@ -154,10 +160,16 @@ fn continuation_slides_reject_a_short_reply() {
     ];
     assert!(apply_deck_continuation(&preview, "{\"slides\":[]}").is_err());
     let patch = r#"{"slides":[{"index":3,"insert":true,"slide":{"html":"<h2>D</h2>"}}]}"#;
-    let continued = apply_deck_continuation(&preview, patch).unwrap();
+    let continued = apply_deck_continuation(&preview, patch)
+        .expect("deck continuation should apply to the fixture");
     assert_eq!(continued.slides.len(), 4);
     assert!(continued.outline.is_empty());
-    assert_eq!(continuation_slides(3, patch).unwrap().len(), 1);
+    assert_eq!(
+        continuation_slides(3, patch)
+            .expect("continuation fixture should contain valid slides")
+            .len(),
+        1
+    );
     assert!(continuation_slides(3, "{\"screens\":[]}").is_err());
     assert!(parse_deck("no json").is_err());
 }
@@ -185,13 +197,13 @@ async fn a_deck_run_asks_the_apps_own_questions_before_it_writes() {
     let server = FakeModelServer::start().await;
     // The planner wants to write at once and asks nothing.
     server.push_text(WRITE_PLAN);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     deck_session(&stores.sessions).await;
     let outcome = engine(&server, &stores)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     // The deck's own questions live on this card: the scenario, the
     // length, the density, the evidence, the candidates, and the
     // variety. Without the card the deck flow asked nothing at all.
@@ -203,8 +215,8 @@ async fn a_deck_run_asks_the_apps_own_questions_before_it_writes() {
         .sessions
         .read_question_set("talk", 1)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test question set should be readable")
+        .expect("test session should contain the saved question set");
     assert!(set.questions.is_empty());
     assert!(set.can_proceed_with_assumptions);
     assert_eq!(server.requests().len(), 1);
@@ -215,20 +227,20 @@ async fn a_valid_deck_reply_is_saved_as_a_candidate() {
     let server = FakeModelServer::start().await;
     server.push_text(WRITE_PLAN);
     server.push_text(SAMPLE_DECK);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     set_up_deck_session(&stores.sessions).await;
     let outcome = engine(&server, &stores)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
     assert!(
         stores
             .decks
             .load("talk-candidate-1")
             .await
-            .unwrap()
+            .expect("test record should load successfully")
             .is_some()
     );
     assert!(
@@ -236,7 +248,7 @@ async fn a_valid_deck_reply_is_saved_as_a_candidate() {
             .designs
             .load("talk-candidate-1")
             .await
-            .unwrap()
+            .expect("test record should load successfully")
             .is_none()
     );
     let planner = server.requests()[0].to_string();
@@ -244,7 +256,11 @@ async fn a_valid_deck_reply_is_saved_as_a_candidate() {
     let request = server.requests()[1].to_string();
     assert!(request.contains("slide decks"));
     assert!(request.contains("Build a deck"));
-    let runs = stores.sessions.runs("talk").await.unwrap();
+    let runs = stores
+        .sessions
+        .runs("talk")
+        .await
+        .expect("test run records should be readable");
     assert_eq!(runs[0].artifacts, vec!["talk-candidate-1"]);
 }
 
@@ -255,24 +271,24 @@ async fn a_chat_request_with_a_deck_open_patches_that_deck() {
     server.push_text(
             r#"{"slides":[{"index":0,"slide":{"html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:96px;}"}}]}"#,
         );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     stores
         .decks
         .save("talk-candidate-1", &sample_deck())
         .await
-        .unwrap();
+        .expect("test data should be saved successfully");
     deck_session(&stores.sessions).await;
     stores
         .sessions
         .apply("talk", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     stores
         .sessions
         .apply("talk", design_model::WorkflowEvent::GenerationSucceeded)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     stores
         .sessions
         .append_message(
@@ -280,20 +296,24 @@ async fn a_chat_request_with_a_deck_open_patches_that_deck() {
             ChatMessage::user("[slide 1] Tighten the title.", Some("talk-candidate-1")),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &stores)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     let GenerationOutcome::Edited { reports, .. } = outcome else {
         panic!("expected a saved edit report");
     };
     assert!(reports[0].contains("Modified slide 1"));
-    let messages = stores.sessions.messages("talk").await.unwrap();
+    let messages = stores
+        .sessions
+        .messages("talk")
+        .await
+        .expect("test chat messages should be readable");
     assert!(
         messages
             .last()
-            .unwrap()
+            .expect("test collection should contain a last item")
             .content
             .contains("Modified slide 1")
     );
@@ -301,11 +321,17 @@ async fn a_chat_request_with_a_deck_open_patches_that_deck() {
         .decks
         .load("talk-candidate-1")
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert!(edited.slides[0].html.contains("Tighter"));
     assert_eq!(
-        stores.sessions.read("talk").await.unwrap().unwrap().state,
+        stores
+            .sessions
+            .read("talk")
+            .await
+            .expect("test data should be readable")
+            .expect("test data should be present")
+            .state,
         WorkflowState::Generating
     );
 }
@@ -317,19 +343,19 @@ async fn reviewing_deck_session_with(stores: &Stores, count: usize) {
             .decks
             .save(&format!("talk-candidate-{number}"), &sample_deck())
             .await
-            .unwrap();
+            .expect("test data should be saved successfully");
     }
     set_up_deck_session(&stores.sessions).await;
     stores
         .sessions
         .apply("talk", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     stores
         .sessions
         .apply("talk", design_model::WorkflowEvent::GenerationSucceeded)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
 }
 
 #[tokio::test]
@@ -339,11 +365,15 @@ async fn a_regenerated_slide_is_written_without_its_old_markup() {
     server.push_text(
             r#"{"slides":[{"index":0,"slide":{"html":"<h1 class='title'>Fresh</h1>","css":".title{font-size:96px;}"}}]}"#,
         );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     let mut deck = sample_deck();
     deck.slides[0].html = "<h1>Old title markup</h1>".to_owned();
-    stores.decks.save("talk-candidate-1", &deck).await.unwrap();
+    stores
+        .decks
+        .save("talk-candidate-1", &deck)
+        .await
+        .expect("test data should be saved successfully");
     reviewing_deck_session_with(&stores, 0).await;
     stores
         .sessions
@@ -352,11 +382,11 @@ async fn a_regenerated_slide_is_written_without_its_old_markup() {
             ChatMessage::regenerate_request("[slide 1] Write this slide anew.", "talk-candidate-1"),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &stores)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(outcome, GenerationOutcome::Edited { .. }));
     let text = server.requests()[0].to_string();
     assert!(text.contains("Write slide 1 of"));
@@ -365,8 +395,8 @@ async fn a_regenerated_slide_is_written_without_its_old_markup() {
         .decks
         .load("talk-candidate-1")
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert!(edited.slides[0].html.contains("Fresh"));
     assert_eq!(edited.slides.len(), deck.slides.len());
 }
@@ -378,7 +408,7 @@ async fn a_merge_of_two_pinned_decks_writes_a_new_one() {
     server.push_text(SAMPLE_DECK);
     // The polish round, when Chrome can measure: no change.
     server.push_text(r#"{"slides":[]}"#);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     reviewing_deck_session_with(&stores, 2).await;
     let pinned = vec!["talk-candidate-1".to_owned(), "talk-candidate-2".to_owned()];
@@ -393,11 +423,11 @@ async fn a_merge_of_two_pinned_decks_writes_a_new_one() {
             .with_pinned(pinned),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &stores)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     let GenerationOutcome::Wrote { design_ids } = outcome else {
         panic!("expected a write");
     };
@@ -407,7 +437,7 @@ async fn a_merge_of_two_pinned_decks_writes_a_new_one() {
             .decks
             .load("talk-candidate-3")
             .await
-            .unwrap()
+            .expect("test record should load successfully")
             .is_some()
     );
     let text = server.requests()[1].to_string();
@@ -421,7 +451,7 @@ async fn a_deck_session_without_a_deck_store_fails_plainly() {
     let server = FakeModelServer::start().await;
     server.push_text(WRITE_PLAN);
     server.push_text(SAMPLE_DECK);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     set_up_deck_session(&stores.sessions).await;
     let engine = GenerationEngine::new(
@@ -432,6 +462,9 @@ async fn a_deck_session_without_a_deck_store_fails_plainly() {
         "http://127.0.0.1:3000".to_owned(),
         ChangeNotifier::new(),
     );
-    let error = engine.run("talk", silent_log()).await.unwrap_err();
+    let error = engine
+        .run("talk", silent_log())
+        .await
+        .expect_err("deck generation without its store should fail");
     assert!(error.contains("no deck store"));
 }

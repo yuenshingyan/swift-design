@@ -135,7 +135,6 @@ fn render_sheet(sheet: &Sheet, index: usize) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use design_model::{Orientation, Print, PrintSize};
     use sha2::Digest;
@@ -144,12 +143,18 @@ mod tests {
     use crate::print::render::{RenderOptions, render_print, render_print_with};
 
     fn sample_print() -> Print {
-        serde_json::from_str(include_str!("../../../../fixtures/sample-print.json")).unwrap()
+        serde_json::from_str(include_str!("../../../../fixtures/sample-print.json"))
+            .expect("test JSON should deserialize")
     }
 
     fn script_hash_of(html: &str) -> String {
-        let start = html.find("<script>").unwrap() + "<script>".len();
-        let end = html.find("</script>").unwrap();
+        let start = html
+            .find("<script>")
+            .expect("fixture should contain the expected match")
+            + "<script>".len();
+        let end = html
+            .find("</script>")
+            .expect("fixture should contain the expected match");
         base64_encode(&sha2::Sha256::digest(&html.as_bytes()[start..end]))
     }
 

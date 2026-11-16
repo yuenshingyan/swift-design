@@ -84,7 +84,6 @@ impl Viewport {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::{DEFAULT_VIEWPORT_HEIGHT, DEFAULT_VIEWPORT_WIDTH, Viewport};
 
@@ -133,9 +132,12 @@ mod tests {
             width: 390,
             height: 844,
         };
-        let json = serde_json::to_string(&viewport).unwrap();
+        let json = serde_json::to_string(&viewport).expect("test value should serialize to JSON");
         assert_eq!(json, r#"{"width":390,"height":844}"#);
-        assert_eq!(serde_json::from_str::<Viewport>(&json).unwrap(), viewport);
+        assert_eq!(
+            serde_json::from_str::<Viewport>(&json).expect("test JSON should deserialize"),
+            viewport
+        );
         assert!(serde_json::from_str::<Viewport>(r#"{"width":1,"height":1,"depth":1}"#).is_err());
     }
 }

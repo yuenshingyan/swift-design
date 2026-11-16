@@ -200,7 +200,6 @@ impl Print {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::test_support::sample_print;
     use crate::{
@@ -211,34 +210,49 @@ mod tests {
     #[test]
     fn print_round_trips_through_json() {
         let print = sample_print();
-        let json = serde_json::to_string(&print).unwrap();
+        let json = serde_json::to_string(&print).expect("test value should serialize to JSON");
         assert!(json.contains("\"sheets\""));
         assert!(json.contains("\"size\":\"a4\""));
         assert!(json.contains("\"orientation\":\"portrait\""));
         assert!(!json.contains("\"viewport\""));
-        let restored: Print = serde_json::from_str(&json).unwrap();
+        let restored: Print = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(print, restored);
     }
 
     #[test]
     fn rejects_unknown_print_fields() {
-        let mut value = serde_json::to_value(sample_print()).unwrap();
+        let mut value =
+            serde_json::to_value(sample_print()).expect("test value should convert to JSON");
         value["extra"] = serde_json::json!(1);
         assert!(serde_json::from_value::<Print>(value.clone()).is_err());
-        value.as_object_mut().unwrap().remove("extra");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("extra");
         value["viewport"] = serde_json::json!({"width": 794, "height": 1123});
         assert!(serde_json::from_value::<Print>(value.clone()).is_err());
-        value.as_object_mut().unwrap().remove("viewport");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("viewport");
         value["transition"] = serde_json::json!({"effect": "fade"});
         assert!(serde_json::from_value::<Print>(value).is_err());
     }
 
     #[test]
     fn the_size_and_orientation_default_to_a4_portrait() {
-        let mut value = serde_json::to_value(sample_print()).unwrap();
-        value.as_object_mut().unwrap().remove("size");
-        value.as_object_mut().unwrap().remove("orientation");
-        let restored: Print = serde_json::from_value(value).unwrap();
+        let mut value =
+            serde_json::to_value(sample_print()).expect("test value should convert to JSON");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("size");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("orientation");
+        let restored: Print =
+            serde_json::from_value(value).expect("test JSON value should deserialize");
         assert_eq!(restored.size, PrintSize::A4);
         assert_eq!(restored.orientation, Orientation::Portrait);
         assert_eq!(restored.viewport(), A4_VIEWPORT);
@@ -266,11 +280,15 @@ mod tests {
     fn an_outline_longer_than_the_sheets_marks_a_preview() {
         let mut print = sample_print();
         assert!(!print.is_preview());
-        assert!(!serde_json::to_string(&print).unwrap().contains("outline"));
+        assert!(
+            !serde_json::to_string(&print)
+                .expect("test value should serialize to JSON")
+                .contains("outline")
+        );
         print.outline = vec!["Front".to_owned(), "Back".to_owned()];
         assert!(print.is_preview());
-        let json = serde_json::to_string(&print).unwrap();
-        let restored: Print = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&print).expect("test value should serialize to JSON");
+        let restored: Print = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(restored.outline, print.outline);
         print.outline.truncate(1);
         assert!(!print.is_preview());
@@ -283,7 +301,7 @@ mod tests {
             assert!(viewport.is_valid(), "{}", size.label());
             assert!(viewport.height > viewport.width, "{}", size.label());
             assert_eq!(PrintSize::from_name(size.as_str()), Some(size));
-            let json = serde_json::to_string(&size).unwrap();
+            let json = serde_json::to_string(&size).expect("test value should serialize to JSON");
             assert_eq!(json, format!("\"{}\"", size.as_str()));
         }
         assert_eq!(A5_VIEWPORT.aspect_ratio_css(), "559 / 794");
@@ -301,7 +319,8 @@ mod tests {
                 Orientation::from_name(orientation.as_str()),
                 Some(orientation)
             );
-            let json = serde_json::to_string(&orientation).unwrap();
+            let json =
+                serde_json::to_string(&orientation).expect("test value should serialize to JSON");
             assert_eq!(json, format!("\"{}\"", orientation.as_str()));
         }
         assert_eq!(Orientation::from_name("upside_down"), None);

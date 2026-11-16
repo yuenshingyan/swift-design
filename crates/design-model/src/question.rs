@@ -353,7 +353,6 @@ fn validate_answer_values(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::{
         AnswerError, BriefQuestion, BriefQuestionSet, QUESTIONS_PER_TURN_LIMIT, QuestionAnswer,
@@ -471,7 +470,8 @@ mod tests {
         let raw = r#"{"id":"a","label":"A?","kind":"slider","required":true}"#;
         assert!(serde_json::from_str::<BriefQuestion>(raw).is_err());
         let raw = r#"{"id":"a","label":"A?","kind":"short_text"}"#;
-        let question: BriefQuestion = serde_json::from_str(raw).unwrap();
+        let question: BriefQuestion =
+            serde_json::from_str(raw).expect("test JSON should deserialize");
         assert_eq!(question.kind, QuestionKind::ShortText);
         assert!(!question.required);
     }
@@ -479,13 +479,15 @@ mod tests {
     #[test]
     fn a_question_kind_named_type_loads() {
         let raw = r#"{"id":"a","label":"A?","type":"short_text"}"#;
-        let question: BriefQuestion = serde_json::from_str(raw).unwrap();
+        let question: BriefQuestion =
+            serde_json::from_str(raw).expect("test JSON should deserialize");
         assert_eq!(question.kind, QuestionKind::ShortText);
     }
 
     #[test]
     fn question_set_json_matches_the_documented_shape() {
-        let json = serde_json::to_value(set(vec![select("platform", true)])).unwrap();
+        let json = serde_json::to_value(set(vec![select("platform", true)]))
+            .expect("test value should convert to JSON");
         assert_eq!(json["can_proceed_with_assumptions"], true);
         let question = &json["questions"][0];
         assert_eq!(question["kind"], "single_select");
@@ -493,7 +495,8 @@ mod tests {
         assert_eq!(question["required"], true);
         assert_eq!(question["options"][0]["value"], "web");
         assert_eq!(question["rationale"], "It changes the layout.");
-        let restored: BriefQuestionSet = serde_json::from_value(json).unwrap();
+        let restored: BriefQuestionSet =
+            serde_json::from_value(json).expect("test JSON value should deserialize");
         assert_eq!(restored, set(vec![select("platform", true)]));
     }
 

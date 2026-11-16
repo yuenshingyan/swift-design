@@ -46,7 +46,6 @@ pub struct FontSet {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::Theme;
     use crate::test_support::sample_design;
@@ -54,8 +53,8 @@ mod tests {
     #[test]
     fn theme_round_trips_through_json() {
         let theme = sample_design().theme;
-        let json = serde_json::to_string(&theme).unwrap();
-        let restored: Theme = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&theme).expect("test value should serialize to JSON");
+        let restored: Theme = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(theme, restored);
     }
 }

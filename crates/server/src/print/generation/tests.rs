@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use std::sync::Arc;
 
 use design_model::{ArtifactKind, WorkflowState};
@@ -25,12 +23,20 @@ const WRITE_PLAN: &str = r#"{"reply":"Writing it now.","generate":true}"#;
 #[test]
 fn a_focused_print_edit_shows_only_the_named_sheets_and_their_findings() {
     let print = sample_print();
-    let focused = focused_print_json(&print, &[1], false).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&focused).unwrap();
+    let focused =
+        focused_print_json(&print, &[1], false).expect("print fixture should produce focused JSON");
+    let value: serde_json::Value =
+        serde_json::from_str(&focused).expect("test JSON should deserialize");
     assert_eq!(value["sheet_count"], print.sheets.len());
     assert_eq!(value["size"], "a4");
     assert_eq!(value["orientation"], "portrait");
-    assert_eq!(value["sheets"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        value["sheets"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        1
+    );
     assert_eq!(value["sheets"][0]["index"], 1);
     let request = SessionRequest {
         request: "A launch flyer.".to_owned(),
@@ -126,7 +132,7 @@ async fn print_session(sessions: &SessionStore) {
                 .with_options(low_effort_options()),
         )
         .await
-        .unwrap();
+        .expect("test fixture should be created");
 }
 
 /// A print session past its setup card: the app's own questions
@@ -136,7 +142,7 @@ async fn set_up_print_session(sessions: &SessionStore) {
     sessions
         .apply("report", design_model::WorkflowEvent::QuestionsAsked)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
 }
 
 #[test]
@@ -156,7 +162,7 @@ fn print_system_prompt_carries_print_rules_the_schema_and_the_example() {
 #[test]
 fn partial_print_returns_complete_sheets_only() {
     let text = r##"{"title":"T","theme":{"name":"m","colors":{"background":"#ffffff","text":"#1a1d21","accent":"#2f6fdd","muted":"#6b7480"},"fonts":{"heading":"Inter","body":"Inter","mono":"Inter"}},"size":"a3","orientation":"landscape","sheets":[{"html":"<h1>One</h1>"},{"html":"<h1>Tw"##;
-    let print = partial_print(text).unwrap();
+    let print = partial_print(text).expect("streamed print fixture should contain a safe preview");
     assert_eq!(print.sheets.len(), 1);
     assert_eq!(print.size, design_model::PrintSize::A3);
     assert_eq!(print.orientation, design_model::Orientation::Landscape);
@@ -169,10 +175,16 @@ fn continuation_sheets_reject_a_short_reply() {
     preview.outline = vec!["A".to_owned(), "B".to_owned(), "C".to_owned()];
     assert!(apply_print_continuation(&preview, "{\"sheets\":[]}").is_err());
     let patch = r#"{"sheets":[{"index":2,"insert":true,"sheet":{"html":"<h2>C</h2>"}}]}"#;
-    let continued = apply_print_continuation(&preview, patch).unwrap();
+    let continued = apply_print_continuation(&preview, patch)
+        .expect("print continuation should apply to the fixture");
     assert_eq!(continued.sheets.len(), 3);
     assert!(continued.outline.is_empty());
-    assert_eq!(continuation_sheets(2, patch).unwrap().len(), 1);
+    assert_eq!(
+        continuation_sheets(2, patch)
+            .expect("continuation fixture should contain valid sheets")
+            .len(),
+        1
+    );
     assert!(continuation_sheets(2, "{\"slides\":[]}").is_err());
     assert!(parse_print("no json").is_err());
 }
@@ -197,13 +209,13 @@ async fn a_print_run_asks_the_apps_own_questions_before_it_writes() {
     let server = FakeModelServer::start().await;
     // The planner wants to write at once and asks nothing.
     server.push_text(WRITE_PLAN);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     print_session(&stores.sessions).await;
     let outcome = engine(&server, &stores)
         .run("report", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(
         outcome,
         GenerationOutcome::NeedsClarification { question_set: 1 }
@@ -212,8 +224,8 @@ async fn a_print_run_asks_the_apps_own_questions_before_it_writes() {
         .sessions
         .read_question_set("report", 1)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test question set should be readable")
+        .expect("test session should contain the saved question set");
     assert!(set.questions.is_empty());
     assert!(set.can_proceed_with_assumptions);
     assert_eq!(server.requests().len(), 1);
@@ -224,20 +236,20 @@ async fn a_valid_print_reply_is_saved_as_a_candidate() {
     let server = FakeModelServer::start().await;
     server.push_text(WRITE_PLAN);
     server.push_text(SAMPLE_PRINT);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     set_up_print_session(&stores.sessions).await;
     let outcome = engine(&server, &stores)
         .run("report", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
     assert!(
         stores
             .prints
             .load("report-candidate-1")
             .await
-            .unwrap()
+            .expect("test record should load successfully")
             .is_some()
     );
     assert!(
@@ -245,7 +257,7 @@ async fn a_valid_print_reply_is_saved_as_a_candidate() {
             .designs
             .load("report-candidate-1")
             .await
-            .unwrap()
+            .expect("test record should load successfully")
             .is_none()
     );
     let planner = server.requests()[0].to_string();
@@ -253,7 +265,11 @@ async fn a_valid_print_reply_is_saved_as_a_candidate() {
     let request = server.requests()[1].to_string();
     assert!(request.contains("print pieces as JSON prints"));
     assert!(request.contains("Build a print piece"));
-    let runs = stores.sessions.runs("report").await.unwrap();
+    let runs = stores
+        .sessions
+        .runs("report")
+        .await
+        .expect("test run records should be readable");
     assert_eq!(runs[0].artifacts, vec!["report-candidate-1"]);
 }
 
@@ -264,24 +280,24 @@ async fn a_chat_request_with_a_print_open_patches_that_print() {
     server.push_text(
             r#"{"sheets":[{"index":0,"sheet":{"html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:40px;}"}}]}"#,
         );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     stores
         .prints
         .save("report-candidate-1", &sample_print())
         .await
-        .unwrap();
+        .expect("test data should be saved successfully");
     print_session(&stores.sessions).await;
     stores
         .sessions
         .apply("report", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     stores
         .sessions
         .apply("report", design_model::WorkflowEvent::GenerationSucceeded)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     stores
         .sessions
         .append_message(
@@ -289,20 +305,24 @@ async fn a_chat_request_with_a_print_open_patches_that_print() {
             ChatMessage::user("[sheet 1] Tighten the title.", Some("report-candidate-1")),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &stores)
         .run("report", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     let GenerationOutcome::Edited { reports, .. } = outcome else {
         panic!("expected a saved edit report");
     };
     assert!(reports[0].contains("Modified sheet 1"));
-    let messages = stores.sessions.messages("report").await.unwrap();
+    let messages = stores
+        .sessions
+        .messages("report")
+        .await
+        .expect("test chat messages should be readable");
     assert!(
         messages
             .last()
-            .unwrap()
+            .expect("test collection should contain a last item")
             .content
             .contains("Modified sheet 1")
     );
@@ -310,11 +330,17 @@ async fn a_chat_request_with_a_print_open_patches_that_print() {
         .prints
         .load("report-candidate-1")
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert!(edited.sheets[0].html.contains("Tighter"));
     assert_eq!(
-        stores.sessions.read("report").await.unwrap().unwrap().state,
+        stores
+            .sessions
+            .read("report")
+            .await
+            .expect("test data should be readable")
+            .expect("test data should be present")
+            .state,
         WorkflowState::Generating
     );
 }
@@ -326,19 +352,19 @@ async fn reviewing_print_session_with(stores: &Stores, count: usize) {
             .prints
             .save(&format!("report-candidate-{number}"), &sample_print())
             .await
-            .unwrap();
+            .expect("test data should be saved successfully");
     }
     set_up_print_session(&stores.sessions).await;
     stores
         .sessions
         .apply("report", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     stores
         .sessions
         .apply("report", design_model::WorkflowEvent::GenerationSucceeded)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
 }
 
 #[tokio::test]
@@ -348,7 +374,7 @@ async fn a_regenerated_sheet_is_written_without_its_old_markup() {
     server.push_text(
             r#"{"sheets":[{"index":0,"sheet":{"html":"<h1 class='title'>Fresh</h1>","css":".title{font-size:40px;}"}}]}"#,
         );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     let mut print = sample_print();
     print.sheets[0].html = "<h1>Old title markup</h1>".to_owned();
@@ -356,7 +382,7 @@ async fn a_regenerated_sheet_is_written_without_its_old_markup() {
         .prints
         .save("report-candidate-1", &print)
         .await
-        .unwrap();
+        .expect("test data should be saved successfully");
     reviewing_print_session_with(&stores, 0).await;
     stores
         .sessions
@@ -368,11 +394,11 @@ async fn a_regenerated_sheet_is_written_without_its_old_markup() {
             ),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &stores)
         .run("report", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(outcome, GenerationOutcome::Edited { .. }));
     let text = server.requests()[0].to_string();
     assert!(text.contains("Write sheet 1 of"));
@@ -381,8 +407,8 @@ async fn a_regenerated_sheet_is_written_without_its_old_markup() {
         .prints
         .load("report-candidate-1")
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert!(edited.sheets[0].html.contains("Fresh"));
     assert_eq!(edited.sheets.len(), print.sheets.len());
 }
@@ -394,7 +420,7 @@ async fn a_merge_of_two_pinned_prints_writes_a_new_one() {
     server.push_text(SAMPLE_PRINT);
     // The polish round, when Chrome can measure: no change.
     server.push_text(r#"{"sheets":[]}"#);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     reviewing_print_session_with(&stores, 2).await;
     let pinned = vec![
@@ -412,11 +438,11 @@ async fn a_merge_of_two_pinned_prints_writes_a_new_one() {
             .with_pinned(pinned),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &stores)
         .run("report", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     let GenerationOutcome::Wrote { design_ids } = outcome else {
         panic!("expected a write");
     };
@@ -426,7 +452,7 @@ async fn a_merge_of_two_pinned_prints_writes_a_new_one() {
             .prints
             .load("report-candidate-3")
             .await
-            .unwrap()
+            .expect("test record should load successfully")
             .is_some()
     );
     let text = server.requests()[1].to_string();
@@ -440,7 +466,7 @@ async fn a_print_session_without_a_print_store_fails_plainly() {
     let server = FakeModelServer::start().await;
     server.push_text(WRITE_PLAN);
     server.push_text(SAMPLE_PRINT);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     set_up_print_session(&stores.sessions).await;
     let engine = GenerationEngine::new(
@@ -451,6 +477,9 @@ async fn a_print_session_without_a_print_store_fails_plainly() {
         "http://127.0.0.1:3000".to_owned(),
         ChangeNotifier::new(),
     );
-    let error = engine.run("report", silent_log()).await.unwrap_err();
+    let error = engine
+        .run("report", silent_log())
+        .await
+        .expect_err("print generation without its store should fail");
     assert!(error.contains("no print store"));
 }

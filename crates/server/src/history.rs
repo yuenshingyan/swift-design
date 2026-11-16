@@ -204,41 +204,62 @@ pub fn saved_at_of(stamp: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     #[tokio::test]
     async fn a_delete_removes_every_snapshot_of_one_id() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = HistoryStore::new(directory.path().join("history"));
         store
             .snapshot_at("talk", 1_000_000_000, b"{}")
             .await
-            .unwrap();
+            .expect("test history snapshot should be saved");
         store
             .snapshot_at("talking", 1_000_000_000, b"{}")
             .await
-            .unwrap();
-        store.delete("talk").await.unwrap();
-        assert!(store.list("talk").await.unwrap().is_empty());
-        assert_eq!(store.list("talking").await.unwrap().len(), 1);
+            .expect("test history snapshot should be saved");
+        store
+            .delete("talk")
+            .await
+            .expect("test record should be deleted");
+        assert!(
+            store
+                .list("talk")
+                .await
+                .expect("test records should be listed")
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .list("talking")
+                .await
+                .expect("test records should be listed")
+                .len(),
+            1
+        );
         // Deleting an id with no history is not an error.
-        store.delete("talk").await.unwrap();
+        store
+            .delete("talk")
+            .await
+            .expect("test record should be deleted");
     }
 
     #[tokio::test]
     async fn rapid_saves_list_the_actual_latest_snapshot_first() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = HistoryStore::new(directory.path().join("history"));
         let mut latest = String::new();
         for index in 0..SNAPSHOT_LIMIT + 12 {
             latest = store
                 .snapshot_at("talk", 1_000_000_000, index.to_string().as_bytes())
                 .await
-                .unwrap();
+                .expect("test history snapshot should be saved");
         }
-        let snapshots = store.list("talk").await.unwrap();
+        let snapshots = store
+            .list("talk")
+            .await
+            .expect("test records should be listed");
         assert_eq!(snapshots.len(), SNAPSHOT_LIMIT);
         assert_eq!(snapshots[0].stamp, latest);
         assert!(
@@ -271,12 +292,24 @@ mod tests {
 
     #[tokio::test]
     async fn snapshots_list_newest_first_with_sizes() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = HistoryStore::new(directory.path().to_path_buf());
-        store.snapshot_at("design", 100, b"one").await.unwrap();
-        store.snapshot_at("design", 300, b"three").await.unwrap();
-        store.snapshot_at("design", 200, b"two").await.unwrap();
-        let rows = store.list("design").await.unwrap();
+        store
+            .snapshot_at("design", 100, b"one")
+            .await
+            .expect("test history snapshot should be saved");
+        store
+            .snapshot_at("design", 300, b"three")
+            .await
+            .expect("test history snapshot should be saved");
+        store
+            .snapshot_at("design", 200, b"two")
+            .await
+            .expect("test history snapshot should be saved");
+        let rows = store
+            .list("design")
+            .await
+            .expect("test records should be listed");
         let stamps: Vec<&str> = rows.iter().map(|row| row.stamp.as_str()).collect();
         assert_eq!(
             stamps,
@@ -288,33 +321,58 @@ mod tests {
         );
         assert_eq!(rows[0].saved_at, "1970-01-01T00:05:00Z");
         assert_eq!(rows[0].size_bytes, 5);
-        assert!(store.list("other").await.unwrap().is_empty());
+        assert!(
+            store
+                .list("other")
+                .await
+                .expect("test records should be listed")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
     async fn two_snapshots_in_one_second_both_survive() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = HistoryStore::new(directory.path().to_path_buf());
-        let first = store.snapshot_at("design", 60, b"a").await.unwrap();
-        let second = store.snapshot_at("design", 60, b"b").await.unwrap();
+        let first = store
+            .snapshot_at("design", 60, b"a")
+            .await
+            .expect("test history snapshot should be saved");
+        let second = store
+            .snapshot_at("design", 60, b"b")
+            .await
+            .expect("test history snapshot should be saved");
         assert_eq!(first, "1970-01-01T00-01-00Z");
         assert_eq!(second, "1970-01-01T00-01-00Z-2");
-        let rows = store.list("design").await.unwrap();
+        let rows = store
+            .list("design")
+            .await
+            .expect("test records should be listed");
         assert_eq!(rows[0].stamp, second);
-        assert_eq!(store.read("design", &second).await.unwrap().unwrap(), b"b");
+        assert_eq!(
+            store
+                .read("design", &second)
+                .await
+                .expect("test data should be readable")
+                .expect("test data should be present"),
+            b"b"
+        );
     }
 
     #[tokio::test]
     async fn the_store_keeps_fifty_snapshots_and_deletes_the_oldest() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = HistoryStore::new(directory.path().to_path_buf());
         for second in 1..=51u64 {
             store
                 .snapshot_at("design", second, second.to_string().as_bytes())
                 .await
-                .unwrap();
+                .expect("test history snapshot should be saved");
         }
-        let rows = store.list("design").await.unwrap();
+        let rows = store
+            .list("design")
+            .await
+            .expect("test records should be listed");
         assert_eq!(rows.len(), SNAPSHOT_LIMIT);
         assert_eq!(rows[0].stamp, stamp_from_unix(51));
         assert_eq!(rows[49].stamp, stamp_from_unix(2));
@@ -322,35 +380,66 @@ mod tests {
             store
                 .read("design", &stamp_from_unix(1))
                 .await
-                .unwrap()
+                .expect("test data should be readable")
                 .is_none()
         );
     }
 
     #[tokio::test]
     async fn read_returns_none_for_unknown_or_unsafe_stamps() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = HistoryStore::new(directory.path().to_path_buf());
-        store.snapshot_at("design", 5, b"x").await.unwrap();
+        store
+            .snapshot_at("design", 5, b"x")
+            .await
+            .expect("test history snapshot should be saved");
         assert!(
             store
                 .read("design", "2000-01-01T00-00-00Z")
                 .await
-                .unwrap()
+                .expect("test data should be readable")
                 .is_none()
         );
-        assert!(store.read("design", "../design").await.unwrap().is_none());
+        assert!(
+            store
+                .read("design", "../design")
+                .await
+                .expect("test data should be readable")
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn rename_moves_the_history_directory() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = HistoryStore::new(directory.path().to_path_buf());
-        store.snapshot_at("old", 7, b"x").await.unwrap();
-        store.rename("old", "new").await.unwrap();
-        assert!(store.list("old").await.unwrap().is_empty());
-        assert_eq!(store.list("new").await.unwrap().len(), 1);
-        store.rename("absent", "elsewhere").await.unwrap();
+        store
+            .snapshot_at("old", 7, b"x")
+            .await
+            .expect("test history snapshot should be saved");
+        store
+            .rename("old", "new")
+            .await
+            .expect("test artifact should be renamed");
+        assert!(
+            store
+                .list("old")
+                .await
+                .expect("test records should be listed")
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .list("new")
+                .await
+                .expect("test records should be listed")
+                .len(),
+            1
+        );
+        store
+            .rename("absent", "elsewhere")
+            .await
+            .expect("test artifact should be renamed");
         assert!(!directory.path().join("elsewhere").exists());
     }
 }

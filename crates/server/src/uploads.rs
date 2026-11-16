@@ -528,7 +528,6 @@ async fn delete_upload(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::office::{DOCX, PPTX, XLSX};
     use crate::uploads::{
@@ -548,83 +547,195 @@ mod tests {
 
     #[tokio::test]
     async fn deleting_an_upload_reports_whether_it_existed() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = UploadStore::new(directory.path().to_path_buf());
-        store.save("talk", "a.png", b"x").await.unwrap();
-        let listing = store.list("talk").await.unwrap();
+        store
+            .save("talk", "a.png", b"x")
+            .await
+            .expect("test data should be saved successfully");
+        let listing = store
+            .list("talk")
+            .await
+            .expect("test records should be listed");
         assert_eq!(listing.len(), 1);
         assert_eq!(listing[0].content_type, "image/png");
         assert!(listing[0].is_image);
-        assert!(store.delete("a.png").await.unwrap());
-        assert!(!store.delete("a.png").await.unwrap());
-        assert!(store.read("a.png").await.unwrap().is_none());
+        assert!(
+            store
+                .delete("a.png")
+                .await
+                .expect("test record should be deleted")
+        );
+        assert!(
+            !store
+                .delete("a.png")
+                .await
+                .expect("test record should be deleted")
+        );
+        assert!(
+            store
+                .read("a.png")
+                .await
+                .expect("test data should be readable")
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn a_session_sees_only_its_own_files() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = UploadStore::new(directory.path().to_path_buf());
-        store.save("talk", "notes.md", b"one").await.unwrap();
-        store.save("pitch", "other.md", b"two").await.unwrap();
+        store
+            .save("talk", "notes.md", b"one")
+            .await
+            .expect("test data should be saved successfully");
+        store
+            .save("pitch", "other.md", b"two")
+            .await
+            .expect("test data should be saved successfully");
         let names = |listing: Vec<UploadSummary>| {
             listing
                 .into_iter()
                 .map(|summary| summary.name)
                 .collect::<Vec<String>>()
         };
-        assert_eq!(names(store.list("talk").await.unwrap()), ["notes.md"]);
-        assert_eq!(names(store.list("pitch").await.unwrap()), ["other.md"]);
+        assert_eq!(
+            names(
+                store
+                    .list("talk")
+                    .await
+                    .expect("test records should be listed")
+            ),
+            ["notes.md"]
+        );
+        assert_eq!(
+            names(
+                store
+                    .list("pitch")
+                    .await
+                    .expect("test records should be listed")
+            ),
+            ["other.md"]
+        );
         // The draft scope holds what no session has taken yet.
-        assert!(store.list(DRAFT_SCOPE).await.unwrap().is_empty());
+        assert!(
+            store
+                .list(DRAFT_SCOPE)
+                .await
+                .expect("test records should be listed")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
     async fn one_session_never_overwrites_another_file() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = UploadStore::new(directory.path().to_path_buf());
-        let first = store.save("talk", "readme.md", b"one").await.unwrap();
-        let second = store.save("pitch", "readme.md", b"two").await.unwrap();
+        let first = store
+            .save("talk", "readme.md", b"one")
+            .await
+            .expect("test data should be saved successfully");
+        let second = store
+            .save("pitch", "readme.md", b"two")
+            .await
+            .expect("test data should be saved successfully");
         assert_eq!(first.as_deref(), Some("readme.md"));
         assert_eq!(second.as_deref(), Some("readme-2.md"));
-        assert_eq!(store.read("readme.md").await.unwrap().unwrap(), b"one");
+        assert_eq!(
+            store
+                .read("readme.md")
+                .await
+                .expect("test data should be readable")
+                .expect("test data should be present"),
+            b"one"
+        );
         // The same session writing the same name replaces its own file.
-        let again = store.save("talk", "readme.md", b"three").await.unwrap();
+        let again = store
+            .save("talk", "readme.md", b"three")
+            .await
+            .expect("test data should be saved successfully");
         assert_eq!(again.as_deref(), Some("readme.md"));
-        assert_eq!(store.read("readme.md").await.unwrap().unwrap(), b"three");
+        assert_eq!(
+            store
+                .read("readme.md")
+                .await
+                .expect("test data should be readable")
+                .expect("test data should be present"),
+            b"three"
+        );
     }
 
     #[tokio::test]
     async fn a_new_session_takes_the_draft_files_and_the_unowned_ones() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = UploadStore::new(directory.path().to_path_buf());
-        store.save(DRAFT_SCOPE, "brief.md", b"one").await.unwrap();
+        store
+            .save(DRAFT_SCOPE, "brief.md", b"one")
+            .await
+            .expect("test data should be saved successfully");
         // A file from before the scopes existed, written straight into
         // the directory.
         tokio::fs::write(directory.path().join("legacy.md"), b"old")
             .await
-            .unwrap();
-        assert_eq!(store.adopt("talk").await.unwrap(), 2);
+            .expect("test fixture should be written successfully");
+        assert_eq!(
+            store
+                .adopt("talk")
+                .await
+                .expect("draft test uploads should be adopted by the session"),
+            2
+        );
         let mut names: Vec<String> = store
             .list("talk")
             .await
-            .unwrap()
+            .expect("test records should be listed")
             .into_iter()
             .map(|summary| summary.name)
             .collect();
         names.sort();
         assert_eq!(names, ["brief.md", "legacy.md"]);
-        assert!(store.list(DRAFT_SCOPE).await.unwrap().is_empty());
+        assert!(
+            store
+                .list(DRAFT_SCOPE)
+                .await
+                .expect("test records should be listed")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
     async fn deleting_a_scope_takes_its_files_and_leaves_the_rest() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = UploadStore::new(directory.path().to_path_buf());
-        store.save("talk", "a.md", b"one").await.unwrap();
-        store.save("pitch", "b.md", b"two").await.unwrap();
-        assert_eq!(store.delete_scope("talk").await.unwrap(), 1);
-        assert!(store.read("a.md").await.unwrap().is_none());
-        assert!(store.read("b.md").await.unwrap().is_some());
+        store
+            .save("talk", "a.md", b"one")
+            .await
+            .expect("test data should be saved successfully");
+        store
+            .save("pitch", "b.md", b"two")
+            .await
+            .expect("test data should be saved successfully");
+        assert_eq!(
+            store
+                .delete_scope("talk")
+                .await
+                .expect("test upload scope should be deleted"),
+            1
+        );
+        assert!(
+            store
+                .read("a.md")
+                .await
+                .expect("test data should be readable")
+                .is_none()
+        );
+        assert!(
+            store
+                .read("b.md")
+                .await
+                .expect("test data should be readable")
+                .is_some()
+        );
     }
 
     #[test]
@@ -660,7 +771,8 @@ mod tests {
     #[test]
     fn a_deep_path_keeps_its_leaf_and_drops_its_front() {
         let deep = format!("{}/report.pdf", vec!["folder"; 40].join("/"));
-        let name = sanitize_file_name(&deep).unwrap();
+        let name =
+            sanitize_file_name(&deep).expect("valid test file name should pass sanitization");
         assert!(name.ends_with("folder-report.pdf"), "{name}");
         assert!(name.len() <= 104, "{name}");
         assert!(!name.starts_with('-'), "{name}");

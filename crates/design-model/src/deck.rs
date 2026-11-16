@@ -55,7 +55,6 @@ impl Deck {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::test_support::sample_deck;
     use crate::{DECK_VIEWPORT, Deck, Transition, TransitionAxis, TransitionEffect};
@@ -63,19 +62,23 @@ mod tests {
     #[test]
     fn deck_round_trips_through_json() {
         let deck = sample_deck();
-        let json = serde_json::to_string(&deck).unwrap();
+        let json = serde_json::to_string(&deck).expect("test value should serialize to JSON");
         assert!(json.contains("\"slides\""));
         assert!(!json.contains("\"viewport\""));
-        let restored: Deck = serde_json::from_str(&json).unwrap();
+        let restored: Deck = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(deck, restored);
     }
 
     #[test]
     fn rejects_unknown_deck_fields() {
-        let mut value = serde_json::to_value(sample_deck()).unwrap();
+        let mut value =
+            serde_json::to_value(sample_deck()).expect("test value should convert to JSON");
         value["extra"] = serde_json::json!(1);
         assert!(serde_json::from_value::<Deck>(value.clone()).is_err());
-        value.as_object_mut().unwrap().remove("extra");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("extra");
         value["viewport"] = serde_json::json!({"width": 1920, "height": 1080});
         assert!(serde_json::from_value::<Deck>(value).is_err());
     }
@@ -84,11 +87,15 @@ mod tests {
     fn an_outline_longer_than_the_slides_marks_a_preview() {
         let mut deck = sample_deck();
         assert!(!deck.is_preview());
-        assert!(!serde_json::to_string(&deck).unwrap().contains("outline"));
+        assert!(
+            !serde_json::to_string(&deck)
+                .expect("test value should serialize to JSON")
+                .contains("outline")
+        );
         deck.outline = vec!["Sample".to_owned(), "Next".to_owned()];
         assert!(deck.is_preview());
-        let json = serde_json::to_string(&deck).unwrap();
-        let restored: Deck = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&deck).expect("test value should serialize to JSON");
+        let restored: Deck = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(restored.outline, deck.outline);
         deck.outline.truncate(1);
         assert!(!deck.is_preview());
@@ -97,14 +104,18 @@ mod tests {
     #[test]
     fn a_deck_transition_round_trips() {
         let mut deck = sample_deck();
-        assert!(!serde_json::to_string(&deck).unwrap().contains("transition"));
+        assert!(
+            !serde_json::to_string(&deck)
+                .expect("test value should serialize to JSON")
+                .contains("transition")
+        );
         deck.transition = Some(Transition {
             effect: TransitionEffect::Zoom,
             axis: TransitionAxis::Horizontal,
             duration_ms: 300,
         });
-        let json = serde_json::to_string(&deck).unwrap();
-        let restored: Deck = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&deck).expect("test value should serialize to JSON");
+        let restored: Deck = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(restored.transition, deck.transition);
     }
 

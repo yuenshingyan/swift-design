@@ -25,7 +25,6 @@ use crate::{
 mod errors;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests;
 
 pub use errors::ValidationError;

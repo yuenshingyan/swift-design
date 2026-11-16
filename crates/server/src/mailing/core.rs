@@ -658,7 +658,6 @@ async fn render_stored_mailing(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use design_model::Mailing;
 
@@ -666,7 +665,8 @@ mod tests {
     use crate::mailing::core::{MailingStore, is_pending_email, is_valid_mailing_id};
 
     fn sample_mailing() -> Mailing {
-        serde_json::from_str(include_str!("../../../../fixtures/sample-mailing.json")).unwrap()
+        serde_json::from_str(include_str!("../../../../fixtures/sample-mailing.json"))
+            .expect("test JSON should deserialize")
     }
 
     fn store_with_history(directory: &std::path::Path) -> MailingStore {
@@ -676,59 +676,126 @@ mod tests {
 
     #[tokio::test]
     async fn the_first_mailing_save_writes_no_snapshot() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = store_with_history(directory.path());
-        store.save("report", &sample_mailing()).await.unwrap();
-        assert!(store.history("report").await.unwrap().is_empty());
+        store
+            .save("report", &sample_mailing())
+            .await
+            .expect("test data should be saved successfully");
+        assert!(
+            store
+                .history("report")
+                .await
+                .expect("test history should be listed")
+                .is_empty()
+        );
         assert!(!directory.path().join("mailing-history/report").exists());
     }
 
     #[tokio::test]
     async fn a_mailing_restore_returns_the_mailing_to_the_snapshot() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = store_with_history(directory.path());
-        store.save("report", &sample_mailing()).await.unwrap();
+        store
+            .save("report", &sample_mailing())
+            .await
+            .expect("test data should be saved successfully");
         let mut edited = sample_mailing();
         edited.title = "Edited".to_owned();
-        store.save("report", &edited).await.unwrap();
-        let stamp = store.history("report").await.unwrap()[0].stamp.clone();
-        let restored = store.restore("report", &stamp).await.unwrap().unwrap();
+        store
+            .save("report", &edited)
+            .await
+            .expect("test data should be saved successfully");
+        let stamp = store
+            .history("report")
+            .await
+            .expect("test history should be listed")[0]
+            .stamp
+            .clone();
+        let restored = store
+            .restore("report", &stamp)
+            .await
+            .expect("test snapshot should restore successfully")
+            .expect("restored test snapshot should exist");
         assert_eq!(restored.title, "Swift Design launch email");
-        assert_eq!(store.history("report").await.unwrap().len(), 2);
+        assert_eq!(
+            store
+                .history("report")
+                .await
+                .expect("test history should be listed")
+                .len(),
+            2
+        );
         assert!(
             store
                 .restore("report", "2000-01-01T00-00-00Z")
                 .await
-                .unwrap()
+                .expect("test snapshot should restore successfully")
                 .is_none()
         );
     }
 
     #[tokio::test]
     async fn a_mailing_delete_takes_the_history_with_it() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = store_with_history(directory.path());
-        store.save("report", &sample_mailing()).await.unwrap();
-        store.save("report", &sample_mailing()).await.unwrap();
-        assert_eq!(store.history("report").await.unwrap().len(), 1);
-        assert!(store.delete("report").await.unwrap());
-        assert!(store.history("report").await.unwrap().is_empty());
+        store
+            .save("report", &sample_mailing())
+            .await
+            .expect("test data should be saved successfully");
+        store
+            .save("report", &sample_mailing())
+            .await
+            .expect("test data should be saved successfully");
+        assert_eq!(
+            store
+                .history("report")
+                .await
+                .expect("test history should be listed")
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .delete("report")
+                .await
+                .expect("test record should be deleted")
+        );
+        assert!(
+            store
+                .history("report")
+                .await
+                .expect("test history should be listed")
+                .is_empty()
+        );
         assert!(!directory.path().join("mailing-history/report").exists());
     }
 
     #[tokio::test]
     async fn deleting_a_session_takes_its_mailing_candidates() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = store_with_history(directory.path());
         for id in ["memo-candidate-1", "memo-candidate-2", "memorial"] {
-            store.save(id, &sample_mailing()).await.unwrap();
-            store.save(id, &sample_mailing()).await.unwrap();
+            store
+                .save(id, &sample_mailing())
+                .await
+                .expect("test data should be saved successfully");
+            store
+                .save(id, &sample_mailing())
+                .await
+                .expect("test data should be saved successfully");
         }
-        assert_eq!(store.delete_session("memo").await.unwrap(), 2);
+        assert_eq!(
+            store
+                .delete_session("memo")
+                .await
+                .expect("test session should be deleted"),
+            2
+        );
         let left: Vec<String> = store
             .list()
             .await
-            .unwrap()
+            .expect("test records should be listed")
             .into_iter()
             .map(|summary| summary.id)
             .collect();
@@ -744,29 +811,57 @@ mod tests {
 
     #[tokio::test]
     async fn a_mailing_rename_moves_the_history_directory() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = store_with_history(directory.path());
-        store.save("old", &sample_mailing()).await.unwrap();
-        store.save("old", &sample_mailing()).await.unwrap();
-        assert!(store.rename("old", "new").await.unwrap());
+        store
+            .save("old", &sample_mailing())
+            .await
+            .expect("test data should be saved successfully");
+        store
+            .save("old", &sample_mailing())
+            .await
+            .expect("test data should be saved successfully");
+        assert!(
+            store
+                .rename("old", "new")
+                .await
+                .expect("test artifact should be renamed")
+        );
         assert!(!directory.path().join("mailing-history/old").exists());
-        assert_eq!(store.history("new").await.unwrap().len(), 1);
-        assert!(store.load("old").await.unwrap().is_none());
+        assert_eq!(
+            store
+                .history("new")
+                .await
+                .expect("test history should be listed")
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .load("old")
+                .await
+                .expect("test record should load successfully")
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn mailing_listing_skips_malformed_files() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = MailingStore::new(directory.path().to_path_buf());
-        store.save("good", &sample_mailing()).await.unwrap();
-        std::fs::write(directory.path().join("broken.json"), "not json").unwrap();
+        store
+            .save("good", &sample_mailing())
+            .await
+            .expect("test data should be saved successfully");
+        std::fs::write(directory.path().join("broken.json"), "not json")
+            .expect("test fixture should be written successfully");
         // A deck file is not a mailing: it is skipped too.
         std::fs::write(
             directory.path().join("deck.json"),
             include_str!("../../../../fixtures/sample-deck.json"),
         )
-        .unwrap();
-        let summaries = store.list().await.unwrap();
+        .expect("test fixture should be written successfully");
+        let summaries = store.list().await.expect("test records should be listed");
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].id, "good");
         assert_eq!(summaries[0].email_count, 2);
@@ -776,22 +871,31 @@ mod tests {
 
     #[tokio::test]
     async fn user_authorship_is_recorded_per_email_path() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let store = MailingStore::new(directory.path().to_path_buf());
         let first = sample_mailing();
-        store.save("report", &first).await.unwrap();
+        store
+            .save("report", &first)
+            .await
+            .expect("test data should be saved successfully");
         store
             .record_authors("report", None, &first, false)
             .await
-            .unwrap();
+            .expect("test authorship changes should be recorded");
         let mut second = first.clone();
         second.emails[0].html = "<h1>Mine</h1>".to_owned();
-        store.save("report", &second).await.unwrap();
+        store
+            .save("report", &second)
+            .await
+            .expect("test data should be saved successfully");
         store
             .record_authors("report", Some(&first), &second, true)
             .await
-            .unwrap();
-        let paths = store.user_paths("report").await.unwrap();
+            .expect("test authorship changes should be recorded");
+        let paths = store
+            .user_paths("report")
+            .await
+            .expect("test authorship paths should be readable");
         assert!(paths.contains("emails/0/html"));
         assert_eq!(paths.len(), 1);
     }

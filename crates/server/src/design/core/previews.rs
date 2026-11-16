@@ -155,7 +155,6 @@ impl LivePreview {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests;
 
 impl Drop for PreviewOwner {

@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use axum::body::to_bytes;
 use axum::http::{StatusCode, header};
 use design_model::Design;
@@ -22,7 +20,7 @@ use crate::uploads::UploadStore;
 
 #[tokio::test]
 async fn social_exports_without_chrome_are_503() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = UploadStore::new(directory.path().to_path_buf());
     let scope = ExportScope {
         id: "launch",
@@ -52,9 +50,14 @@ async fn new_png_zip_exports_without_chrome_are_503() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    let message = body["error"]["message"].as_str().unwrap();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("test response body should be readable as bytes");
+    let body: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("test JSON bytes should deserialize");
+    let message = body["error"]["message"]
+        .as_str()
+        .expect("test JSON value should be a string");
     assert!(message.starts_with("PNG exports need Chrome"));
     assert!(message.contains("SWIFT_DESIGN_CHROME"));
 
@@ -69,17 +72,27 @@ async fn new_png_zip_exports_without_chrome_are_503() {
 
 #[test]
 fn screen_selections_support_ranges_and_keep_design_order_without_duplicates() {
-    assert_eq!(selected_screen_indexes(None, 3).unwrap(), vec![0, 1, 2]);
     assert_eq!(
-        selected_screen_indexes(Some(" 5, 2-4,3, 1 "), 5).unwrap(),
+        selected_screen_indexes(None, 3).expect("test screen selection should be valid"),
+        vec![0, 1, 2]
+    );
+    assert_eq!(
+        selected_screen_indexes(Some(" 5, 2-4,3, 1 "), 5)
+            .expect("test screen selection should be valid"),
         vec![0, 1, 2, 3, 4]
     );
     assert_eq!(
-        selected_screen_indexes(Some("23-35"), 35).unwrap(),
+        selected_screen_indexes(Some("23-35"), 35).expect("test screen selection should be valid"),
         (22..35).collect::<Vec<_>>()
     );
-    assert_eq!(selected_screen_indexes(Some("2"), 3).unwrap(), vec![1]);
-    assert_eq!(selected_screen_indexes(Some("3,1"), 3).unwrap(), vec![0, 2]);
+    assert_eq!(
+        selected_screen_indexes(Some("2"), 3).expect("test screen selection should be valid"),
+        vec![1]
+    );
+    assert_eq!(
+        selected_screen_indexes(Some("3,1"), 3).expect("test screen selection should be valid"),
+        vec![0, 2]
+    );
     for selection in [
         "",
         " ",
@@ -111,26 +124,42 @@ fn selected_png_zip_preserves_original_screen_numbers_and_exact_content() {
         "demo",
         &[(22, b"SCREEN23".to_vec()), (34, b"SCREEN35".to_vec())],
     )
-    .unwrap();
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    .expect("selected test screens should pack into a ZIP");
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .expect("test bytes should form a readable ZIP archive");
     assert_eq!(archive.len(), 2);
-    assert_eq!(archive.by_index(0).unwrap().name(), "demo-screen-23.png");
-    assert_eq!(archive.by_index(1).unwrap().name(), "demo-screen-35.png");
+    assert_eq!(
+        archive
+            .by_index(0)
+            .expect("ZIP should contain the entry at the expected index")
+            .name(),
+        "demo-screen-23.png"
+    );
+    assert_eq!(
+        archive
+            .by_index(1)
+            .expect("ZIP should contain the entry at the expected index")
+            .name(),
+        "demo-screen-35.png"
+    );
     let mut content = String::new();
     archive
         .by_name("demo-screen-35.png")
-        .unwrap()
+        .expect("ZIP should contain the named entry")
         .read_to_string(&mut content)
-        .unwrap();
+        .expect("test content should be readable as text");
     assert_eq!(content, "SCREEN35");
     assert!(archive.by_name("demo-screen-1.png").is_err());
 }
 
 #[tokio::test]
 async fn invalid_screen_selection_is_rejected_before_screenshot_work() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = crate::design::core::DesignStore::new(directory.path().join("designs"));
-    store.save("demo", &sample_design()).await.unwrap();
+    store
+        .save("demo", &sample_design())
+        .await
+        .expect("test data should be saved successfully");
     let application = test_application(&directory);
     for selection in ["", "0", "999", "2-1", "1,,2", "bad"] {
         let (status, _) = send(
@@ -162,14 +191,21 @@ async fn selected_png_export_captures_only_the_requested_original_screen() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CONTENT_TYPE], "application/zip");
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("test response body should be readable as bytes");
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .expect("test bytes should form a readable ZIP archive");
     assert_eq!(archive.len(), 1);
-    let mut entry = archive.by_index(0).unwrap();
+    let mut entry = archive
+        .by_index(0)
+        .expect("ZIP should contain the entry at the expected index");
     assert_eq!(entry.name(), format!("demo-screen-{}.png", selected + 1));
     use std::io::Read;
     let mut signature = [0; 8];
-    entry.read_exact(&mut signature).unwrap();
+    entry
+        .read_exact(&mut signature)
+        .expect("test content should contain all requested bytes");
     assert_eq!(&signature, b"\x89PNG\r\n\x1a\n");
 }
 
@@ -190,12 +226,18 @@ async fn parallel_selected_export_keeps_sparse_screens_in_original_order() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("test response body should be readable as bytes");
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .expect("test bytes should form a readable ZIP archive");
     assert_eq!(archive.len(), 3);
     for (entry, screen) in [1, 3, 4].into_iter().enumerate() {
         assert_eq!(
-            archive.by_index(entry).unwrap().name(),
+            archive
+                .by_index(entry)
+                .expect("ZIP should contain the entry at the expected index")
+                .name(),
             format!("demo-screen-{screen}.png")
         );
     }
@@ -208,15 +250,40 @@ fn unit_images_pack_as_numbered_pngs_in_order() {
         "screen",
         &[b"PNG1".to_vec(), b"PNG2".to_vec(), b"PNG3".to_vec()],
     )
-    .unwrap();
+    .expect("test unit images should pack into a ZIP");
     assert_eq!(&bytes[..2], b"PK");
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .expect("test bytes should form a readable ZIP archive");
     assert_eq!(archive.len(), 3);
-    assert_eq!(archive.by_index(0).unwrap().name(), "overview-screen-1.png");
-    assert_eq!(archive.by_index(1).unwrap().name(), "overview-screen-2.png");
-    assert_eq!(archive.by_index(2).unwrap().name(), "overview-screen-3.png");
+    assert_eq!(
+        archive
+            .by_index(0)
+            .expect("ZIP should contain the entry at the expected index")
+            .name(),
+        "overview-screen-1.png"
+    );
+    assert_eq!(
+        archive
+            .by_index(1)
+            .expect("ZIP should contain the entry at the expected index")
+            .name(),
+        "overview-screen-2.png"
+    );
+    assert_eq!(
+        archive
+            .by_index(2)
+            .expect("ZIP should contain the entry at the expected index")
+            .name(),
+        "overview-screen-3.png"
+    );
     let mut content = Vec::new();
-    std::io::Read::read_to_end(&mut archive.by_index(2).unwrap(), &mut content).unwrap();
+    std::io::Read::read_to_end(
+        &mut archive
+            .by_index(2)
+            .expect("ZIP should contain the entry at the expected index"),
+        &mut content,
+    )
+    .expect("test content should be readable in full");
     assert_eq!(content, b"PNG3");
 }
 
@@ -225,14 +292,22 @@ async fn zip_download_headers_name_the_attachment() {
     let response = file_download("overview", "zip", "application/zip", b"PK".to_vec());
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.headers().get(header::CONTENT_TYPE).unwrap(),
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .expect("test collection should contain the requested entry"),
         "application/zip"
     );
     assert_eq!(
-        response.headers().get(header::CONTENT_DISPOSITION).unwrap(),
+        response
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .expect("test collection should contain the requested entry"),
         "attachment; filename=\"overview.zip\""
     );
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("test response body should be readable as bytes");
     assert_eq!(bytes.as_ref(), b"PK");
 }
 
@@ -253,50 +328,86 @@ fn a_scoped_export_stem_names_the_unit_like_a_zip_entry() {
 #[test]
 fn a_unit_number_converts_to_an_index_or_a_404() {
     let artwork = sample_artwork();
-    assert_eq!(only_cover_index("launch", &artwork, None).unwrap(), None);
     assert_eq!(
-        only_cover_index("launch", &artwork, Some(2)).unwrap(),
+        only_cover_index("launch", &artwork, None)
+            .expect("test cover selection should be in range"),
+        None
+    );
+    assert_eq!(
+        only_cover_index("launch", &artwork, Some(2))
+            .expect("test cover selection should be in range"),
         Some(1)
     );
-    let response = only_cover_index("launch", &artwork, Some(9)).unwrap_err();
+    let response = only_cover_index("launch", &artwork, Some(9))
+        .expect_err("invalid unit number should return not found");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let response = only_cover_index("launch", &artwork, Some(0)).unwrap_err();
+    let response = only_cover_index("launch", &artwork, Some(0))
+        .expect_err("invalid unit number should return not found");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[test]
 fn frame_images_pack_as_numbered_pngs() {
-    let bytes = pack_unit_images("launch", "frame", &[b"PNG1".to_vec(), b"PNG2".to_vec()]).unwrap();
+    let bytes = pack_unit_images("launch", "frame", &[b"PNG1".to_vec(), b"PNG2".to_vec()])
+        .expect("test unit images should pack into a ZIP");
     assert_eq!(&bytes[..2], b"PK");
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .expect("test bytes should form a readable ZIP archive");
     assert_eq!(archive.len(), 2);
-    assert_eq!(archive.by_index(0).unwrap().name(), "launch-frame-1.png");
-    assert_eq!(archive.by_index(1).unwrap().name(), "launch-frame-2.png");
+    assert_eq!(
+        archive
+            .by_index(0)
+            .expect("ZIP should contain the entry at the expected index")
+            .name(),
+        "launch-frame-1.png"
+    );
+    assert_eq!(
+        archive
+            .by_index(1)
+            .expect("ZIP should contain the entry at the expected index")
+            .name(),
+        "launch-frame-2.png"
+    );
     let mut content = Vec::new();
-    std::io::Read::read_to_end(&mut archive.by_index(1).unwrap(), &mut content).unwrap();
+    std::io::Read::read_to_end(
+        &mut archive
+            .by_index(1)
+            .expect("ZIP should contain the entry at the expected index"),
+        &mut content,
+    )
+    .expect("test content should be readable in full");
     assert_eq!(content, b"PNG2");
 }
 
 #[tokio::test]
 async fn inlines_uploaded_images_in_frames() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = UploadStore::new(directory.path().to_path_buf());
-    store.save("launch", "logo.png", b"PNGDATA").await.unwrap();
+    store
+        .save("launch", "logo.png", b"PNGDATA")
+        .await
+        .expect("test data should be saved successfully");
     let mut social = sample_social();
     social.frames[0].html = "<img src='/uploads/logo.png'>".to_owned();
     social.frames[0].css = Some(".a { background: url('/uploads/logo.png'); }".to_owned());
     inline_uploaded_frame_images(&mut social, &store)
         .await
-        .unwrap();
+        .expect("test uploaded frame images should be embedded");
     let expected = format!("data:image/png;base64,{}", base64_encode(b"PNGDATA"));
     assert!(social.frames[0].html.contains(&expected));
-    assert!(social.frames[0].css.as_deref().unwrap().contains(&expected));
+    assert!(
+        social.frames[0]
+            .css
+            .as_deref()
+            .expect("optional test content should be present")
+            .contains(&expected)
+    );
     assert!(!social.frames[0].html.contains("/uploads/"));
 }
 
 #[tokio::test]
 async fn document_pdf_export_without_chrome_is_503() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = UploadStore::new(directory.path().to_path_buf());
     let response = build_document_pdf_response("report", sample_document(), &store, None).await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -304,22 +415,25 @@ async fn document_pdf_export_without_chrome_is_503() {
 
 #[tokio::test]
 async fn inlines_uploaded_images_in_pages() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = UploadStore::new(directory.path().to_path_buf());
-    store.save("report", "chart.png", b"PNGDATA").await.unwrap();
+    store
+        .save("report", "chart.png", b"PNGDATA")
+        .await
+        .expect("test data should be saved successfully");
     let mut document = sample_document();
     document.pages[0].html = "<img src='/uploads/chart.png'>".to_owned();
     document.pages[0].css = Some(".a { background: url('/uploads/chart.png'); }".to_owned());
     inline_uploaded_page_images(&mut document, &store)
         .await
-        .unwrap();
+        .expect("test uploaded page images should be embedded");
     let expected = format!("data:image/png;base64,{}", base64_encode(b"PNGDATA"));
     assert!(document.pages[0].html.contains(&expected));
     assert!(
         document.pages[0]
             .css
             .as_deref()
-            .unwrap()
+            .expect("optional test content should be present")
             .contains(&expected)
     );
     assert!(!document.pages[0].html.contains("/uploads/"));
@@ -330,18 +444,22 @@ const STYLESHEET_URL: &str =
 const FONT_CSS: &str = "@font-face { font-family: 'Inter'; font-style: normal; font-weight: 400; src: url(https://fonts.gstatic.com/s/inter/a.woff2) format('woff2'); }\n@font-face { font-family: 'Inter'; font-weight: 700; src: url(https://fonts.gstatic.com/s/inter/b.woff2) format('woff2'); }";
 
 fn sample_design() -> Design {
-    serde_json::from_str(include_str!("../../../../fixtures/sample-design.json")).unwrap()
+    serde_json::from_str(include_str!("../../../../fixtures/sample-design.json"))
+        .expect("test JSON should deserialize")
 }
 
 async fn write_invalid_artifact(directory: &tempfile::TempDir, kind: &str, id: &str) {
     let path = directory.path().join(kind).join(format!("{id}.json"));
-    tokio::fs::create_dir_all(path.parent().unwrap())
-        .await
-        .unwrap();
+    tokio::fs::create_dir_all(
+        path.parent()
+            .expect("test file path should have a parent directory"),
+    )
+    .await
+    .expect("test directory tree should be created");
     let mut value: serde_json::Value = match kind {
-        "designs" => serde_json::from_str(SAMPLE_DESIGN).unwrap(),
-        "decks" => serde_json::from_str(SAMPLE_DECK).unwrap(),
-        "documents" => serde_json::from_str(SAMPLE_DOCUMENT).unwrap(),
+        "designs" => serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize"),
+        "decks" => serde_json::from_str(SAMPLE_DECK).expect("test JSON should deserialize"),
+        "documents" => serde_json::from_str(SAMPLE_DOCUMENT).expect("test JSON should deserialize"),
         _ => unreachable!(),
     };
     match kind {
@@ -350,14 +468,17 @@ async fn write_invalid_artifact(directory: &tempfile::TempDir, kind: &str, id: &
         "documents" => value["pages"] = serde_json::json!([]),
         _ => unreachable!(),
     }
-    tokio::fs::write(path, serde_json::to_vec(&value).unwrap())
-        .await
-        .unwrap();
+    tokio::fs::write(
+        path,
+        serde_json::to_vec(&value).expect("test value should serialize to JSON bytes"),
+    )
+    .await
+    .expect("test fixture should be written successfully");
 }
 
 #[tokio::test]
 async fn png_zip_routes_reject_invalid_ids() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let application = test_application(&directory);
     let (status, _) = send(
         application.clone(),
@@ -375,7 +496,7 @@ async fn png_zip_routes_reject_invalid_ids() {
 
 #[tokio::test]
 async fn png_zip_routes_404_for_missing_artifacts() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let application = test_application(&directory);
     let (status, _) = send(
         application.clone(),
@@ -399,7 +520,7 @@ async fn png_zip_routes_404_for_missing_artifacts() {
 
 #[tokio::test]
 async fn png_zip_routes_reject_invalid_artifacts_before_chrome() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     write_invalid_artifact(&directory, "designs", "broken").await;
     write_invalid_artifact(&directory, "decks", "broken").await;
     write_invalid_artifact(&directory, "documents", "broken").await;
@@ -444,7 +565,8 @@ fn google_fonts_link_is_found_with_its_bounds() {
     let html = format!(
         "<head>\n<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n<link rel=\"stylesheet\" href=\"{STYLESHEET_URL}\">\n<style>"
     );
-    let link = google_fonts_link(&html).unwrap();
+    let link =
+        google_fonts_link(&html).expect("test HTML should contain a Google Fonts stylesheet link");
     assert_eq!(
         &html[link.start..link.end],
         format!("<link rel=\"stylesheet\" href=\"{STYLESHEET_URL}\">")
@@ -463,7 +585,9 @@ fn google_fonts_link_is_found_with_its_bounds() {
 #[tokio::test]
 async fn rewrite_replaces_one_font_url_with_a_data_uri() {
     let css = "@font-face { src: url(https://fonts.gstatic.com/s/inter/a.woff2) format('woff2'); }";
-    let rewritten = inline_font_urls(css, &fake_fetch).await.unwrap();
+    let rewritten = inline_font_urls(css, &fake_fetch)
+        .await
+        .expect("test font URLs should be inlined");
     assert_eq!(
         rewritten,
         format!(
@@ -475,7 +599,9 @@ async fn rewrite_replaces_one_font_url_with_a_data_uri() {
 
 #[tokio::test]
 async fn rewrite_replaces_every_font_url() {
-    let rewritten = inline_font_urls(FONT_CSS, &fake_fetch).await.unwrap();
+    let rewritten = inline_font_urls(FONT_CSS, &fake_fetch)
+        .await
+        .expect("test font URLs should be inlined");
     assert!(rewritten.contains(&data_uri("a.woff2")));
     assert!(rewritten.contains(&data_uri("b.woff2")));
     assert!(!rewritten.contains("fonts.gstatic.com"));
@@ -484,7 +610,9 @@ async fn rewrite_replaces_every_font_url() {
 
 #[tokio::test]
 async fn rewrite_keeps_the_rest_of_the_css_unchanged() {
-    let rewritten = inline_font_urls(FONT_CSS, &fake_fetch).await.unwrap();
+    let rewritten = inline_font_urls(FONT_CSS, &fake_fetch)
+        .await
+        .expect("test font URLs should be inlined");
     let restored = rewritten
         .replace(
             &data_uri("a.woff2"),
@@ -498,7 +626,7 @@ async fn rewrite_keeps_the_rest_of_the_css_unchanged() {
     assert_eq!(
         inline_font_urls("p { color: red }", &fake_fetch)
             .await
-            .unwrap(),
+            .expect("test font URLs should be inlined"),
         "p { color: red }"
     );
 }
@@ -548,7 +676,7 @@ fn attachment_disposition_names_the_design_file() {
 
 #[tokio::test]
 async fn deck_pdf_export_without_chrome_is_503() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = UploadStore::new(directory.path().to_path_buf());
     let response = build_deck_pdf_response("overview", sample_deck(), &store, None).await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -556,7 +684,7 @@ async fn deck_pdf_export_without_chrome_is_503() {
 
 #[tokio::test]
 async fn pptx_export_without_chrome_is_503() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = UploadStore::new(directory.path().to_path_buf());
     let sources = ExportSources {
         uploads: &store,
@@ -566,27 +694,39 @@ async fn pptx_export_without_chrome_is_503() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
-        .unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    let message = body["error"]["message"].as_str().unwrap();
+        .expect("test response body should be readable as bytes");
+    let body: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("test JSON bytes should deserialize");
+    let message = body["error"]["message"]
+        .as_str()
+        .expect("test JSON value should be a string");
     assert!(message.starts_with("PPTX exports need Chrome"));
     assert!(message.contains("SWIFT_DESIGN_CHROME"));
 }
 
 #[tokio::test]
 async fn inlines_uploaded_images_in_slides() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = UploadStore::new(directory.path().to_path_buf());
-    store.save("talk", "chart.png", b"PNGDATA").await.unwrap();
+    store
+        .save("talk", "chart.png", b"PNGDATA")
+        .await
+        .expect("test data should be saved successfully");
     let mut deck = sample_deck();
     deck.slides[0].html = "<img src='/uploads/chart.png'>".to_owned();
     deck.slides[0].css = Some(".a { background: url('/uploads/chart.png'); }".to_owned());
     inline_uploaded_slide_images(&mut deck, &store)
         .await
-        .unwrap();
+        .expect("test uploaded slide images should be embedded");
     let expected = format!("data:image/png;base64,{}", base64_encode(b"PNGDATA"));
     assert!(deck.slides[0].html.contains(&expected));
-    assert!(deck.slides[0].css.as_deref().unwrap().contains(&expected));
+    assert!(
+        deck.slides[0]
+            .css
+            .as_deref()
+            .expect("optional test content should be present")
+            .contains(&expected)
+    );
     assert!(!deck.slides[0].html.contains("/uploads/"));
 }
 
@@ -601,23 +741,28 @@ fn base64_matches_known_vectors() {
 
 #[tokio::test]
 async fn inlines_uploaded_images_in_html_and_css() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = UploadStore::new(directory.path().to_path_buf());
-    store.save("talk", "chart.png", b"PNGDATA").await.unwrap();
+    store
+        .save("talk", "chart.png", b"PNGDATA")
+        .await
+        .expect("test data should be saved successfully");
 
     let mut design = sample_design();
     design.screens[0].html =
         "<img src='/uploads/chart.png'><div style=\"background:url(/uploads/chart.png)\"></div>"
             .to_owned();
     design.screens[0].css = Some(".a { background: url('/uploads/chart.png'); }".to_owned());
-    inline_uploaded_images(&mut design, &store).await.unwrap();
+    inline_uploaded_images(&mut design, &store)
+        .await
+        .expect("test uploaded images should be embedded");
     let expected = format!("data:image/png;base64,{}", base64_encode(b"PNGDATA"));
     assert_eq!(design.screens[0].html.matches(&expected).count(), 2);
     assert!(
         design.screens[0]
             .css
             .as_deref()
-            .unwrap()
+            .expect("optional test content should be present")
             .contains(&expected)
     );
     assert!(!design.screens[0].html.contains("/uploads/"));
@@ -625,12 +770,14 @@ async fn inlines_uploaded_images_in_html_and_css() {
 
 #[tokio::test]
 async fn keeps_missing_and_external_images_untouched() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = UploadStore::new(directory.path().to_path_buf());
     let mut design = sample_design();
     design.screens[0].html =
         "<img src='/uploads/absent.png'><a href='https://example.com/a.png'>x</a>".to_owned();
-    inline_uploaded_images(&mut design, &store).await.unwrap();
+    inline_uploaded_images(&mut design, &store)
+        .await
+        .expect("test uploaded images should be embedded");
     assert!(design.screens[0].html.contains("/uploads/absent.png"));
     assert!(design.screens[0].html.contains("https://example.com/a.png"));
 }

@@ -156,7 +156,6 @@ impl Artwork {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::test_support::sample_artwork;
     use crate::{
@@ -167,32 +166,44 @@ mod tests {
     #[test]
     fn artwork_round_trips_through_json() {
         let artwork = sample_artwork();
-        let json = serde_json::to_string(&artwork).unwrap();
+        let json = serde_json::to_string(&artwork).expect("test value should serialize to JSON");
         assert!(json.contains("\"covers\""));
         assert!(json.contains("\"size\":\"thumbnail\""));
         assert!(!json.contains("\"viewport\""));
-        let restored: Artwork = serde_json::from_str(&json).unwrap();
+        let restored: Artwork = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(artwork, restored);
     }
 
     #[test]
     fn rejects_unknown_artwork_fields() {
-        let mut value = serde_json::to_value(sample_artwork()).unwrap();
+        let mut value =
+            serde_json::to_value(sample_artwork()).expect("test value should convert to JSON");
         value["extra"] = serde_json::json!(1);
         assert!(serde_json::from_value::<Artwork>(value.clone()).is_err());
-        value.as_object_mut().unwrap().remove("extra");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("extra");
         value["viewport"] = serde_json::json!({"width": 1280, "height": 720});
         assert!(serde_json::from_value::<Artwork>(value.clone()).is_err());
-        value.as_object_mut().unwrap().remove("viewport");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("viewport");
         value["transition"] = serde_json::json!({"effect": "fade"});
         assert!(serde_json::from_value::<Artwork>(value).is_err());
     }
 
     #[test]
     fn the_size_defaults_to_thumbnail() {
-        let mut value = serde_json::to_value(sample_artwork()).unwrap();
-        value.as_object_mut().unwrap().remove("size");
-        let restored: Artwork = serde_json::from_value(value).unwrap();
+        let mut value =
+            serde_json::to_value(sample_artwork()).expect("test value should convert to JSON");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("size");
+        let restored: Artwork =
+            serde_json::from_value(value).expect("test JSON value should deserialize");
         assert_eq!(restored.size, CoverSize::Thumbnail);
         assert_eq!(restored.viewport(), THUMBNAIL_COVER_VIEWPORT);
     }
@@ -201,11 +212,15 @@ mod tests {
     fn an_outline_longer_than_the_covers_marks_a_preview() {
         let mut artwork = sample_artwork();
         assert!(!artwork.is_preview());
-        assert!(!serde_json::to_string(&artwork).unwrap().contains("outline"));
+        assert!(
+            !serde_json::to_string(&artwork)
+                .expect("test value should serialize to JSON")
+                .contains("outline")
+        );
         artwork.outline = vec!["Primary".to_owned(), "Variant B".to_owned()];
         assert!(artwork.is_preview());
-        let json = serde_json::to_string(&artwork).unwrap();
-        let restored: Artwork = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&artwork).expect("test value should serialize to JSON");
+        let restored: Artwork = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(restored.outline, artwork.outline);
         artwork.outline.truncate(1);
         assert!(!artwork.is_preview());
@@ -218,7 +233,7 @@ mod tests {
         for size in CoverSize::ALL {
             assert_eq!(CoverSize::from_name(size.as_str()), Some(size));
             assert!(size.viewport().is_valid(), "{}", size.as_str());
-            let json = serde_json::to_string(&size).unwrap();
+            let json = serde_json::to_string(&size).expect("test value should serialize to JSON");
             assert_eq!(json, format!("\"{}\"", size.as_str()));
         }
         assert_eq!(THUMBNAIL_COVER_VIEWPORT.aspect_ratio_css(), "1280 / 720");

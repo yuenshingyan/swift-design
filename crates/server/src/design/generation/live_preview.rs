@@ -13,7 +13,6 @@ use crate::design::patch::{apply_patch, parse_patch};
 use crate::model_client::TextSink;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests;
 
 /// Latest isolated screen operation from each parallel worker.

@@ -2,12 +2,13 @@ use super::*;
 
 #[tokio::test]
 async fn a_deck_session_lists_its_decks_and_chooses_from_the_deck_store() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_deck_session(&application, "talk").await;
     let (status, body) = send(application.clone(), "GET", "/sessions/talk", None).await;
     assert_eq!(status, StatusCode::OK);
-    let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let view: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
     assert_eq!(view["session"]["artifact_kind"], "deck");
     assert_eq!(view["session"]["artifact_kind"], "deck");
     let (status, _) = send(
@@ -19,9 +20,22 @@ async fn a_deck_session_lists_its_decks_and_chooses_from_the_deck_store() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (_, body) = send(application.clone(), "GET", "/sessions/talk", None).await;
-    let view: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(view["decks"].as_array().unwrap().len(), 1);
-    assert_eq!(view["designs"].as_array().unwrap().len(), 0);
+    let view: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
+    assert_eq!(
+        view["decks"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        1
+    );
+    assert_eq!(
+        view["designs"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        0
+    );
     let (status, body) = send(application.clone(), "GET", "/candidates/talk", None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Choose this deck"));
@@ -42,7 +56,7 @@ async fn a_deck_session_lists_its_decks_and_chooses_from_the_deck_store() {
 
 #[tokio::test]
 async fn renders_a_valid_deck_to_html() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (status, body) = send(
         test_application(&directory),
         "POST",
@@ -67,7 +81,7 @@ async fn renders_a_valid_deck_to_html() {
 
 #[tokio::test]
 async fn saving_then_fetching_a_deck_round_trips() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "talk").await;
     let (status, _) = send(
@@ -80,8 +94,15 @@ async fn saving_then_fetching_a_deck_round_trips() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, body) = send(application.clone(), "GET", "/decks/talk-candidate-1", None).await;
     assert_eq!(status, StatusCode::OK);
-    let deck: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(deck["slides"].as_array().unwrap().len(), 3);
+    let deck: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
+    assert_eq!(
+        deck["slides"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        3
+    );
     let (status, body) = send(application.clone(), "GET", "/decks", None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("\"slide_count\":3"));
@@ -107,7 +128,7 @@ async fn saving_then_fetching_a_deck_round_trips() {
 
 #[tokio::test]
 async fn deck_writes_are_rejected_unless_the_session_is_generating() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     let (status, body) = send(application.clone(), "PUT", "/decks/talk", Some(SAMPLE_DECK)).await;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -127,7 +148,7 @@ async fn deck_writes_are_rejected_unless_the_session_is_generating() {
 
 #[tokio::test]
 async fn presents_a_stored_deck_with_its_notes() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "talk").await;
     send(application.clone(), "PUT", "/decks/talk", Some(SAMPLE_DECK)).await;
@@ -150,7 +171,7 @@ async fn presents_a_stored_deck_with_its_notes() {
 
 #[tokio::test]
 async fn only_the_audience_render_carries_the_follow_script() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "talk").await;
     send(application.clone(), "PUT", "/decks/talk", Some(SAMPLE_DECK)).await;

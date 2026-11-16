@@ -185,7 +185,6 @@ fn http_date_seconds(value: &str) -> Option<u64> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::cell::{Cell, RefCell};
     use std::future::{pending, ready};
@@ -221,7 +220,11 @@ mod tests {
         .await;
         assert_eq!(calls.get(), 4);
         assert_eq!(*delays.borrow(), [5, 10, 20]);
-        assert!(result.unwrap_err().contains("after 4 attempts"));
+        assert!(
+            result
+                .expect_err("retry budget exhaustion should return the last error")
+                .contains("after 4 attempts")
+        );
     }
 
     #[tokio::test]
@@ -229,7 +232,12 @@ mod tests {
         let calls = Cell::new(0);
         let lines = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&lines);
-        let log: LogSink = Arc::new(move |line| captured.lock().unwrap().push(line.to_owned()));
+        let log: LogSink = Arc::new(move |line| {
+            captured
+                .lock()
+                .expect("test mutex should not be poisoned")
+                .push(line.to_owned())
+        });
         let result = with_retry_wait(
             || {
                 calls.set(calls.get() + 1);
@@ -243,9 +251,15 @@ mod tests {
             Some(&log),
         )
         .await;
-        assert_eq!(result.unwrap(), "recovered");
+        assert_eq!(
+            result.expect("test operation should return its expected result"),
+            "recovered"
+        );
         assert_eq!(calls.get(), 3);
-        assert!(lines.lock().unwrap()[0].contains("attempt 2 of 4 in 5 seconds"));
+        assert!(
+            lines.lock().expect("test mutex should not be poisoned")[0]
+                .contains("attempt 2 of 4 in 5 seconds")
+        );
     }
 
     #[tokio::test]
@@ -261,7 +275,10 @@ mod tests {
         )
         .await;
         assert_eq!(calls.get(), 1);
-        assert_eq!(result.unwrap_err(), "invalid api key");
+        assert_eq!(
+            result.expect_err("permanent provider failure should be returned without retrying"),
+            "invalid api key"
+        );
     }
 
     #[tokio::test]
@@ -292,7 +309,11 @@ mod tests {
                 assert!(result.is_ok());
                 assert_eq!(*delays.borrow(), [30]);
             } else {
-                assert!(result.unwrap_err().contains("Retry later"));
+                assert!(
+                    result
+                        .expect_err("provider wait beyond the retry budget should be refused")
+                        .contains("Retry later")
+                );
                 assert_eq!(calls.get(), 1);
                 assert!(delays.borrow().is_empty());
             }

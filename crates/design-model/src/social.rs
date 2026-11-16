@@ -141,7 +141,6 @@ impl Social {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::test_support::sample_social;
     use crate::{
@@ -151,32 +150,44 @@ mod tests {
     #[test]
     fn social_round_trips_through_json() {
         let social = sample_social();
-        let json = serde_json::to_string(&social).unwrap();
+        let json = serde_json::to_string(&social).expect("test value should serialize to JSON");
         assert!(json.contains("\"frames\""));
         assert!(json.contains("\"format\":\"portrait\""));
         assert!(!json.contains("\"viewport\""));
-        let restored: Social = serde_json::from_str(&json).unwrap();
+        let restored: Social = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(social, restored);
     }
 
     #[test]
     fn rejects_unknown_social_fields() {
-        let mut value = serde_json::to_value(sample_social()).unwrap();
+        let mut value =
+            serde_json::to_value(sample_social()).expect("test value should convert to JSON");
         value["extra"] = serde_json::json!(1);
         assert!(serde_json::from_value::<Social>(value.clone()).is_err());
-        value.as_object_mut().unwrap().remove("extra");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("extra");
         value["viewport"] = serde_json::json!({"width": 1080, "height": 1350});
         assert!(serde_json::from_value::<Social>(value.clone()).is_err());
-        value.as_object_mut().unwrap().remove("viewport");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("viewport");
         value["transition"] = serde_json::json!({"effect": "fade"});
         assert!(serde_json::from_value::<Social>(value).is_err());
     }
 
     #[test]
     fn the_format_defaults_to_portrait() {
-        let mut value = serde_json::to_value(sample_social()).unwrap();
-        value.as_object_mut().unwrap().remove("format");
-        let restored: Social = serde_json::from_value(value).unwrap();
+        let mut value =
+            serde_json::to_value(sample_social()).expect("test value should convert to JSON");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("format");
+        let restored: Social =
+            serde_json::from_value(value).expect("test JSON value should deserialize");
         assert_eq!(restored.format, Format::Portrait);
         assert_eq!(restored.viewport(), PORTRAIT_VIEWPORT);
     }
@@ -185,11 +196,15 @@ mod tests {
     fn an_outline_longer_than_the_frames_marks_a_preview() {
         let mut social = sample_social();
         assert!(!social.is_preview());
-        assert!(!serde_json::to_string(&social).unwrap().contains("outline"));
+        assert!(
+            !serde_json::to_string(&social)
+                .expect("test value should serialize to JSON")
+                .contains("outline")
+        );
         social.outline = vec!["Sample".to_owned(), "Next".to_owned()];
         assert!(social.is_preview());
-        let json = serde_json::to_string(&social).unwrap();
-        let restored: Social = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&social).expect("test value should serialize to JSON");
+        let restored: Social = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(restored.outline, social.outline);
         social.outline.truncate(1);
         assert!(!social.is_preview());
@@ -201,7 +216,7 @@ mod tests {
             let viewport = format.viewport();
             assert!(viewport.is_valid(), "{}", format.label());
             assert_eq!(Format::from_name(format.as_str()), Some(format));
-            let json = serde_json::to_string(&format).unwrap();
+            let json = serde_json::to_string(&format).expect("test value should serialize to JSON");
             assert_eq!(json, format!("\"{}\"", format.as_str()));
         }
         assert_eq!(SQUARE_VIEWPORT.aspect_ratio_css(), "1080 / 1080");

@@ -155,7 +155,6 @@ impl Campaign {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::test_support::sample_campaign;
     use crate::{
@@ -166,32 +165,44 @@ mod tests {
     #[test]
     fn campaign_round_trips_through_json() {
         let campaign = sample_campaign();
-        let json = serde_json::to_string(&campaign).unwrap();
+        let json = serde_json::to_string(&campaign).expect("test value should serialize to JSON");
         assert!(json.contains("\"ads\""));
         assert!(json.contains("\"size\":\"medium_rectangle\""));
         assert!(!json.contains("\"viewport\""));
-        let restored: Campaign = serde_json::from_str(&json).unwrap();
+        let restored: Campaign = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(campaign, restored);
     }
 
     #[test]
     fn rejects_unknown_campaign_fields() {
-        let mut value = serde_json::to_value(sample_campaign()).unwrap();
+        let mut value =
+            serde_json::to_value(sample_campaign()).expect("test value should convert to JSON");
         value["extra"] = serde_json::json!(1);
         assert!(serde_json::from_value::<Campaign>(value.clone()).is_err());
-        value.as_object_mut().unwrap().remove("extra");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("extra");
         value["viewport"] = serde_json::json!({"width": 300, "height": 250});
         assert!(serde_json::from_value::<Campaign>(value.clone()).is_err());
-        value.as_object_mut().unwrap().remove("viewport");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("viewport");
         value["transition"] = serde_json::json!({"effect": "fade"});
         assert!(serde_json::from_value::<Campaign>(value).is_err());
     }
 
     #[test]
     fn the_size_defaults_to_medium_rectangle() {
-        let mut value = serde_json::to_value(sample_campaign()).unwrap();
-        value.as_object_mut().unwrap().remove("size");
-        let restored: Campaign = serde_json::from_value(value).unwrap();
+        let mut value =
+            serde_json::to_value(sample_campaign()).expect("test value should convert to JSON");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("size");
+        let restored: Campaign =
+            serde_json::from_value(value).expect("test JSON value should deserialize");
         assert_eq!(restored.size, AdSize::MediumRectangle);
         assert_eq!(restored.viewport(), MEDIUM_RECTANGLE_AD_VIEWPORT);
     }
@@ -202,13 +213,13 @@ mod tests {
         assert!(!campaign.is_preview());
         assert!(
             !serde_json::to_string(&campaign)
-                .unwrap()
+                .expect("test value should serialize to JSON")
                 .contains("outline")
         );
         campaign.outline = vec!["Primary".to_owned(), "Variant B".to_owned()];
         assert!(campaign.is_preview());
-        let json = serde_json::to_string(&campaign).unwrap();
-        let restored: Campaign = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&campaign).expect("test value should serialize to JSON");
+        let restored: Campaign = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(restored.outline, campaign.outline);
         campaign.outline.truncate(1);
         assert!(!campaign.is_preview());
@@ -220,7 +231,7 @@ mod tests {
     fn the_sizes_are_the_iab_units_and_named() {
         for size in AdSize::ALL {
             assert_eq!(AdSize::from_name(size.as_str()), Some(size));
-            let json = serde_json::to_string(&size).unwrap();
+            let json = serde_json::to_string(&size).expect("test value should serialize to JSON");
             assert_eq!(json, format!("\"{}\"", size.as_str()));
         }
         assert_eq!(MEDIUM_RECTANGLE_AD_VIEWPORT.aspect_ratio_css(), "300 / 250");

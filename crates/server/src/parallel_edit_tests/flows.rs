@@ -11,8 +11,9 @@ fn guard_rejects_malformed_or_reversed_json_delimiters_without_panicking() {
 #[test]
 fn worker_and_coordination_prompts_preserve_attachment_parts() {
     let original = sample_design();
-    let snapshot = serde_json::to_value(&original).unwrap();
-    let artifact_json = serde_json::to_string(&original).unwrap();
+    let snapshot = serde_json::to_value(&original).expect("test value should convert to JSON");
+    let artifact_json =
+        serde_json::to_string(&original).expect("test value should serialize to JSON");
     let note = "Old focused edit note.";
     let input = edit_input(&artifact_json, "Update the chosen screens.", note);
     let messages = vec![json!({ "role": "user", "content": [
@@ -29,15 +30,17 @@ fn worker_and_coordination_prompts_preserve_attachment_parts() {
         is_fresh: false,
         request: &request,
     };
-    let worker = page_messages(&edit, &snapshot, 0).unwrap();
-    let coordinator = coordination_messages(&edit, &original).unwrap();
+    let worker = page_messages(&edit, &snapshot, 0)
+        .expect("test page worker messages should be constructed");
+    let coordinator = coordination_messages(&edit, &original)
+        .expect("test coordination messages should be constructed");
     for rewritten in [&worker, &coordinator] {
         assert_eq!(rewritten[0]["content"][1], messages[0]["content"][1]);
         assert_eq!(rewritten[0]["content"][2], messages[0]["content"][2]);
         assert!(
             !rewritten[0]["content"][0]["text"]
                 .as_str()
-                .unwrap()
+                .expect("test JSON value should be a string")
                 .contains(note)
         );
     }
@@ -51,11 +54,14 @@ fn worker_and_coordination_prompts_preserve_attachment_parts() {
 
 #[test]
 fn guard_rejects_shared_meta_changes_for_scoped_patch() {
-    let original: Value = serde_json::from_str(SAMPLE_DOCUMENT).unwrap();
+    let original: Value =
+        serde_json::from_str(SAMPLE_DOCUMENT).expect("test JSON should deserialize");
     let mut patch: Value =
-        serde_json::from_str(&patch_for(ArtifactKind::Document, &original, 1, "ok")).unwrap();
+        serde_json::from_str(&patch_for(ArtifactKind::Document, &original, 1, "ok"))
+            .expect("test JSON should deserialize");
     patch["title"] = json!("Changed title");
-    let error = guard_page_patch(&patch.to_string(), ArtifactKind::Document, &[1]).unwrap_err();
+    let error = guard_page_patch(&patch.to_string(), ArtifactKind::Document, &[1])
+        .expect_err("scoped patch changing shared metadata should be rejected");
     assert!(error.contains("shared") || error.contains("title"));
 }
 
@@ -67,21 +73,23 @@ fn a_page_worker_cannot_change_shared_app_window_bounds() {
 
 #[test]
 fn guard_rejects_cross_unit_changes_for_scoped_patch() {
-    let original: Value = serde_json::from_str(SAMPLE_SOCIAL).unwrap();
+    let original: Value =
+        serde_json::from_str(SAMPLE_SOCIAL).expect("test JSON should deserialize");
     let patch = patch_for(ArtifactKind::Social, &original, 0, "wrong frame");
-    let error = guard_page_patch(&patch, ArtifactKind::Social, &[1]).unwrap_err();
+    let error = guard_page_patch(&patch, ArtifactKind::Social, &[1])
+        .expect_err("scoped patch changing another unit should be rejected");
     assert!(error.contains("assigned") || error.contains("other units"));
 }
 
 #[test]
 fn guard_rejects_insert_delete_and_duplicate_operations() {
-    let original: Value = serde_json::from_str(SAMPLE_PRINT).unwrap();
+    let original: Value = serde_json::from_str(SAMPLE_PRINT).expect("test JSON should deserialize");
     let insert_error = guard_page_patch(
         &insert_patch_for(ArtifactKind::Print, &original, 0),
         ArtifactKind::Print,
         &[0],
     )
-    .unwrap_err();
+    .expect_err("scoped patch inserting, deleting, or duplicating units should be rejected");
     assert!(insert_error.contains("insert"));
 
     let delete_error = guard_page_patch(
@@ -89,7 +97,7 @@ fn guard_rejects_insert_delete_and_duplicate_operations() {
         ArtifactKind::Print,
         &[0],
     )
-    .unwrap_err();
+    .expect_err("scoped patch inserting, deleting, or duplicating units should be rejected");
     assert!(delete_error.contains("delete") || delete_error.contains("null"));
 
     let duplicate_error = guard_page_patch(
@@ -97,21 +105,29 @@ fn guard_rejects_insert_delete_and_duplicate_operations() {
         ArtifactKind::Print,
         &[0],
     )
-    .unwrap_err();
+    .expect_err("scoped patch inserting, deleting, or duplicating units should be rejected");
     assert!(duplicate_error.contains("assigned") || duplicate_error.contains("at most once"));
 }
 
 #[test]
 fn focused_worker_json_shows_one_index_and_omits_markup_for_regeneration() {
-    let original: Value = serde_json::from_str(SAMPLE_DECK).unwrap();
-    let focused = focused_worker_json(&original, ArtifactKind::Deck, 2, false).unwrap();
-    let focused_json: Value = serde_json::from_str(&focused).unwrap();
-    assert_eq!(focused_json["slides"].as_array().unwrap().len(), 1);
+    let original: Value = serde_json::from_str(SAMPLE_DECK).expect("test JSON should deserialize");
+    let focused = focused_worker_json(&original, ArtifactKind::Deck, 2, false)
+        .expect("worker fixture should produce focused JSON");
+    let focused_json: Value = serde_json::from_str(&focused).expect("test JSON should deserialize");
+    assert_eq!(
+        focused_json["slides"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        1
+    );
     assert_eq!(focused_json["slides"][0]["index"], json!(2));
     assert!(focused.contains("html"));
     assert!(focused.contains("css"));
 
-    let fresh = focused_worker_json(&original, ArtifactKind::Deck, 2, true).unwrap();
+    let fresh = focused_worker_json(&original, ArtifactKind::Deck, 2, true)
+        .expect("worker fixture should produce focused JSON");
     assert!(fresh.contains("index"));
     assert!(!fresh.contains("<"));
     assert!(!fresh.contains(".slide"));
@@ -122,44 +138,49 @@ fn all_kinds_use_their_patch_vocabulary_with_actual_fixtures() {
     let cases = [
         (
             ArtifactKind::Demo,
-            serde_json::from_str::<Value>(SAMPLE_DESIGN).unwrap(),
+            serde_json::from_str::<Value>(SAMPLE_DESIGN).expect("test JSON should deserialize"),
         ),
         (
             ArtifactKind::Deck,
-            serde_json::from_str::<Value>(SAMPLE_DECK).unwrap(),
+            serde_json::from_str::<Value>(SAMPLE_DECK).expect("test JSON should deserialize"),
         ),
         (
             ArtifactKind::Document,
-            serde_json::from_str::<Value>(SAMPLE_DOCUMENT).unwrap(),
+            serde_json::from_str::<Value>(SAMPLE_DOCUMENT).expect("test JSON should deserialize"),
         ),
         (
             ArtifactKind::Social,
-            serde_json::from_str::<Value>(SAMPLE_SOCIAL).unwrap(),
+            serde_json::from_str::<Value>(SAMPLE_SOCIAL).expect("test JSON should deserialize"),
         ),
         (
             ArtifactKind::Print,
-            serde_json::from_str::<Value>(SAMPLE_PRINT).unwrap(),
+            serde_json::from_str::<Value>(SAMPLE_PRINT).expect("test JSON should deserialize"),
         ),
         (
             ArtifactKind::Mailing,
-            serde_json::from_str::<Value>(SAMPLE_MAILING).unwrap(),
+            serde_json::from_str::<Value>(SAMPLE_MAILING).expect("test JSON should deserialize"),
         ),
         (
             ArtifactKind::Campaign,
-            serde_json::from_str::<Value>(SAMPLE_CAMPAIGN).unwrap(),
+            serde_json::from_str::<Value>(SAMPLE_CAMPAIGN).expect("test JSON should deserialize"),
         ),
         (
             ArtifactKind::Artwork,
-            serde_json::from_str::<Value>(SAMPLE_ARTWORK).unwrap(),
+            serde_json::from_str::<Value>(SAMPLE_ARTWORK).expect("test JSON should deserialize"),
         ),
     ];
 
     for (kind, artifact) in cases {
-        let focused = focused_worker_json(&artifact, kind, 0, false).unwrap();
-        let focused_json: Value = serde_json::from_str(&focused).unwrap();
+        let focused = focused_worker_json(&artifact, kind, 0, false)
+            .expect("worker fixture should produce focused JSON");
+        let focused_json: Value =
+            serde_json::from_str(&focused).expect("test JSON should deserialize");
         assert!(focused_json.get(unit_key(kind)).is_some(), "{kind:?}");
         assert_eq!(
-            focused_json[unit_key(kind)].as_array().unwrap().len(),
+            focused_json[unit_key(kind)]
+                .as_array()
+                .expect("test JSON value should be an array")
+                .len(),
             1,
             "{kind:?}"
         );
@@ -170,7 +191,8 @@ fn all_kinds_use_their_patch_vocabulary_with_actual_fixtures() {
         );
 
         let patch = patch_for(kind, &artifact, 0, "changed");
-        guard_page_patch(&patch, kind, &[0]).unwrap();
+        guard_page_patch(&patch, kind, &[0])
+            .expect("test patch should stay within the assigned page scope");
         assert!(patch.contains(unit_key(kind)), "{kind:?}");
         assert!(patch.contains(singular_key(kind)), "{kind:?}");
     }
@@ -179,19 +201,20 @@ fn all_kinds_use_their_patch_vocabulary_with_actual_fixtures() {
 #[test]
 fn merge_worker_results_preserves_original_order_from_out_of_order_workers() {
     let original = sample_document();
-    let original_json = serde_json::to_value(&original).unwrap();
+    let original_json = serde_json::to_value(&original).expect("test value should convert to JSON");
     let second = <design_model::Document as ParallelEditable>::apply_edit(
         &original,
         &patch_for(ArtifactKind::Document, &original_json, 1, "second first"),
     )
-    .unwrap();
+    .expect("test edit should apply to its baseline");
     let first = <design_model::Document as ParallelEditable>::apply_edit(
         &original,
         &patch_for(ArtifactKind::Document, &original_json, 0, "first second"),
     )
-    .unwrap();
+    .expect("test edit should apply to its baseline");
 
-    let merged = merge_worker_results(original.clone(), vec![(1, second), (0, first)]).unwrap();
+    let merged = merge_worker_results(original.clone(), vec![(1, second), (0, first)])
+        .expect("test worker results should merge without conflicts");
     assert_eq!(merged.pages[0].notes.as_deref(), Some("first second"));
     assert_eq!(merged.pages[1].notes.as_deref(), Some("second first"));
     assert_eq!(merged.pages[2], original.pages[2]);
@@ -200,7 +223,7 @@ fn merge_worker_results_preserves_original_order_from_out_of_order_workers() {
 #[tokio::test]
 async fn multi_unit_edit_runs_workers_before_one_serial_coordination_call() {
     let original = sample_document();
-    let original_json = serde_json::to_value(&original).unwrap();
+    let original_json = serde_json::to_value(&original).expect("test value should convert to JSON");
     let fake = ParallelFakeModel::start(None).await;
     fake.auto_worker_patches(ArtifactKind::Document, &original_json, "worker");
     fake.push_text(patch_for(
@@ -228,7 +251,7 @@ async fn parallel_workers_are_limited_before_coordination() {
     while original.screens.len() < 5 {
         original.screens.push(original.screens[0].clone());
     }
-    let original_json = serde_json::to_value(&original).unwrap();
+    let original_json = serde_json::to_value(&original).expect("test value should convert to JSON");
     let barrier = Arc::new(Barrier::new(5));
     let fake = ParallelFakeModel::start(Some(Arc::clone(&barrier))).await;
     fake.auto_worker_patches(ArtifactKind::Demo, &original_json, "worker");
@@ -255,8 +278,8 @@ async fn parallel_workers_are_limited_before_coordination() {
     let _ = succeeded(
         tokio::time::timeout(Duration::from_secs(2), edit)
             .await
-            .unwrap()
-            .unwrap(),
+            .expect("test operation should complete before the timeout")
+            .expect("test operation should succeed within the timeout"),
     );
 
     assert_eq!(
@@ -277,7 +300,7 @@ async fn a_systemic_edit_saves_only_after_coordination_and_reports_the_final_cha
     fake.push_text(EDIT_PLAN.to_owned());
     fake.auto_worker_patches(
         ArtifactKind::Demo,
-        &serde_json::to_value(&original).unwrap(),
+        &serde_json::to_value(&original).expect("test value should convert to JSON"),
         "worker",
     );
     fake.push_text(r#"{"title":"Coordinated workspace","screens":[]}"#.to_owned());
@@ -297,14 +320,14 @@ async fn a_systemic_edit_saves_only_after_coordination_and_reports_the_final_cha
         .sessions
         .append_message("talk", pending)
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     assert_eq!(
         candidate
             .designs
             .load("talk-candidate-1")
             .await
-            .unwrap()
-            .unwrap(),
+            .expect("test record should load successfully")
+            .expect("saved test record should exist"),
         original
     );
     assert!(
@@ -312,16 +335,16 @@ async fn a_systemic_edit_saves_only_after_coordination_and_reports_the_final_cha
             .designs
             .history("talk-candidate-1")
             .await
-            .unwrap()
+            .expect("test history should be listed")
             .is_empty()
     );
     assert_eq!(fake.state.coordinator_count.load(Ordering::SeqCst), 0);
     barrier.wait().await;
     let outcome = tokio::time::timeout(Duration::from_secs(10), run)
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("test operation should complete before the timeout")
+        .expect("test operation should succeed within the timeout")
+        .expect("test result should contain the expected value");
     let GenerationOutcome::Edited { reports, .. } = outcome else {
         panic!("expected an edit report");
     };
@@ -329,8 +352,8 @@ async fn a_systemic_edit_saves_only_after_coordination_and_reports_the_final_cha
         .designs
         .load("talk-candidate-1")
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert_eq!(saved.title, "Coordinated workspace");
     for (index, screen) in saved.screens.iter().enumerate() {
         assert_eq!(
@@ -345,7 +368,7 @@ async fn a_systemic_edit_saves_only_after_coordination_and_reports_the_final_cha
             .designs
             .history("talk-candidate-1")
             .await
-            .unwrap()
+            .expect("test history should be listed")
             .len(),
         1
     );
@@ -356,24 +379,37 @@ async fn a_systemic_edit_saves_only_after_coordination_and_reports_the_final_cha
             .load(Ordering::SeqCst)
     );
     assert_eq!(fake.state.coordinator_count.load(Ordering::SeqCst), 1);
-    let messages = candidate.sessions.messages("talk").await.unwrap();
+    let messages = candidate
+        .sessions
+        .messages("talk")
+        .await
+        .expect("test chat messages should be readable");
     assert!(
         candidate
             .sessions
             .has_queued_messages("talk")
             .await
-            .unwrap()
+            .expect("queued-message state should be readable")
     );
     assert!(
         fake.requests()
             .iter()
             .all(|body| !request_text(body).contains("QUEUED_ONLY_CHANGE"))
     );
-    let report = messages.last().unwrap();
+    let report = messages
+        .last()
+        .expect("test collection should contain a last item");
     assert!(report.content.contains(&reports[0]));
-    let history = candidate.designs.history("talk-candidate-1").await.unwrap();
+    let history = candidate
+        .designs
+        .history("talk-candidate-1")
+        .await
+        .expect("test history should be listed");
     assert_eq!(
-        report.snapshot_stamps.as_ref().unwrap()["talk-candidate-1"],
+        report
+            .snapshot_stamps
+            .as_ref()
+            .expect("optional test value should be present")["talk-candidate-1"],
         history[0].stamp
     );
     verify_queued_edit_baseline(&candidate, &fake, &saved).await;

@@ -33,7 +33,6 @@ pub struct Email {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::Email;
     use crate::test_support::sample_mailing;
@@ -45,14 +44,15 @@ mod tests {
             css: Some("h1 { color: red; }".to_owned()),
             notes: Some("Subject: Hi. Preheader: A short hello.".to_owned()),
         };
-        let json = serde_json::to_string(&email).unwrap();
-        let restored: Email = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&email).expect("test value should serialize to JSON");
+        let restored: Email = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(email, restored);
     }
 
     #[test]
     fn absent_email_fields_stay_out_of_the_json() {
-        let json = serde_json::to_value(&sample_mailing().emails[0]).unwrap();
+        let json = serde_json::to_value(&sample_mailing().emails[0])
+            .expect("test value should convert to JSON");
         assert!(json.get("notes").is_none());
         assert!(json.get("html").is_some());
     }

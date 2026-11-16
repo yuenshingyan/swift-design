@@ -32,7 +32,6 @@ pub struct Slide {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::Slide;
     use crate::test_support::sample_deck;
@@ -44,14 +43,15 @@ mod tests {
             css: Some("h1 { color: red; }".to_owned()),
             notes: Some("Speak slowly.".to_owned()),
         };
-        let json = serde_json::to_string(&slide).unwrap();
-        let restored: Slide = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&slide).expect("test value should serialize to JSON");
+        let restored: Slide = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(slide, restored);
     }
 
     #[test]
     fn absent_slide_fields_stay_out_of_the_json() {
-        let json = serde_json::to_value(&sample_deck().slides[0]).unwrap();
+        let json = serde_json::to_value(&sample_deck().slides[0])
+            .expect("test value should convert to JSON");
         assert!(json.get("notes").is_none());
         assert!(json.get("html").is_some());
     }

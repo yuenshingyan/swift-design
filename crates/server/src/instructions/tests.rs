@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use design_model::{Artwork, Campaign, Deck, Design, Document, Mailing, Print, Social};
 
 use crate::instructions::{
@@ -11,7 +9,10 @@ use crate::instructions::{
 fn instructions_carry_social_rules_routes_and_the_example() {
     let payload = instructions();
     assert_eq!(
-        payload["social_rules"].as_array().unwrap().len(),
+        payload["social_rules"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
         SOCIAL_RULES.len()
     );
     let social = payload["social_rules"].to_string();
@@ -36,14 +37,15 @@ fn instructions_carry_social_rules_routes_and_the_example() {
     assert!(
         payload["kinds"]["social"]
             .as_str()
-            .unwrap()
+            .expect("test JSON value should be a string")
             .contains("`frames`")
     );
     let text = payload.to_string();
     assert!(text.contains("PUT it to /socials/{id}-candidate-1"));
     assert!(text.contains("demo, deck, document, social, print, mailing, campaign, or artwork"));
     assert!(text.contains("`[frame 2]`"));
-    let example: Social = serde_json::from_value(payload["example_social"].clone()).unwrap();
+    let example: Social = serde_json::from_value(payload["example_social"].clone())
+        .expect("test JSON value should deserialize");
     assert_eq!(example.validate(), Vec::new());
     assert!(payload["example_social"].get("viewport").is_none());
 }
@@ -52,7 +54,10 @@ fn instructions_carry_social_rules_routes_and_the_example() {
 fn instructions_carry_print_rules_routes_and_the_example() {
     let payload = instructions();
     assert_eq!(
-        payload["print_rules"].as_array().unwrap().len(),
+        payload["print_rules"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
         PRINT_RULES.len()
     );
     let print = payload["print_rules"].to_string();
@@ -78,14 +83,15 @@ fn instructions_carry_print_rules_routes_and_the_example() {
     assert!(
         payload["kinds"]["print"]
             .as_str()
-            .unwrap()
+            .expect("test JSON value should be a string")
             .contains("`sheets`")
     );
     let text = payload.to_string();
     assert!(text.contains("PUT it to /prints/{id}-candidate-1"));
     assert!(text.contains("demo, deck, document, social, print, mailing, campaign, or artwork"));
     assert!(text.contains("`[sheet 2]`"));
-    let example: Print = serde_json::from_value(payload["example_print"].clone()).unwrap();
+    let example: Print = serde_json::from_value(payload["example_print"].clone())
+        .expect("test JSON value should deserialize");
     assert_eq!(example.validate(), Vec::new());
     assert!(payload["example_print"].get("viewport").is_none());
 }
@@ -94,7 +100,10 @@ fn instructions_carry_print_rules_routes_and_the_example() {
 fn instructions_carry_mailing_rules_routes_and_the_example() {
     let payload = instructions();
     assert_eq!(
-        payload["mailing_rules"].as_array().unwrap().len(),
+        payload["mailing_rules"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
         MAILING_RULES.len()
     );
     let mailing = payload["mailing_rules"].to_string();
@@ -133,14 +142,15 @@ fn instructions_carry_mailing_rules_routes_and_the_example() {
     assert!(
         payload["kinds"]["mailing"]
             .as_str()
-            .unwrap()
+            .expect("test JSON value should be a string")
             .contains("`emails`")
     );
     let text = payload.to_string();
     assert!(text.contains("PUT it to /mailings/{id}-candidate-1"));
     assert!(text.contains("demo, deck, document, social, print, mailing, campaign, or artwork"));
     assert!(text.contains("`[email 2]`"));
-    let example: Mailing = serde_json::from_value(payload["example_mailing"].clone()).unwrap();
+    let example: Mailing = serde_json::from_value(payload["example_mailing"].clone())
+        .expect("test JSON value should deserialize");
     assert_eq!(example.validate(), Vec::new());
     assert!(payload["example_mailing"].get("viewport").is_none());
 }
@@ -149,7 +159,10 @@ fn instructions_carry_mailing_rules_routes_and_the_example() {
 fn instructions_carry_campaign_rules_routes_and_the_example() {
     let payload = instructions();
     assert_eq!(
-        payload["campaign_rules"].as_array().unwrap().len(),
+        payload["campaign_rules"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
         CAMPAIGN_RULES.len()
     );
     let campaign = payload["campaign_rules"].to_string();
@@ -181,13 +194,14 @@ fn instructions_carry_campaign_rules_routes_and_the_example() {
     assert!(
         payload["kinds"]["campaign"]
             .as_str()
-            .unwrap()
+            .expect("test JSON value should be a string")
             .contains("`ads`")
     );
     let text = payload.to_string();
     assert!(text.contains("PUT it to /campaigns/{id}-candidate-1"));
     assert!(text.contains("`[ad 2]`"));
-    let example: Campaign = serde_json::from_value(payload["example_campaign"].clone()).unwrap();
+    let example: Campaign = serde_json::from_value(payload["example_campaign"].clone())
+        .expect("test JSON value should deserialize");
     assert_eq!(example.validate(), Vec::new());
     assert!(payload["example_campaign"].get("viewport").is_none());
 }
@@ -196,7 +210,10 @@ fn instructions_carry_campaign_rules_routes_and_the_example() {
 fn instructions_carry_artwork_rules_routes_and_the_example() {
     let payload = instructions();
     assert_eq!(
-        payload["artwork_rules"].as_array().unwrap().len(),
+        payload["artwork_rules"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
         ARTWORK_RULES.len()
     );
     let artwork = payload["artwork_rules"].to_string();
@@ -225,13 +242,14 @@ fn instructions_carry_artwork_rules_routes_and_the_example() {
     assert!(
         payload["kinds"]["artwork"]
             .as_str()
-            .unwrap()
+            .expect("test JSON value should be a string")
             .contains("`covers`")
     );
     let text = payload.to_string();
     assert!(text.contains("PUT it to /artworks/{id}-candidate-1"));
     assert!(text.contains("`[cover 2]`"));
-    let example: Artwork = serde_json::from_value(payload["example_artwork"].clone()).unwrap();
+    let example: Artwork = serde_json::from_value(payload["example_artwork"].clone())
+        .expect("test JSON value should deserialize");
     assert_eq!(example.validate(), Vec::new());
     assert!(payload["example_artwork"].get("viewport").is_none());
 }
@@ -240,7 +258,10 @@ fn instructions_carry_artwork_rules_routes_and_the_example() {
 fn instructions_carry_document_rules_routes_and_the_example() {
     let payload = instructions();
     assert_eq!(
-        payload["document_rules"].as_array().unwrap().len(),
+        payload["document_rules"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
         DOCUMENT_RULES.len()
     );
     let document = payload["document_rules"].to_string();
@@ -270,14 +291,15 @@ fn instructions_carry_document_rules_routes_and_the_example() {
     assert!(
         payload["kinds"]["document"]
             .as_str()
-            .unwrap()
+            .expect("test JSON value should be a string")
             .contains("`pages`")
     );
     let text = payload.to_string();
     assert!(text.contains("PUT it to /documents/{id}-candidate-1"));
     assert!(text.contains("demo, deck, document, social, print, mailing, campaign, or artwork"));
     assert!(text.contains("`[page 2]`"));
-    let example: Document = serde_json::from_value(payload["example_document"].clone()).unwrap();
+    let example: Document = serde_json::from_value(payload["example_document"].clone())
+        .expect("test JSON value should deserialize");
     assert_eq!(example.validate(), Vec::new());
     assert!(payload["example_document"].get("viewport").is_none());
 }
@@ -285,8 +307,18 @@ fn instructions_carry_document_rules_routes_and_the_example() {
 #[test]
 fn instructions_cover_steps_rules_routes_and_an_example() {
     let payload = instructions();
-    assert!(!payload["steps"].as_array().unwrap().is_empty());
-    assert!(!payload["demo_rules"].as_array().unwrap().is_empty());
+    assert!(
+        !payload["steps"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .is_empty()
+    );
+    assert!(
+        !payload["demo_rules"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .is_empty()
+    );
     assert_eq!(payload["routes"]["schema_design"], "GET /schemas/design");
     assert_eq!(payload["routes"]["session"], "GET /sessions/{id}");
     assert_eq!(payload["example_design"]["title"], "Swift Design Overview");
@@ -323,11 +355,17 @@ fn instructions_serve_every_schema() {
 fn instructions_carry_rules_for_both_kinds() {
     let payload = instructions();
     assert_eq!(
-        payload["demo_rules"].as_array().unwrap().len(),
+        payload["demo_rules"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
         DEMO_RULES.len()
     );
     assert_eq!(
-        payload["deck_rules"].as_array().unwrap().len(),
+        payload["deck_rules"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
         DECK_RULES.len()
     );
     let demo = payload["demo_rules"].to_string();
@@ -342,7 +380,7 @@ fn instructions_carry_rules_for_both_kinds() {
     assert!(
         payload["kinds"]["deck"]
             .as_str()
-            .unwrap()
+            .expect("test JSON value should be a string")
             .contains("`slides`")
     );
 }
@@ -356,7 +394,8 @@ fn instructions_embed_the_deck_example() {
     );
     assert!(payload["example_deck"]["slides"].is_array());
     assert!(payload["example_deck"].get("viewport").is_none());
-    let deck: Deck = serde_json::from_value(payload["example_deck"].clone()).unwrap();
+    let deck: Deck = serde_json::from_value(payload["example_deck"].clone())
+        .expect("test JSON value should deserialize");
     assert_eq!(deck.validate(), Vec::new());
 }
 
@@ -396,7 +435,7 @@ fn required_demo_views_are_separate_clickable_exportable_screens() {
     assert!(
         payload["demo_rules"]
             .as_array()
-            .unwrap()
+            .expect("test JSON value should be an array")
             .iter()
             .any(|value| value.as_str() == Some(rule))
     );
@@ -429,7 +468,9 @@ fn the_demo_rules_explain_screen_links_and_css_widgets() {
 #[test]
 fn instructions_describe_queued_prompts_and_pause_conditions() {
     let payload = instructions();
-    let note = payload["conventions"]["queued_prompts"].as_str().unwrap();
+    let note = payload["conventions"]["queued_prompts"]
+        .as_str()
+        .expect("test JSON value should be a string");
     assert!(note.contains("is_queued: true"));
     assert!(note.contains("Ignore queued messages"));
     assert!(note.contains("one prompt"));
@@ -441,7 +482,9 @@ fn instructions_describe_queued_prompts_and_pause_conditions() {
 #[test]
 fn instructions_describe_parallel_editing_before_serial_coordination() {
     let payload = instructions();
-    let note = payload["conventions"]["parallel_edits"].as_str().unwrap();
+    let note = payload["conventions"]["parallel_edits"]
+        .as_str()
+        .expect("test JSON value should be a string");
     assert!(note.contains("at most four"));
     assert!(note.contains("same original artifact"));
     assert!(note.contains("only its assigned unit"));
@@ -453,7 +496,9 @@ fn instructions_describe_parallel_editing_before_serial_coordination() {
 #[test]
 fn instructions_describe_saved_edit_reports_without_claiming_backend_verification() {
     let payload = instructions();
-    let note = payload["conventions"]["edit_reports"].as_str().unwrap();
+    let note = payload["conventions"]["edit_reports"]
+        .as_str()
+        .expect("test JSON value should be a string");
     assert!(note.contains("final edited artifact after fixes"));
     assert!(note.contains("one-based number"));
     assert!(note.contains("shared theme"));
@@ -473,7 +518,13 @@ fn instructions_describe_charts() {
     assert!(text.contains("Label each axis."));
     assert!(text.contains("Do not compute a value at run time."));
     assert!(text.contains("`role='img'` attribute and a `<title>` element"));
-    assert_eq!(payload["charts"]["rules"].as_array().unwrap().len(), 8);
+    assert_eq!(
+        payload["charts"]["rules"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        8
+    );
     assert_eq!(payload["charts"]["example"], CHART_EXAMPLE);
 }
 
@@ -485,7 +536,8 @@ fn the_chart_example_is_short_and_validates_inside_a_design() {
     assert!(CHART_EXAMPLE.contains("var(--accent)"));
     assert!(!CHART_EXAMPLE.contains("width='800'"));
     let mut design: Design =
-        serde_json::from_str(include_str!("../../../../fixtures/sample-design.json")).unwrap();
+        serde_json::from_str(include_str!("../../../../fixtures/sample-design.json"))
+            .expect("test JSON should deserialize");
     design.screens[0].html = format!("<div class='s4-page'>{CHART_EXAMPLE}</div>");
     assert_eq!(design.validate(), Vec::new());
 }
@@ -523,8 +575,8 @@ fn demo_rules_define_window_bounds_per_candidate_not_across_candidates() {
 #[test]
 fn instructions_keep_historical_questions_separate_from_current_clarification() {
     let payload = instructions();
-    assert!(payload["steps"].as_array().unwrap().iter().any(|step| {
-            step.as_str().unwrap().contains(
+    assert!(payload["steps"].as_array().expect("test JSON value should be an array").iter().any(|step| {
+            step.as_str().expect("test JSON value should be a string").contains(
                 "A question set is open only while the state is clarifying. Historical unanswered question sets do not reopen the setup card.",
             )
         }));
@@ -540,9 +592,11 @@ fn instructions_describe_image_zip_handoffs_for_demos_decks_and_documents() {
     ] {
         let route = format!("GET /{kind}/{{id}}/export.zip");
         assert_eq!(payload["routes"][key], route);
-        let steps = payload["steps"].as_array().unwrap();
+        let steps = payload["steps"]
+            .as_array()
+            .expect("test JSON value should be an array");
         assert!(steps.iter().any(|step| {
-            let text = step.as_str().unwrap();
+            let text = step.as_str().expect("test JSON value should be a string");
             text.contains(&route) && text.contains(&format!("{{id}}-{unit}-{{n}}.png"))
         }));
     }

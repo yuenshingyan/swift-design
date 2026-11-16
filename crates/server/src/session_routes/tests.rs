@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use axum::http::StatusCode;
 use design_model::WorkflowEvent;
 use tempfile::TempDir;
@@ -13,7 +11,7 @@ use crate::test_support::{sample_deck, send, test_application};
 async fn view(application: &axum::Router, id: &str) -> serde_json::Value {
     let (status, body) = send(application.clone(), "GET", &format!("/sessions/{id}"), None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    serde_json::from_str(&body).unwrap()
+    serde_json::from_str(&body).expect("test JSON should deserialize")
 }
 
 async fn create(application: &axum::Router, id: &str) {
@@ -24,7 +22,7 @@ async fn create(application: &axum::Router, id: &str) {
 
 #[tokio::test]
 async fn a_message_pins_candidates_of_its_own_session_only() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "finance-app").await;
     let (status, body) = send(
@@ -50,7 +48,7 @@ async fn a_message_pins_candidates_of_its_own_session_only() {
 
 #[tokio::test]
 async fn a_regenerate_request_names_a_unit() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "finance-app").await;
     let (status, body) = send(
@@ -90,7 +88,7 @@ async fn a_regenerate_request_names_a_unit() {
 
 #[tokio::test]
 async fn a_link_to_a_private_address_is_not_captured_and_the_message_still_posts() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "finance-app").await;
     let (status, body) = send(
@@ -116,7 +114,7 @@ async fn a_link_to_a_private_address_is_not_captured_and_the_message_still_posts
 
 #[tokio::test]
 async fn answering_questions_resumes_the_current_prompt_before_queued_followups() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "finance-app").await;
     let (status, body) = send(application.clone(), "PUT", "/sessions/finance-app/question-set", Some(r#"{"title":"T","message":"Which color?","questions":[{"id":"color","label":"Color","kind":"single_select","required":false,"options":[{"value":"a","label":"A"},{"value":"b","label":"B"}]}]}"#)).await;
@@ -141,7 +139,7 @@ async fn answering_questions_resumes_the_current_prompt_before_queued_followups(
     let snapshot = view(&application, "finance-app").await;
     let queued: Vec<_> = snapshot["messages"]
         .as_array()
-        .unwrap()
+        .expect("test JSON value should be an array")
         .iter()
         .filter(|message| message["is_queued"] == true)
         .collect();
@@ -149,12 +147,18 @@ async fn answering_questions_resumes_the_current_prompt_before_queued_followups(
     assert_eq!(queued[0]["content"], snapshot["session"]["request"]);
     assert_eq!(queued[0]["is_resume"], true);
     assert_eq!(queued[1]["content"], "Later prompt");
-    assert_eq!(snapshot["answers"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        snapshot["answers"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
 async fn messages_during_generation_are_accepted_and_queued_with_their_targets() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "finance-app").await;
     send(
@@ -176,7 +180,9 @@ async fn messages_during_generation_are_accepted_and_queued_with_their_targets()
         assert_eq!(status, StatusCode::NO_CONTENT, "{response}");
     }
     let snapshot = view(&application, "finance-app").await;
-    let messages = snapshot["messages"].as_array().unwrap();
+    let messages = snapshot["messages"]
+        .as_array()
+        .expect("test JSON value should be an array");
     let queued: Vec<_> = messages
         .iter()
         .filter(|message| message["is_queued"] == true)
@@ -191,7 +197,7 @@ async fn messages_during_generation_are_accepted_and_queued_with_their_targets()
 
 #[tokio::test]
 async fn a_vague_request_enters_clarifying_when_questions_are_asked() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "finance-app").await;
     let (status, _) = send(
@@ -210,7 +216,7 @@ async fn a_vague_request_enters_clarifying_when_questions_are_asked() {
 
 #[tokio::test]
 async fn a_deck_scenario_is_validated_and_kept_on_the_options() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     send(
         application.clone(),
@@ -258,7 +264,7 @@ async fn a_deck_scenario_is_validated_and_kept_on_the_options() {
 
 #[tokio::test]
 async fn the_apps_own_axes_take_a_preset_or_the_users_own_words() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     send(
         application.clone(),
@@ -313,7 +319,7 @@ async fn the_apps_own_axes_take_a_preset_or_the_users_own_words() {
 
 #[tokio::test]
 async fn a_deck_question_set_is_written_as_skippable() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     let (status, _) = send(
         application.clone(),
@@ -338,7 +344,7 @@ async fn a_deck_question_set_is_written_as_skippable() {
 
 #[tokio::test]
 async fn a_question_set_with_four_questions_is_rejected_with_every_error() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "talk").await;
     let (status, body) = send(
@@ -349,13 +355,19 @@ async fn a_question_set_with_four_questions_is_rejected_with_every_error() {
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let response: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert!(!response["error"]["details"].as_array().unwrap().is_empty());
+    let response: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
+    assert!(
+        !response["error"]["details"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .is_empty()
+    );
 }
 
 #[tokio::test]
 async fn answers_are_only_accepted_in_clarifying() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "talk").await;
     // No question set yet, session is intake: 409.
@@ -371,7 +383,7 @@ async fn answers_are_only_accepted_in_clarifying() {
 
 #[tokio::test]
 async fn retry_restores_the_state_before_the_error() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "talk").await;
     // Force the session into error via a failed built-in run: no
@@ -383,18 +395,18 @@ async fn retry_restores_the_state_before_the_error() {
 
 #[tokio::test]
 async fn retry_failed_edit_preserves_the_original_instruction_and_candidate() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "talk").await;
     let sessions = SessionStore::new(directory.path().join("data/sessions"));
     sessions
         .apply("talk", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     sessions
         .apply("talk", design_model::WorkflowEvent::GenerationSucceeded)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     sessions
         .append_message(
             "talk",
@@ -404,11 +416,11 @@ async fn retry_failed_edit_preserves_the_original_instruction_and_candidate() {
             ),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     sessions
         .apply("talk", design_model::WorkflowEvent::RunFailed)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     let before = view(&application, "talk").await;
     let (status, _) = send(application.clone(), "POST", "/sessions/talk/retry", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -424,7 +436,7 @@ async fn retry_failed_edit_preserves_the_original_instruction_and_candidate() {
 
 #[tokio::test]
 async fn a_message_after_an_error_recovers_the_session() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "talk").await;
     send(application.clone(), "POST", "/sessions/talk/generate", None).await;
@@ -432,7 +444,7 @@ async fn a_message_after_an_error_recovers_the_session() {
     sessions
         .apply("talk", design_model::WorkflowEvent::RunFailed)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     assert_eq!(
         view(&application, "talk").await["session"]["state"],
         "error"
@@ -455,28 +467,53 @@ async fn a_message_after_an_error_recovers_the_session() {
 
 #[tokio::test]
 async fn deleting_a_session_takes_its_candidates_with_it() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "talk").await;
     // The stores the test application serves from.
     let designs = DesignStore::new(directory.path().join("designs"));
     let decks = DeckStore::new(directory.path().join("decks"));
     let design: design_model::Design =
-        serde_json::from_str(include_str!("../../../../fixtures/sample-design.json")).unwrap();
-    designs.save("talk-candidate-1", &design).await.unwrap();
-    designs.save("other-candidate-1", &design).await.unwrap();
+        serde_json::from_str(include_str!("../../../../fixtures/sample-design.json"))
+            .expect("test JSON should deserialize");
+    designs
+        .save("talk-candidate-1", &design)
+        .await
+        .expect("test data should be saved successfully");
+    designs
+        .save("other-candidate-1", &design)
+        .await
+        .expect("test data should be saved successfully");
     decks
         .save("talk-candidate-1", &sample_deck())
         .await
-        .unwrap();
+        .expect("test data should be saved successfully");
     let (status, body) = send(application.clone(), "DELETE", "/sessions/talk", None).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
     // A session id comes from the request text, so the next session
     // with the same request reuses this id. Its candidates must not
     // be waiting for it.
-    assert!(designs.load("talk-candidate-1").await.unwrap().is_none());
-    assert!(decks.load("talk-candidate-1").await.unwrap().is_none());
-    assert!(designs.load("other-candidate-1").await.unwrap().is_some());
+    assert!(
+        designs
+            .load("talk-candidate-1")
+            .await
+            .expect("test record should load successfully")
+            .is_none()
+    );
+    assert!(
+        decks
+            .load("talk-candidate-1")
+            .await
+            .expect("test record should load successfully")
+            .is_none()
+    );
+    assert!(
+        designs
+            .load("other-candidate-1")
+            .await
+            .expect("test record should load successfully")
+            .is_some()
+    );
     create(&application, "talk").await;
     assert_eq!(
         view(&application, "talk").await["designs"],
@@ -486,7 +523,7 @@ async fn deleting_a_session_takes_its_candidates_with_it() {
 
 #[tokio::test]
 async fn a_generating_session_deletes_without_a_fight() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "talk").await;
     send(application.clone(), "POST", "/sessions/talk/generate", None).await;
@@ -505,7 +542,7 @@ async fn a_generating_session_deletes_without_a_fight() {
 
 #[tokio::test]
 async fn historical_unanswered_questions_do_not_cover_generation_or_review() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "talk").await;
     let (status, _) = send(
@@ -522,29 +559,43 @@ async fn historical_unanswered_questions_do_not_cover_generation_or_review() {
         WorkflowEvent::GenerationStarted,
         WorkflowEvent::GenerationSucceeded,
     ] {
-        sessions.apply("talk", event).await.unwrap();
+        sessions
+            .apply("talk", event)
+            .await
+            .expect("test workflow transition should apply");
         let session = view(&application, "talk").await;
         assert!(session["open_question_set"].is_null());
-        assert_eq!(session["question_sets"].as_array().unwrap().len(), 1);
-        assert!(session["answers"].as_array().unwrap().is_empty());
+        assert_eq!(
+            session["question_sets"]
+                .as_array()
+                .expect("test JSON value should be an array")
+                .len(),
+            1
+        );
+        assert!(
+            session["answers"]
+                .as_array()
+                .expect("test JSON value should be an array")
+                .is_empty()
+        );
         assert_eq!(session["session"]["latest_question_set"], 1);
     }
 }
 
 #[tokio::test]
 async fn a_new_clarification_after_review_still_opens_its_question_card() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "talk").await;
     let sessions = SessionStore::new(directory.path().join("data/sessions"));
     sessions
         .apply("talk", WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     sessions
         .apply("talk", WorkflowEvent::GenerationSucceeded)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     let (status, _) = send(
         application.clone(),
         "PUT",
@@ -560,7 +611,7 @@ async fn a_new_clarification_after_review_still_opens_its_question_card() {
 
 #[tokio::test]
 async fn skipping_the_questions_closes_the_open_card() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "talk").await;
     send(
@@ -585,7 +636,7 @@ async fn skipping_the_questions_closes_the_open_card() {
 
 #[tokio::test]
 async fn a_second_finish_joins_the_running_turn() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "talk").await;
     // The run that writes the candidates is in flight.
@@ -615,7 +666,7 @@ async fn a_second_finish_joins_the_running_turn() {
 
 #[tokio::test]
 async fn a_finish_after_a_stop_resumes_the_session() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "talk").await;
     send(application.clone(), "POST", "/sessions/talk/generate", None).await;
@@ -624,7 +675,7 @@ async fn a_finish_after_a_stop_resumes_the_session() {
     sessions
         .apply("talk", design_model::WorkflowEvent::RunStopped)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     assert_eq!(
         view(&application, "talk").await["session"]["state"],
         "stopped"
@@ -646,7 +697,7 @@ async fn a_finish_after_a_stop_resumes_the_session() {
 
 #[tokio::test]
 async fn state_survives_a_server_restart() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let first = test_application(&directory);
     create(&first, "talk").await;
     send(first.clone(), "POST", "/sessions/talk/generate", None).await;
@@ -660,17 +711,24 @@ async fn state_survives_a_server_restart() {
 
 #[tokio::test]
 async fn session_views_never_include_credentials_or_paths() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     create(&application, "talk").await;
     let (_, body) = send(application.clone(), "GET", "/sessions/talk", None).await;
     assert!(!body.contains("data/sessions"));
-    assert!(!body.contains(directory.path().to_str().unwrap()));
+    assert!(
+        !body.contains(
+            directory
+                .path()
+                .to_str()
+                .expect("test file name should contain valid UTF-8")
+        )
+    );
 }
 
 #[tokio::test]
 async fn a_missing_session_returns_404() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (status, _) = send(
         test_application(&directory),
         "GET",

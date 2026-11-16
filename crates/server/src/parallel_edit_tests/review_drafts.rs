@@ -20,7 +20,9 @@ async fn an_unavailable_layout_audit_preserves_an_unverified_draft_not_a_success
     });
     candidate.engine = candidate.engine.with_demo_dom_runner(runner);
     candidate.seed(&original, "Update screen 1.").await;
-    let before = tokio::fs::read(candidate.path()).await.unwrap();
+    let before = tokio::fs::read(candidate.path())
+        .await
+        .expect("test data should be readable");
     fake.push_text(r#"{"edit":true}"#.into());
     fake.push_text(
         json!({"instruction":"Update screen 1", "screens":[0], "minimum_new_screens":0,
@@ -33,18 +35,23 @@ async fn an_unavailable_layout_audit_preserves_an_unverified_draft_not_a_success
         .clone()
         .run("talk", log_sink())
         .await
-        .unwrap_err();
+        .expect_err("unavailable layout audit should prevent verified completion");
     assert!(error.contains("Needs review"));
     assert!(error.contains("Browser audit unavailable"));
     assert!(!error.contains("Rendered layout verified"));
-    assert_eq!(tokio::fs::read(candidate.path()).await.unwrap(), before);
+    assert_eq!(
+        tokio::fs::read(candidate.path())
+            .await
+            .expect("test data should be readable"),
+        before
+    );
     assert!(
         candidate
             .designs
             .load("talk-candidate-2")
             .await
-            .unwrap()
-            .unwrap()
+            .expect("test record should load successfully")
+            .expect("saved test record should exist")
             .title
             .starts_with("Needs review")
     );
@@ -75,7 +82,9 @@ async fn advisory_polish_saves_with_review_notes_but_serious_defects_preserve_a_
         });
         candidate.engine = candidate.engine.with_demo_dom_runner(runner);
         candidate.seed(&original, "Update only screen 1.").await;
-        let before = tokio::fs::read(candidate.path()).await.unwrap();
+        let before = tokio::fs::read(candidate.path())
+            .await
+            .expect("test data should be readable");
         fake.push_text(r#"{"edit":true}"#.into());
         fake.push_text(
             json!({"instruction":"Update screen 1", "screens":[0],
@@ -92,26 +101,36 @@ async fn advisory_polish_saves_with_review_notes_but_serious_defects_preserve_a_
             json!({"coverage":[{"complete":true,"reason":"Requested design present"}]}).to_string()
         });
         let result = candidate.engine.clone().run("talk", log_sink()).await;
-        let messages = candidate.sessions.messages("talk").await.unwrap();
+        let messages = candidate
+            .sessions
+            .messages("talk")
+            .await
+            .expect("test chat messages should be readable");
         if serious {
-            let error = result.unwrap_err();
+            let error =
+                result.expect_err("serious layout defects should block verified completion");
             assert!(error.contains("Needs review"), "{error}");
             assert!(error.contains("talk-candidate-2"));
-            assert_eq!(tokio::fs::read(candidate.path()).await.unwrap(), before);
+            assert_eq!(
+                tokio::fs::read(candidate.path())
+                    .await
+                    .expect("test data should be readable"),
+                before
+            );
             assert!(
                 candidate
                     .designs
                     .history("talk-candidate-1")
                     .await
-                    .unwrap()
+                    .expect("test history should be listed")
                     .is_empty()
             );
             let draft = candidate
                 .designs
                 .load("talk-candidate-2")
                 .await
-                .unwrap()
-                .unwrap();
+                .expect("test record should load successfully")
+                .expect("saved test record should exist");
             assert!(draft.title.starts_with("Needs review"));
             assert_eq!(draft.screens[0], screen);
             assert_eq!(draft.screens[1..], original.screens[1..]);
@@ -127,11 +146,14 @@ async fn advisory_polish_saves_with_review_notes_but_serious_defects_preserve_a_
                 .designs
                 .load("talk-candidate-1")
                 .await
-                .unwrap()
-                .unwrap();
+                .expect("test record should load successfully")
+                .expect("saved test record should exist");
             assert_eq!(saved.screens[0], screen);
             assert_eq!(saved.screens[1..], original.screens[1..]);
-            let report = &messages.last().unwrap().content;
+            let report = &messages
+                .last()
+                .expect("test collection should contain a last item")
+                .content;
             assert!(report.contains("Needs review — advisory layout findings"));
             assert!(!report.contains("Rendered layout verified"));
             assert!(
@@ -139,7 +161,7 @@ async fn advisory_polish_saves_with_review_notes_but_serious_defects_preserve_a_
                     .designs
                     .load("talk-candidate-2")
                     .await
-                    .unwrap()
+                    .expect("test record should load successfully")
                     .is_none()
             );
         }

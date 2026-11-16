@@ -355,7 +355,6 @@ fn render_notes(slides: &[Slide], shown: usize) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use design_model::Deck;
     use sha2::Digest;
@@ -364,7 +363,8 @@ mod tests {
     use crate::export::base64_encode;
 
     fn sample_deck() -> Deck {
-        serde_json::from_str(include_str!("../../../../fixtures/sample-deck.json")).unwrap()
+        serde_json::from_str(include_str!("../../../../fixtures/sample-deck.json"))
+            .expect("test JSON should deserialize")
     }
 
     #[test]
@@ -450,8 +450,13 @@ mod tests {
     #[test]
     fn the_presenter_csp_hash_matches_the_emitted_script() {
         let html = presenter_page("talk", &sample_deck(), 0, "a1");
-        let start = html.find("<script>").unwrap() + "<script>".len();
-        let end = html.find("</script>").unwrap();
+        let start = html
+            .find("<script>")
+            .expect("fixture should contain the expected match")
+            + "<script>".len();
+        let end = html
+            .find("</script>")
+            .expect("fixture should contain the expected match");
         let hash = base64_encode(&sha2::Sha256::digest(&html.as_bytes()[start..end]));
         assert!(html.contains(&format!("script-src 'sha256-{hash}'")));
         assert!(html.contains("frame-src 'self'"));
