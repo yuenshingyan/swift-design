@@ -1,14 +1,13 @@
-//! The mailing editor: a chat column, a live email preview with a
+//! The social editor: a chat column, a live frame preview with a
 //! right-click menu, thumbnails, and a properties sheet.
 //!
-//! The mailing twin of `print_editor.rs`. It shares the preview
+//! The social twin of `document/editor.rs`. It shares the preview
 //! bridge, the node inspector, the theme form, and the history section
-//! with the design editor; what differs is the mailing type, the
-//! `/mailings` routes, the email vocabulary, the format control, and
-//! the exports: PDF, a PNG zip, and an email-client HTML zip beside
-//! the HTML file.
+//! with the design editor; what differs is the social type, the
+//! `/socials` routes, the frame vocabulary, the format control, and
+//! the exports: PDF and a PNG zip beside the HTML file.
 
-use design_model::{ArtifactKind, Email, EmailFormat, Mailing, Theme};
+use design_model::{ArtifactKind, Format, Frame, Social, Theme};
 use dioxus::document;
 use dioxus::prelude::*;
 
@@ -29,101 +28,80 @@ mod support;
 
 use support::*;
 
-/// How the mailing preview takes a click: as a selection, or as a
-/// reader in the inbox would.
+/// How the social preview takes a click: as a selection, or as a
+/// reader of the feed would.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MailingPreviewMode {
-    /// A click reaches the email as it would for a reader.
+pub(crate) enum SocialPreviewMode {
+    /// A click reaches the frame as it would for a reader.
     Read,
     /// A click selects a node, a double-click edits its text.
     Edit,
 }
 
-impl MailingPreviewMode {
+impl SocialPreviewMode {
     /// Both modes, in tab order. Read comes first: it is the default,
-    /// so a mailing opens as its reader sees it.
-    pub(crate) const ALL: [MailingPreviewMode; 2] =
-        [MailingPreviewMode::Read, MailingPreviewMode::Edit];
+    /// so a social opens as its reader sees it.
+    pub(crate) const ALL: [SocialPreviewMode; 2] =
+        [SocialPreviewMode::Read, SocialPreviewMode::Edit];
 
     /// The tab label.
     pub(crate) fn label(self) -> &'static str {
         match self {
-            MailingPreviewMode::Read => "Read",
-            MailingPreviewMode::Edit => "Edit",
+            SocialPreviewMode::Read => "Read",
+            SocialPreviewMode::Edit => "Edit",
         }
     }
 
     /// The tab tooltip.
     pub(crate) fn title(self) -> &'static str {
         match self {
-            MailingPreviewMode::Read => "See the email as a reader would",
-            MailingPreviewMode::Edit => "Click a node to select it",
+            SocialPreviewMode::Read => "See the frame as a reader would",
+            SocialPreviewMode::Edit => "Click a node to select it",
         }
     }
 
     /// The query that asks the render for the editing script. Read mode
-    /// asks for nothing, so the email shows with no selection outlines.
+    /// asks for nothing, so the frame shows with no selection outlines.
     pub(crate) fn render_query(self) -> &'static str {
         match self {
-            MailingPreviewMode::Read => "",
-            MailingPreviewMode::Edit => "&editable=true",
+            SocialPreviewMode::Read => "",
+            SocialPreviewMode::Edit => "&editable=true",
         }
     }
 }
 
-/// Fetches a URL and puts the response on the clipboard as rich text
-/// and as plain source, inside one user gesture. The promise-valued
-/// `ClipboardItem` keeps the gesture alive through the fetch, so
-/// Safari accepts the write too. Sends back `ok` or the error text.
-const COPY_EMAIL_TO_CLIPBOARD: &str = "\
-const url = await dioxus.recv();
-try {
-  const text = fetch(url).then((response) => {
-    if (!response.ok) { throw new Error('fetch failed with status ' + response.status); }
-    return response.text();
-  });
-  const item = new ClipboardItem({
-    'text/html': text.then((html) => new Blob([html], { type: 'text/html' })),
-    'text/plain': text.then((html) => new Blob([html], { type: 'text/plain' })),
-  });
-  await navigator.clipboard.write([item]);
-  dioxus.send('ok');
-} catch (error) {
-  dioxus.send(String(error));
-}";
-
-/// Loads one mailing, then hands it to the editor.
+/// Loads one social, then hands it to the editor.
 #[component]
-pub fn MailingEditor(mailing_id: String, on_back: EventHandler<()>) -> Element {
-    let id_for_fetch = mailing_id.clone();
+pub fn SocialEditor(social_id: String, on_back: EventHandler<()>) -> Element {
+    let id_for_fetch = social_id.clone();
     let loaded = use_resource(move || {
         let id = id_for_fetch.clone();
-        async move { api::fetch_mailing(&id).await }
+        async move { crate::social::api::fetch_social(&id).await }
     });
     let current = loaded.read();
     match &*current {
-        Some(Ok(mailing)) => rsx! {
-            LoadedMailingEditor { mailing_id, initial: mailing.clone(), on_back }
+        Some(Ok(social)) => rsx! {
+            LoadedSocialEditor { social_id, initial: social.clone(), on_back }
         },
         Some(Err(message)) => rsx! {
             p { class: "error", "{message}" }
         },
         None => rsx! {
-            p { "Loading mailing…" }
+            p { "Loading social…" }
         },
     }
 }
 
-/// The editor for a loaded mailing: chat on the left, preview and
-/// thumbnails on the right, the properties email on demand.
+/// The editor for a loaded social: chat on the left, preview and
+/// thumbnails on the right, the properties sheet on demand.
 #[component]
-fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandler<()>) -> Element {
-    let mut mailing = use_signal(|| initial.clone());
+fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<()>) -> Element {
+    let mut social = use_signal(|| initial.clone());
     let mut selected = use_signal(|| 0usize);
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
     let mut selection = use_signal(Vec::<SelectionEntry>::new);
-    let mut mode = use_signal(|| MailingPreviewMode::Read);
-    // The emails pinned for the chat with a command-click on a tile.
+    let mut mode = use_signal(|| SocialPreviewMode::Read);
+    // The frames pinned for the chat with a command-click on a tile.
     let mut pinned = use_signal(Vec::<usize>::new);
     let mut messages = use_signal(Vec::<String>::new);
     let mut preview_version = use_signal(|| 0u32);
@@ -136,15 +114,15 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
     let mut template_name = use_signal(|| Option::<String>::None);
     let mut chat_context = use_signal(|| Option::<String>::None);
     let mut dragged = use_signal(|| Option::<usize>::None);
-    let mut pending_email_delete = use_signal(|| Option::<usize>::None);
+    let mut pending_frame_delete = use_signal(|| Option::<usize>::None);
     // The tile whose Redo waits for its second click.
     let mut pending_redo = use_signal(|| Option::<usize>::None);
 
-    let authors_id = mailing_id.clone();
+    let authors_id = social_id.clone();
     use_future(move || {
         let id = authors_id.clone();
         async move {
-            if let Ok(paths) = api::fetch_mailing_user_paths(&id).await {
+            if let Ok(paths) = crate::social::api::fetch_social_user_paths(&id).await {
                 user_paths.set(paths);
             }
         }
@@ -156,19 +134,19 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
     let can_export_with_chrome = settings().flatten().is_none_or(|view| view.has_chrome);
 
     let save = use_callback({
-        let mailing_id = mailing_id.clone();
+        let social_id = social_id.clone();
         move |reload_preview: bool| {
-            let id = mailing_id.clone();
-            let snapshot = mailing();
+            let id = social_id.clone();
+            let snapshot = social();
             spawn(async move {
-                match api::save_mailing(&id, &snapshot).await {
+                match crate::social::api::save_social(&id, &snapshot).await {
                     Ok(()) => {
                         messages.set(Vec::new());
                         is_dirty.set(false);
                         if reload_preview {
                             preview_version += 1;
                         }
-                        if let Ok(paths) = api::fetch_mailing_user_paths(&id).await {
+                        if let Ok(paths) = crate::social::api::fetch_social_user_paths(&id).await {
                             user_paths.set(paths);
                         }
                     }
@@ -179,17 +157,17 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
     });
 
     let reload = use_callback({
-        let mailing_id = mailing_id.clone();
+        let social_id = social_id.clone();
         move |_: ()| {
-            let id = mailing_id.clone();
+            let id = social_id.clone();
             spawn(async move {
-                if let Ok(fetched) = api::fetch_mailing(&id).await {
-                    mailing.set(fetched);
+                if let Ok(fetched) = crate::social::api::fetch_social(&id).await {
+                    social.set(fetched);
                     is_dirty.set(false);
                     preview_version += 1;
                     selected_node.set(None);
                 }
-                if let Ok(paths) = api::fetch_mailing_user_paths(&id).await {
+                if let Ok(paths) = crate::social::api::fetch_social_user_paths(&id).await {
                     user_paths.set(paths);
                 }
             });
@@ -206,7 +184,7 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                     template_name.set(None);
                 }
                 "swift-design-navigate" => {
-                    let count = mailing.peek().emails.len();
+                    let count = social.peek().frames.len();
                     let current = selected();
                     let next = if message.step > 0 {
                         (current + 1).min(count.saturating_sub(1))
@@ -218,7 +196,7 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                         selected_node.set(None);
                     }
                 }
-                "swift-design-select" if message.screen < mailing.peek().emails.len() => {
+                "swift-design-select" if message.screen < social.peek().frames.len() => {
                     selected.set(message.screen);
                     selection.set(selection_of(&message));
                     selected_node.set(SelectedNode::from_message(&message));
@@ -228,9 +206,9 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                         continue;
                     };
                     let is_changed =
-                        mailing.with_mut(|mailing| match mailing.emails.get_mut(message.screen) {
-                            Some(email) if email.html != html => {
-                                email.html = html;
+                        social.with_mut(|social| match social.frames.get_mut(message.screen) {
+                            Some(frame) if frame.html != html => {
+                                frame.html = html;
                                 true
                             }
                             _ => false,
@@ -243,17 +221,17 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                     }
                 }
                 "swift-design-drag" => match message.action.as_deref() {
-                    Some("start") if message.screen < mailing.peek().emails.len() => {
+                    Some("start") if message.screen < social.peek().frames.len() => {
                         dragged.set(Some(message.screen));
                     }
                     Some("over") => {
                         let to = message.screen;
                         if let Some(from) = dragged()
                             && from != to
-                            && to < mailing.peek().emails.len()
+                            && to < social.peek().frames.len()
                         {
-                            mailing.with_mut(|mailing| {
-                                move_screen(&mut mailing.emails, &mut mailing.outline, from, to)
+                            social.with_mut(|social| {
+                                move_screen(&mut social.frames, &mut social.outline, from, to)
                             });
                             dragged.set(Some(to));
                             selected.set(to);
@@ -273,7 +251,7 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                     Some("pin") => {
                         selected.set(message.screen);
                         chat_context.set(Some(pin_reference(
-                            "email",
+                            "frame",
                             message.screen,
                             &selection_of(&message),
                         )));
@@ -281,8 +259,8 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                     Some("ask") => {
                         selected.set(message.screen);
                         chat_context.set(Some(match SelectedNode::from_message(&message) {
-                            Some(node) => node_reference("email", message.screen, &node),
-                            None => format!("[email {}]", message.screen + 1),
+                            Some(node) => node_reference("frame", message.screen, &node),
+                            None => format!("[frame {}]", message.screen + 1),
                         }));
                     }
                     Some("properties") => {
@@ -291,16 +269,16 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                         show_properties.set(true);
                     }
                     Some("delete-screen") => {
-                        let removed = mailing.with_mut(|mailing| {
-                            if mailing.emails.len() > 1 && message.screen < mailing.emails.len() {
-                                mailing.emails.remove(message.screen);
+                        let removed = social.with_mut(|social| {
+                            if social.frames.len() > 1 && message.screen < social.frames.len() {
+                                social.frames.remove(message.screen);
                                 true
                             } else {
                                 false
                             }
                         });
                         if removed {
-                            let count = mailing.peek().emails.len();
+                            let count = social.peek().frames.len();
                             selected.set(message.screen.min(count.saturating_sub(1)));
                             selected_node.set(None);
                             save.call(true);
@@ -324,45 +302,44 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
         }
     });
 
-    let email_count = mailing().emails.len();
-    let outline_count = mailing().outline.len();
-    // Every email shares the format, so every tile has the same
-    // width.
-    let viewport = mailing().viewport();
+    let frame_count = social().frames.len();
+    let outline_count = social().outline.len();
+    // Every frame shares the format, so every tile has the same width.
+    let viewport = social().viewport();
     let tile_width = frame_width_rem(viewport, STRIP_TILE_HEIGHT_REM);
-    let email_ratio = viewport.aspect_ratio_css();
+    let frame_ratio = viewport.aspect_ratio_css();
     let stage_class = preview_stage_class(viewport);
-    let planned_count = outline_count.saturating_sub(email_count);
-    let summary = strip_summary(email_count, planned_count);
-    let total_fields = field_count(&mailing());
+    let planned_count = outline_count.saturating_sub(frame_count);
+    let summary = strip_summary(frame_count, planned_count);
+    let total_fields = field_count(&social());
     let user_count = user_paths().len().min(total_fields);
     let agent_count = total_fields - user_count;
-    let thumbnail_labels: Vec<String> = mailing()
-        .emails
+    let thumbnail_labels: Vec<String> = social()
+        .frames
         .iter()
         .enumerate()
-        .map(|(index, email)| email_label(index, email))
+        .map(|(index, frame)| frame_label(index, frame))
         .collect();
-    let email_labels = thumbnail_labels.clone();
-    let current_notes = mailing()
-        .emails
+    let frame_labels = thumbnail_labels.clone();
+    let current_notes = social()
+        .frames
         .get(selected())
-        .and_then(|email| email.notes.clone())
+        .and_then(|frame| frame.notes.clone())
         .unwrap_or_default();
     rsx! {
         main { class: "editor",
             DesignChat {
-                design_id: mailing_id.clone(),
+                design_id: social_id.clone(),
                 context: chat_context,
-                page: page_reference("email", &pinned()),
+                page: page_reference("frame", &pinned()),
                 is_pinned: !pinned().is_empty(),
                 on_pin_page: move |index: usize| {
                     if !pinned().contains(&index) {
                         pinned.write().push(index);
                     }
                 },
-                pages: email_labels.clone(),
-                page_unit: Some("email".to_owned()),
+                pages: frame_labels.clone(),
+                page_unit: Some("frame".to_owned()),
                 on_drop_page: move |_| pinned.write().clear(),
                 on_before_send: move |_| {
                     if is_dirty() {
@@ -378,9 +355,9 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                         "Project"
                     }
                     span { class: "divider" }
-                    span { class: "preview-heading", "{selected() + 1} / {email_count}" }
+                    span { class: "preview-heading", "{selected() + 1} / {frame_count}" }
                     div { class: "canvas-tabs preview-modes", role: "tablist",
-                        for candidate in MailingPreviewMode::ALL {
+                        for candidate in SocialPreviewMode::ALL {
                             button {
                                 key: "{candidate.label()}",
                                 role: "tab",
@@ -406,43 +383,10 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                             "Properties"
                         }
                         span { class: "divider" }
-                        button {
-                            title: "Copy this email for pasting into a compose window or an HTML template box",
-                            onclick: {
-                                let mailing_id = mailing_id.clone();
-                                move |_| {
-                                    let url = format!("/mailings/{mailing_id}/emails/{}.html", selected() + 1);
-                                    let number = selected() + 1;
-                                    let mut channel = document::eval(COPY_EMAIL_TO_CLIPBOARD); // The clipboard write must start inside
-                                    let _ = channel.send(url);
-                                    spawn(async move {
-                                        match channel.recv::<String>().await {
-                                            Ok(result) if result == "ok" => {
-                                                messages
-                                                    .set(
-                                                        vec![
-                                                            format!(
-                                                                "Copied email {number}. Paste it into a compose window; an HTML template box takes the source.",
-                                                            ),
-                                                        ],
-                                                    );
-                                            }
-                                            Ok(error) => {
-                                                messages.set(vec![format!("Copy failed: {error}")]);
-                                            }
-                                            Err(error) => {
-                                                messages.set(vec![format!("Copy failed: {error:?}")]);
-                                            }
-                                        }
-                                    });
-                                }
-                            },
-                            "Copy"
-                        }
-                        MailingExportGroup {
-                            mailing_id: mailing_id.clone(),
+                        SocialExportGroup {
+                            social_id: social_id.clone(),
                             selected: selected(),
-                            email_count,
+                            frame_count,
                             can_export_with_chrome,
                         }
                         button {
@@ -474,7 +418,7 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                                         class: "primary",
                                         disabled: name.trim().is_empty(),
                                         onclick: {
-                                            let mailing_id = mailing_id.clone();
+                                            let social_id = social_id.clone();
                                             move |_| {
                                                 let Some(name) = template_name() else {
                                                     return;
@@ -483,9 +427,9 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                                                 if name.is_empty() {
                                                     return;
                                                 }
-                                                let mailing_id = mailing_id.clone();
+                                                let social_id = social_id.clone();
                                                 spawn(async move {
-                                                    match api::save_mailing_template(&mailing_id, &name).await {
+                                                    match api::save_social_template(&social_id, &name).await {
                                                         Ok(saved) => {
                                                             template_name.set(None);
                                                             is_menu_open.set(false);
@@ -505,7 +449,7 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                                 }
                             } else {
                                 button {
-                                    title: "Keep this mailing's theme and layout style for a future design, deck, document, or social",
+                                    title: "Keep this social's theme and layout style for a future design, deck, document, or social",
                                     onclick: move |_| template_name.set(Some(String::new())),
                                     "Save as template"
                                 }
@@ -517,22 +461,22 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                     for message in messages() {
                         p { class: "error", "{message}" }
                     }
-                    // Every mailing format is narrower than the
-                    // 16:10 stage, so an email is limited by height
-                    // like a phone canvas, without the bezel.
+                    // A square, portrait, or story frame is limited by
+                    // height like a phone canvas, without the bezel. A
+                    // landscape frame is wide, so it fills the width.
                     div { class: "{stage_class}",
                         PreviewFrame {
-                            title: "Mailing preview",
-                            ratio: "{email_ratio}",
-                            src: "/mailings/{mailing_id}/render?version={preview_version()}{mode().render_query()}&email={selected() + 1}",
+                            title: "Social preview",
+                            ratio: "{frame_ratio}",
+                            src: "/socials/{social_id}/render?version={preview_version()}{mode().render_query()}&frame={selected() + 1}",
                         }
                     }
                     p { class: "preview-hint",
-                        if mode() == MailingPreviewMode::Read {
-                            span { "The email as a reader sees it · switch to Edit to select a node" }
+                        if mode() == SocialPreviewMode::Read {
+                            span { "The frame as a reader sees it · switch to Edit to select a node" }
                         } else {
                             span {
-                                "Click a node to select it and edit its text · ⌘-click adds more · right-click and Pin to chat references it · ⌘-click a tile to pin emails"
+                                "Click a node to select it and edit its text · ⌘-click adds more · right-click and Pin to chat references it · ⌘-click a tile to pin frames"
                             }
                             span { class: "dot", "·" }
                             span { "right-click for quick edits" }
@@ -542,23 +486,23 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                             kbd { "←" }
                             " "
                             kbd { "→" }
-                            " change emails"
+                            " change frames"
                         }
                     }
                     label { class: "notes-box",
                         span { class: "notes-heading",
                             "Author notes"
-                            span { class: "screen-no", "email {selected() + 1}" }
+                            span { class: "screen-no", "frame {selected() + 1}" }
                         }
                         textarea {
                             value: "{current_notes}",
-                            placeholder: "The subject line and the preheader, as a Subject: line and a Preheader: line, plus intent or handoff remarks. Never shown on the email.",
+                            placeholder: "The caption to post with the frame, intent, or handoff remarks. Never shown on the frame.",
                             oninput: move |event| {
                                 let index = selected();
-                                mailing
-                                    .with_mut(|mailing| {
-                                        if let Some(email) = mailing.emails.get_mut(index) {
-                                            email.notes = optional(event.value());
+                                social
+                                    .with_mut(|social| {
+                                        if let Some(frame) = social.frames.get_mut(index) {
+                                            frame.notes = optional(event.value());
                                         }
                                     });
                                 is_dirty.set(true);
@@ -567,22 +511,22 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                         }
                     }
                     div { class: "strip-head",
-                        "Emails"
+                        "Frames"
                         span { class: "strip-counts", "{summary}" }
-                        // One control writes every planned email. A
+                        // One control writes every planned frame. A
                         // button on each planned tile did the same thing
                         // and read as if it wrote that one alone.
                         if planned_count > 0 {
                             button {
                                 class: "strip-write",
-                                title: "Write the emails the outline still plans",
+                                title: "Write the frames the outline still plans",
                                 onclick: {
-                                    let mailing_id = mailing_id.clone();
+                                    let social_id = social_id.clone();
                                     move |_| {
-                                        let mailing_id = mailing_id.clone();
+                                        let social_id = social_id.clone();
                                         spawn(async move {
-                                            let session_id = artifact_project(&mailing_id);
-                                            let sent = api::continue_artifact(&session_id, &mailing_id).await;
+                                            let session_id = artifact_project(&social_id);
+                                            let sent = api::continue_artifact(&session_id, &social_id).await;
                                             if let Err(message) = sent {
                                                 messages.write().push(message);
                                             }
@@ -597,7 +541,7 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                     div { class: "thumbnails",
                         for (index, label) in thumbnail_labels.into_iter().enumerate() {
                             {
-                                let is_deleting = pending_email_delete() == Some(index);
+                                let is_deleting = pending_frame_delete() == Some(index);
                                 let is_redoing = pending_redo() == Some(index);
                                 let class = thumbnail_class(ThumbnailState {
                                     is_current: index == selected(),
@@ -614,7 +558,7 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                                         style: "--tile-width: {tile_width}rem",
                                         "data-index": "{index}",
                                         onclick: move |event: MouseEvent| {
-                                            // A command-click pins the email for
+                                            // A command-click pins the frame for
                                             // the chat; a plain click opens it.
                                             if event.modifiers().meta() || event.modifiers().ctrl() {
                                                 toggle_pin(&mut pinned.write(), index);
@@ -622,28 +566,28 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                                             }
                                             selected.set(index);
                                             selected_node.set(None);
-                                            pending_email_delete.set(None);
+                                            pending_frame_delete.set(None);
                                             pending_redo.set(None);
                                         },
                                         iframe {
-                                            title: "Email {index + 1}",
+                                            title: "Frame {index + 1}",
                                             tabindex: "-1",
-                                            src: "/mailings/{mailing_id}/render?version={preview_version()}&email={index + 1}",
+                                            src: "/socials/{social_id}/render?version={preview_version()}&frame={index + 1}",
                                         }
                                         span { class: "thumbnail-number", {format!("{:02}", index + 1)} }
-                                        if email_count > 1 {
+                                        if frame_count > 1 {
                                             button {
                                                 class: if is_deleting { "thumbnail-delete confirm" } else { "thumbnail-delete" },
-                                                title: "Delete this email",
+                                                title: "Delete this frame",
                                                 onclick: move |event: Event<MouseData>| {
                                                     event.stop_propagation();
-                                                    if pending_email_delete() != Some(index) {
-                                                        pending_email_delete.set(Some(index));
+                                                    if pending_frame_delete() != Some(index) {
+                                                        pending_frame_delete.set(Some(index));
                                                         return;
                                                     }
-                                                    pending_email_delete.set(None);
-                                                    mailing.with_mut(|mailing| remove_email(mailing, index));
-                                                    selected.set(selected().min(email_count.saturating_sub(2)));
+                                                    pending_frame_delete.set(None);
+                                                    social.with_mut(|social| remove_frame(social, index));
+                                                    selected.set(selected().min(frame_count.saturating_sub(2)));
                                                     selected_node.set(None);
                                                     save.call(true);
                                                 },
@@ -653,16 +597,16 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                                                 }
                                             }
                                         }
-                                        // A redo writes the email anew: the model
+                                        // A redo writes the frame anew: the model
                                         // sees its notes, not its markup.
                                         button {
                                             class: if is_redoing { "thumbnail-redo confirm" } else { "thumbnail-redo" },
-                                            title: "Write this email anew",
+                                            title: "Write this frame anew",
                                             onclick: {
-                                                let mailing_id = mailing_id.clone();
+                                                let social_id = social_id.clone();
                                                 move |event: Event<MouseData>| {
                                                     event.stop_propagation();
-                                                    pending_email_delete.set(None);
+                                                    pending_frame_delete.set(None);
                                                     if pending_redo() != Some(index) {
                                                         pending_redo.set(Some(index));
                                                         return;
@@ -671,13 +615,13 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                                                     if is_dirty() {
                                                         save.call(true);
                                                     }
-                                                    let mailing_id = mailing_id.clone();
+                                                    let social_id = social_id.clone();
                                                     spawn(async move {
-                                                        let session_id = artifact_project(&mailing_id);
+                                                        let session_id = artifact_project(&social_id);
                                                         let sent = api::regenerate_unit(
                                                                 &session_id,
-                                                                &mailing_id,
-                                                                "email",
+                                                                &social_id,
+                                                                "frame",
                                                                 index + 1,
                                                             )
                                                             .await;
@@ -696,20 +640,20 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                                 }
                             }
                         }
-                        if outline_count > email_count {
+                        if outline_count > frame_count {
                             span { class: "strip-divider" }
                         }
                         // A planned tile is an outline entry nobody has
                         // written. The strip head writes them.
-                        for index in email_count..outline_count {
+                        for index in frame_count..outline_count {
                             {
-                                let (number, title) = outline_entry(&mailing().outline, index, "Email");
+                                let (number, title) = outline_entry(&social().outline, index, "Frame");
                                 rsx! {
                                     div {
                                         key: "outline-{index}",
                                         class: "thumbnail outline",
                                         style: "--tile-width: {tile_width}rem",
-                                        title: "{outline_title(&mailing(), index)} · not written yet",
+                                        title: "{outline_title(&social(), index)} · not written yet",
                                         span { class: "outline-kicker",
                                             "{number}"
                                             span { class: "planned-text", " planned" }
@@ -738,16 +682,16 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                             screen: selected(),
                             node: selected_node(),
                             on_apply: move |command: NodeCommand| apply.call(command),
-                            scope: artifact_project(&mailing_id),
+                            scope: artifact_project(&social_id),
                         }
                         div { class: "sheet-section",
-                            div { class: "head", "Mailing" }
+                            div { class: "head", "Social" }
                             label {
-                                "Mailing title"
+                                "Social title"
                                 input {
-                                    value: "{mailing().title}",
+                                    value: "{social().title}",
                                     oninput: move |event| {
-                                        mailing.with_mut(|mailing| mailing.title = event.value());
+                                        social.with_mut(|social| social.title = event.value());
                                         is_dirty.set(true);
                                         schedule_save(save_generation, save, false);
                                     },
@@ -756,22 +700,22 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                             label {
                                 "Format"
                                 select {
-                                    value: "{mailing().format.as_str()}",
+                                    value: "{social().format.as_str()}",
                                     onchange: move |event| {
-                                        let Some(format) = EmailFormat::from_name(&event.value()) else {
+                                        let Some(format) = Format::from_name(&event.value()) else {
                                             return;
                                         };
-                                        mailing.with_mut(|mailing| mailing.format = format);
+                                        social.with_mut(|social| social.format = format);
                                         is_dirty.set(true);
                                         // The canvas changes, so the preview
                                         // reloads on save.
                                         schedule_save(save_generation, save, true);
                                     },
-                                    for format in EmailFormat::ALL {
+                                    for format in Format::ALL {
                                         option {
                                             key: "{format.as_str()}",
                                             value: "{format.as_str()}",
-                                            selected: mailing().format == format,
+                                            selected: social().format == format,
                                             "{format_option_label(format)}"
                                         }
                                     }
@@ -779,16 +723,16 @@ fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandl
                             }
                         }
                         ThemeForm {
-                            theme: mailing().theme.clone(),
+                            theme: social().theme.clone(),
                             on_change: move |theme: Theme| {
-                                mailing.with_mut(|mailing| mailing.theme = theme);
+                                social.with_mut(|social| social.theme = theme);
                                 is_dirty.set(true);
                                 schedule_save(save_generation, save, true);
                             },
                         }
                         HistorySection {
-                            design_id: mailing_id.clone(),
-                            kind: ArtifactKind::Mailing,
+                            design_id: social_id.clone(),
+                            kind: ArtifactKind::Social,
                             on_restored: move |_| reload.call(()),
                         }
                     }

@@ -1,4 +1,10 @@
-use super::*;
+#![allow(dead_code)]
+
+use design_model::{AdSize, Campaign};
+use gloo_net::http::Request;
+use serde::Deserialize;
+
+use crate::api::*;
 
 // -- Campaigns -----------------------------------------------------------
 
@@ -107,4 +113,16 @@ pub async fn restore_campaign_history(id: &str, stamp: &str) -> Result<(), Strin
         "restore",
     )
     .await
+}
+
+/// Copies one campaign candidate under the next free number of its
+/// session. Returns the new id.
+pub async fn fork_campaign(id: &str) -> Result<String, String> {
+    let request = built(Request::post(&format!("/campaigns/{id}/fork")))?;
+    let response = send_checked(request, "POST /campaigns/fork").await?;
+    response
+        .json::<ForkResponse>()
+        .await
+        .map(|fork| fork.id)
+        .map_err(|error| error.to_string())
 }

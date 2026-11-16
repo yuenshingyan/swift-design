@@ -1,5 +1,14 @@
 use super::*;
 
+use crate::artwork::api::ArtworkSummary;
+use crate::campaign::api::CampaignSummary;
+use crate::deck::api::DeckSummary;
+use crate::design::api::DesignSummary;
+use crate::document::api::DocumentSummary;
+use crate::mailing::api::MailingSummary;
+use crate::print::api::PrintSummary;
+use crate::social::api::SocialSummary;
+
 // -- Sessions ------------------------------------------------------------
 
 /// One row of `GET /sessions`.

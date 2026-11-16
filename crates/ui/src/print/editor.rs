@@ -1,13 +1,13 @@
-//! The campaign editor: a chat column, a live ad preview with a
+//! The print editor: a chat column, a live sheet preview with a
 //! right-click menu, thumbnails, and a properties sheet.
 //!
-//! The campaign twin of `mailing_editor.rs`. It shares the preview
+//! The print twin of `social/editor.rs`. It shares the preview
 //! bridge, the node inspector, the theme form, and the history section
-//! with the design editor; what differs is the campaign type, the
-//! `/campaigns` routes, the ad vocabulary, the size control, and the
-//! exports: PDF and a PNG zip beside the HTML file.
+//! with the design editor; what differs is the print type, the
+//! `/prints` routes, the sheet vocabulary, the size and orientation
+//! controls, and the exports: PDF and a PNG zip beside the HTML file.
 
-use design_model::{Ad, AdSize, ArtifactKind, Campaign, Theme};
+use design_model::{ArtifactKind, Orientation, Print, PrintSize, Sheet, Theme};
 use dioxus::document;
 use dioxus::prelude::*;
 
@@ -28,84 +28,79 @@ mod support;
 
 use support::*;
 
-/// How the campaign preview takes a click: as a selection, or as a
-/// reader in the inbox would.
+/// How the print preview takes a click: as a selection, or as a
+/// reader of the printed piece would.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CampaignPreviewMode {
-    /// A click reaches the ad as it would for a reader.
+pub(crate) enum PrintPreviewMode {
+    /// A click reaches the sheet as it would for a reader.
     Read,
     /// A click selects a node, a double-click edits its text.
     Edit,
 }
 
-impl CampaignPreviewMode {
+impl PrintPreviewMode {
     /// Both modes, in tab order. Read comes first: it is the default,
-    /// so a campaign opens as its reader sees it.
-    pub(crate) const ALL: [CampaignPreviewMode; 2] =
-        [CampaignPreviewMode::Read, CampaignPreviewMode::Edit];
+    /// so a print opens as its reader sees it.
+    pub(crate) const ALL: [PrintPreviewMode; 2] = [PrintPreviewMode::Read, PrintPreviewMode::Edit];
 
     /// The tab label.
     pub(crate) fn label(self) -> &'static str {
         match self {
-            CampaignPreviewMode::Read => "Read",
-            CampaignPreviewMode::Edit => "Edit",
+            PrintPreviewMode::Read => "Read",
+            PrintPreviewMode::Edit => "Edit",
         }
     }
 
     /// The tab tooltip.
     pub(crate) fn title(self) -> &'static str {
         match self {
-            CampaignPreviewMode::Read => "See the ad as a reader would",
-            CampaignPreviewMode::Edit => "Click a node to select it",
+            PrintPreviewMode::Read => "See the sheet as a reader would",
+            PrintPreviewMode::Edit => "Click a node to select it",
         }
     }
 
     /// The query that asks the render for the editing script. Read mode
-    /// asks for nothing, so the ad shows with no selection outlines.
+    /// asks for nothing, so the sheet shows with no selection outlines.
     pub(crate) fn render_query(self) -> &'static str {
         match self {
-            CampaignPreviewMode::Read => "",
-            CampaignPreviewMode::Edit => "&editable=true",
+            PrintPreviewMode::Read => "",
+            PrintPreviewMode::Edit => "&editable=true",
         }
     }
 }
 
-/// Loads one campaign, then hands it to the editor.
+/// Loads one print, then hands it to the editor.
 #[component]
-pub fn CampaignEditor(campaign_id: String, on_back: EventHandler<()>) -> Element {
-    let id_for_fetch = campaign_id.clone();
+pub fn PrintEditor(print_id: String, on_back: EventHandler<()>) -> Element {
+    let id_for_fetch = print_id.clone();
     let loaded = use_resource(move || {
         let id = id_for_fetch.clone();
-        async move { api::fetch_campaign(&id).await }
+        async move { crate::print::api::fetch_print(&id).await }
     });
     let current = loaded.read();
     match &*current {
-        Some(Ok(campaign)) => rsx! {
-            LoadedCampaignEditor { campaign_id, initial: campaign.clone(), on_back }
+        Some(Ok(print)) => rsx! {
+            LoadedPrintEditor { print_id, initial: print.clone(), on_back }
         },
         Some(Err(message)) => rsx! {
             p { class: "error", "{message}" }
         },
         None => rsx! {
-            p { "Loading campaign…" }
+            p { "Loading print…" }
         },
     }
 }
 
-/// The editor for a loaded campaign: chat on the left, preview and
-/// thumbnails on the right, the properties ad on demand.
+/// The editor for a loaded print: chat on the left, preview and
+/// thumbnails on the right, the properties sheet on demand.
 #[component]
-fn LoadedCampaignEditor(
-    campaign_id: String,
-    initial: Campaign,
-    on_back: EventHandler<()>,
-) -> Element {
-    let mut campaign = use_signal(|| initial.clone());
+fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>) -> Element {
+    let mut print = use_signal(|| initial.clone());
     let mut selected = use_signal(|| 0usize);
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
     let mut selection = use_signal(Vec::<SelectionEntry>::new);
-    let mut mode = use_signal(|| CampaignPreviewMode::Read);
-    // The ads pinned for the chat with a command-click on a tile.
+    let mut mode = use_signal(|| PrintPreviewMode::Read);
+    // The sheets pinned for the chat with a command-click on a tile.
     let mut pinned = use_signal(Vec::<usize>::new);
     let mut messages = use_signal(Vec::<String>::new);
     let mut preview_version = use_signal(|| 0u32);
@@ -118,15 +113,15 @@ fn LoadedCampaignEditor(
     let mut template_name = use_signal(|| Option::<String>::None);
     let mut chat_context = use_signal(|| Option::<String>::None);
     let mut dragged = use_signal(|| Option::<usize>::None);
-    let mut pending_ad_delete = use_signal(|| Option::<usize>::None);
+    let mut pending_sheet_delete = use_signal(|| Option::<usize>::None);
     // The tile whose Redo waits for its second click.
     let mut pending_redo = use_signal(|| Option::<usize>::None);
 
-    let authors_id = campaign_id.clone();
+    let authors_id = print_id.clone();
     use_future(move || {
         let id = authors_id.clone();
         async move {
-            if let Ok(paths) = api::fetch_campaign_user_paths(&id).await {
+            if let Ok(paths) = crate::print::api::fetch_print_user_paths(&id).await {
                 user_paths.set(paths);
             }
         }
@@ -138,19 +133,19 @@ fn LoadedCampaignEditor(
     let can_export_with_chrome = settings().flatten().is_none_or(|view| view.has_chrome);
 
     let save = use_callback({
-        let campaign_id = campaign_id.clone();
+        let print_id = print_id.clone();
         move |reload_preview: bool| {
-            let id = campaign_id.clone();
-            let snapshot = campaign();
+            let id = print_id.clone();
+            let snapshot = print();
             spawn(async move {
-                match api::save_campaign(&id, &snapshot).await {
+                match crate::print::api::save_print(&id, &snapshot).await {
                     Ok(()) => {
                         messages.set(Vec::new());
                         is_dirty.set(false);
                         if reload_preview {
                             preview_version += 1;
                         }
-                        if let Ok(paths) = api::fetch_campaign_user_paths(&id).await {
+                        if let Ok(paths) = crate::print::api::fetch_print_user_paths(&id).await {
                             user_paths.set(paths);
                         }
                     }
@@ -161,17 +156,17 @@ fn LoadedCampaignEditor(
     });
 
     let reload = use_callback({
-        let campaign_id = campaign_id.clone();
+        let print_id = print_id.clone();
         move |_: ()| {
-            let id = campaign_id.clone();
+            let id = print_id.clone();
             spawn(async move {
-                if let Ok(fetched) = api::fetch_campaign(&id).await {
-                    campaign.set(fetched);
+                if let Ok(fetched) = crate::print::api::fetch_print(&id).await {
+                    print.set(fetched);
                     is_dirty.set(false);
                     preview_version += 1;
                     selected_node.set(None);
                 }
-                if let Ok(paths) = api::fetch_campaign_user_paths(&id).await {
+                if let Ok(paths) = crate::print::api::fetch_print_user_paths(&id).await {
                     user_paths.set(paths);
                 }
             });
@@ -188,7 +183,7 @@ fn LoadedCampaignEditor(
                     template_name.set(None);
                 }
                 "swift-design-navigate" => {
-                    let count = campaign.peek().ads.len();
+                    let count = print.peek().sheets.len();
                     let current = selected();
                     let next = if message.step > 0 {
                         (current + 1).min(count.saturating_sub(1))
@@ -200,7 +195,7 @@ fn LoadedCampaignEditor(
                         selected_node.set(None);
                     }
                 }
-                "swift-design-select" if message.screen < campaign.peek().ads.len() => {
+                "swift-design-select" if message.screen < print.peek().sheets.len() => {
                     selected.set(message.screen);
                     selection.set(selection_of(&message));
                     selected_node.set(SelectedNode::from_message(&message));
@@ -210,9 +205,9 @@ fn LoadedCampaignEditor(
                         continue;
                     };
                     let is_changed =
-                        campaign.with_mut(|campaign| match campaign.ads.get_mut(message.screen) {
-                            Some(ad) if ad.html != html => {
-                                ad.html = html;
+                        print.with_mut(|print| match print.sheets.get_mut(message.screen) {
+                            Some(sheet) if sheet.html != html => {
+                                sheet.html = html;
                                 true
                             }
                             _ => false,
@@ -225,17 +220,17 @@ fn LoadedCampaignEditor(
                     }
                 }
                 "swift-design-drag" => match message.action.as_deref() {
-                    Some("start") if message.screen < campaign.peek().ads.len() => {
+                    Some("start") if message.screen < print.peek().sheets.len() => {
                         dragged.set(Some(message.screen));
                     }
                     Some("over") => {
                         let to = message.screen;
                         if let Some(from) = dragged()
                             && from != to
-                            && to < campaign.peek().ads.len()
+                            && to < print.peek().sheets.len()
                         {
-                            campaign.with_mut(|campaign| {
-                                move_screen(&mut campaign.ads, &mut campaign.outline, from, to)
+                            print.with_mut(|print| {
+                                move_screen(&mut print.sheets, &mut print.outline, from, to)
                             });
                             dragged.set(Some(to));
                             selected.set(to);
@@ -255,7 +250,7 @@ fn LoadedCampaignEditor(
                     Some("pin") => {
                         selected.set(message.screen);
                         chat_context.set(Some(pin_reference(
-                            "ad",
+                            "sheet",
                             message.screen,
                             &selection_of(&message),
                         )));
@@ -263,8 +258,8 @@ fn LoadedCampaignEditor(
                     Some("ask") => {
                         selected.set(message.screen);
                         chat_context.set(Some(match SelectedNode::from_message(&message) {
-                            Some(node) => node_reference("ad", message.screen, &node),
-                            None => format!("[ad {}]", message.screen + 1),
+                            Some(node) => node_reference("sheet", message.screen, &node),
+                            None => format!("[sheet {}]", message.screen + 1),
                         }));
                     }
                     Some("properties") => {
@@ -273,16 +268,16 @@ fn LoadedCampaignEditor(
                         show_properties.set(true);
                     }
                     Some("delete-screen") => {
-                        let removed = campaign.with_mut(|campaign| {
-                            if campaign.ads.len() > 1 && message.screen < campaign.ads.len() {
-                                campaign.ads.remove(message.screen);
+                        let removed = print.with_mut(|print| {
+                            if print.sheets.len() > 1 && message.screen < print.sheets.len() {
+                                print.sheets.remove(message.screen);
                                 true
                             } else {
                                 false
                             }
                         });
                         if removed {
-                            let count = campaign.peek().ads.len();
+                            let count = print.peek().sheets.len();
                             selected.set(message.screen.min(count.saturating_sub(1)));
                             selected_node.set(None);
                             save.call(true);
@@ -306,44 +301,45 @@ fn LoadedCampaignEditor(
         }
     });
 
-    let ad_count = campaign().ads.len();
-    let outline_count = campaign().outline.len();
-    // Every ad shares the size, so every tile has the same width.
-    let viewport = campaign().viewport();
-    let tile_width = strip_tile_width(viewport);
-    let ad_ratio = viewport.aspect_ratio_css();
+    let sheet_count = print().sheets.len();
+    let outline_count = print().outline.len();
+    // Every sheet shares the size and orientation, so every tile has
+    // the same width.
+    let viewport = print().viewport();
+    let tile_width = frame_width_rem(viewport, STRIP_TILE_HEIGHT_REM);
+    let sheet_ratio = viewport.aspect_ratio_css();
     let stage_class = preview_stage_class(viewport);
-    let planned_count = outline_count.saturating_sub(ad_count);
-    let summary = strip_summary(ad_count, planned_count);
-    let total_fields = field_count(&campaign());
+    let planned_count = outline_count.saturating_sub(sheet_count);
+    let summary = strip_summary(sheet_count, planned_count);
+    let total_fields = field_count(&print());
     let user_count = user_paths().len().min(total_fields);
     let agent_count = total_fields - user_count;
-    let thumbnail_labels: Vec<String> = campaign()
-        .ads
+    let thumbnail_labels: Vec<String> = print()
+        .sheets
         .iter()
         .enumerate()
-        .map(|(index, ad)| ad_label(index, ad))
+        .map(|(index, sheet)| sheet_label(index, sheet))
         .collect();
-    let ad_labels = thumbnail_labels.clone();
-    let current_notes = campaign()
-        .ads
+    let sheet_labels = thumbnail_labels.clone();
+    let current_notes = print()
+        .sheets
         .get(selected())
-        .and_then(|ad| ad.notes.clone())
+        .and_then(|sheet| sheet.notes.clone())
         .unwrap_or_default();
     rsx! {
         main { class: "editor",
             DesignChat {
-                design_id: campaign_id.clone(),
+                design_id: print_id.clone(),
                 context: chat_context,
-                page: page_reference("ad", &pinned()),
+                page: page_reference("sheet", &pinned()),
                 is_pinned: !pinned().is_empty(),
                 on_pin_page: move |index: usize| {
                     if !pinned().contains(&index) {
                         pinned.write().push(index);
                     }
                 },
-                pages: ad_labels.clone(),
-                page_unit: Some("ad".to_owned()),
+                pages: sheet_labels.clone(),
+                page_unit: Some("sheet".to_owned()),
                 on_drop_page: move |_| pinned.write().clear(),
                 on_before_send: move |_| {
                     if is_dirty() {
@@ -359,9 +355,9 @@ fn LoadedCampaignEditor(
                         "Project"
                     }
                     span { class: "divider" }
-                    span { class: "preview-heading", "{selected() + 1} / {ad_count}" }
+                    span { class: "preview-heading", "{selected() + 1} / {sheet_count}" }
                     div { class: "canvas-tabs preview-modes", role: "tablist",
-                        for candidate in CampaignPreviewMode::ALL {
+                        for candidate in PrintPreviewMode::ALL {
                             button {
                                 key: "{candidate.label()}",
                                 role: "tab",
@@ -387,10 +383,10 @@ fn LoadedCampaignEditor(
                             "Properties"
                         }
                         span { class: "divider" }
-                        CampaignExportGroup {
-                            campaign_id: campaign_id.clone(),
+                        PrintExportGroup {
+                            print_id: print_id.clone(),
                             selected: selected(),
-                            ad_count,
+                            sheet_count,
                             can_export_with_chrome,
                         }
                         button {
@@ -422,7 +418,7 @@ fn LoadedCampaignEditor(
                                         class: "primary",
                                         disabled: name.trim().is_empty(),
                                         onclick: {
-                                            let campaign_id = campaign_id.clone();
+                                            let print_id = print_id.clone();
                                             move |_| {
                                                 let Some(name) = template_name() else {
                                                     return;
@@ -431,9 +427,9 @@ fn LoadedCampaignEditor(
                                                 if name.is_empty() {
                                                     return;
                                                 }
-                                                let campaign_id = campaign_id.clone();
+                                                let print_id = print_id.clone();
                                                 spawn(async move {
-                                                    match api::save_campaign_template(&campaign_id, &name).await {
+                                                    match api::save_print_template(&print_id, &name).await {
                                                         Ok(saved) => {
                                                             template_name.set(None);
                                                             is_menu_open.set(false);
@@ -453,7 +449,7 @@ fn LoadedCampaignEditor(
                                 }
                             } else {
                                 button {
-                                    title: "Keep this campaign's theme and layout style for a future design, deck, document, or social",
+                                    title: "Keep this print's theme and layout style for a future design, deck, document, or social",
                                     onclick: move |_| template_name.set(Some(String::new())),
                                     "Save as template"
                                 }
@@ -465,22 +461,23 @@ fn LoadedCampaignEditor(
                     for message in messages() {
                         p { class: "error", "{message}" }
                     }
-                    // A tall ad unit is limited by height like a
-                    // phone canvas, without the bezel; a leaderboard
-                    // or a mobile banner fills the width instead.
+                    // Every print size, portrait or landscape, is
+                    // narrower than the 16:10 stage, so a sheet is
+                    // limited by height like a phone canvas, without
+                    // the bezel.
                     div { class: "{stage_class}",
                         PreviewFrame {
-                            title: "Campaign preview",
-                            ratio: "{ad_ratio}",
-                            src: "/campaigns/{campaign_id}/render?version={preview_version()}{mode().render_query()}&ad={selected() + 1}",
+                            title: "Print preview",
+                            ratio: "{sheet_ratio}",
+                            src: "/prints/{print_id}/render?version={preview_version()}{mode().render_query()}&sheet={selected() + 1}",
                         }
                     }
                     p { class: "preview-hint",
-                        if mode() == CampaignPreviewMode::Read {
-                            span { "The ad as a reader sees it · switch to Edit to select a node" }
+                        if mode() == PrintPreviewMode::Read {
+                            span { "The sheet as a reader sees it · switch to Edit to select a node" }
                         } else {
                             span {
-                                "Click a node to select it and edit its text · ⌘-click adds more · right-click and Pin to chat references it · ⌘-click a tile to pin ads"
+                                "Click a node to select it and edit its text · ⌘-click adds more · right-click and Pin to chat references it · ⌘-click a tile to pin sheets"
                             }
                             span { class: "dot", "·" }
                             span { "right-click for quick edits" }
@@ -490,23 +487,23 @@ fn LoadedCampaignEditor(
                             kbd { "←" }
                             " "
                             kbd { "→" }
-                            " change ads"
+                            " change sheets"
                         }
                     }
                     label { class: "notes-box",
                         span { class: "notes-heading",
                             "Author notes"
-                            span { class: "screen-no", "ad {selected() + 1}" }
+                            span { class: "screen-no", "sheet {selected() + 1}" }
                         }
                         textarea {
                             value: "{current_notes}",
-                            placeholder: "The click-through URL and the alt text, as a Link: line and an Alt: line, plus intent or handoff remarks. Never shown on the ad.",
+                            placeholder: "Print instructions such as paper stock or bleed, intent, or handoff remarks. Never shown on the sheet.",
                             oninput: move |event| {
                                 let index = selected();
-                                campaign
-                                    .with_mut(|campaign| {
-                                        if let Some(ad) = campaign.ads.get_mut(index) {
-                                            ad.notes = optional(event.value());
+                                print
+                                    .with_mut(|print| {
+                                        if let Some(sheet) = print.sheets.get_mut(index) {
+                                            sheet.notes = optional(event.value());
                                         }
                                     });
                                 is_dirty.set(true);
@@ -515,22 +512,22 @@ fn LoadedCampaignEditor(
                         }
                     }
                     div { class: "strip-head",
-                        "Ads"
+                        "Sheets"
                         span { class: "strip-counts", "{summary}" }
-                        // One control writes every planned ad. A
+                        // One control writes every planned sheet. A
                         // button on each planned tile did the same thing
                         // and read as if it wrote that one alone.
                         if planned_count > 0 {
                             button {
                                 class: "strip-write",
-                                title: "Write the ads the outline still plans",
+                                title: "Write the sheets the outline still plans",
                                 onclick: {
-                                    let campaign_id = campaign_id.clone();
+                                    let print_id = print_id.clone();
                                     move |_| {
-                                        let campaign_id = campaign_id.clone();
+                                        let print_id = print_id.clone();
                                         spawn(async move {
-                                            let session_id = artifact_project(&campaign_id);
-                                            let sent = api::continue_artifact(&session_id, &campaign_id).await;
+                                            let session_id = artifact_project(&print_id);
+                                            let sent = api::continue_artifact(&session_id, &print_id).await;
                                             if let Err(message) = sent {
                                                 messages.write().push(message);
                                             }
@@ -545,7 +542,7 @@ fn LoadedCampaignEditor(
                     div { class: "thumbnails",
                         for (index, label) in thumbnail_labels.into_iter().enumerate() {
                             {
-                                let is_deleting = pending_ad_delete() == Some(index);
+                                let is_deleting = pending_sheet_delete() == Some(index);
                                 let is_redoing = pending_redo() == Some(index);
                                 let class = thumbnail_class(ThumbnailState {
                                     is_current: index == selected(),
@@ -562,7 +559,7 @@ fn LoadedCampaignEditor(
                                         style: "--tile-width: {tile_width}rem",
                                         "data-index": "{index}",
                                         onclick: move |event: MouseEvent| {
-                                            // A command-click pins the ad for
+                                            // A command-click pins the sheet for
                                             // the chat; a plain click opens it.
                                             if event.modifiers().meta() || event.modifiers().ctrl() {
                                                 toggle_pin(&mut pinned.write(), index);
@@ -570,28 +567,28 @@ fn LoadedCampaignEditor(
                                             }
                                             selected.set(index);
                                             selected_node.set(None);
-                                            pending_ad_delete.set(None);
+                                            pending_sheet_delete.set(None);
                                             pending_redo.set(None);
                                         },
                                         iframe {
-                                            title: "Ad {index + 1}",
+                                            title: "Sheet {index + 1}",
                                             tabindex: "-1",
-                                            src: "/campaigns/{campaign_id}/render?version={preview_version()}&ad={index + 1}",
+                                            src: "/prints/{print_id}/render?version={preview_version()}&sheet={index + 1}",
                                         }
                                         span { class: "thumbnail-number", {format!("{:02}", index + 1)} }
-                                        if ad_count > 1 {
+                                        if sheet_count > 1 {
                                             button {
                                                 class: if is_deleting { "thumbnail-delete confirm" } else { "thumbnail-delete" },
-                                                title: "Delete this ad",
+                                                title: "Delete this sheet",
                                                 onclick: move |event: Event<MouseData>| {
                                                     event.stop_propagation();
-                                                    if pending_ad_delete() != Some(index) {
-                                                        pending_ad_delete.set(Some(index));
+                                                    if pending_sheet_delete() != Some(index) {
+                                                        pending_sheet_delete.set(Some(index));
                                                         return;
                                                     }
-                                                    pending_ad_delete.set(None);
-                                                    campaign.with_mut(|campaign| remove_ad(campaign, index));
-                                                    selected.set(selected().min(ad_count.saturating_sub(2)));
+                                                    pending_sheet_delete.set(None);
+                                                    print.with_mut(|print| remove_sheet(print, index));
+                                                    selected.set(selected().min(sheet_count.saturating_sub(2)));
                                                     selected_node.set(None);
                                                     save.call(true);
                                                 },
@@ -601,16 +598,16 @@ fn LoadedCampaignEditor(
                                                 }
                                             }
                                         }
-                                        // A redo writes the ad anew: the model
+                                        // A redo writes the sheet anew: the model
                                         // sees its notes, not its markup.
                                         button {
                                             class: if is_redoing { "thumbnail-redo confirm" } else { "thumbnail-redo" },
-                                            title: "Write this ad anew",
+                                            title: "Write this sheet anew",
                                             onclick: {
-                                                let campaign_id = campaign_id.clone();
+                                                let print_id = print_id.clone();
                                                 move |event: Event<MouseData>| {
                                                     event.stop_propagation();
-                                                    pending_ad_delete.set(None);
+                                                    pending_sheet_delete.set(None);
                                                     if pending_redo() != Some(index) {
                                                         pending_redo.set(Some(index));
                                                         return;
@@ -619,13 +616,13 @@ fn LoadedCampaignEditor(
                                                     if is_dirty() {
                                                         save.call(true);
                                                     }
-                                                    let campaign_id = campaign_id.clone();
+                                                    let print_id = print_id.clone();
                                                     spawn(async move {
-                                                        let session_id = artifact_project(&campaign_id);
+                                                        let session_id = artifact_project(&print_id);
                                                         let sent = api::regenerate_unit(
                                                                 &session_id,
-                                                                &campaign_id,
-                                                                "ad",
+                                                                &print_id,
+                                                                "sheet",
                                                                 index + 1,
                                                             )
                                                             .await;
@@ -644,20 +641,20 @@ fn LoadedCampaignEditor(
                                 }
                             }
                         }
-                        if outline_count > ad_count {
+                        if outline_count > sheet_count {
                             span { class: "strip-divider" }
                         }
                         // A planned tile is an outline entry nobody has
                         // written. The strip head writes them.
-                        for index in ad_count..outline_count {
+                        for index in sheet_count..outline_count {
                             {
-                                let (number, title) = outline_entry(&campaign().outline, index, "Ad");
+                                let (number, title) = outline_entry(&print().outline, index, "Sheet");
                                 rsx! {
                                     div {
                                         key: "outline-{index}",
                                         class: "thumbnail outline",
                                         style: "--tile-width: {tile_width}rem",
-                                        title: "{outline_title(&campaign(), index)} · not written yet",
+                                        title: "{outline_title(&print(), index)} · not written yet",
                                         span { class: "outline-kicker",
                                             "{number}"
                                             span { class: "planned-text", " planned" }
@@ -686,57 +683,85 @@ fn LoadedCampaignEditor(
                             screen: selected(),
                             node: selected_node(),
                             on_apply: move |command: NodeCommand| apply.call(command),
-                            scope: artifact_project(&campaign_id),
+                            scope: artifact_project(&print_id),
                         }
                         div { class: "sheet-section",
-                            div { class: "head", "Campaign" }
+                            div { class: "head", "Print" }
                             label {
-                                "Campaign title"
+                                "Print title"
                                 input {
-                                    value: "{campaign().title}",
+                                    value: "{print().title}",
                                     oninput: move |event| {
-                                        campaign.with_mut(|campaign| campaign.title = event.value());
+                                        print.with_mut(|print| print.title = event.value());
                                         is_dirty.set(true);
                                         schedule_save(save_generation, save, false);
                                     },
                                 }
                             }
-                            label {
-                                "Size"
-                                select {
-                                    value: "{campaign().size.as_str()}",
-                                    onchange: move |event| {
-                                        let Some(size) = AdSize::from_name(&event.value()) else {
-                                            return;
-                                        };
-                                        campaign.with_mut(|campaign| campaign.size = size);
-                                        is_dirty.set(true);
-                                        // The canvas changes, so the preview
-                                        // reloads on save.
-                                        schedule_save(save_generation, save, true);
-                                    },
-                                    for size in AdSize::ALL {
-                                        option {
-                                            key: "{size.as_str()}",
-                                            value: "{size.as_str()}",
-                                            selected: campaign().size == size,
-                                            "{size_option_label(size)}"
+                            // The size and the orientation share one row:
+                            // together they are the canvas.
+                            div { class: "theme-grid",
+                                label {
+                                    "Size"
+                                    select {
+                                        value: "{print().size.as_str()}",
+                                        onchange: move |event| {
+                                            let Some(size) = PrintSize::from_name(&event.value()) else {
+                                                return;
+                                            };
+                                            print.with_mut(|print| print.size = size);
+                                            is_dirty.set(true);
+                                            // The canvas changes, so the preview
+                                            // reloads on save.
+                                            schedule_save(save_generation, save, true);
+                                        },
+                                        for size in PrintSize::ALL {
+                                            option {
+                                                key: "{size.as_str()}",
+                                                value: "{size.as_str()}",
+                                                selected: print().size == size,
+                                                "{size_option_label(size)}"
+                                            }
+                                        }
+                                    }
+                                }
+                                label {
+                                    "Orientation"
+                                    select {
+                                        value: "{print().orientation.as_str()}",
+                                        onchange: move |event| {
+                                            let Some(orientation) = Orientation::from_name(&event.value()) else {
+                                                return;
+                                            };
+                                            print.with_mut(|print| print.orientation = orientation);
+                                            is_dirty.set(true);
+                                            // The canvas changes, so the preview
+                                            // reloads on save.
+                                            schedule_save(save_generation, save, true);
+                                        },
+                                        for orientation in Orientation::ALL {
+                                            option {
+                                                key: "{orientation.as_str()}",
+                                                value: "{orientation.as_str()}",
+                                                selected: print().orientation == orientation,
+                                                "{orientation.label()}"
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                         ThemeForm {
-                            theme: campaign().theme.clone(),
+                            theme: print().theme.clone(),
                             on_change: move |theme: Theme| {
-                                campaign.with_mut(|campaign| campaign.theme = theme);
+                                print.with_mut(|print| print.theme = theme);
                                 is_dirty.set(true);
                                 schedule_save(save_generation, save, true);
                             },
                         }
                         HistorySection {
-                            design_id: campaign_id.clone(),
-                            kind: ArtifactKind::Campaign,
+                            design_id: print_id.clone(),
+                            kind: ArtifactKind::Print,
                             on_restored: move |_| reload.call(()),
                         }
                     }

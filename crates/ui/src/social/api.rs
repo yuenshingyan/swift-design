@@ -1,4 +1,10 @@
-use super::*;
+#![allow(dead_code)]
+
+use design_model::{Format, Social};
+use gloo_net::http::Request;
+use serde::Deserialize;
+
+use crate::api::*;
 
 // -- Socials -------------------------------------------------------------
 
@@ -107,4 +113,16 @@ pub async fn restore_social_history(id: &str, stamp: &str) -> Result<(), String>
         "restore",
     )
     .await
+}
+
+/// Copies one social candidate under the next free number of its
+/// session. Returns the new id.
+pub async fn fork_social(id: &str) -> Result<String, String> {
+    let request = built(Request::post(&format!("/socials/{id}/fork")))?;
+    let response = send_checked(request, "POST /socials/fork").await?;
+    response
+        .json::<ForkResponse>()
+        .await
+        .map(|fork| fork.id)
+        .map_err(|error| error.to_string())
 }

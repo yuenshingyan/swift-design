@@ -16,14 +16,14 @@ pub(crate) fn HistorySection(
         let id = id_for_fetch.clone();
         async move {
             match kind {
-                ArtifactKind::Demo => api::fetch_design_history(&id).await,
-                ArtifactKind::Deck => api::fetch_deck_history(&id).await,
-                ArtifactKind::Document => api::fetch_document_history(&id).await,
-                ArtifactKind::Social => api::fetch_social_history(&id).await,
-                ArtifactKind::Print => api::fetch_print_history(&id).await,
-                ArtifactKind::Mailing => api::fetch_mailing_history(&id).await,
-                ArtifactKind::Campaign => api::fetch_campaign_history(&id).await,
-                ArtifactKind::Artwork => api::fetch_artwork_history(&id).await,
+                ArtifactKind::Demo => crate::design::api::fetch_design_history(&id).await,
+                ArtifactKind::Deck => crate::deck::api::fetch_deck_history(&id).await,
+                ArtifactKind::Document => crate::document::api::fetch_document_history(&id).await,
+                ArtifactKind::Social => crate::social::api::fetch_social_history(&id).await,
+                ArtifactKind::Print => crate::print::api::fetch_print_history(&id).await,
+                ArtifactKind::Mailing => crate::mailing::api::fetch_mailing_history(&id).await,
+                ArtifactKind::Campaign => crate::campaign::api::fetch_campaign_history(&id).await,
+                ArtifactKind::Artwork => crate::artwork::api::fetch_artwork_history(&id).await,
             }
         }
     });
@@ -56,28 +56,28 @@ pub(crate) fn HistorySection(
                                             spawn(async move {
                                                 let restored = match kind {
                                                     ArtifactKind::Demo => {
-                                                        api::restore_design_history(&design_id, &stamp).await
+                                                        crate::design::api::restore_design_history(&design_id, &stamp).await
                                                     }
                                                     ArtifactKind::Deck => {
-                                                        api::restore_deck_history(&design_id, &stamp).await
+                                                        crate::deck::api::restore_deck_history(&design_id, &stamp).await
                                                     }
                                                     ArtifactKind::Document => {
-                                                        api::restore_document_history(&design_id, &stamp).await
+                                                        crate::document::api::restore_document_history(&design_id, &stamp).await
                                                     }
                                                     ArtifactKind::Social => {
-                                                        api::restore_social_history(&design_id, &stamp).await
+                                                        crate::social::api::restore_social_history(&design_id, &stamp).await
                                                     }
                                                     ArtifactKind::Print => {
-                                                        api::restore_print_history(&design_id, &stamp).await
+                                                        crate::print::api::restore_print_history(&design_id, &stamp).await
                                                     }
                                                     ArtifactKind::Mailing => {
-                                                        api::restore_mailing_history(&design_id, &stamp).await
+                                                        crate::mailing::api::restore_mailing_history(&design_id, &stamp).await
                                                     }
                                                     ArtifactKind::Campaign => {
-                                                        api::restore_campaign_history(&design_id, &stamp).await
+                                                        crate::campaign::api::restore_campaign_history(&design_id, &stamp).await
                                                     }
                                                     ArtifactKind::Artwork => {
-                                                        api::restore_artwork_history(&design_id, &stamp).await
+                                                        crate::artwork::api::restore_artwork_history(&design_id, &stamp).await
                                                     }
                                                 };
                                                 match restored {

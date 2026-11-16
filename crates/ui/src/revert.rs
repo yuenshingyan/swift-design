@@ -47,40 +47,52 @@ pub(crate) async fn revert_artifact(
     exact_stamp: Option<&str>,
 ) -> Result<&'static str, String> {
     let history = match kind {
-        ArtifactKind::Demo => api::fetch_design_history(id).await?,
-        ArtifactKind::Deck => api::fetch_deck_history(id).await?,
-        ArtifactKind::Document => api::fetch_document_history(id).await?,
-        ArtifactKind::Social => api::fetch_social_history(id).await?,
-        ArtifactKind::Print => api::fetch_print_history(id).await?,
-        ArtifactKind::Mailing => api::fetch_mailing_history(id).await?,
-        ArtifactKind::Campaign => api::fetch_campaign_history(id).await?,
-        ArtifactKind::Artwork => api::fetch_artwork_history(id).await?,
+        ArtifactKind::Demo => crate::design::api::fetch_design_history(id).await?,
+        ArtifactKind::Deck => crate::deck::api::fetch_deck_history(id).await?,
+        ArtifactKind::Document => crate::document::api::fetch_document_history(id).await?,
+        ArtifactKind::Social => crate::social::api::fetch_social_history(id).await?,
+        ArtifactKind::Print => crate::print::api::fetch_print_history(id).await?,
+        ArtifactKind::Mailing => crate::mailing::api::fetch_mailing_history(id).await?,
+        ArtifactKind::Campaign => crate::campaign::api::fetch_campaign_history(id).await?,
+        ArtifactKind::Artwork => crate::artwork::api::fetch_artwork_history(id).await?,
     };
     match restore_stamp(&history, since, exact_stamp) {
         Some(stamp) => {
             match kind {
-                ArtifactKind::Demo => api::restore_design_history(id, &stamp).await?,
-                ArtifactKind::Deck => api::restore_deck_history(id, &stamp).await?,
-                ArtifactKind::Document => api::restore_document_history(id, &stamp).await?,
-                ArtifactKind::Social => api::restore_social_history(id, &stamp).await?,
-                ArtifactKind::Print => api::restore_print_history(id, &stamp).await?,
-                ArtifactKind::Mailing => api::restore_mailing_history(id, &stamp).await?,
-                ArtifactKind::Campaign => api::restore_campaign_history(id, &stamp).await?,
-                ArtifactKind::Artwork => api::restore_artwork_history(id, &stamp).await?,
+                ArtifactKind::Demo => {
+                    crate::design::api::restore_design_history(id, &stamp).await?
+                }
+                ArtifactKind::Deck => crate::deck::api::restore_deck_history(id, &stamp).await?,
+                ArtifactKind::Document => {
+                    crate::document::api::restore_document_history(id, &stamp).await?
+                }
+                ArtifactKind::Social => {
+                    crate::social::api::restore_social_history(id, &stamp).await?
+                }
+                ArtifactKind::Print => crate::print::api::restore_print_history(id, &stamp).await?,
+                ArtifactKind::Mailing => {
+                    crate::mailing::api::restore_mailing_history(id, &stamp).await?
+                }
+                ArtifactKind::Campaign => {
+                    crate::campaign::api::restore_campaign_history(id, &stamp).await?
+                }
+                ArtifactKind::Artwork => {
+                    crate::artwork::api::restore_artwork_history(id, &stamp).await?
+                }
             }
             Ok("restored")
         }
         // No snapshot since the turn began: the turn created it.
         None => {
             match kind {
-                ArtifactKind::Demo => api::delete_design(id).await?,
-                ArtifactKind::Deck => api::delete_deck(id).await?,
-                ArtifactKind::Document => api::delete_document(id).await?,
-                ArtifactKind::Social => api::delete_social(id).await?,
-                ArtifactKind::Print => api::delete_print(id).await?,
-                ArtifactKind::Mailing => api::delete_mailing(id).await?,
-                ArtifactKind::Campaign => api::delete_campaign(id).await?,
-                ArtifactKind::Artwork => api::delete_artwork(id).await?,
+                ArtifactKind::Demo => crate::design::api::delete_design(id).await?,
+                ArtifactKind::Deck => crate::deck::api::delete_deck(id).await?,
+                ArtifactKind::Document => crate::document::api::delete_document(id).await?,
+                ArtifactKind::Social => crate::social::api::delete_social(id).await?,
+                ArtifactKind::Print => crate::print::api::delete_print(id).await?,
+                ArtifactKind::Mailing => crate::mailing::api::delete_mailing(id).await?,
+                ArtifactKind::Campaign => crate::campaign::api::delete_campaign(id).await?,
+                ArtifactKind::Artwork => crate::artwork::api::delete_artwork(id).await?,
             }
             Ok("deleted")
         }

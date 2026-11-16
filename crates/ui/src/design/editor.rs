@@ -1,146 +1,167 @@
-//! The deck editor: a chat column, a live slide preview with a
-//! right-click menu, thumbnails, and a properties sheet.
+//! The design editor: a chat column, a live preview with a right-click
+//! menu, thumbnails, and a properties sheet for the rare manual edit.
 //!
-//! The deck twin of `editor.rs`. It shares the preview bridge, the node
-//! inspector, the theme and transition forms, and the history section
-//! with the design editor; what differs is the deck type, the `/decks`
-//! routes, the slide vocabulary, and two deck-only actions: the presenter
-//! view and the PPTX export.
+//! The main path is the chat: the user asks for changes and the engine
+//! rewrites the design. The preview iframe renders the screen in editable
+//! mode: clicking a node selects it and puts a reference in the chat,
+//! text is editable in place, and a right-click menu applies quick
+//! actions in the iframe's DOM. After every change the iframe posts the
+//! screen's HTML back, and this editor stores it as `screens[i].html` and
+//! saves. Reordering remaps local screen links before saving. Field badges show who
+//! wrote the title, theme, css, and notes: the agent, or the user.
 
-use design_model::{ArtifactKind, DECK_VIEWPORT, Deck, Slide, Theme, Transition};
+use design_model::{ArtifactKind, Design, Screen, Theme, Transition};
 use dioxus::document;
 use dioxus::prelude::*;
 
 use crate::api;
-use crate::canvas::frame_width_rem;
+use crate::canvas::{frame_width_rem, is_portrait_canvas};
 use crate::chat::DesignChat;
-use crate::editor::{
-    APPLY_TO_PREVIEW, HistorySection, NodeCommand, NodeInspector, PREVIEW_LISTENER, PreviewFrame,
-    PreviewMessage, STRIP_TILE_HEIGHT_REM, SelectedNode, SelectionEntry, ThemeForm, ThumbnailState,
-    TransitionForm, fragment_label, move_screen, node_reference, optional, outline_entry,
-    page_reference, pin_reference, schedule_save, selection_of, selection_paths, strip_summary,
-    thumbnail_class, toggle_pin,
-};
 use crate::icons;
 use crate::settings::artifact_project;
 
-/// How the deck preview takes a click: as a selection, or as a reader
-/// of the deck would.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DeckPreviewMode {
-    /// A click reaches the slide as it would for a reader.
-    Read,
-    /// A click selects a node, a double-click edits its text.
-    Edit,
+mod support;
+
+use crate::editor::*;
+use support::{
+    DesignExportGroup, ScreenExportCheckbox, field_count, outline_title, screen_label, view_href,
+};
+
+// A dirty local buffer always wins; a draft-only buffer must never become editable.
+fn preview_design<'a>(saved: &'a Design, draft: Option<&'a Design>, is_dirty: bool) -> &'a Design {
+    draft.filter(|_| !is_dirty).unwrap_or(saved)
 }
 
-impl DeckPreviewMode {
-    /// Both modes, in tab order. Read comes first: it is the default,
-    /// so a deck opens as its reader sees it.
-    pub(crate) const ALL: [DeckPreviewMode; 2] = [DeckPreviewMode::Read, DeckPreviewMode::Edit];
-
-    /// The tab label.
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            DeckPreviewMode::Read => "Read",
-            DeckPreviewMode::Edit => "Edit",
-        }
-    }
-
-    /// The tab tooltip.
-    pub(crate) fn title(self) -> &'static str {
-        match self {
-            DeckPreviewMode::Read => "See the slide as a reader would",
-            DeckPreviewMode::Edit => "Click a node to select it",
-        }
-    }
-
-    /// The query that asks the render for the editing script. Read mode
-    /// asks for nothing, so the slide shows with no selection outlines.
-    pub(crate) fn render_query(self) -> &'static str {
-        match self {
-            DeckPreviewMode::Read => "",
-            DeckPreviewMode::Edit => "&editable=true",
-        }
-    }
-}
-
-/// Loads one deck, then hands it to the editor.
+/// Loads one design, then hands it to the editor.
 #[component]
-pub fn DeckEditor(deck_id: String, on_back: EventHandler<()>) -> Element {
-    let id_for_fetch = deck_id.clone();
+pub fn Editor(design_id: String, on_back: EventHandler<()>) -> Element {
+    let id_for_fetch = design_id.clone();
     let loaded = use_resource(move || {
         let id = id_for_fetch.clone();
-        async move { api::fetch_deck(&id).await }
+        async move {
+            match crate::design::api::fetch_design(&id).await {
+                Ok(saved) => Ok((saved, true)),
+                Err(error) => match crate::design::api::fetch_design_preview(&id).await? {
+                    Some(draft) => Ok((draft, false)),
+                    None => Err(error),
+                },
+            }
+        }
     });
     let current = loaded.read();
     match &*current {
-        Some(Ok(deck)) => rsx! {
-            LoadedDeckEditor { deck_id, initial: deck.clone(), on_back }
+        Some(Ok((design, has_saved))) => rsx! {
+            LoadedEditor { design_id, initial: design.clone(), initially_saved: *has_saved, on_back }
         },
         Some(Err(message)) => rsx! {
             p { class: "error", "{message}" }
         },
         None => rsx! {
-            p { "Loading deck…" }
+            p { "Loading design…" }
         },
     }
 }
 
-/// The editor for a loaded deck: chat on the left, preview and
+/// The editor for a loaded design: chat on the left, preview and
 /// thumbnails on the right, the properties sheet on demand.
 #[component]
-fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -> Element {
-    let mut deck = use_signal(|| initial.clone());
+fn LoadedEditor(
+    design_id: String,
+    initial: Design,
+    initially_saved: bool,
+    on_back: EventHandler<()>,
+) -> Element {
+    // `design` is the local saved-data buffer; live drafts never enter its save path.
+    let mut design = use_signal(|| initial.clone());
+    let mut has_saved = use_signal(|| initially_saved);
+    let mut saved_screen_labels = use_signal(|| {
+        if initially_saved {
+            initial
+                .screens
+                .iter()
+                .enumerate()
+                .map(|(i, screen)| screen_label(i, screen))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        }
+    });
+    let mut export_screens = use_signal(Vec::<usize>::new);
+    let saved_screen_count = saved_screen_labels.read().len();
+    use_effect(use_reactive!(|saved_screen_count| {
+        export_screens
+            .write()
+            .retain(|&screen| screen <= saved_screen_count);
+    }));
+    let mut live_draft = use_signal(|| (!initially_saved).then(|| initial.clone()));
     let mut selected = use_signal(|| 0usize);
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
     let mut selection = use_signal(Vec::<SelectionEntry>::new);
-    let mut mode = use_signal(|| DeckPreviewMode::Read);
-    // The slides pinned for the chat with a command-click on a tile.
+    // The screens pinned for the chat with a command-click on a tile.
     let mut pinned = use_signal(Vec::<usize>::new);
     let mut messages = use_signal(Vec::<String>::new);
     let mut preview_version = use_signal(|| 0u32);
     let mut user_paths = use_signal(Vec::<String>::new);
     let mut is_dirty = use_signal(|| false);
+    let is_read_only = use_memo(move || !has_saved() || (live_draft().is_some() && !is_dirty()));
+    let displayed =
+        use_memo(move || preview_design(&design(), live_draft().as_ref(), is_dirty()).clone());
     // Autosave: the newest change wins the delay.
     let save_generation = use_signal(|| 0u64);
     let mut show_properties = use_signal(|| false);
+    // The toolbar's `…` menu, and the template name being typed while
+    // its save prompt is open.
     let mut is_menu_open = use_signal(|| false);
+    let mut mode = use_signal(|| PreviewMode::Play);
     let mut template_name = use_signal(|| Option::<String>::None);
+    // The node reference the chat prepends to the next message.
     let mut chat_context = use_signal(|| Option::<String>::None);
+    // Thumbnail being dragged, and a screen awaiting delete confirmation.
     let mut dragged = use_signal(|| Option::<usize>::None);
-    let mut pending_slide_delete = use_signal(|| Option::<usize>::None);
+    let mut pending_screen_delete = use_signal(|| Option::<usize>::None);
     // The tile whose Redo waits for its second click.
     let mut pending_redo = use_signal(|| Option::<usize>::None);
+    let settings = use_resource(|| async { api::fetch_settings().await.ok() });
 
-    let authors_id = deck_id.clone();
+    let authors_id = design_id.clone();
     use_future(move || {
         let id = authors_id.clone();
         async move {
-            if let Ok(paths) = api::fetch_deck_user_paths(&id).await {
+            if let Ok(paths) = crate::design::api::fetch_user_paths(&id).await {
                 user_paths.set(paths);
             }
         }
     });
-    // Until the settings answer, the PDF and PPTX buttons stay enabled:
-    // the server answers 503 with the install hint when Chrome is missing.
-    let settings = use_resource(|| async { api::fetch_settings().await.ok() });
-    let can_export_with_chrome = settings().flatten().is_none_or(|view| view.has_chrome);
-
+    // Saves the design and refreshes the badges. The preview reloads only
+    // when `reload_preview` is true: in-place edits already show.
     let save = use_callback({
-        let deck_id = deck_id.clone();
+        let design_id = design_id.clone();
         move |reload_preview: bool| {
-            let id = deck_id.clone();
-            let snapshot = deck();
+            if is_read_only() {
+                return;
+            }
+            let id = design_id.clone();
+            let snapshot = design();
+            is_dirty.set(true);
             spawn(async move {
-                match api::save_deck(&id, &snapshot).await {
+                match crate::design::api::save_design(&id, &snapshot).await {
                     Ok(()) => {
+                        saved_screen_labels.set(
+                            snapshot
+                                .screens
+                                .iter()
+                                .enumerate()
+                                .map(|(i, screen)| screen_label(i, screen))
+                                .collect(),
+                        );
                         messages.set(Vec::new());
-                        is_dirty.set(false);
+                        if design.peek().eq(&snapshot) {
+                            is_dirty.set(false);
+                        }
                         if reload_preview {
                             preview_version += 1;
                         }
-                        if let Ok(paths) = api::fetch_deck_user_paths(&id).await {
+                        if let Ok(paths) = crate::design::api::fetch_user_paths(&id).await {
                             user_paths.set(paths);
                         }
                     }
@@ -150,21 +171,86 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
         }
     });
 
+    // Reloads the design from the server after the engine edited it.
     let reload = use_callback({
-        let deck_id = deck_id.clone();
+        let design_id = design_id.clone();
         move |_: ()| {
-            let id = deck_id.clone();
+            let id = design_id.clone();
             spawn(async move {
-                if let Ok(fetched) = api::fetch_deck(&id).await {
-                    deck.set(fetched);
-                    is_dirty.set(false);
-                    preview_version += 1;
-                    selected_node.set(None);
+                if let Ok(fetched) = crate::design::api::fetch_design(&id).await
+                    && !is_dirty()
+                {
+                    saved_screen_labels.set(
+                        fetched
+                            .screens
+                            .iter()
+                            .enumerate()
+                            .map(|(i, screen)| screen_label(i, screen))
+                            .collect(),
+                    );
+                    if design.peek().ne(&fetched) {
+                        if live_draft.peek().is_none() {
+                            selected.set(selected().min(fetched.screens.len().saturating_sub(1)));
+                        }
+                        design.set(fetched);
+                        preview_version += 1;
+                        selected_node.set(None);
+                    }
+                    has_saved.set(true);
                 }
-                if let Ok(paths) = api::fetch_deck_user_paths(&id).await {
+                if let Ok(paths) = crate::design::api::fetch_user_paths(&id).await {
                     user_paths.set(paths);
                 }
             });
+        }
+    });
+
+    // Events carry no candidate payload. Compare the actual content before invalidating
+    // frames, and recheck dirty state after requests so typing wins network races.
+    let events_id = design_id.clone();
+    use_future(move || {
+        let id = events_id.clone();
+        async move {
+            let mut revision = 0;
+            loop {
+                let preview = crate::design::api::fetch_design_preview(&id).await;
+                let saved = crate::design::api::fetch_design(&id).await;
+                if let Ok(preview) = preview {
+                    let before = displayed.peek().clone();
+                    if live_draft.peek().ne(&preview) {
+                        live_draft.set(preview);
+                    }
+                    if !is_dirty() {
+                        if let Ok(saved) = saved {
+                            saved_screen_labels.set(
+                                saved
+                                    .screens
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, screen)| screen_label(i, screen))
+                                    .collect(),
+                            );
+                            if design.peek().ne(&saved) {
+                                design.set(saved);
+                            }
+                            has_saved.set(true);
+                        }
+                        let after =
+                            preview_design(&design.peek(), live_draft.peek().as_ref(), false)
+                                .clone();
+                        if before != after {
+                            preview_version += 1;
+                            selected.set(selected().min(after.screens.len().saturating_sub(1)));
+                            selected_node.set(None);
+                            selection.set(Vec::new());
+                        }
+                    }
+                }
+                match api::wait_for_change(revision).await {
+                    Ok(next) => revision = next,
+                    Err(_) => crate::settings::pause_briefly().await,
+                }
+            }
         }
     });
 
@@ -172,25 +258,24 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
     use_future(move || async move {
         let mut preview_channel = document::eval(PREVIEW_LISTENER);
         while let Ok(message) = preview_channel.recv::<PreviewMessage>().await {
+            if is_read_only() && message.kind != "swift-design-navigate" {
+                continue;
+            }
             match message.kind.as_str() {
                 "swift-design-escape" => {
                     is_menu_open.set(false);
                     template_name.set(None);
                 }
                 "swift-design-navigate" => {
-                    let count = deck.peek().slides.len();
+                    let count = displayed.peek().screens.len();
                     let current = selected();
-                    let next = if message.step > 0 {
-                        (current + 1).min(count.saturating_sub(1))
-                    } else {
-                        current.saturating_sub(1)
-                    };
+                    let next = navigation_target(current, count, message.step, message.target);
                     if next != current {
                         selected.set(next);
                         selected_node.set(None);
                     }
                 }
-                "swift-design-select" if message.screen < deck.peek().slides.len() => {
+                "swift-design-select" if message.screen < design.peek().screens.len() => {
                     selected.set(message.screen);
                     selection.set(selection_of(&message));
                     selected_node.set(SelectedNode::from_message(&message));
@@ -200,9 +285,9 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                         continue;
                     };
                     let is_changed =
-                        deck.with_mut(|deck| match deck.slides.get_mut(message.screen) {
-                            Some(slide) if slide.html != html => {
-                                slide.html = html;
+                        design.with_mut(|design| match design.screens.get_mut(message.screen) {
+                            Some(screen) if screen.html != html => {
+                                screen.html = html;
                                 true
                             }
                             _ => false,
@@ -215,17 +300,18 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                     }
                 }
                 "swift-design-drag" => match message.action.as_deref() {
-                    Some("start") if message.screen < deck.peek().slides.len() => {
+                    Some("start") if message.screen < design.peek().screens.len() => {
                         dragged.set(Some(message.screen));
                     }
                     Some("over") => {
                         let to = message.screen;
                         if let Some(from) = dragged()
                             && from != to
-                            && to < deck.peek().slides.len()
+                            && to < design.peek().screens.len()
                         {
-                            deck.with_mut(|deck| {
-                                move_screen(&mut deck.slides, &mut deck.outline, from, to)
+                            export_screens.set(Vec::new());
+                            design.with_mut(|design| {
+                                move_screen(&mut design.screens, &mut design.outline, from, to)
                             });
                             dragged.set(Some(to));
                             selected.set(to);
@@ -245,7 +331,7 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                     Some("pin") => {
                         selected.set(message.screen);
                         chat_context.set(Some(pin_reference(
-                            "slide",
+                            "screen",
                             message.screen,
                             &selection_of(&message),
                         )));
@@ -253,8 +339,8 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                     Some("ask") => {
                         selected.set(message.screen);
                         chat_context.set(Some(match SelectedNode::from_message(&message) {
-                            Some(node) => node_reference("slide", message.screen, &node),
-                            None => format!("[slide {}]", message.screen + 1),
+                            Some(node) => node_reference("screen", message.screen, &node),
+                            None => format!("[screen {}]", message.screen + 1),
                         }));
                     }
                     Some("properties") => {
@@ -263,16 +349,16 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                         show_properties.set(true);
                     }
                     Some("delete-screen") => {
-                        let removed = deck.with_mut(|deck| {
-                            if deck.slides.len() > 1 && message.screen < deck.slides.len() {
-                                deck.slides.remove(message.screen);
+                        let removed = design.with_mut(|design| {
+                            if design.screens.len() > 1 && message.screen < design.screens.len() {
+                                design.screens.remove(message.screen);
                                 true
                             } else {
                                 false
                             }
                         });
                         if removed {
-                            let count = deck.peek().slides.len();
+                            let count = design.peek().screens.len();
                             selected.set(message.screen.min(count.saturating_sub(1)));
                             selected_node.set(None);
                             save.call(true);
@@ -285,8 +371,13 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
         }
     });
 
-    // One command per selected node: see the design editor.
+    // Sends an inspector command into the preview iframe, once per
+    // selected node: a change made on the primary node lands on every
+    // node in the selection.
     let apply = use_callback(move |command: NodeCommand| {
+        if is_read_only() {
+            return;
+        }
         for path in selection_paths(&selection.peek(), &command.path) {
             let channel = document::eval(APPLY_TO_PREVIEW);
             let _ = channel.send(NodeCommand {
@@ -296,34 +387,51 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
         }
     });
 
-    let slide_count = deck().slides.len();
-    let outline_count = deck().outline.len();
-    // A deck is always 16:9, so every tile has the same width.
-    let tile_width = frame_width_rem(DECK_VIEWPORT, STRIP_TILE_HEIGHT_REM);
-    let deck_ratio = DECK_VIEWPORT.aspect_ratio_css();
-    let planned_count = outline_count.saturating_sub(slide_count);
-    let summary = strip_summary(slide_count, planned_count);
-    let total_fields = field_count(&deck());
+    let screen_count = displayed().screens.len();
+    let outline_count = displayed().outline.len();
+    let live_query = if is_read_only() && live_draft().is_some() {
+        "&preview=true"
+    } else {
+        ""
+    };
+    let preview_mode = if is_read_only() {
+        PreviewMode::Play
+    } else {
+        mode()
+    };
+    let is_available = has_saved() || live_draft().is_some();
+    let can_export_with_chrome = settings().flatten().is_none_or(|view| view.has_chrome);
+    // The render page fits the screen to its frame, so a frame with the
+    // canvas ratio shows the screen edge to edge. Every thumbnail is
+    // the same height, and as wide as the ratio says.
+    let viewport = displayed().viewport;
+    let ratio = viewport.aspect_ratio_css();
+    let stage_class = preview_stage_class(viewport);
+    let is_portrait = is_portrait_canvas(viewport);
+    let tile_width = frame_width_rem(viewport, STRIP_TILE_HEIGHT_REM);
+    let planned_count = outline_count.saturating_sub(screen_count);
+    let summary = strip_summary(screen_count, planned_count);
+    let total_fields = field_count(&design());
     let user_count = user_paths().len().min(total_fields);
     let agent_count = total_fields - user_count;
-    let thumbnail_labels: Vec<String> = deck()
-        .slides
+    let thumbnail_labels: Vec<String> = displayed()
+        .screens
         .iter()
         .enumerate()
-        .map(|(index, slide)| slide_label(index, slide))
+        .map(|(index, screen)| screen_label(index, screen))
         .collect();
     let page_labels = thumbnail_labels.clone();
-    let current_notes = deck()
-        .slides
+    let current_notes = displayed()
+        .screens
         .get(selected())
-        .and_then(|slide| slide.notes.clone())
+        .and_then(|screen| screen.notes.clone())
         .unwrap_or_default();
     rsx! {
         main { class: "editor",
             DesignChat {
-                design_id: deck_id.clone(),
+                design_id: design_id.clone(),
                 context: chat_context,
-                page: page_reference("slide", &pinned()),
+                page: page_reference("screen", &pinned()),
                 is_pinned: !pinned().is_empty(),
                 on_pin_page: move |index: usize| {
                     if !pinned().contains(&index) {
@@ -331,7 +439,7 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                     }
                 },
                 pages: page_labels.clone(),
-                page_unit: Some("slide".to_owned()),
+                page_unit: Some("screen".to_owned()),
                 on_drop_page: move |_| pinned.write().clear(),
                 on_before_send: move |_| {
                     if is_dirty() {
@@ -347,13 +455,17 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                         "Project"
                     }
                     span { class: "divider" }
-                    span { class: "preview-heading", "{selected() + 1} / {slide_count}" }
-                    div { class: "canvas-tabs preview-modes", role: "tablist",
-                        for candidate in DeckPreviewMode::ALL {
+                    span { class: "preview-heading", "{selected() + 1} / {screen_count}" }
+                    div {
+                        class: "canvas-tabs preview-modes",
+                        role: "group",
+                        aria_label: "Demo preview controls",
+                        for candidate in PreviewMode::ALL {
                             button {
                                 key: "{candidate.label()}",
-                                role: "tab",
-                                class: if mode() == candidate { "canvas-tab open" } else { "canvas-tab" },
+                                disabled: is_read_only(),
+                                aria_pressed: "{preview_mode == candidate}",
+                                class: if preview_mode == candidate { "canvas-tab open" } else { "canvas-tab" },
                                 title: "{candidate.title()}",
                                 onclick: move |_| {
                                     mode.set(candidate);
@@ -362,6 +474,26 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                                 span { class: "tab-name", "{candidate.label()}" }
                             }
                         }
+                        if is_dirty() || !has_saved() {
+                            button {
+                                class: "canvas-tab",
+                                disabled: true,
+                                title: "Wait for changes to save before viewing the demo",
+                                "View"
+                            }
+                        } else {
+                            a {
+                                class: "canvas-tab",
+                                href: view_href(&design_id),
+                                target: "_blank",
+                                rel: "noopener noreferrer",
+                                title: "View the full demo in a new tab",
+                                "View"
+                            }
+                        }
+                    }
+                    if is_read_only() {
+                        span { class: "badge", "Live draft — unverified · read-only" }
                     }
                     span { class: "badge", "agent {agent_count}" }
                     span { class: "badge you", "you {user_count}" }
@@ -371,23 +503,29 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                         span { class: "save-state pending", "saving…" }
                     }
                     div { class: "actions",
-                        button { onclick: move |_| show_properties.set(!show_properties()),
+                        button { disabled: is_read_only(), onclick: move |_| show_properties.set(!show_properties()),
                             "Properties"
                         }
                         span { class: "divider" }
-                        DeckExportGroup {
-                            deck_id: deck_id.clone(),
-                            selected: selected(),
-                            can_export_with_chrome,
+                        if !is_read_only() {
+                            DesignExportGroup {
+                                key: "{design_id}",
+                                design_id: design_id.clone(),
+                                selected: selected(),
+                                screen_count: saved_screen_count,
+                                export_screens,
+                                can_export_with_chrome,
+                            }
                         }
                         button {
                             class: "toolbar-more",
+                            disabled: is_read_only(),
                             title: "More actions",
                             onclick: move |_| is_menu_open.set(!is_menu_open()),
                             "…"
                         }
                     }
-                    if is_menu_open() {
+                    if is_menu_open() && !is_read_only() {
                         div {
                             class: "menu-backdrop",
                             onclick: move |_| {
@@ -409,7 +547,7 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                                         class: "primary",
                                         disabled: name.trim().is_empty(),
                                         onclick: {
-                                            let deck_id = deck_id.clone();
+                                            let design_id = design_id.clone();
                                             move |_| {
                                                 let Some(name) = template_name() else {
                                                     return;
@@ -418,9 +556,9 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                                                 if name.is_empty() {
                                                     return;
                                                 }
-                                                let deck_id = deck_id.clone();
+                                                let design_id = design_id.clone();
                                                 spawn(async move {
-                                                    match api::save_deck_template(&deck_id, &name).await {
+                                                    match api::save_template(&design_id, &name).await {
                                                         Ok(saved) => {
                                                             template_name.set(None);
                                                             is_menu_open.set(false);
@@ -440,7 +578,7 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                                 }
                             } else {
                                 button {
-                                    title: "Keep this deck's theme and layout style for a future design or deck",
+                                    title: "Keep this design's theme and layout style for a future design",
                                     onclick: move |_| template_name.set(Some(String::new())),
                                     "Save as template"
                                 }
@@ -452,19 +590,22 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                     for message in messages() {
                         p { class: "error", "{message}" }
                     }
-                    div { class: "preview-stage",
+                    if !is_available {
+                        p { "The live draft was cleared; no saved design exists yet. Return to the project." }
+                    }
+                    if is_available {
+                    div { class: stage_class,
                         PreviewFrame {
-                            title: "Deck preview",
-                            // Without the ratio the iframe falls back to
-                            // its default height and the slide sits in a
-                            // band of the deck's own background.
-                            ratio: "{deck_ratio}",
-                            src: "/decks/{deck_id}/render?version={preview_version()}{mode().render_query()}&slide={selected() + 1}",
+                            title: "Design preview",
+                            ratio: "{ratio}",
+                            src: "/designs/{design_id}/render?version={preview_version()}{live_query}{preview_mode.render_query()}&screen={selected() + 1}",
                         }
                     }
                     p { class: "preview-hint",
-                        if mode() == DeckPreviewMode::Read {
-                            span { "The slide as a reader sees it · switch to Edit to select a node" }
+                        if preview_mode == PreviewMode::Play {
+                            span {
+                                "Click buttons, links, and menus as a user would · a link to another screen opens it"
+                            }
                         } else {
                             span {
                                 "Click a node to select it and edit its text · ⌘-click adds more · right-click and Pin to chat references it · ⌘-click a tile to pin pages"
@@ -477,46 +618,50 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                             kbd { "←" }
                             " "
                             kbd { "→" }
-                            " change slides"
+                            " change screens"
                         }
                     }
                     label { class: "notes-box",
                         span { class: "notes-heading",
-                            "Presenter notes"
-                            span { class: "screen-no", "slide {selected() + 1}" }
+                            "Design notes"
+                            span { class: "screen-no", "screen {selected() + 1}" }
                         }
                         textarea {
+                            readonly: is_read_only(),
                             value: "{current_notes}",
-                            placeholder: "What to say on this slide. Never shown on the slide.",
+                            placeholder: "Intent, states, and handoff remarks for this screen. Never shown on the screen.",
                             oninput: move |event| {
+                                if is_read_only() { return; }
                                 let index = selected();
-                                deck.with_mut(|deck| {
-                                    if let Some(slide) = deck.slides.get_mut(index) {
-                                        slide.notes = optional(event.value());
-                                    }
-                                });
+                                design
+                                    .with_mut(|design| {
+                                        if let Some(screen) = design.screens.get_mut(index) {
+                                            screen.notes = optional(event.value());
+                                        }
+                                    });
                                 is_dirty.set(true);
                                 schedule_save(save_generation, save, false);
                             },
                         }
                     }
                     div { class: "strip-head",
-                        "Slides"
+                        "Screens"
                         span { class: "strip-counts", "{summary}" }
-                        // One control writes every planned slide. A
+                        // One control writes every planned screen. A
                         // button on each planned tile did the same thing
                         // and read as if it wrote that one alone.
                         if planned_count > 0 {
                             button {
                                 class: "strip-write",
-                                title: "Write the slides the outline still plans",
+                                disabled: is_read_only(),
+                                title: "Write the screens the outline still plans",
                                 onclick: {
-                                    let deck_id = deck_id.clone();
+                                    let design_id = design_id.clone();
                                     move |_| {
-                                        let deck_id = deck_id.clone();
+                                        let design_id = design_id.clone();
                                         spawn(async move {
-                                            let session_id = artifact_project(&deck_id);
-                                            let sent = api::continue_artifact(&session_id, &deck_id).await;
+                                            let session_id = artifact_project(&design_id);
+                                            let sent = api::continue_artifact(&session_id, &design_id).await;
                                             if let Err(message) = sent {
                                                 messages.write().push(message);
                                             }
@@ -531,15 +676,18 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                     div { class: "thumbnails",
                         for (index, label) in thumbnail_labels.into_iter().enumerate() {
                             {
-                                let is_deleting = pending_slide_delete() == Some(index);
+                                let is_deleting = pending_screen_delete() == Some(index);
                                 let is_redoing = pending_redo() == Some(index);
-                                let class = thumbnail_class(ThumbnailState {
+                                let mut class = thumbnail_class(ThumbnailState {
                                     is_current: index == selected(),
                                     is_dragging: dragged() == Some(index),
-                                    is_portrait: false,
+                                    is_portrait,
                                     is_deleting,
                                     is_pinned: pinned().contains(&index),
                                 });
+                                if !is_read_only() && export_screens.read().contains(&(index + 1)) {
+                                    class.push_str(" export-selected");
+                                }
                                 rsx! {
                                     div {
                                         key: "{index}",
@@ -548,7 +696,7 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                                         style: "--tile-width: {tile_width}rem",
                                         "data-index": "{index}",
                                         onclick: move |event: MouseEvent| {
-                                            // A command-click pins the slide for
+                                            // A command-click pins the screen for
                                             // the chat; a plain click opens it.
                                             if event.modifiers().meta() || event.modifiers().ctrl() {
                                                 toggle_pin(&mut pinned.write(), index);
@@ -556,33 +704,42 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                                             }
                                             selected.set(index);
                                             selected_node.set(None);
-                                            pending_slide_delete.set(None);
+                                            pending_screen_delete.set(None);
                                             pending_redo.set(None);
                                         },
                                         iframe {
-                                            title: "Slide {index + 1}",
+                                            title: "Screen {index + 1}",
                                             tabindex: "-1",
-                                            src: "/decks/{deck_id}/render?version={preview_version()}&slide={index + 1}",
+                                            src: "/designs/{design_id}/render?version={preview_version()}{live_query}&screen={index + 1}",
                                         }
                                         span { class: "thumbnail-number", {format!("{:02}", index + 1)} }
-                                        if slide_count > 1 {
+                                        if !is_read_only() && index < saved_screen_count {
+                                            ScreenExportCheckbox {
+                                                screen: index + 1,
+                                                label: label.clone(),
+                                                selection: export_screens,
+                                            }
+                                        }
+                                        if screen_count > 1 && !is_read_only() {
                                             button {
                                                 class: if is_deleting { "thumbnail-delete confirm" } else { "thumbnail-delete" },
-                                                title: "Delete this slide",
+                                                title: "Delete this screen",
                                                 onclick: move |event: Event<MouseData>| {
                                                     event.stop_propagation();
-                                                    if pending_slide_delete() == Some(index) {
-                                                        pending_slide_delete.set(None);
-                                                        deck.with_mut(|deck| {
-                                                            if deck.slides.len() > 1 && index < deck.slides.len() {
-                                                                deck.slides.remove(index);
-                                                            }
-                                                        });
-                                                        selected.set(selected().min(slide_count.saturating_sub(2)));
+                                                    if pending_screen_delete() == Some(index) {
+                                                        pending_screen_delete.set(None);
+                                                        export_screens.set(Vec::new());
+                                                        design
+                                                            .with_mut(|design| {
+                                                                if design.screens.len() > 1 && index < design.screens.len() {
+                                                                    design.screens.remove(index);
+                                                                }
+                                                            });
+                                                        selected.set(selected().min(screen_count.saturating_sub(2)));
                                                         selected_node.set(None);
                                                         save.call(true);
                                                     } else {
-                                                        pending_slide_delete.set(Some(index));
+                                                        pending_screen_delete.set(Some(index));
                                                     }
                                                 },
                                                 "×"
@@ -591,16 +748,17 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                                                 }
                                             }
                                         }
-                                        // A redo writes the slide anew: the model
-                                        // sees its notes, not its markup.
+                                        // A redo writes the screen anew: the model
+                                        // sees its name and notes, not its markup.
                                         button {
+                                            disabled: is_read_only(),
                                             class: if is_redoing { "thumbnail-redo confirm" } else { "thumbnail-redo" },
-                                            title: "Write this slide anew",
+                                            title: "Write this screen anew",
                                             onclick: {
-                                                let deck_id = deck_id.clone();
+                                                let design_id = design_id.clone();
                                                 move |event: Event<MouseData>| {
                                                     event.stop_propagation();
-                                                    pending_slide_delete.set(None);
+                                                    pending_screen_delete.set(None);
                                                     if pending_redo() != Some(index) {
                                                         pending_redo.set(Some(index));
                                                         return;
@@ -609,13 +767,13 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                                                     if is_dirty() {
                                                         save.call(true);
                                                     }
-                                                    let deck_id = deck_id.clone();
+                                                    let design_id = design_id.clone();
                                                     spawn(async move {
-                                                        let session_id = artifact_project(&deck_id);
+                                                        let session_id = artifact_project(&design_id);
                                                         let sent = api::regenerate_unit(
                                                                 &session_id,
-                                                                &deck_id,
-                                                                "slide",
+                                                                &design_id,
+                                                                "screen",
                                                                 index + 1,
                                                             )
                                                             .await;
@@ -634,20 +792,20 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                                 }
                             }
                         }
-                        if outline_count > slide_count {
+                        if outline_count > screen_count {
                             span { class: "strip-divider" }
                         }
                         // A planned tile is an outline entry nobody has
                         // written. The strip head writes them.
-                        for index in slide_count..outline_count {
+                        for index in screen_count..outline_count {
                             {
-                                let (number, title) = outline_entry(&deck().outline, index, "Slide");
+                                let (number, title) = outline_entry(&displayed().outline, index, "Screen");
                                 rsx! {
                                     div {
                                         key: "outline-{index}",
-                                        class: "thumbnail outline",
+                                        class: if is_portrait { "thumbnail outline portrait" } else { "thumbnail outline" },
                                         style: "--tile-width: {tile_width}rem",
-                                        title: "{outline_title(&deck(), index)} · not written yet",
+                                        title: "{outline_title(&displayed(), index)} · not written yet",
                                         span { class: "outline-kicker",
                                             "{number}"
                                             span { class: "planned-text", " planned" }
@@ -659,8 +817,9 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                         }
                     }
                 }
+                }
             }
-            if show_properties() {
+            if show_properties() && !is_read_only() {
                 aside { class: "properties-sheet",
                     div { class: "sheet-head",
                         span { class: "kicker", "Properties" }
@@ -676,16 +835,16 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                             screen: selected(),
                             node: selected_node(),
                             on_apply: move |command: NodeCommand| apply.call(command),
-                            scope: artifact_project(&deck_id),
+                            scope: artifact_project(&design_id),
                         }
                         div { class: "sheet-section",
-                            div { class: "head", "Deck" }
+                            div { class: "head", "Design" }
                             label {
-                                "Deck title"
+                                "Design title"
                                 input {
-                                    value: "{deck().title}",
+                                    value: "{design().title}",
                                     oninput: move |event| {
-                                        deck.with_mut(|deck| deck.title = event.value());
+                                        design.with_mut(|design| design.title = event.value());
                                         is_dirty.set(true);
                                         schedule_save(save_generation, save, false);
                                     },
@@ -693,283 +852,30 @@ fn LoadedDeckEditor(deck_id: String, initial: Deck, on_back: EventHandler<()>) -
                             }
                         }
                         ThemeForm {
-                            theme: deck().theme.clone(),
+                            theme: design().theme.clone(),
                             on_change: move |theme: Theme| {
-                                deck.with_mut(|deck| deck.theme = theme);
+                                design.with_mut(|design| design.theme = theme);
                                 is_dirty.set(true);
                                 schedule_save(save_generation, save, true);
                             },
                         }
                         TransitionForm {
-                            transition: deck().transition,
+                            default_cut: true,
+                            transition: design().transition,
                             on_change: move |transition: Option<Transition>| {
-                                deck.with_mut(|deck| deck.transition = transition);
+                                design.with_mut(|design| design.transition = transition);
                                 is_dirty.set(true);
                                 save.call(false);
                             },
                         }
                         HistorySection {
-                            design_id: deck_id.clone(),
-                            kind: ArtifactKind::Deck,
+                            design_id: design_id.clone(),
+                            kind: ArtifactKind::Demo,
                             on_restored: move |_| reload.call(()),
                         }
                     }
                 }
             }
         }
-    }
-}
-
-/// The href of the PNG export: one slide's image when scoped, the zip
-/// of every slide otherwise.
-fn png_export_href(deck_id: &str, only: Option<usize>) -> String {
-    match only {
-        Some(index) => format!("/decks/{deck_id}/slides/{}.png", index + 1),
-        None => format!("/decks/{deck_id}/export.zip"),
-    }
-}
-
-/// The download name of a scoped slide image, matching the zip entry.
-fn slide_download_name(deck_id: &str, index: usize) -> String {
-    format!("{deck_id}-slide-{}.png", index + 1)
-}
-
-/// The label of the menu that downloads the slide on display.
-fn slide_export_label(index: usize) -> String {
-    format!("Slide {}", index + 1)
-}
-
-/// The deck toolbar's export menus: the presenter view, `All` downloads
-/// the whole deck, and `Slide N` downloads the slide on display.
-#[component]
-fn DeckExportGroup(deck_id: String, selected: usize, can_export_with_chrome: bool) -> Element {
-    let mut is_all_menu_open = use_signal(|| false);
-    let mut is_unit_menu_open = use_signal(|| false);
-    let unit_label = slide_export_label(selected);
-    rsx! {
-        a {
-            class: "button",
-            href: "/decks/{deck_id}/present?slide={selected + 1}",
-            target: "_blank",
-            title: "Present in a new window",
-            span { dangerous_inner_html: icons::PLAY }
-            "Present"
-        }
-        div { class: "unit-export",
-            button {
-                title: "Download the whole deck",
-                onclick: move |_| is_all_menu_open.set(!is_all_menu_open()),
-                span { dangerous_inner_html: icons::DOWNLOAD }
-                "All"
-            }
-            if is_all_menu_open() {
-                div {
-                    class: "menu-backdrop",
-                    onclick: move |_| is_all_menu_open.set(false),
-                }
-                div { class: "toolbar-menu unit-export-menu",
-                    a {
-                        href: "/decks/{deck_id}/export",
-                        onclick: move |_| is_all_menu_open.set(false),
-                        "Download as HTML"
-                    }
-                    if can_export_with_chrome {
-                        a {
-                            href: "/decks/{deck_id}/export.pdf",
-                            onclick: move |_| is_all_menu_open.set(false),
-                            "Download as PDF"
-                        }
-                        a {
-                            href: "/decks/{deck_id}/export.pptx",
-                            onclick: move |_| is_all_menu_open.set(false),
-                            "Download as PPTX"
-                        }
-                        a {
-                            href: png_export_href(&deck_id, None),
-                            onclick: move |_| is_all_menu_open.set(false),
-                            "Download as PNG zip"
-                        }
-                    } else {
-                        a {
-                            "aria-disabled": "true",
-                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
-                            "Download as PDF"
-                        }
-                        a {
-                            "aria-disabled": "true",
-                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
-                            "Download as PPTX"
-                        }
-                        a {
-                            "aria-disabled": "true",
-                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
-                            "Download as PNG zip"
-                        }
-                    }
-                }
-            }
-        }
-        div { class: "unit-export",
-            button {
-                title: "Download only the slide on display",
-                onclick: move |_| is_unit_menu_open.set(!is_unit_menu_open()),
-                span { dangerous_inner_html: icons::DOWNLOAD }
-                "{unit_label}"
-            }
-            if is_unit_menu_open() {
-                div {
-                    class: "menu-backdrop",
-                    onclick: move |_| is_unit_menu_open.set(false),
-                }
-                div { class: "toolbar-menu unit-export-menu",
-                    if can_export_with_chrome {
-                        a {
-                            href: png_export_href(&deck_id, Some(selected)),
-                            download: slide_download_name(&deck_id, selected),
-                            onclick: move |_| is_unit_menu_open.set(false),
-                            "Download as PNG"
-                        }
-                    } else {
-                        a {
-                            "aria-disabled": "true",
-                            title: "Install Chrome or Chromium on the server machine, or set SWIFT_DESIGN_CHROME",
-                            "Download as PNG"
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Short label for a thumbnail: position, then the first heading text,
-/// else the first words of the slide, else `Slide N`.
-fn slide_label(index: usize, slide: &Slide) -> String {
-    fragment_label("Slide", index, &slide.html)
-}
-
-/// The planned title of outline entry `index`, as the thumbnail tooltip:
-/// `5. Title`, or `5. Slide 5` when the outline has no entry there.
-fn outline_title(deck: &Deck, index: usize) -> String {
-    match deck.outline.get(index) {
-        Some(title) if !title.trim().is_empty() => format!("{}. {}", index + 1, title.trim()),
-        _ => format!("{}. Slide {}", index + 1, index + 1),
-    }
-}
-
-/// A sample slide for tests: a heading and a paragraph.
-#[cfg(test)]
-fn default_slide() -> Slide {
-    Slide {
-        html: "<div class='body'><h2>New slide</h2><p>Text</p></div>".to_owned(),
-        css: Some(
-            ".body { padding: 120px; height: 100%; display: flex; flex-direction: column; gap: 40px; } h2 { font-size: 72px; }"
-                .to_owned(),
-        ),
-        notes: None,
-    }
-}
-
-/// Number of set leaf fields in the deck. Matches the server's
-/// provenance paths: absent optional fields are not counted.
-fn field_count(deck: &Deck) -> usize {
-    // Deck title, theme name, four colors, three fonts.
-    let mut count = 9;
-    for slide in &deck.slides {
-        count += 1 + usize::from(slide.css.is_some()) + usize::from(slide.notes.is_some());
-    }
-    count
-}
-
-#[cfg(test)]
-mod tests {
-    use design_model::{Deck, FontSet, Palette, Slide, Theme};
-
-    use super::{
-        DeckPreviewMode, default_slide, field_count, outline_title, png_export_href,
-        slide_download_name, slide_export_label, slide_label,
-    };
-
-    #[test]
-    fn a_deck_opens_in_read_mode_and_edit_loads_the_editing_script() {
-        assert_eq!(DeckPreviewMode::ALL[0], DeckPreviewMode::Read);
-        assert_eq!(
-            DeckPreviewMode::ALL.map(DeckPreviewMode::label),
-            ["Read", "Edit"]
-        );
-        assert_eq!(DeckPreviewMode::Read.render_query(), "");
-        assert_eq!(DeckPreviewMode::Edit.render_query(), "&editable=true");
-    }
-
-    fn deck() -> Deck {
-        Deck {
-            title: "T".to_owned(),
-            theme: Theme {
-                name: "n".to_owned(),
-                colors: Palette {
-                    background: "#000000".to_owned(),
-                    text: "#ffffff".to_owned(),
-                    accent: "#0e6e63".to_owned(),
-                    muted: "#888888".to_owned(),
-                },
-                fonts: FontSet {
-                    heading: "Inter".to_owned(),
-                    body: "Inter".to_owned(),
-                    mono: "Menlo".to_owned(),
-                },
-            },
-            slides: vec![
-                Slide {
-                    html: "<h1>Swift Design</h1>".to_owned(),
-                    css: None,
-                    notes: Some("Open".to_owned()),
-                },
-                default_slide(),
-            ],
-            outline: Vec::new(),
-            transition: None,
-        }
-    }
-
-    #[test]
-    fn slide_labels_use_the_heading_then_the_text_then_a_number() {
-        assert_eq!(slide_label(0, &default_slide()), "1. New slide");
-        let deck = deck();
-        assert_eq!(slide_label(0, &deck.slides[0]), "1. Swift Design");
-        let empty = Slide {
-            html: "<div></div>".to_owned(),
-            css: None,
-            notes: None,
-        };
-        assert_eq!(slide_label(1, &empty), "2. Slide 2");
-    }
-
-    #[test]
-    fn outline_titles_fall_back_to_the_slide_number() {
-        let mut planned = deck();
-        planned.outline = vec!["Intro".to_owned(), "  ".to_owned()];
-        assert_eq!(outline_title(&planned, 0), "1. Intro");
-        assert_eq!(outline_title(&planned, 1), "2. Slide 2");
-        assert_eq!(outline_title(&planned, 5), "6. Slide 6");
-    }
-
-    #[test]
-    fn the_default_slide_validates_inside_a_deck() {
-        let deck = deck();
-        assert_eq!(deck.validate(), Vec::new());
-        // 9 deck and theme fields, html and notes on the first slide, html
-        // and css on the second.
-        assert_eq!(field_count(&deck), 9 + 2 + 2);
-    }
-
-    #[test]
-    fn png_exports_name_the_slide_in_href_and_filename() {
-        assert_eq!(png_export_href("launch", None), "/decks/launch/export.zip");
-        assert_eq!(
-            png_export_href("launch", Some(1)),
-            "/decks/launch/slides/2.png"
-        );
-        assert_eq!(slide_download_name("launch", 1), "launch-slide-2.png");
-        assert_eq!(slide_export_label(1), "Slide 2");
     }
 }

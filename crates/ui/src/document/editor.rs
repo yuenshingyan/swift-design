@@ -1,18 +1,18 @@
-//! The social editor: a chat column, a live frame preview with a
+//! The document editor: a chat column, a live page preview with a
 //! right-click menu, thumbnails, and a properties sheet.
 //!
-//! The social twin of `document_editor.rs`. It shares the preview
-//! bridge, the node inspector, the theme form, and the history section
-//! with the design editor; what differs is the social type, the
-//! `/socials` routes, the frame vocabulary, the format control, and
-//! the exports: PDF and a PNG zip beside the HTML file.
+//! The document twin of `deck/editor.rs`. It shares the preview bridge,
+//! the node inspector, the theme form, and the history section with
+//! the design editor; what differs is the document type, the
+//! `/documents` routes, the page vocabulary, the paper control, and
+//! the exports: PDF, DOCX, and PNG files beside the HTML file.
 
-use design_model::{ArtifactKind, Format, Frame, Social, Theme};
+use design_model::{ArtifactKind, Document, Page, Paper, Theme};
 use dioxus::document;
 use dioxus::prelude::*;
 
 use crate::api;
-use crate::canvas::{frame_width_rem, is_narrow_canvas};
+use crate::canvas::frame_width_rem;
 use crate::chat::DesignChat;
 use crate::editor::{
     APPLY_TO_PREVIEW, HistorySection, NodeCommand, NodeInspector, PREVIEW_LISTENER, PreviewFrame,
@@ -28,80 +28,84 @@ mod support;
 
 use support::*;
 
-/// How the social preview takes a click: as a selection, or as a
-/// reader of the feed would.
+/// How the document preview takes a click: as a selection, or as a
+/// reader of the document would.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SocialPreviewMode {
-    /// A click reaches the frame as it would for a reader.
+pub(crate) enum DocumentPreviewMode {
+    /// A click reaches the page as it would for a reader.
     Read,
     /// A click selects a node, a double-click edits its text.
     Edit,
 }
 
-impl SocialPreviewMode {
+impl DocumentPreviewMode {
     /// Both modes, in tab order. Read comes first: it is the default,
-    /// so a social opens as its reader sees it.
-    pub(crate) const ALL: [SocialPreviewMode; 2] =
-        [SocialPreviewMode::Read, SocialPreviewMode::Edit];
+    /// so a document opens as its reader sees it.
+    pub(crate) const ALL: [DocumentPreviewMode; 2] =
+        [DocumentPreviewMode::Read, DocumentPreviewMode::Edit];
 
     /// The tab label.
     pub(crate) fn label(self) -> &'static str {
         match self {
-            SocialPreviewMode::Read => "Read",
-            SocialPreviewMode::Edit => "Edit",
+            DocumentPreviewMode::Read => "Read",
+            DocumentPreviewMode::Edit => "Edit",
         }
     }
 
     /// The tab tooltip.
     pub(crate) fn title(self) -> &'static str {
         match self {
-            SocialPreviewMode::Read => "See the frame as a reader would",
-            SocialPreviewMode::Edit => "Click a node to select it",
+            DocumentPreviewMode::Read => "See the page as a reader would",
+            DocumentPreviewMode::Edit => "Click a node to select it",
         }
     }
 
     /// The query that asks the render for the editing script. Read mode
-    /// asks for nothing, so the frame shows with no selection outlines.
+    /// asks for nothing, so the page shows with no selection outlines.
     pub(crate) fn render_query(self) -> &'static str {
         match self {
-            SocialPreviewMode::Read => "",
-            SocialPreviewMode::Edit => "&editable=true",
+            DocumentPreviewMode::Read => "",
+            DocumentPreviewMode::Edit => "&editable=true",
         }
     }
 }
 
-/// Loads one social, then hands it to the editor.
+/// Loads one document, then hands it to the editor.
 #[component]
-pub fn SocialEditor(social_id: String, on_back: EventHandler<()>) -> Element {
-    let id_for_fetch = social_id.clone();
+pub fn DocumentEditor(document_id: String, on_back: EventHandler<()>) -> Element {
+    let id_for_fetch = document_id.clone();
     let loaded = use_resource(move || {
         let id = id_for_fetch.clone();
-        async move { api::fetch_social(&id).await }
+        async move { crate::document::api::fetch_document(&id).await }
     });
     let current = loaded.read();
     match &*current {
-        Some(Ok(social)) => rsx! {
-            LoadedSocialEditor { social_id, initial: social.clone(), on_back }
+        Some(Ok(document)) => rsx! {
+            LoadedDocumentEditor { document_id, initial: document.clone(), on_back }
         },
         Some(Err(message)) => rsx! {
             p { class: "error", "{message}" }
         },
         None => rsx! {
-            p { "Loading social…" }
+            p { "Loading document…" }
         },
     }
 }
 
-/// The editor for a loaded social: chat on the left, preview and
+/// The editor for a loaded document: chat on the left, preview and
 /// thumbnails on the right, the properties sheet on demand.
 #[component]
-fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<()>) -> Element {
-    let mut social = use_signal(|| initial.clone());
+fn LoadedDocumentEditor(
+    document_id: String,
+    initial: Document,
+    on_back: EventHandler<()>,
+) -> Element {
+    let mut document = use_signal(|| initial.clone());
     let mut selected = use_signal(|| 0usize);
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
     let mut selection = use_signal(Vec::<SelectionEntry>::new);
-    let mut mode = use_signal(|| SocialPreviewMode::Read);
-    // The frames pinned for the chat with a command-click on a tile.
+    let mut mode = use_signal(|| DocumentPreviewMode::Read);
+    // The pages pinned for the chat with a command-click on a tile.
     let mut pinned = use_signal(Vec::<usize>::new);
     let mut messages = use_signal(Vec::<String>::new);
     let mut preview_version = use_signal(|| 0u32);
@@ -114,39 +118,40 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
     let mut template_name = use_signal(|| Option::<String>::None);
     let mut chat_context = use_signal(|| Option::<String>::None);
     let mut dragged = use_signal(|| Option::<usize>::None);
-    let mut pending_frame_delete = use_signal(|| Option::<usize>::None);
+    let mut pending_page_delete = use_signal(|| Option::<usize>::None);
     // The tile whose Redo waits for its second click.
     let mut pending_redo = use_signal(|| Option::<usize>::None);
 
-    let authors_id = social_id.clone();
+    let authors_id = document_id.clone();
     use_future(move || {
         let id = authors_id.clone();
         async move {
-            if let Ok(paths) = api::fetch_social_user_paths(&id).await {
+            if let Ok(paths) = crate::document::api::fetch_document_user_paths(&id).await {
                 user_paths.set(paths);
             }
         }
     });
-    // Until the settings answer, the PDF and PNG buttons stay enabled:
-    // the server answers 503 with the install hint when Chrome is
-    // missing.
+    // Until the settings answer, the PDF button stays enabled: the
+    // server answers 503 with the install hint when Chrome is missing.
     let settings = use_resource(|| async { api::fetch_settings().await.ok() });
     let can_export_with_chrome = settings().flatten().is_none_or(|view| view.has_chrome);
 
     let save = use_callback({
-        let social_id = social_id.clone();
+        let document_id = document_id.clone();
         move |reload_preview: bool| {
-            let id = social_id.clone();
-            let snapshot = social();
+            let id = document_id.clone();
+            let snapshot = document();
             spawn(async move {
-                match api::save_social(&id, &snapshot).await {
+                match crate::document::api::save_document(&id, &snapshot).await {
                     Ok(()) => {
                         messages.set(Vec::new());
                         is_dirty.set(false);
                         if reload_preview {
                             preview_version += 1;
                         }
-                        if let Ok(paths) = api::fetch_social_user_paths(&id).await {
+                        if let Ok(paths) =
+                            crate::document::api::fetch_document_user_paths(&id).await
+                        {
                             user_paths.set(paths);
                         }
                     }
@@ -157,17 +162,17 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
     });
 
     let reload = use_callback({
-        let social_id = social_id.clone();
+        let document_id = document_id.clone();
         move |_: ()| {
-            let id = social_id.clone();
+            let id = document_id.clone();
             spawn(async move {
-                if let Ok(fetched) = api::fetch_social(&id).await {
-                    social.set(fetched);
+                if let Ok(fetched) = crate::document::api::fetch_document(&id).await {
+                    document.set(fetched);
                     is_dirty.set(false);
                     preview_version += 1;
                     selected_node.set(None);
                 }
-                if let Ok(paths) = api::fetch_social_user_paths(&id).await {
+                if let Ok(paths) = crate::document::api::fetch_document_user_paths(&id).await {
                     user_paths.set(paths);
                 }
             });
@@ -184,7 +189,7 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                     template_name.set(None);
                 }
                 "swift-design-navigate" => {
-                    let count = social.peek().frames.len();
+                    let count = document.peek().pages.len();
                     let current = selected();
                     let next = if message.step > 0 {
                         (current + 1).min(count.saturating_sub(1))
@@ -196,7 +201,7 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                         selected_node.set(None);
                     }
                 }
-                "swift-design-select" if message.screen < social.peek().frames.len() => {
+                "swift-design-select" if message.screen < document.peek().pages.len() => {
                     selected.set(message.screen);
                     selection.set(selection_of(&message));
                     selected_node.set(SelectedNode::from_message(&message));
@@ -205,14 +210,15 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                     let Some(html) = message.html else {
                         continue;
                     };
-                    let is_changed =
-                        social.with_mut(|social| match social.frames.get_mut(message.screen) {
-                            Some(frame) if frame.html != html => {
-                                frame.html = html;
+                    let is_changed = document.with_mut(|document| {
+                        match document.pages.get_mut(message.screen) {
+                            Some(page) if page.html != html => {
+                                page.html = html;
                                 true
                             }
                             _ => false,
-                        });
+                        }
+                    });
                     if is_changed {
                         is_dirty.set(true);
                     }
@@ -221,17 +227,17 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                     }
                 }
                 "swift-design-drag" => match message.action.as_deref() {
-                    Some("start") if message.screen < social.peek().frames.len() => {
+                    Some("start") if message.screen < document.peek().pages.len() => {
                         dragged.set(Some(message.screen));
                     }
                     Some("over") => {
                         let to = message.screen;
                         if let Some(from) = dragged()
                             && from != to
-                            && to < social.peek().frames.len()
+                            && to < document.peek().pages.len()
                         {
-                            social.with_mut(|social| {
-                                move_screen(&mut social.frames, &mut social.outline, from, to)
+                            document.with_mut(|document| {
+                                move_screen(&mut document.pages, &mut document.outline, from, to)
                             });
                             dragged.set(Some(to));
                             selected.set(to);
@@ -251,7 +257,7 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                     Some("pin") => {
                         selected.set(message.screen);
                         chat_context.set(Some(pin_reference(
-                            "frame",
+                            "page",
                             message.screen,
                             &selection_of(&message),
                         )));
@@ -259,8 +265,8 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                     Some("ask") => {
                         selected.set(message.screen);
                         chat_context.set(Some(match SelectedNode::from_message(&message) {
-                            Some(node) => node_reference("frame", message.screen, &node),
-                            None => format!("[frame {}]", message.screen + 1),
+                            Some(node) => node_reference("page", message.screen, &node),
+                            None => format!("[page {}]", message.screen + 1),
                         }));
                     }
                     Some("properties") => {
@@ -269,16 +275,16 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                         show_properties.set(true);
                     }
                     Some("delete-screen") => {
-                        let removed = social.with_mut(|social| {
-                            if social.frames.len() > 1 && message.screen < social.frames.len() {
-                                social.frames.remove(message.screen);
+                        let removed = document.with_mut(|document| {
+                            if document.pages.len() > 1 && message.screen < document.pages.len() {
+                                document.pages.remove(message.screen);
                                 true
                             } else {
                                 false
                             }
                         });
                         if removed {
-                            let count = social.peek().frames.len();
+                            let count = document.peek().pages.len();
                             selected.set(message.screen.min(count.saturating_sub(1)));
                             selected_node.set(None);
                             save.call(true);
@@ -302,44 +308,43 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
         }
     });
 
-    let frame_count = social().frames.len();
-    let outline_count = social().outline.len();
-    // Every frame shares the format, so every tile has the same width.
-    let viewport = social().viewport();
+    let page_count = document().pages.len();
+    let outline_count = document().outline.len();
+    // Every page shares the paper, so every tile has the same width.
+    let viewport = document().viewport();
     let tile_width = frame_width_rem(viewport, STRIP_TILE_HEIGHT_REM);
-    let frame_ratio = viewport.aspect_ratio_css();
-    let stage_class = preview_stage_class(viewport);
-    let planned_count = outline_count.saturating_sub(frame_count);
-    let summary = strip_summary(frame_count, planned_count);
-    let total_fields = field_count(&social());
+    let page_ratio = viewport.aspect_ratio_css();
+    let planned_count = outline_count.saturating_sub(page_count);
+    let summary = strip_summary(page_count, planned_count);
+    let total_fields = field_count(&document());
     let user_count = user_paths().len().min(total_fields);
     let agent_count = total_fields - user_count;
-    let thumbnail_labels: Vec<String> = social()
-        .frames
+    let thumbnail_labels: Vec<String> = document()
+        .pages
         .iter()
         .enumerate()
-        .map(|(index, frame)| frame_label(index, frame))
+        .map(|(index, page)| page_label(index, page))
         .collect();
-    let frame_labels = thumbnail_labels.clone();
-    let current_notes = social()
-        .frames
+    let page_labels = thumbnail_labels.clone();
+    let current_notes = document()
+        .pages
         .get(selected())
-        .and_then(|frame| frame.notes.clone())
+        .and_then(|page| page.notes.clone())
         .unwrap_or_default();
     rsx! {
         main { class: "editor",
             DesignChat {
-                design_id: social_id.clone(),
+                design_id: document_id.clone(),
                 context: chat_context,
-                page: page_reference("frame", &pinned()),
+                page: page_reference("page", &pinned()),
                 is_pinned: !pinned().is_empty(),
                 on_pin_page: move |index: usize| {
                     if !pinned().contains(&index) {
                         pinned.write().push(index);
                     }
                 },
-                pages: frame_labels.clone(),
-                page_unit: Some("frame".to_owned()),
+                pages: page_labels.clone(),
+                page_unit: Some("page".to_owned()),
                 on_drop_page: move |_| pinned.write().clear(),
                 on_before_send: move |_| {
                     if is_dirty() {
@@ -355,9 +360,9 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                         "Project"
                     }
                     span { class: "divider" }
-                    span { class: "preview-heading", "{selected() + 1} / {frame_count}" }
+                    span { class: "preview-heading", "{selected() + 1} / {page_count}" }
                     div { class: "canvas-tabs preview-modes", role: "tablist",
-                        for candidate in SocialPreviewMode::ALL {
+                        for candidate in DocumentPreviewMode::ALL {
                             button {
                                 key: "{candidate.label()}",
                                 role: "tab",
@@ -383,10 +388,9 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                             "Properties"
                         }
                         span { class: "divider" }
-                        SocialExportGroup {
-                            social_id: social_id.clone(),
+                        DocumentExportGroup {
+                            document_id: document_id.clone(),
                             selected: selected(),
-                            frame_count,
                             can_export_with_chrome,
                         }
                         button {
@@ -418,7 +422,7 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                                         class: "primary",
                                         disabled: name.trim().is_empty(),
                                         onclick: {
-                                            let social_id = social_id.clone();
+                                            let document_id = document_id.clone();
                                             move |_| {
                                                 let Some(name) = template_name() else {
                                                     return;
@@ -427,9 +431,9 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                                                 if name.is_empty() {
                                                     return;
                                                 }
-                                                let social_id = social_id.clone();
+                                                let document_id = document_id.clone();
                                                 spawn(async move {
-                                                    match api::save_social_template(&social_id, &name).await {
+                                                    match api::save_document_template(&document_id, &name).await {
                                                         Ok(saved) => {
                                                             template_name.set(None);
                                                             is_menu_open.set(false);
@@ -449,7 +453,7 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                                 }
                             } else {
                                 button {
-                                    title: "Keep this social's theme and layout style for a future design, deck, document, or social",
+                                    title: "Keep this document's theme and layout style for a future design, deck, or document",
                                     onclick: move |_| template_name.set(Some(String::new())),
                                     "Save as template"
                                 }
@@ -461,22 +465,21 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                     for message in messages() {
                         p { class: "error", "{message}" }
                     }
-                    // A square, portrait, or story frame is limited by
-                    // height like a phone canvas, without the bezel. A
-                    // landscape frame is wide, so it fills the width.
-                    div { class: "{stage_class}",
+                    // A page is taller than wide, so the stage limits it
+                    // by height like a phone canvas, without the bezel.
+                    div { class: "preview-stage narrow",
                         PreviewFrame {
-                            title: "Social preview",
-                            ratio: "{frame_ratio}",
-                            src: "/socials/{social_id}/render?version={preview_version()}{mode().render_query()}&frame={selected() + 1}",
+                            title: "Document preview",
+                            ratio: "{page_ratio}",
+                            src: "/documents/{document_id}/render?version={preview_version()}{mode().render_query()}&page={selected() + 1}",
                         }
                     }
                     p { class: "preview-hint",
-                        if mode() == SocialPreviewMode::Read {
-                            span { "The frame as a reader sees it · switch to Edit to select a node" }
+                        if mode() == DocumentPreviewMode::Read {
+                            span { "The page as a reader sees it · switch to Edit to select a node" }
                         } else {
                             span {
-                                "Click a node to select it and edit its text · ⌘-click adds more · right-click and Pin to chat references it · ⌘-click a tile to pin frames"
+                                "Click a node to select it and edit its text · ⌘-click adds more · right-click and Pin to chat references it · ⌘-click a tile to pin pages"
                             }
                             span { class: "dot", "·" }
                             span { "right-click for quick edits" }
@@ -486,23 +489,23 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                             kbd { "←" }
                             " "
                             kbd { "→" }
-                            " change frames"
+                            " change pages"
                         }
                     }
                     label { class: "notes-box",
                         span { class: "notes-heading",
                             "Author notes"
-                            span { class: "screen-no", "frame {selected() + 1}" }
+                            span { class: "screen-no", "page {selected() + 1}" }
                         }
                         textarea {
                             value: "{current_notes}",
-                            placeholder: "The caption to post with the frame, intent, or handoff remarks. Never shown on the frame.",
+                            placeholder: "Sources, intent, or handoff remarks. Never shown on the page.",
                             oninput: move |event| {
                                 let index = selected();
-                                social
-                                    .with_mut(|social| {
-                                        if let Some(frame) = social.frames.get_mut(index) {
-                                            frame.notes = optional(event.value());
+                                document
+                                    .with_mut(|document| {
+                                        if let Some(page) = document.pages.get_mut(index) {
+                                            page.notes = optional(event.value());
                                         }
                                     });
                                 is_dirty.set(true);
@@ -511,22 +514,22 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                         }
                     }
                     div { class: "strip-head",
-                        "Frames"
+                        "Pages"
                         span { class: "strip-counts", "{summary}" }
-                        // One control writes every planned frame. A
+                        // One control writes every planned page. A
                         // button on each planned tile did the same thing
                         // and read as if it wrote that one alone.
                         if planned_count > 0 {
                             button {
                                 class: "strip-write",
-                                title: "Write the frames the outline still plans",
+                                title: "Write the pages the outline still plans",
                                 onclick: {
-                                    let social_id = social_id.clone();
+                                    let document_id = document_id.clone();
                                     move |_| {
-                                        let social_id = social_id.clone();
+                                        let document_id = document_id.clone();
                                         spawn(async move {
-                                            let session_id = artifact_project(&social_id);
-                                            let sent = api::continue_artifact(&session_id, &social_id).await;
+                                            let session_id = artifact_project(&document_id);
+                                            let sent = api::continue_artifact(&session_id, &document_id).await;
                                             if let Err(message) = sent {
                                                 messages.write().push(message);
                                             }
@@ -541,7 +544,7 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                     div { class: "thumbnails",
                         for (index, label) in thumbnail_labels.into_iter().enumerate() {
                             {
-                                let is_deleting = pending_frame_delete() == Some(index);
+                                let is_deleting = pending_page_delete() == Some(index);
                                 let is_redoing = pending_redo() == Some(index);
                                 let class = thumbnail_class(ThumbnailState {
                                     is_current: index == selected(),
@@ -558,7 +561,7 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                                         style: "--tile-width: {tile_width}rem",
                                         "data-index": "{index}",
                                         onclick: move |event: MouseEvent| {
-                                            // A command-click pins the frame for
+                                            // A command-click pins the page for
                                             // the chat; a plain click opens it.
                                             if event.modifiers().meta() || event.modifiers().ctrl() {
                                                 toggle_pin(&mut pinned.write(), index);
@@ -566,28 +569,28 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                                             }
                                             selected.set(index);
                                             selected_node.set(None);
-                                            pending_frame_delete.set(None);
+                                            pending_page_delete.set(None);
                                             pending_redo.set(None);
                                         },
                                         iframe {
-                                            title: "Frame {index + 1}",
+                                            title: "Page {index + 1}",
                                             tabindex: "-1",
-                                            src: "/socials/{social_id}/render?version={preview_version()}&frame={index + 1}",
+                                            src: "/documents/{document_id}/render?version={preview_version()}&page={index + 1}",
                                         }
                                         span { class: "thumbnail-number", {format!("{:02}", index + 1)} }
-                                        if frame_count > 1 {
+                                        if page_count > 1 {
                                             button {
                                                 class: if is_deleting { "thumbnail-delete confirm" } else { "thumbnail-delete" },
-                                                title: "Delete this frame",
+                                                title: "Delete this page",
                                                 onclick: move |event: Event<MouseData>| {
                                                     event.stop_propagation();
-                                                    if pending_frame_delete() != Some(index) {
-                                                        pending_frame_delete.set(Some(index));
+                                                    if pending_page_delete() != Some(index) {
+                                                        pending_page_delete.set(Some(index));
                                                         return;
                                                     }
-                                                    pending_frame_delete.set(None);
-                                                    social.with_mut(|social| remove_frame(social, index));
-                                                    selected.set(selected().min(frame_count.saturating_sub(2)));
+                                                    pending_page_delete.set(None);
+                                                    document.with_mut(|document| remove_page(document, index));
+                                                    selected.set(selected().min(page_count.saturating_sub(2)));
                                                     selected_node.set(None);
                                                     save.call(true);
                                                 },
@@ -597,16 +600,16 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                                                 }
                                             }
                                         }
-                                        // A redo writes the frame anew: the model
+                                        // A redo writes the page anew: the model
                                         // sees its notes, not its markup.
                                         button {
                                             class: if is_redoing { "thumbnail-redo confirm" } else { "thumbnail-redo" },
-                                            title: "Write this frame anew",
+                                            title: "Write this page anew",
                                             onclick: {
-                                                let social_id = social_id.clone();
+                                                let document_id = document_id.clone();
                                                 move |event: Event<MouseData>| {
                                                     event.stop_propagation();
-                                                    pending_frame_delete.set(None);
+                                                    pending_page_delete.set(None);
                                                     if pending_redo() != Some(index) {
                                                         pending_redo.set(Some(index));
                                                         return;
@@ -615,13 +618,13 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                                                     if is_dirty() {
                                                         save.call(true);
                                                     }
-                                                    let social_id = social_id.clone();
+                                                    let document_id = document_id.clone();
                                                     spawn(async move {
-                                                        let session_id = artifact_project(&social_id);
+                                                        let session_id = artifact_project(&document_id);
                                                         let sent = api::regenerate_unit(
                                                                 &session_id,
-                                                                &social_id,
-                                                                "frame",
+                                                                &document_id,
+                                                                "page",
                                                                 index + 1,
                                                             )
                                                             .await;
@@ -640,20 +643,20 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                                 }
                             }
                         }
-                        if outline_count > frame_count {
+                        if outline_count > page_count {
                             span { class: "strip-divider" }
                         }
                         // A planned tile is an outline entry nobody has
                         // written. The strip head writes them.
-                        for index in frame_count..outline_count {
+                        for index in page_count..outline_count {
                             {
-                                let (number, title) = outline_entry(&social().outline, index, "Frame");
+                                let (number, title) = outline_entry(&document().outline, index, "Page");
                                 rsx! {
                                     div {
                                         key: "outline-{index}",
                                         class: "thumbnail outline",
                                         style: "--tile-width: {tile_width}rem",
-                                        title: "{outline_title(&social(), index)} · not written yet",
+                                        title: "{outline_title(&document(), index)} · not written yet",
                                         span { class: "outline-kicker",
                                             "{number}"
                                             span { class: "planned-text", " planned" }
@@ -682,57 +685,57 @@ fn LoadedSocialEditor(social_id: String, initial: Social, on_back: EventHandler<
                             screen: selected(),
                             node: selected_node(),
                             on_apply: move |command: NodeCommand| apply.call(command),
-                            scope: artifact_project(&social_id),
+                            scope: artifact_project(&document_id),
                         }
                         div { class: "sheet-section",
-                            div { class: "head", "Social" }
+                            div { class: "head", "Document" }
                             label {
-                                "Social title"
+                                "Document title"
                                 input {
-                                    value: "{social().title}",
+                                    value: "{document().title}",
                                     oninput: move |event| {
-                                        social.with_mut(|social| social.title = event.value());
+                                        document.with_mut(|document| document.title = event.value());
                                         is_dirty.set(true);
                                         schedule_save(save_generation, save, false);
                                     },
                                 }
                             }
                             label {
-                                "Format"
+                                "Paper"
                                 select {
-                                    value: "{social().format.as_str()}",
+                                    value: "{document().paper.as_str()}",
                                     onchange: move |event| {
-                                        let Some(format) = Format::from_name(&event.value()) else {
+                                        let Some(paper) = Paper::from_name(&event.value()) else {
                                             return;
                                         };
-                                        social.with_mut(|social| social.format = format);
+                                        document.with_mut(|document| document.paper = paper);
                                         is_dirty.set(true);
                                         // The canvas changes, so the preview
                                         // reloads on save.
                                         schedule_save(save_generation, save, true);
                                     },
-                                    for format in Format::ALL {
+                                    for paper in Paper::ALL {
                                         option {
-                                            key: "{format.as_str()}",
-                                            value: "{format.as_str()}",
-                                            selected: social().format == format,
-                                            "{format_option_label(format)}"
+                                            key: "{paper.as_str()}",
+                                            value: "{paper.as_str()}",
+                                            selected: document().paper == paper,
+                                            "{paper_option_label(paper)}"
                                         }
                                     }
                                 }
                             }
                         }
                         ThemeForm {
-                            theme: social().theme.clone(),
+                            theme: document().theme.clone(),
                             on_change: move |theme: Theme| {
-                                social.with_mut(|social| social.theme = theme);
+                                document.with_mut(|document| document.theme = theme);
                                 is_dirty.set(true);
                                 schedule_save(save_generation, save, true);
                             },
                         }
                         HistorySection {
-                            design_id: social_id.clone(),
-                            kind: ArtifactKind::Social,
+                            design_id: document_id.clone(),
+                            kind: ArtifactKind::Document,
                             on_restored: move |_| reload.call(()),
                         }
                     }

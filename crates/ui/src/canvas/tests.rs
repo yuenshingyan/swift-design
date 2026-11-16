@@ -1,6 +1,10 @@
-use design_model::{LANDSCAPE_VIEWPORT, PORTRAIT_VIEWPORT, SQUARE_VIEWPORT, STORY_VIEWPORT};
+use design_model::{
+    DECK_VIEWPORT, LANDSCAPE_VIEWPORT, PORTRAIT_VIEWPORT, SQUARE_VIEWPORT, STORY_VIEWPORT,
+};
 
-use crate::api::{DeckSummary, DesignSummary, SocialSummary};
+use crate::deck::api::DeckSummary;
+use crate::design::api::DesignSummary;
+use crate::social::api::SocialSummary;
 
 use super::*;
 
@@ -246,7 +250,8 @@ fn social_cards_take_their_canvas_from_the_format() {
             pending_count: 0,
         },
     ];
-    let cards = cards_from_socials(&socials, "post", Some("post-candidate-2"));
+    let cards =
+        crate::social::canvas::cards_from_socials(&socials, "post", Some("post-candidate-2"));
     assert_eq!(cards.len(), 2);
     // The chosen social comes first.
     assert_eq!(cards[0].id, "post-candidate-2");
@@ -373,7 +378,8 @@ fn session_designs_filter_and_put_the_chosen_first() {
         summary("talk-candidate-2"),
         summary("other"),
     ];
-    let mine = cards_from_designs(&designs, "talk", Some("talk-candidate-2"));
+    let mine =
+        crate::design::canvas::cards_from_designs(&designs, "talk", Some("talk-candidate-2"));
     assert_eq!(mine.len(), 2);
     assert_eq!(mine[0].id, "talk-candidate-2");
     assert_eq!(mine[0].kind, ArtifactKind::Demo);
@@ -386,7 +392,7 @@ fn session_designs_filter_and_put_the_chosen_first() {
 #[test]
 fn deck_cards_count_slides_and_use_the_deck_render_url() {
     let decks = [deck_summary("talk-candidate-1"), deck_summary("other")];
-    let cards = cards_from_decks(&decks, "talk", None);
+    let cards = crate::deck::canvas::cards_from_decks(&decks, "talk", None);
     assert_eq!(cards.len(), 1);
     assert_eq!(cards[0].kind, ArtifactKind::Deck);
     assert_eq!(cards[0].viewport, DECK_VIEWPORT);

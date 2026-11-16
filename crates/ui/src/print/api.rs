@@ -1,4 +1,10 @@
-use super::*;
+#![allow(dead_code)]
+
+use design_model::{Orientation, Print, PrintSize};
+use gloo_net::http::Request;
+use serde::Deserialize;
+
+use crate::api::*;
 
 // -- Prints --------------------------------------------------------------
 
@@ -107,4 +113,16 @@ pub async fn restore_print_history(id: &str, stamp: &str) -> Result<(), String> 
         "restore",
     )
     .await
+}
+
+/// Copies one print candidate under the next free number of its
+/// session. Returns the new id.
+pub async fn fork_print(id: &str) -> Result<String, String> {
+    let request = built(Request::post(&format!("/prints/{id}/fork")))?;
+    let response = send_checked(request, "POST /prints/fork").await?;
+    response
+        .json::<ForkResponse>()
+        .await
+        .map(|fork| fork.id)
+        .map_err(|error| error.to_string())
 }

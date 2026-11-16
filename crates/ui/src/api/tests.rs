@@ -1,6 +1,7 @@
 use design_model::{Format, STORY_VIEWPORT};
 
-use crate::api::{SessionOptions, SocialSummary, VARIATION_LIMIT};
+use crate::api::{SessionOptions, VARIATION_LIMIT};
+use crate::social::api::SocialSummary;
 
 #[test]
 fn a_social_summary_takes_its_canvas_from_the_format() {
