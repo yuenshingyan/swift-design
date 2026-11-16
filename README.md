@@ -128,9 +128,37 @@ Three more ways to work a candidate:
 - **Merge.** Pin two or more cards with `@` in the chat and say which parts to take from each, for example "the hero from candidate 1 and the pricing table from candidate 3". The planner writes one new candidate from those parts. The candidates of a merge must share a canvas.
 - **Redo a screen or a slide.** In the editor, the circular arrow on a thumbnail writes that screen or slide anew: the model sees its name and notes, not its old markup. One click arms the button, the second sends. The old version stays in the history.
 
+Demo candidates show **Live draft — unverified** previews during writing,
+correction and layout tweaking, including safe prefixes before an HTML string
+finishes. Updates are limited to five per second; shared metadata and safe markup
+must be available before anything renders. Parallel screen updates are combined,
+not shown as competing versions. Drafts are read-only in the editor and kept
+separate from saved data; dirty local changes take priority. Edits and continuations
+leave the saved candidate unchanged until acceptance. Only complete model replies
+can pass acceptance: completing markup for display never approves an edit.
+Temporary previews are cleared when a run finishes, fails or is cancelled; the UI
+returns to saved data. Validated work retained as **Needs review** is a separate
+candidate, not an overwrite. Exports, history and ordinary render URLs use saved
+data; `GET /designs/{id}/previews` and `render?preview=true` explicitly opt into drafts.
+The run status distinguishes **Reviewing candidates…** from **Tweaking candidates…**,
+including requirement review and correction rounds, rather than calling every phase writing.
+
 Every new candidate takes the next free number: a later run adds candidates after the ones the session has instead of overwriting them.
 
 In `reviewing`, the chat is the edit input: type what should change and press **Send**. With a candidate chosen, the change is applied to it; otherwise new candidates are written.
+
+Demo generation instructions require each requested page, flow step, tab
+destination, modal/confirmation view and distinct visual deliverable state to be
+its own named screen, visible by default and independently exportable as one PNG.
+Clickable screen links connect those views, including retry, confirm, cancel and
+back actions; a modal screen shows its overlay already open. Hidden panels,
+preview-state selectors and notes cannot substitute for required rendered views.
+Small local menus and incidental toggles can remain interactive within a screen;
+this does not require every hover or control combination to become a new screen.
+The edit planner enumerates requested visual views and accounts for missing
+screens; requirement review checks their separate visible screens and navigation.
+Styling-only edits do not silently restructure unrelated legacy screens, and
+explicitly permitted behavior specifications remain valid specification deliverables.
 
 Demo edits first resolve the current request and its clarifications into a screen
 scope and deliverable checklist. Candidate selection does not prohibit adding
@@ -141,8 +169,41 @@ a model compares the original and proposed markup against the checklist and
 request. Preservation checks use that baseline; they do not require identical
 markup or new functionality for a restyle. Candidate isolation is enforced by
 the server's save target, not inferred by the reviewer from other candidates.
-Incomplete or unreviewable edits fail without replacing the saved demo. This
-review is separate from browser layout checks and is not proof of backend behavior.
+Planning, editing, and review receive the same session reference attachments.
+Planning, writing, correction, and review share an acceptance contract that separates
+rendered designs from implementation specifications. Complete component/state
+specifications are accepted when the request permits them; missing visual controls
+or responsive layouts cannot be replaced by promises. The renderer's restrictions
+remain unchanged, and explicitly required executable behavior it cannot support
+is reported separately rather than retried indefinitely.
+Review returns specific reasons for unmet requirements. Up to three correction
+rounds repair the latest draft while preservation checks still use the saved
+original. Corrections stop early if the number of incomplete checklist items does
+not decrease. Only a passing draft replaces the selected candidate; stopping or
+cancellation leaves that saved candidate intact. Missing or unreadable required references produce a
+reference-verification error instead of an incomplete-edit verdict.
+Safety, valid markup, protected-screen scope and core requested deliverables are
+hard gates. Alignment differences, unmeasurable groups, contrast and small-text
+findings are advisory. Local clipping of at most 8 CSS pixels and at most 15% of
+the affected box dimension is also advisory; larger clipping, off-screen content,
+actual overlap, empty screens and shared-shell violations still block verified
+completion. Obsolete alignment annotations may be corrected or removed rather
+than forcing filler content into a layout.
+Demo edits with only advisory findings can save after requirement review, with
+**Needs review** notes instead of an unqualified layout-verification claim. If
+layout repair or its audit fails, a valid, scope-preserving draft is retained as a
+separate candidate titled **Needs review**, with its issues recorded in chat. It
+is not selected automatically and is not claimed as requirement-complete; the
+original remains unchanged. Failed continuation polish likewise restores the
+preview and retains its new work separately. Fresh generation keeps its validated
+draft under its already reserved candidate id, labelled **Needs review**; mere
+presence on disk never counts as a successfully completed generation. Invalid or
+out-of-scope drafts are never preserved.
+Incomplete or unreviewable requirements still block replacing the saved demo. Both the
+editor chat and session workspace show **Retry edit** beside the failed candidate
+request while the session is in error. It retries that request without adding a new
+prompt and is disabled while a run is active. This review is separate from browser
+layout checks and is not proof of backend behavior.
 Follow-up chat receives the five most recent completed run outcomes, including
 recorded failures, so it can explain a rejected edit without asking you to diagnose it.
 

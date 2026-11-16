@@ -227,9 +227,12 @@ button.control-cell:focus-visible { outline-offset: -2px; }
 .studio-head .rename-input { flex: 1; min-width: 0; }
 .conversation { display: flex; flex-direction: column; gap: 0.875rem;
   padding: 0 0 1.125rem; border-right: 1px solid var(--hairline);
-  background: var(--raised); overflow: hidden; min-height: 0; }
+  background: var(--raised); overflow: hidden; min-height: 0; min-width: 0; }
 .thread { display: flex; flex-direction: column; gap: 0.875rem; flex: 1;
-  min-height: 0; overflow-y: auto; padding: 1.125rem 1.25rem 0; }
+  min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden;
+  overflow-wrap: anywhere; padding: 1.125rem 1.25rem 0; }
+.thread > * { min-width: 0; }
+.thread pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .conversation > .chat-box { margin: 0 1.25rem; }
 .brief-summary { display: flex; flex-direction: column; gap: 0.625rem;
   border: 1px solid var(--hairline); border-radius: var(--r-panel); background: var(--subtle);
@@ -267,7 +270,7 @@ button.primary.send-button { display: inline-flex; align-items: center; justify-
   border-radius: var(--r-track); }
 .send-button span { display: flex; }
 .bubble { padding: 0.6875rem 0.875rem; font-size: 0.875rem; line-height: 1.5; max-width: 92%; }
-.bubble p { margin: 0; white-space: pre-wrap; }
+.bubble p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .bubble.user { align-self: flex-end; background: var(--ink); color: var(--paper);
   border-radius: 12px 12px 4px 12px; }
 .bubble.agent { align-self: flex-start; background: var(--sunken); color: var(--ink);

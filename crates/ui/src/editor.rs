@@ -48,18 +48,31 @@ pub(crate) use theme::ThemeForm;
 pub(crate) use transition::TransitionForm;
 
 use support::{DesignExportGroup, field_count, outline_title, screen_label, view_href};
+// A dirty local buffer always wins; a draft-only buffer must never become editable.
+fn preview_design<'a>(saved: &'a Design, draft: Option<&'a Design>, is_dirty: bool) -> &'a Design {
+    draft.filter(|_| !is_dirty).unwrap_or(saved)
+}
+
 /// Loads one design, then hands it to the editor.
 #[component]
 pub fn Editor(design_id: String, on_back: EventHandler<()>) -> Element {
     let id_for_fetch = design_id.clone();
     let loaded = use_resource(move || {
         let id = id_for_fetch.clone();
-        async move { api::fetch_design(&id).await }
+        async move {
+            match api::fetch_design(&id).await {
+                Ok(saved) => Ok((saved, true)),
+                Err(error) => match api::fetch_design_preview(&id).await? {
+                    Some(draft) => Ok((draft, false)),
+                    None => Err(error),
+                },
+            }
+        }
     });
     let current = loaded.read();
     match &*current {
-        Some(Ok(design)) => rsx! {
-            LoadedEditor { design_id, initial: design.clone(), on_back }
+        Some(Ok((design, has_saved))) => rsx! {
+            LoadedEditor { design_id, initial: design.clone(), initially_saved: *has_saved, on_back }
         },
         Some(Err(message)) => rsx! {
             p { class: "error", "{message}" }
@@ -73,8 +86,16 @@ pub fn Editor(design_id: String, on_back: EventHandler<()>) -> Element {
 /// The editor for a loaded design: chat on the left, preview and
 /// thumbnails on the right, the properties sheet on demand.
 #[component]
-fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -> Element {
+fn LoadedEditor(
+    design_id: String,
+    initial: Design,
+    initially_saved: bool,
+    on_back: EventHandler<()>,
+) -> Element {
+    // `design` is the local saved-data buffer; live drafts never enter its save path.
     let mut design = use_signal(|| initial.clone());
+    let mut has_saved = use_signal(|| initially_saved);
+    let mut live_draft = use_signal(|| (!initially_saved).then(|| initial.clone()));
     let mut selected = use_signal(|| 0usize);
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
     let mut selection = use_signal(Vec::<SelectionEntry>::new);
@@ -84,6 +105,9 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
     let mut preview_version = use_signal(|| 0u32);
     let mut user_paths = use_signal(Vec::<String>::new);
     let mut is_dirty = use_signal(|| false);
+    let is_read_only = use_memo(move || !has_saved() || (live_draft().is_some() && !is_dirty()));
+    let displayed =
+        use_memo(move || preview_design(&design(), live_draft().as_ref(), is_dirty()).clone());
     // Autosave: the newest change wins the delay.
     let save_generation = use_signal(|| 0u64);
     let mut show_properties = use_signal(|| false);
@@ -115,13 +139,19 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
     let save = use_callback({
         let design_id = design_id.clone();
         move |reload_preview: bool| {
+            if is_read_only() {
+                return;
+            }
             let id = design_id.clone();
             let snapshot = design();
+            is_dirty.set(true);
             spawn(async move {
                 match api::save_design(&id, &snapshot).await {
                     Ok(()) => {
                         messages.set(Vec::new());
-                        is_dirty.set(false);
+                        if design.peek().eq(&snapshot) {
+                            is_dirty.set(false);
+                        }
                         if reload_preview {
                             preview_version += 1;
                         }
@@ -141,11 +171,18 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
         move |_: ()| {
             let id = design_id.clone();
             spawn(async move {
-                if let Ok(fetched) = api::fetch_design(&id).await {
-                    design.set(fetched);
-                    is_dirty.set(false);
-                    preview_version += 1;
-                    selected_node.set(None);
+                if let Ok(fetched) = api::fetch_design(&id).await
+                    && !is_dirty()
+                {
+                    if design.peek().ne(&fetched) {
+                        if live_draft.peek().is_none() {
+                            selected.set(selected().min(fetched.screens.len().saturating_sub(1)));
+                        }
+                        design.set(fetched);
+                        preview_version += 1;
+                        selected_node.set(None);
+                    }
+                    has_saved.set(true);
                 }
                 if let Ok(paths) = api::fetch_user_paths(&id).await {
                     user_paths.set(paths);
@@ -154,17 +191,61 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
         }
     });
 
+    // Events carry no candidate payload. Compare the actual content before invalidating
+    // frames, and recheck dirty state after requests so typing wins network races.
+    let events_id = design_id.clone();
+    use_future(move || {
+        let id = events_id.clone();
+        async move {
+            let mut revision = 0;
+            loop {
+                let preview = api::fetch_design_preview(&id).await;
+                let saved = api::fetch_design(&id).await;
+                if let Ok(preview) = preview {
+                    let before = displayed.peek().clone();
+                    if live_draft.peek().ne(&preview) {
+                        live_draft.set(preview);
+                    }
+                    if !is_dirty() {
+                        if let Ok(saved) = saved {
+                            if design.peek().ne(&saved) {
+                                design.set(saved);
+                            }
+                            has_saved.set(true);
+                        }
+                        let after =
+                            preview_design(&design.peek(), live_draft.peek().as_ref(), false)
+                                .clone();
+                        if before != after {
+                            preview_version += 1;
+                            selected.set(selected().min(after.screens.len().saturating_sub(1)));
+                            selected_node.set(None);
+                            selection.set(Vec::new());
+                        }
+                    }
+                }
+                match api::wait_for_change(revision).await {
+                    Ok(next) => revision = next,
+                    Err(_) => crate::settings::pause_briefly().await,
+                }
+            }
+        }
+    });
+
     // Apply HTML updates, selections, and menu actions from the preview.
     use_future(move || async move {
         let mut preview_channel = document::eval(PREVIEW_LISTENER);
         while let Ok(message) = preview_channel.recv::<PreviewMessage>().await {
+            if is_read_only() && message.kind != "swift-design-navigate" {
+                continue;
+            }
             match message.kind.as_str() {
                 "swift-design-escape" => {
                     is_menu_open.set(false);
                     template_name.set(None);
                 }
                 "swift-design-navigate" => {
-                    let count = design.peek().screens.len();
+                    let count = displayed.peek().screens.len();
                     let current = selected();
                     let next = navigation_target(current, count, message.step, message.target);
                     if next != current {
@@ -271,6 +352,9 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
     // selected node: a change made on the primary node lands on every
     // node in the selection.
     let apply = use_callback(move |command: NodeCommand| {
+        if is_read_only() {
+            return;
+        }
         for path in selection_paths(&selection.peek(), &command.path) {
             let channel = document::eval(APPLY_TO_PREVIEW);
             let _ = channel.send(NodeCommand {
@@ -280,13 +364,24 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
         }
     });
 
-    let screen_count = design().screens.len();
-    let outline_count = design().outline.len();
+    let screen_count = displayed().screens.len();
+    let outline_count = displayed().outline.len();
+    let live_query = if is_read_only() && live_draft().is_some() {
+        "&preview=true"
+    } else {
+        ""
+    };
+    let preview_mode = if is_read_only() {
+        PreviewMode::Play
+    } else {
+        mode()
+    };
+    let is_available = has_saved() || live_draft().is_some();
     let can_export_with_chrome = settings().flatten().is_none_or(|view| view.has_chrome);
     // The render page fits the screen to its frame, so a frame with the
     // canvas ratio shows the screen edge to edge. Every thumbnail is
     // the same height, and as wide as the ratio says.
-    let viewport = design().viewport;
+    let viewport = displayed().viewport;
     let ratio = viewport.aspect_ratio_css();
     let stage_class = preview_stage_class(viewport);
     let is_portrait = is_portrait_canvas(viewport);
@@ -296,14 +391,14 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
     let total_fields = field_count(&design());
     let user_count = user_paths().len().min(total_fields);
     let agent_count = total_fields - user_count;
-    let thumbnail_labels: Vec<String> = design()
+    let thumbnail_labels: Vec<String> = displayed()
         .screens
         .iter()
         .enumerate()
         .map(|(index, screen)| screen_label(index, screen))
         .collect();
     let page_labels = thumbnail_labels.clone();
-    let current_notes = design()
+    let current_notes = displayed()
         .screens
         .get(selected())
         .and_then(|screen| screen.notes.clone())
@@ -345,8 +440,9 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                         for candidate in PreviewMode::ALL {
                             button {
                                 key: "{candidate.label()}",
-                                aria_pressed: "{mode() == candidate}",
-                                class: if mode() == candidate { "canvas-tab open" } else { "canvas-tab" },
+                                disabled: is_read_only(),
+                                aria_pressed: "{preview_mode == candidate}",
+                                class: if preview_mode == candidate { "canvas-tab open" } else { "canvas-tab" },
                                 title: "{candidate.title()}",
                                 onclick: move |_| {
                                     mode.set(candidate);
@@ -355,7 +451,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                                 span { class: "tab-name", "{candidate.label()}" }
                             }
                         }
-                        if is_dirty() {
+                        if is_dirty() || !has_saved() {
                             button {
                                 class: "canvas-tab",
                                 disabled: true,
@@ -373,6 +469,9 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                             }
                         }
                     }
+                    if is_read_only() {
+                        span { class: "badge", "Live draft — unverified · read-only" }
+                    }
                     span { class: "badge", "agent {agent_count}" }
                     span { class: "badge you", "you {user_count}" }
                     // Every change saves by itself, shortly after it. The
@@ -381,23 +480,26 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                         span { class: "save-state pending", "saving…" }
                     }
                     div { class: "actions",
-                        button { onclick: move |_| show_properties.set(!show_properties()),
+                        button { disabled: is_read_only(), onclick: move |_| show_properties.set(!show_properties()),
                             "Properties"
                         }
                         span { class: "divider" }
-                        DesignExportGroup {
-                            design_id: design_id.clone(),
-                            selected: selected(),
-                            can_export_with_chrome,
+                        if !is_read_only() {
+                            DesignExportGroup {
+                                design_id: design_id.clone(),
+                                selected: selected(),
+                                can_export_with_chrome,
+                            }
                         }
                         button {
                             class: "toolbar-more",
+                            disabled: is_read_only(),
                             title: "More actions",
                             onclick: move |_| is_menu_open.set(!is_menu_open()),
                             "…"
                         }
                     }
-                    if is_menu_open() {
+                    if is_menu_open() && !is_read_only() {
                         div {
                             class: "menu-backdrop",
                             onclick: move |_| {
@@ -462,15 +564,19 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                     for message in messages() {
                         p { class: "error", "{message}" }
                     }
+                    if !is_available {
+                        p { "The live draft was cleared; no saved design exists yet. Return to the project." }
+                    }
+                    if is_available {
                     div { class: stage_class,
                         PreviewFrame {
                             title: "Design preview",
                             ratio: "{ratio}",
-                            src: "/designs/{design_id}/render?version={preview_version()}{mode().render_query()}&screen={selected() + 1}",
+                            src: "/designs/{design_id}/render?version={preview_version()}{live_query}{preview_mode.render_query()}&screen={selected() + 1}",
                         }
                     }
                     p { class: "preview-hint",
-                        if mode() == PreviewMode::Play {
+                        if preview_mode == PreviewMode::Play {
                             span {
                                 "Click buttons, links, and menus as a user would · a link to another screen opens it"
                             }
@@ -495,9 +601,11 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                             span { class: "screen-no", "screen {selected() + 1}" }
                         }
                         textarea {
+                            readonly: is_read_only(),
                             value: "{current_notes}",
                             placeholder: "Intent, states, and handoff remarks for this screen. Never shown on the screen.",
                             oninput: move |event| {
+                                if is_read_only() { return; }
                                 let index = selected();
                                 design
                                     .with_mut(|design| {
@@ -519,6 +627,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                         if planned_count > 0 {
                             button {
                                 class: "strip-write",
+                                disabled: is_read_only(),
                                 title: "Write the screens the outline still plans",
                                 onclick: {
                                     let design_id = design_id.clone();
@@ -572,10 +681,10 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                                         iframe {
                                             title: "Screen {index + 1}",
                                             tabindex: "-1",
-                                            src: "/designs/{design_id}/render?version={preview_version()}&screen={index + 1}",
+                                            src: "/designs/{design_id}/render?version={preview_version()}{live_query}&screen={index + 1}",
                                         }
                                         span { class: "thumbnail-number", {format!("{:02}", index + 1)} }
-                                        if screen_count > 1 {
+                                        if screen_count > 1 && !is_read_only() {
                                             button {
                                                 class: if is_deleting { "thumbnail-delete confirm" } else { "thumbnail-delete" },
                                                 title: "Delete this screen",
@@ -605,6 +714,7 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                                         // A redo writes the screen anew: the model
                                         // sees its name and notes, not its markup.
                                         button {
+                                            disabled: is_read_only(),
                                             class: if is_redoing { "thumbnail-redo confirm" } else { "thumbnail-redo" },
                                             title: "Write this screen anew",
                                             onclick: {
@@ -652,13 +762,13 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                         // written. The strip head writes them.
                         for index in screen_count..outline_count {
                             {
-                                let (number, title) = outline_entry(&design().outline, index, "Screen");
+                                let (number, title) = outline_entry(&displayed().outline, index, "Screen");
                                 rsx! {
                                     div {
                                         key: "outline-{index}",
                                         class: if is_portrait { "thumbnail outline portrait" } else { "thumbnail outline" },
                                         style: "--tile-width: {tile_width}rem",
-                                        title: "{outline_title(&design(), index)} · not written yet",
+                                        title: "{outline_title(&displayed(), index)} · not written yet",
                                         span { class: "outline-kicker",
                                             "{number}"
                                             span { class: "planned-text", " planned" }
@@ -670,8 +780,9 @@ fn LoadedEditor(design_id: String, initial: Design, on_back: EventHandler<()>) -
                         }
                     }
                 }
+                }
             }
-            if show_properties() {
+            if show_properties() && !is_read_only() {
                 aside { class: "properties-sheet",
                     div { class: "sheet-head",
                         span { class: "kicker", "Properties" }

@@ -339,14 +339,14 @@ impl GenerationEngine {
                     .generate_candidate(&client, &request, &attachments, &share, &log)
                     .await?;
                 log(&format!("candidate {candidate_number}: saved as {id}"));
-                Ok::<(), GenerationStop>(())
+                Ok::<String, GenerationStop>(id)
             });
         }
         let mut saved = Vec::new();
         let mut failures = Vec::new();
         while let Some(outcome) = tasks.join_next().await {
             match outcome {
-                Ok(Ok(())) => {}
+                Ok(Ok(id)) => saved.push(id),
                 Ok(Err(GenerationStop::NeedsClarification(set))) => {
                     tasks.shutdown().await;
                     return Err(GenerationStop::NeedsClarification(set));
@@ -355,17 +355,13 @@ impl GenerationEngine {
                 Err(error) => failures.push(format!("candidate task failed: {error}")),
             }
         }
-        // Every candidate saves itself, so the written ids are those on
-        // disk under this base.
-        for id in &ids {
-            if matches!(self.designs.load(id).await, Ok(Some(_))) {
-                saved.push(id.clone());
-            }
-        }
+        // Presence on disk is not completion: failed polish may retain an
+        // explicitly unverified review draft under its reserved id.
+        let saved: Vec<_> = ids.into_iter().filter(|id| saved.contains(id)).collect();
         if saved.is_empty() {
             return Err(GenerationStop::Failed(failure_message(
                 &failures,
-                "no candidate reached the store",
+                "no candidate passed verification",
             )));
         }
         for failure in &failures {
@@ -520,6 +516,58 @@ impl GenerationEngine {
         }
     }
 
+    // Reuse a fresh generation's reserved id; fork edits and continuations so
+    // polish never overwrites the user's saved version or erases safe work.
+    pub(super) async fn save_review_draft(
+        &self,
+        source_id: &str,
+        design: &Design,
+        issue: &str,
+        is_new: bool,
+    ) -> Result<String, String> {
+        let session_id = session_id_of_artifact(source_id);
+        if !design.validate().is_empty() {
+            return Err("Cannot preserve review draft: the artifact failed validation.".into());
+        }
+        let id = if is_new {
+            source_id.to_owned()
+        } else {
+            let rows = self
+                .designs
+                .list()
+                .await
+                .map_err(|error| error.to_string())?;
+            let number = crate::candidates::next_candidate_number(
+                session_id,
+                rows.iter().map(|row| row.id.as_str()),
+            );
+            crate::candidates::candidate_id(session_id, number)
+        };
+        let mut draft = design.clone();
+        draft.title = format!("Needs review — {}", draft.title);
+        self.designs
+            .save(&id, &draft)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.notifier.notify();
+        let preservation = if is_new {
+            "This is a draft, not a completed candidate."
+        } else {
+            "The original candidate is unchanged."
+        };
+        let message = format!(
+            "Needs review: preserved draft `{id}`. {preservation} Layout and requirement completion are not verified.\n{issue}"
+        );
+        self.sessions
+            .append_message(
+                session_id,
+                ChatMessage::assistant(&message).with_artifacts(vec![id]),
+            )
+            .await
+            .map_err(|error| format!("{message}\nCannot record draft notice: {error}"))?;
+        Ok(message)
+    }
+
     pub(super) async fn edit_design(
         &self,
         client: &reqwest::Client,
@@ -538,8 +586,9 @@ impl GenerationEngine {
             })?;
         let label = format!("edit {design_id}");
         log(&format!("{label}: resolving edit requirements and scope"));
+        let attachments = self.load_attachments(&context.session_id, log).await;
         let plan = self
-            .plan_demo_edit(client, &design, order, context.effort())
+            .plan_demo_edit(client, &design, order, (&attachments, context.effort()))
             .await
             .map_err(GenerationStop::Failed)?;
         let instruction = plan.instruction.as_str();
@@ -553,102 +602,172 @@ impl GenerationEngine {
         log(&format!("{label}: checking layout before editing"));
         let measured = self.audit_demo(&design).await?.instructions(None);
         let findings = findings_for(&measured, "screens", &indexes);
-        let total = design.screens.len();
-        let (design_json, note) = if indexes.is_empty() {
-            (serde_json::to_string(&design), String::new())
-        } else if order.is_fresh {
-            (
-                focused_design_json(&design, &indexes, true),
-                fresh_note("screen", "screens", &indexes, total),
-            )
-        } else {
-            (
-                focused_design_json(&design, &indexes, false),
-                focus_note("screen", "screens", &indexes, total),
-            )
-        };
-        let design_json = design_json.map_err(|error| GenerationStop::Failed(error.to_string()))?;
-        let attachments = self.load_attachments(&context.session_id, log).await;
-        let input = EditInput {
-            instruction,
-            artifact_json: &design_json,
-            note: &note,
-            findings: &findings,
-            conversation: order.conversation,
-        };
-        let messages = vec![
-            serde_json::json!({ "role": "system", "content": system_prompt() }),
-            self.user_message(&edit_prompt(&context.request, &input), &attachments),
-        ];
-        let original = design.clone();
-        let effort = context.effort().to_owned();
-        let request = ArtifactRequest {
-            effort,
-            label,
-            parse: Box::new(move |content| apply_patch(&original, parse_patch(content)?)),
-            progress: self.shared_progress(&[design_id.to_owned()], 5, 95).pop(),
-            live: None,
-        };
-        let edited = self
-            .request_edit(
-                client,
-                EditExecution {
-                    original: &design,
-                    messages,
-                    input: &input,
-                    indexes: &indexes,
-                    is_fresh: order.is_fresh,
-                    request: &request,
+        let preview = self.designs.start_preview(
+            design_id,
+            &self.notifier,
+            Some((design.clone(), plan.screens.clone())),
+        );
+        let mut draft = design.clone();
+        let mut correction = String::new();
+        let mut attempt = 0;
+        let mut previous_missing = None;
+        let progress = self.shared_progress(&[design_id.to_owned()], 5, 95).pop();
+        let (final_design, verified_indexes, layout_warnings) = loop {
+            // Fresh regeneration drops old markup only once; corrections must
+            // see and repair the latest draft, including newly added screens.
+            let is_fresh = order.is_fresh && attempt == 0;
+            let total = draft.screens.len();
+            let (design_json, note) = if indexes.is_empty() {
+                (serde_json::to_string(&draft), String::new())
+            } else if is_fresh {
+                (
+                    focused_design_json(&draft, &indexes, true),
+                    fresh_note("screen", "screens", &indexes, total),
+                )
+            } else {
+                (
+                    focused_design_json(&draft, &indexes, false),
+                    focus_note("screen", "screens", &indexes, total),
+                )
+            };
+            let design_json =
+                design_json.map_err(|error| GenerationStop::Failed(error.to_string()))?;
+            let correction_instruction = format!("{instruction}\n{correction}");
+            let input = EditInput {
+                instruction: &correction_instruction,
+                artifact_json: &design_json,
+                note: &note,
+                findings: &findings,
+                conversation: order.conversation,
+            };
+            let original = draft.clone();
+            let request = ArtifactRequest {
+                effort: context.effort().to_owned(),
+                label: if attempt == 0 {
+                    label.clone()
+                } else {
+                    format!("{label}: correction round {attempt}/3")
                 },
-                log,
-            )
-            .await?;
-        // A fix can make a new problem. The touched screens are measured
-        // again, and the model tweaks them until they measure clean or
-        // the effort's rounds run out.
-        let touched = if design.theme != edited.theme
-            || design.viewport != edited.viewport
-            || design.app_window != edited.app_window
-        {
-            (0..edited.screens.len()).collect()
-        } else {
-            touched_indexes(&design.screens, &edited.screens, &indexes)
+                parse: Box::new(move |content| apply_patch(&original, parse_patch(content)?)),
+                progress: progress.clone(),
+                live: Some(preview.edit_sink(&draft)),
+            };
+            let messages = vec![
+                serde_json::json!({ "role": "system", "content": system_prompt() }),
+                self.user_message(&edit_prompt(&context.request, &input), &attachments),
+            ];
+            let edited = self
+                .request_edit(
+                    client,
+                    EditExecution {
+                        original: &draft,
+                        messages,
+                        input: &input,
+                        indexes: &indexes,
+                        is_fresh,
+                        request: &request,
+                    },
+                    log,
+                )
+                .await?;
+            preview.show(&edited);
+            // A fix can make a new problem. The touched screens are measured
+            // again, and the model tweaks them until they measure clean or
+            // the effort's rounds run out.
+            let touched = if design.theme != edited.theme
+                || design.viewport != edited.viewport
+                || design.app_window != edited.app_window
+            {
+                (0..edited.screens.len()).collect()
+            } else {
+                touched_indexes(&design.screens, &edited.screens, &indexes)
+            };
+            let fix = EditFix {
+                request: &context.request,
+                context: &request,
+                indexes: touched,
+            };
+            let fallback = edited.clone();
+            let polished = self.fix_edited_design(client, edited, &fix, log).await;
+            let (final_design, audit) = match polished {
+                Ok(result) => result,
+                Err(error) => {
+                    plan.check_structure(&design, &fallback)
+                        .map_err(GenerationStop::Failed)?;
+                    let notice = self
+                        .save_review_draft(design_id, &fallback, &error, false)
+                        .await
+                        .map_err(GenerationStop::Failed)?;
+                    return Err(GenerationStop::Failed(notice));
+                }
+            };
+            plan.check_structure(&design, &final_design)
+                .map_err(GenerationStop::Failed)?;
+            if let Err(error) = audit.require_layout_clean_on(Some(&fix.indexes)) {
+                let notice = self
+                    .save_review_draft(design_id, &final_design, &error, false)
+                    .await
+                    .map_err(GenerationStop::Failed)?;
+                return Err(GenerationStop::Failed(notice));
+            }
+            let layout_warnings = audit.instructions(Some(&fix.indexes));
+            log(&format!(
+                "{}: reviewing requested feature coverage before saving",
+                request.label
+            ));
+            let failures = self
+                .verify_demo_edit(
+                    client,
+                    &plan,
+                    DemoEditEvidence {
+                        candidate_id: design_id,
+                        before: &design,
+                        after: &final_design,
+                        attachments: &attachments,
+                    },
+                    context.effort(),
+                )
+                .await
+                .map_err(GenerationStop::Failed)?;
+            if failures.is_empty() {
+                break (final_design, fix.indexes, layout_warnings);
+            }
+            let stop_reason = if attempt == 3 {
+                Some("the three-correction-round limit was reached")
+            } else if previous_missing.is_some_and(|count| failures.len() >= count) {
+                Some("requirement coverage did not improve")
+            } else {
+                None
+            };
+            if let Some(reason) = stop_reason {
+                return Err(GenerationStop::Failed(format!(
+                    "Cannot save incomplete demo edit after {attempt} correction round(s): {reason}; remaining issues: {}",
+                    failures.join("; ")
+                )));
+            }
+            previous_missing = Some(failures.len());
+            correction = format!(
+                "Repair the supplied latest draft rather than starting over. Preserve completed work and satisfy the entire acceptance contract. The last review found {} incomplete checklist items:\n{}",
+                failures.len(),
+                failures.join("\n")
+            );
+            draft = final_design;
+            attempt += 1;
+            log(&format!(
+                "{}: correction round {attempt}/3; {} incomplete checklist items",
+                request.label,
+                failures.len()
+            ));
         };
-        let fix = EditFix {
-            request: &context.request,
-            context: &request,
-            indexes: touched,
-        };
-        let final_design = self
-            .fix_edited_design(client, edited, &fix, log)
-            .await
-            .map_err(GenerationStop::Failed)?;
-        plan.check_structure(&design, &final_design)
-            .map_err(GenerationStop::Failed)?;
-        log(&format!(
-            "{}: reviewing requested feature coverage before saving",
-            request.label
-        ));
-        self.verify_demo_edit(
-            client,
-            &plan,
-            DemoEditEvidence {
-                candidate_id: design_id,
-                before: &design,
-                after: &final_design,
-            },
-            context.effort(),
-        )
-        .await
-        .map_err(GenerationStop::Failed)?;
         let mut report = saved_edit_report(design_id, context.request.kind, &design, &final_design)
             .map_err(GenerationStop::Failed)?;
-        let verified: Vec<String> = fix
-            .indexes
+        let verified: Vec<String> = verified_indexes
             .iter()
             .map(|index| (index + 1).to_string())
             .collect();
-        if !verified.is_empty() {
+        if !layout_warnings.is_empty() {
+            report.push_str(&format!("\nNeeds review — advisory layout findings on the edited screens:\n{}\nNo blocking layout defects were measured; this is not a claim that all polish is verified.", layout_warnings.join("\n")));
+        } else if !verified.is_empty() {
             report.push_str(&format!("\nRendered layout verified on screen(s) {}. Untouched screens are not claimed as verified.", verified.join(", ")));
         }
         self.designs

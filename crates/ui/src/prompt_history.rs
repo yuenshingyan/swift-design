@@ -112,6 +112,7 @@ mod tests {
             role: "user".to_owned(),
             content: content.to_owned(),
             design: None,
+            pinned: Vec::new(),
             question_set: None,
             is_continue,
             is_queued: false,

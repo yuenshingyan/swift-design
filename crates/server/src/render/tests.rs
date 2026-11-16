@@ -267,6 +267,45 @@ fn audit_checks_app_window_geometry_when_metadata_exists() {
     assert!(AUDIT_SCRIPT.contains("Array.from(root.children).find"));
 }
 
+#[tokio::test]
+async fn chat_wraps_long_messages_without_horizontal_scrolling() {
+    if crate::screenshots::find_chrome().is_none() {
+        return;
+    }
+    let css = include_str!("../../../ui/src/main/styles.css");
+    let long_text = "candidate-identifier-without-any-breaks".repeat(20);
+    for class in ["conversation", "conversation editor-chat"] {
+        for width in [320, 420] {
+            let messages = format!("<div class='bubble user'><p>{long_text}</p></div><div class='bubble agent'><p>{long_text}</p></div><div class='status-card'><p class='agent-log wrapped'>{long_text}</p></div><pre>{long_text}</pre>").repeat(4);
+            let html = format!(
+                r#"<!doctype html><html><head><style>{css}</style></head><body>
+                <section class='{class}' style='width:{width}px;height:300px'>
+                <div class='thread'>{messages}</div></section><script>
+                const thread = document.querySelector('.thread');
+                document.documentElement.setAttribute('data-chat-fits', String(
+                    thread.scrollWidth <= thread.clientWidth &&
+                    Array.from(thread.querySelectorAll('.bubble p, pre')).every(node => node.scrollWidth <= node.clientWidth)));
+                document.documentElement.setAttribute('data-chat-no-horizontal-scroll', String(getComputedStyle(thread).overflowX === 'hidden'));
+                document.documentElement.setAttribute('data-chat-vertical-scroll', String(thread.scrollHeight > thread.clientHeight));
+                </script></body></html>"#
+            );
+            let dom = crate::screenshots::dump_rendered_dom(
+                &html,
+                "http://127.0.0.1:3000",
+                design_model::Viewport::default(),
+            )
+            .await
+            .unwrap();
+            assert!(
+                dom.contains("data-chat-fits=\"true\""),
+                "{class} at {width}px overflows"
+            );
+            assert!(dom.contains("data-chat-no-horizontal-scroll=\"true\""));
+            assert!(dom.contains("data-chat-vertical-scroll=\"true\""));
+        }
+    }
+}
+
 #[test]
 fn audit_has_opt_in_alignment_checks() {
     assert!(AUDIT_SCRIPT.contains("data-layout-align"));
@@ -274,7 +313,8 @@ fn audit_has_opt_in_alignment_checks() {
     assert!(AUDIT_SCRIPT.contains("kind: 'alignment'"));
     assert!(AUDIT_SCRIPT.contains("alignmentModes.has(align)"));
     assert!(AUDIT_SCRIPT.contains("gapModes.has(gap)"));
-    assert!(AUDIT_SCRIPT.contains("needs at least 3 visible direct children"));
+    assert!(AUDIT_SCRIPT.contains("kind: 'alignment_unmeasured'"));
+    assert!(AUDIT_SCRIPT.contains("cannot be measured with fewer than 3 visible direct children"));
     assert!(AUDIT_SCRIPT.contains("differ by more than ' + tolerancePx + ' canvas px"));
 }
 

@@ -15,10 +15,11 @@ use design_model::ArtifactKind;
 
 use crate::edit_focus::{EditInput, focus_note};
 use crate::edit_report::unit_names;
+use crate::generation::live_preview::{PreviewBoard, patch_sink, worker_sink};
 use crate::generation::{
     ArtifactRequest, DRAFT_SHARE, GenerationEngine, GenerationStop, Validated,
 };
-use crate::model_client::LogSink;
+use crate::model_client::{LogSink, TextSink};
 use crate::{
     artwork_patch, campaign_patch, deck_patch, document_patch, mailing_patch, patch, print_patch,
     social_patch,
@@ -98,6 +99,8 @@ struct WorkerShared<T> {
     effort: String,
     label: String,
     log: LogSink,
+    live: Option<Arc<TextSink>>,
+    preview_board: PreviewBoard,
 }
 
 /// Work that can be spawned without borrowing the caller's edit context.
@@ -166,6 +169,8 @@ impl GenerationEngine {
             effort: edit.request.effort.clone(),
             label: edit.request.label.clone(),
             log: Arc::clone(log),
+            live: edit.request.live.clone(),
+            preview_board: PreviewBoard::default(),
         });
         let merged = collect_workers(shared, &edit, &snapshot, &indexes).await?;
         log(&format!(
@@ -185,6 +190,10 @@ impl GenerationEngine {
     ) -> Result<T, GenerationStop> {
         let messages = coordination_messages(edit, &merged).map_err(GenerationStop::Failed)?;
         let indexes = edit.indexes.to_vec();
+        let live = edit.request.live.as_ref().and_then(|sink| {
+            let base = serde_json::from_value(serde_json::to_value(&merged).ok()?).ok()?;
+            Some(patch_sink(&base, Arc::clone(sink)))
+        });
         let request = ArtifactRequest {
             effort: edit.request.effort.clone(),
             label: format!("{}: coordination", edit.request.label),
@@ -195,7 +204,7 @@ impl GenerationEngine {
                 T::apply_edit(&merged, content)
             }),
             progress: None,
-            live: None,
+            live,
         };
         let coordinated = self.request_valid(client, messages, &request, log).await?;
         edit.request.report(DRAFT_SHARE);
@@ -265,7 +274,16 @@ async fn page_worker<T: ParallelEditable>(
             T::apply_edit(&original, content)
         }),
         progress: None,
-        live: None,
+        live: shared.live.as_ref().and_then(|sink| {
+            let base = serde_json::from_value(serde_json::to_value(shared.original.as_ref()).ok()?)
+                .ok()?;
+            Some(worker_sink(
+                base,
+                index,
+                Arc::clone(&shared.preview_board),
+                Arc::clone(sink),
+            ))
+        }),
     };
     let edited = shared
         .engine

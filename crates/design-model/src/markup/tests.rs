@@ -1,5 +1,43 @@
 use super::*;
 
+#[test]
+fn preview_closes_safe_prefixes_without_weakening_saved_html_validation() {
+    let prefix = "<main><h1>Growing text";
+    assert_eq!(
+        preview_html_prefix(prefix).as_deref(),
+        Some("<main><h1>Growing text</h1></main>")
+    );
+    assert!(!html_problems(prefix).is_empty());
+    assert_eq!(
+        preview_html_prefix("<div>Ready<a hr").as_deref(),
+        Some("<div>Ready</div>")
+    );
+    assert!(preview_html_prefix("<div").is_none());
+    assert!(preview_html_prefix("").is_none());
+}
+
+#[test]
+fn preview_rejects_unsafe_attributes_tags_and_unfinished_quoted_values() {
+    for html in [
+        "<div><script>bad()",
+        "<img src='x' onerror='bad()'>",
+        "<a href='javascript:bad()'>Link",
+        "<div title='unfinished >",
+        "<div>Bad\0text",
+        "<div></span>",
+    ] {
+        assert!(
+            preview_html_prefix(html).is_none(),
+            "accepted unsafe prefix: {html}"
+        );
+    }
+    let svg = "<svg><title>Accessible chart";
+    assert_eq!(
+        preview_html_prefix(svg).as_deref(),
+        Some("<svg><title>Accessible chart</title></svg>")
+    );
+}
+
 fn first(problems: Vec<String>) -> String {
     problems.into_iter().next().unwrap_or_default()
 }

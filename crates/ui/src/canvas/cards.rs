@@ -50,7 +50,10 @@ impl CanvasCard {
     pub fn preview_url(&self, revision: u64, current: usize) -> String {
         match self.kind {
             ArtifactKind::Demo => {
-                format!("/designs/{}/render?v={revision}&screen={current}", self.id)
+                format!(
+                    "/designs/{}/render?preview=true&v={revision}&screen={current}",
+                    self.id
+                )
             }
             ArtifactKind::Deck => {
                 format!("/decks/{}/render?v={revision}&slide={current}", self.id)

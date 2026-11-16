@@ -144,6 +144,7 @@ mod tests {
             role: "user".to_owned(),
             content: "Fix it.".to_owned(),
             design: None,
+            pinned: Vec::new(),
             question_set: None,
             is_continue: false,
             is_queued: false,

@@ -20,6 +20,7 @@ fn message(role: &str, design: Option<&str>, is_continue: bool) -> api::ChatMess
         role: role.to_owned(),
         content: String::new(),
         design: design.map(str::to_owned),
+        pinned: Vec::new(),
         question_set: None,
         is_continue,
         is_queued: false,
@@ -378,7 +379,7 @@ fn session_designs_filter_and_put_the_chosen_first() {
     assert_eq!(mine[0].kind, ArtifactKind::Demo);
     assert_eq!(
         mine[0].preview_url(7, 2),
-        "/designs/talk-candidate-2/render?v=7&screen=2"
+        "/designs/talk-candidate-2/render?preview=true&v=7&screen=2"
     );
 }
 

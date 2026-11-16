@@ -211,8 +211,8 @@ async fn a_focused_repair_verifies_screen_three_without_rewriting_existing_error
         .fix_edited_design(&reqwest::Client::new(), original.clone(), &fix, &log())
         .await
         .unwrap();
-    assert_eq!(result.screens[2].html, "<h1>Fixed</h1>");
-    assert_eq!(result.screens[0], original.screens[0]);
+    assert_eq!(result.0.screens[2].html, "<h1>Fixed</h1>");
+    assert_eq!(result.0.screens[0], original.screens[0]);
     assert_eq!(fake.requests().len(), 1);
 }
 
@@ -294,8 +294,8 @@ async fn a_temporary_failure_retries_the_repair_without_restarting_the_edit() {
         .fix_edited_design(&reqwest::Client::new(), original.clone(), &fix, &log())
         .await
         .unwrap();
-    assert_eq!(result.screens[2].html, "<h1>Fixed</h1>");
-    assert_eq!(result.screens[0], original.screens[0]);
+    assert_eq!(result.0.screens[2].html, "<h1>Fixed</h1>");
+    assert_eq!(result.0.screens[0], original.screens[0]);
     let requests = fake.requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0], requests[1]);
@@ -321,12 +321,14 @@ async fn real_chrome_distinguishes_padding_only_scroll_extents_from_three_pixel_
         "{:?}",
         audit.instructions(Some(&[0]))
     );
-    let error = audit.require_layout_clean_on(Some(&[1])).unwrap_err();
+    assert!(audit.require_layout_clean_on(Some(&[1])).is_ok());
+    let warnings = audit.instructions(Some(&[1])).join("; ");
     assert!(
-        error.contains("41px tall but the box is 38px tall"),
-        "{error}"
+        warnings.contains("41px tall but the box is 38px tall"),
+        "{warnings}"
     );
-    assert!(error.contains("div.clip"));
+    assert!(warnings.contains("div.clip"));
+    assert_eq!(audit.score(Some(&[1])).0, 0);
 }
 
 #[tokio::test]
@@ -391,7 +393,7 @@ async fn real_chrome_distinguishes_clipping_and_uneven_gaps_from_scrolling_and_h
         (
             "<div class='row' data-layout-gap='x'><p>One</p><p>Two</p><p>Three</p></div>",
             ".row {position:absolute;left:40px;top:40px;width:800px;height:40px;} p {position:absolute;width:50px;margin:0;font-size:16px;} p:nth-child(2) {left:80px;} p:nth-child(3) {left:200px;}",
-            false,
+            true,
         ),
     ];
     for (html, css, should_pass) in cases {
@@ -408,6 +410,40 @@ async fn real_chrome_distinguishes_clipping_and_uneven_gaps_from_scrolling_and_h
             should_pass,
             "{html}: {:?}",
             audit.instructions(None)
+        );
+    }
+}
+
+#[tokio::test]
+async fn real_chrome_marks_small_hidden_and_scrolling_groups_as_unmeasured_not_broken() {
+    if find_chrome().is_none() {
+        return;
+    }
+    let mut design = design();
+    design.screens[0].html =
+        "<div class='group' data-layout-gap='y'><p>One</p><p>Two</p></div>".into();
+    design.screens[1].html =
+        "<div class='group' data-layout-gap='y'><p>One</p><p>Two</p><p hidden>Hidden</p></div>"
+            .into();
+    design.screens[2].html = "<div class='group scroll' data-layout-gap='y'><p>One</p><p>Two</p><p class='later'>Below the canvas</p></div>".into();
+    for screen in &mut design.screens {
+        screen.css = Some(".group{display:grid;gap:16px;width:400px;}p{margin:0;font-size:16px;line-height:24px;}.scroll{display:block;height:800px;overflow:auto;}.later{margin-top:1000px;}".into());
+    }
+    let dom = chrome_dom_runner()(design, "http://127.0.0.1:3000".into())
+        .await
+        .unwrap();
+    let audit = DemoAudit::from_dom(&dom, 3).unwrap();
+    assert!(
+        audit.require_layout_clean().is_ok(),
+        "{:?}",
+        audit.instructions(None)
+    );
+    for index in 0..3 {
+        assert!(
+            audit
+                .instructions(Some(&[index]))
+                .join(" ")
+                .contains("cannot be measured with fewer than 3")
         );
     }
 }
