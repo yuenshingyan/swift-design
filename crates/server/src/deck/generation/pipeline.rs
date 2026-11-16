@@ -1,5 +1,14 @@
 use super::*;
 
+/// Model and source inputs shared by continuation chunk writers.
+struct DeckChunkRequest<'a> {
+    client: &'a reqwest::Client,
+    context: &'a GenerationContext,
+    preview: &'a Deck,
+    attachments: &'a Arc<Attachments>,
+    log: &'a LogSink,
+}
+
 impl GenerationEngine {
     /// The deck store, or the failure a deck run reports without one.
     fn deck_store(&self) -> Result<&DeckStore, GenerationStop> {
@@ -482,14 +491,16 @@ impl GenerationEngine {
         let saver = DeckLiveSaver::new(decks, &self.notifier, deck_id);
         let board = self
             .write_deck_chunks(
-                client,
-                context,
-                &deck,
+                DeckChunkRequest {
+                    client,
+                    context,
+                    preview: &deck,
+                    attachments,
+                    log,
+                },
                 &chunks,
-                attachments,
                 progress,
                 &saver,
-                log,
             )
             .await;
         let mut continued = deck.clone();
@@ -536,18 +547,20 @@ impl GenerationEngine {
     /// Runs every continuation chunk of `preview` at the same time and
     /// returns the board with what each chunk wrote. A chunk that fails
     /// is logged and leaves its row empty.
-    #[allow(clippy::too_many_arguments)]
     async fn write_deck_chunks(
         &self,
-        client: &reqwest::Client,
-        context: &GenerationContext,
-        preview: &Deck,
+        request: DeckChunkRequest<'_>,
         chunks: &[ContinueChunk],
-        attachments: &Arc<Attachments>,
         progress: &ShareSink,
         saver: &DeckLiveSaver,
-        log: &LogSink,
     ) -> DeckChunkBoard {
+        let DeckChunkRequest {
+            client,
+            context,
+            preview,
+            attachments,
+            log,
+        } = request;
         let start = preview.slides.len();
         let planned = preview.outline.len();
         let board: DeckChunkBoard = Arc::new(std::sync::Mutex::new(
@@ -583,14 +596,16 @@ impl GenerationEngine {
             tasks.spawn(async move {
                 engine
                     .write_deck_chunk(
-                        &client,
-                        &context,
-                        &preview,
+                        DeckChunkRequest {
+                            client: &client,
+                            context: &context,
+                            preview: &preview,
+                            attachments: &attachments,
+                            log: &log,
+                        },
                         (position, chunk),
-                        &attachments,
                         &board,
                         &show,
-                        &log,
                     )
                     .await
             });
@@ -607,18 +622,20 @@ impl GenerationEngine {
 
     /// Writes one continuation chunk into row `position` of the board,
     /// showing the deck grow while the reply streams.
-    #[allow(clippy::too_many_arguments)]
     async fn write_deck_chunk(
         &self,
-        client: &reqwest::Client,
-        context: &GenerationContext,
-        preview: &Deck,
+        request: DeckChunkRequest<'_>,
         (position, chunk): (usize, ContinueChunk),
-        attachments: &Attachments,
         board: &DeckChunkBoard,
         show: &Arc<dyn Fn() + Send + Sync>,
-        log: &LogSink,
     ) -> Result<(), String> {
+        let DeckChunkRequest {
+            client,
+            context,
+            preview,
+            attachments,
+            log,
+        } = request;
         let deck_json = serde_json::to_string(preview).map_err(|error| error.to_string())?;
         let messages = vec![
             serde_json::json!({ "role": "system", "content": deck_system_prompt() }),

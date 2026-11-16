@@ -1,5 +1,14 @@
 use super::*;
 
+/// Model and source inputs shared by continuation chunk writers.
+struct PrintChunkRequest<'a> {
+    client: &'a reqwest::Client,
+    context: &'a GenerationContext,
+    preview: &'a Print,
+    attachments: &'a Arc<Attachments>,
+    log: &'a LogSink,
+}
+
 impl GenerationEngine {
     /// The print store, or the failure a print run reports
     /// without one.
@@ -484,14 +493,16 @@ impl GenerationEngine {
         let saver = PrintLiveSaver::new(prints, &self.notifier, print_id);
         let board = self
             .write_print_chunks(
-                client,
-                context,
-                &print,
+                PrintChunkRequest {
+                    client,
+                    context,
+                    preview: &print,
+                    attachments,
+                    log,
+                },
                 &chunks,
-                attachments,
                 progress,
                 &saver,
-                log,
             )
             .await;
         let mut continued = print.clone();
@@ -538,18 +549,20 @@ impl GenerationEngine {
     /// Runs every continuation chunk of `preview` at the same time and
     /// returns the board with what each chunk wrote. A chunk that fails
     /// is logged and leaves its row empty.
-    #[allow(clippy::too_many_arguments)]
     async fn write_print_chunks(
         &self,
-        client: &reqwest::Client,
-        context: &GenerationContext,
-        preview: &Print,
+        request: PrintChunkRequest<'_>,
         chunks: &[ContinueChunk],
-        attachments: &Arc<Attachments>,
         progress: &ShareSink,
         saver: &PrintLiveSaver,
-        log: &LogSink,
     ) -> PrintChunkBoard {
+        let PrintChunkRequest {
+            client,
+            context,
+            preview,
+            attachments,
+            log,
+        } = request;
         let start = preview.sheets.len();
         let planned = preview.outline.len();
         let board: PrintChunkBoard = Arc::new(std::sync::Mutex::new(
@@ -585,14 +598,16 @@ impl GenerationEngine {
             tasks.spawn(async move {
                 engine
                     .write_print_chunk(
-                        &client,
-                        &context,
-                        &preview,
+                        PrintChunkRequest {
+                            client: &client,
+                            context: &context,
+                            preview: &preview,
+                            attachments: &attachments,
+                            log: &log,
+                        },
                         (position, chunk),
-                        &attachments,
                         &board,
                         &show,
-                        &log,
                     )
                     .await
             });
@@ -609,18 +624,20 @@ impl GenerationEngine {
 
     /// Writes one continuation chunk into row `position` of the board,
     /// showing the print grow while the reply streams.
-    #[allow(clippy::too_many_arguments)]
     async fn write_print_chunk(
         &self,
-        client: &reqwest::Client,
-        context: &GenerationContext,
-        preview: &Print,
+        request: PrintChunkRequest<'_>,
         (position, chunk): (usize, ContinueChunk),
-        attachments: &Attachments,
         board: &PrintChunkBoard,
         show: &Arc<dyn Fn() + Send + Sync>,
-        log: &LogSink,
     ) -> Result<(), String> {
+        let PrintChunkRequest {
+            client,
+            context,
+            preview,
+            attachments,
+            log,
+        } = request;
         let print_json = serde_json::to_string(preview).map_err(|error| error.to_string())?;
         let messages = vec![
             serde_json::json!({ "role": "system", "content": print_system_prompt() }),

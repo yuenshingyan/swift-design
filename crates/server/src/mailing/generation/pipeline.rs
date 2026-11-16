@@ -1,5 +1,14 @@
 use super::*;
 
+/// Model and source inputs shared by continuation chunk writers.
+struct MailingChunkRequest<'a> {
+    client: &'a reqwest::Client,
+    context: &'a GenerationContext,
+    preview: &'a Mailing,
+    attachments: &'a Arc<Attachments>,
+    log: &'a LogSink,
+}
+
 impl GenerationEngine {
     /// The mailing store, or the failure a mailing run reports
     /// without one.
@@ -490,14 +499,16 @@ impl GenerationEngine {
         let saver = MailingLiveSaver::new(mailings, &self.notifier, mailing_id);
         let board = self
             .write_mailing_chunks(
-                client,
-                context,
-                &mailing,
+                MailingChunkRequest {
+                    client,
+                    context,
+                    preview: &mailing,
+                    attachments,
+                    log,
+                },
                 &chunks,
-                attachments,
                 progress,
                 &saver,
-                log,
             )
             .await;
         let mut continued = mailing.clone();
@@ -544,18 +555,20 @@ impl GenerationEngine {
     /// Runs every continuation chunk of `preview` at the same time and
     /// returns the board with what each chunk wrote. A chunk that fails
     /// is logged and leaves its row empty.
-    #[allow(clippy::too_many_arguments)]
     async fn write_mailing_chunks(
         &self,
-        client: &reqwest::Client,
-        context: &GenerationContext,
-        preview: &Mailing,
+        request: MailingChunkRequest<'_>,
         chunks: &[ContinueChunk],
-        attachments: &Arc<Attachments>,
         progress: &ShareSink,
         saver: &MailingLiveSaver,
-        log: &LogSink,
     ) -> MailingChunkBoard {
+        let MailingChunkRequest {
+            client,
+            context,
+            preview,
+            attachments,
+            log,
+        } = request;
         let start = preview.emails.len();
         let planned = preview.outline.len();
         let board: MailingChunkBoard = Arc::new(std::sync::Mutex::new(
@@ -591,14 +604,16 @@ impl GenerationEngine {
             tasks.spawn(async move {
                 engine
                     .write_mailing_chunk(
-                        &client,
-                        &context,
-                        &preview,
+                        MailingChunkRequest {
+                            client: &client,
+                            context: &context,
+                            preview: &preview,
+                            attachments: &attachments,
+                            log: &log,
+                        },
                         (position, chunk),
-                        &attachments,
                         &board,
                         &show,
-                        &log,
                     )
                     .await
             });
@@ -615,18 +630,20 @@ impl GenerationEngine {
 
     /// Writes one continuation chunk into row `position` of the board,
     /// showing the mailing grow while the reply streams.
-    #[allow(clippy::too_many_arguments)]
     async fn write_mailing_chunk(
         &self,
-        client: &reqwest::Client,
-        context: &GenerationContext,
-        preview: &Mailing,
+        request: MailingChunkRequest<'_>,
         (position, chunk): (usize, ContinueChunk),
-        attachments: &Attachments,
         board: &MailingChunkBoard,
         show: &Arc<dyn Fn() + Send + Sync>,
-        log: &LogSink,
     ) -> Result<(), String> {
+        let MailingChunkRequest {
+            client,
+            context,
+            preview,
+            attachments,
+            log,
+        } = request;
         let mailing_json = serde_json::to_string(preview).map_err(|error| error.to_string())?;
         let messages = vec![
             serde_json::json!({ "role": "system", "content": mailing_system_prompt() }),
