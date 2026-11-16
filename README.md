@@ -243,6 +243,21 @@ built-in demo run sends any model requests, the server checks that Chrome can
 launch and execute JavaScript. A missing or broken browser blocks the run with
 a setup error instead of failing after generation.
 
+The demo editor exports **All** screens, the current **Screen N**, or a subset.
+Hover over a screen thumbnail to reveal its top-left checkbox, then check the
+screens to export. Checked boxes remain visible; keyboard focus reveals them too,
+and touch devices show them without hovering. Use **Export selected (N)** in the
+toolbar to download the PNG ZIP, or **Clear** to clear export selection without
+changing chat pins. Empty selections cannot export. While rendering, the button
+shows **Preparing N screens…** and blocks duplicate clicks; failures appear next
+to it instead of silently navigating to an error response. The download starts
+when the ZIP is ready. Demo ZIPs render at most three screens concurrently.
+The ZIP contains only the selected saved screens, in
+screen order, keeping original filenames such as `candidate-screen-23.png`.
+`GET /designs/{id}/export.zip?screens=23-35` exposes the same selection; omitting
+`screens` preserves the all-screen export. Selection never renumbers navigation
+or mutates the design, and live drafts remain excluded from exports.
+
 The design editor has two modes on a tab pair: **Play** (the default) and **Edit**. In
 Edit a click selects a node. In Play a click acts as it would for a user:
 a link to `#screen-3` opens screen 3, a `<details>` menu opens, and a

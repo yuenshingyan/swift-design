@@ -42,7 +42,7 @@ const endDrag = () => {
   dioxus.send({ type: 'swift-design-drag', action: 'end', screen: 0 });
 };
 document.addEventListener('pointerdown', (event) => {
-  if (event.button !== 0 || (event.target.closest && event.target.closest('button'))) { return; }
+  if (event.button !== 0 || (event.target.closest && event.target.closest('button, input'))) { return; }
   const index = thumbnailIndex(event.target);
   if (index === null) { return; }
   dragFrom = index;

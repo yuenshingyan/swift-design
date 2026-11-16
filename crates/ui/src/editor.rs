@@ -47,7 +47,9 @@ pub(crate) use support::{
 pub(crate) use theme::ThemeForm;
 pub(crate) use transition::TransitionForm;
 
-use support::{DesignExportGroup, field_count, outline_title, screen_label, view_href};
+use support::{
+    DesignExportGroup, ScreenExportCheckbox, field_count, outline_title, screen_label, view_href,
+};
 // A dirty local buffer always wins; a draft-only buffer must never become editable.
 fn preview_design<'a>(saved: &'a Design, draft: Option<&'a Design>, is_dirty: bool) -> &'a Design {
     draft.filter(|_| !is_dirty).unwrap_or(saved)
@@ -95,6 +97,25 @@ fn LoadedEditor(
     // `design` is the local saved-data buffer; live drafts never enter its save path.
     let mut design = use_signal(|| initial.clone());
     let mut has_saved = use_signal(|| initially_saved);
+    let mut saved_screen_labels = use_signal(|| {
+        if initially_saved {
+            initial
+                .screens
+                .iter()
+                .enumerate()
+                .map(|(i, screen)| screen_label(i, screen))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        }
+    });
+    let mut export_screens = use_signal(Vec::<usize>::new);
+    let saved_screen_count = saved_screen_labels.read().len();
+    use_effect(use_reactive!(|saved_screen_count| {
+        export_screens
+            .write()
+            .retain(|&screen| screen <= saved_screen_count);
+    }));
     let mut live_draft = use_signal(|| (!initially_saved).then(|| initial.clone()));
     let mut selected = use_signal(|| 0usize);
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
@@ -148,6 +169,14 @@ fn LoadedEditor(
             spawn(async move {
                 match api::save_design(&id, &snapshot).await {
                     Ok(()) => {
+                        saved_screen_labels.set(
+                            snapshot
+                                .screens
+                                .iter()
+                                .enumerate()
+                                .map(|(i, screen)| screen_label(i, screen))
+                                .collect(),
+                        );
                         messages.set(Vec::new());
                         if design.peek().eq(&snapshot) {
                             is_dirty.set(false);
@@ -174,6 +203,14 @@ fn LoadedEditor(
                 if let Ok(fetched) = api::fetch_design(&id).await
                     && !is_dirty()
                 {
+                    saved_screen_labels.set(
+                        fetched
+                            .screens
+                            .iter()
+                            .enumerate()
+                            .map(|(i, screen)| screen_label(i, screen))
+                            .collect(),
+                    );
                     if design.peek().ne(&fetched) {
                         if live_draft.peek().is_none() {
                             selected.set(selected().min(fetched.screens.len().saturating_sub(1)));
@@ -208,6 +245,14 @@ fn LoadedEditor(
                     }
                     if !is_dirty() {
                         if let Ok(saved) = saved {
+                            saved_screen_labels.set(
+                                saved
+                                    .screens
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, screen)| screen_label(i, screen))
+                                    .collect(),
+                            );
                             if design.peek().ne(&saved) {
                                 design.set(saved);
                             }
@@ -287,6 +332,7 @@ fn LoadedEditor(
                             && from != to
                             && to < design.peek().screens.len()
                         {
+                            export_screens.set(Vec::new());
                             design.with_mut(|design| {
                                 move_screen(&mut design.screens, &mut design.outline, from, to)
                             });
@@ -486,8 +532,11 @@ fn LoadedEditor(
                         span { class: "divider" }
                         if !is_read_only() {
                             DesignExportGroup {
+                                key: "{design_id}",
                                 design_id: design_id.clone(),
                                 selected: selected(),
+                                screen_count: saved_screen_count,
+                                export_screens,
                                 can_export_with_chrome,
                             }
                         }
@@ -652,13 +701,16 @@ fn LoadedEditor(
                             {
                                 let is_deleting = pending_screen_delete() == Some(index);
                                 let is_redoing = pending_redo() == Some(index);
-                                let class = thumbnail_class(ThumbnailState {
+                                let mut class = thumbnail_class(ThumbnailState {
                                     is_current: index == selected(),
                                     is_dragging: dragged() == Some(index),
                                     is_portrait,
                                     is_deleting,
                                     is_pinned: pinned().contains(&index),
                                 });
+                                if !is_read_only() && export_screens.read().contains(&(index + 1)) {
+                                    class.push_str(" export-selected");
+                                }
                                 rsx! {
                                     div {
                                         key: "{index}",
@@ -684,6 +736,13 @@ fn LoadedEditor(
                                             src: "/designs/{design_id}/render?version={preview_version()}{live_query}&screen={index + 1}",
                                         }
                                         span { class: "thumbnail-number", {format!("{:02}", index + 1)} }
+                                        if !is_read_only() && index < saved_screen_count {
+                                            ScreenExportCheckbox {
+                                                screen: index + 1,
+                                                label: label.clone(),
+                                                selection: export_screens,
+                                            }
+                                        }
                                         if screen_count > 1 && !is_read_only() {
                                             button {
                                                 class: if is_deleting { "thumbnail-delete confirm" } else { "thumbnail-delete" },
@@ -692,6 +751,7 @@ fn LoadedEditor(
                                                     event.stop_propagation();
                                                     if pending_screen_delete() == Some(index) {
                                                         pending_screen_delete.set(None);
+                                                        export_screens.set(Vec::new());
                                                         design
                                                             .with_mut(|design| {
                                                                 if design.screens.len() > 1 && index < design.screens.len() {
