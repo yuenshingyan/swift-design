@@ -10,8 +10,8 @@ use crate::export::{
     build_document_pdf_response, build_document_zip_response, build_pptx_response,
     build_social_pdf_response, build_social_zip_response, file_download, google_fonts_link,
     inline_font_urls, inline_google_fonts, inline_uploaded_frame_images, inline_uploaded_images,
-    inline_uploaded_page_images, inline_uploaded_slide_images, only_cover_index, pack_unit_images,
-    upload_references,
+    inline_uploaded_page_images, inline_uploaded_slide_images, only_cover_index,
+    pack_design_images, pack_unit_images, selected_screen_indexes, upload_references,
 };
 use crate::pptx::ExportSources;
 use crate::render;
@@ -44,9 +44,14 @@ async fn social_exports_without_chrome_are_503() {
 
 #[tokio::test]
 async fn new_png_zip_exports_without_chrome_are_503() {
-    let response =
-        build_design_zip_response("overview", &sample_design(), "http://127.0.0.1:3000", None)
-            .await;
+    let response = build_design_zip_response(
+        "overview",
+        &sample_design(),
+        "http://127.0.0.1:3000",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -61,6 +66,140 @@ async fn new_png_zip_exports_without_chrome_are_503() {
         build_document_zip_response("report", &sample_document(), "http://127.0.0.1:3000", None)
             .await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[test]
+fn screen_selections_support_ranges_and_keep_design_order_without_duplicates() {
+    assert_eq!(selected_screen_indexes(None, 3).unwrap(), vec![0, 1, 2]);
+    assert_eq!(
+        selected_screen_indexes(Some(" 5, 2-4,3, 1 "), 5).unwrap(),
+        vec![0, 1, 2, 3, 4]
+    );
+    assert_eq!(
+        selected_screen_indexes(Some("23-35"), 35).unwrap(),
+        (22..35).collect::<Vec<_>>()
+    );
+    assert_eq!(selected_screen_indexes(Some("2"), 3).unwrap(), vec![1]);
+    assert_eq!(selected_screen_indexes(Some("3,1"), 3).unwrap(), vec![0, 2]);
+    for selection in [
+        "",
+        " ",
+        "0",
+        "4",
+        "3-1",
+        "1-4",
+        "-1",
+        "1-",
+        "1,,2",
+        "1-2-3",
+        "+1",
+        "one",
+        "999999999999999999999999999999999",
+    ] {
+        assert!(
+            selected_screen_indexes(Some(selection), 3).is_err(),
+            "{selection}"
+        );
+    }
+    assert!(selected_screen_indexes(Some(&"1,".repeat(2049)), 3).is_err());
+}
+
+#[test]
+fn selected_png_zip_preserves_original_screen_numbers_and_exact_content() {
+    use std::io::Read;
+
+    let bytes = pack_design_images(
+        "demo",
+        &[(22, b"SCREEN23".to_vec()), (34, b"SCREEN35".to_vec())],
+    )
+    .unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    assert_eq!(archive.len(), 2);
+    assert_eq!(archive.by_index(0).unwrap().name(), "demo-screen-23.png");
+    assert_eq!(archive.by_index(1).unwrap().name(), "demo-screen-35.png");
+    let mut content = String::new();
+    archive
+        .by_name("demo-screen-35.png")
+        .unwrap()
+        .read_to_string(&mut content)
+        .unwrap();
+    assert_eq!(content, "SCREEN35");
+    assert!(archive.by_name("demo-screen-1.png").is_err());
+}
+
+#[tokio::test]
+async fn invalid_screen_selection_is_rejected_before_screenshot_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = crate::designs::DesignStore::new(directory.path().join("designs"));
+    store.save("demo", &sample_design()).await.unwrap();
+    let application = test_application(&directory);
+    for selection in ["", "0", "999", "2-1", "1,,2", "bad"] {
+        let (status, _) = send(
+            application.clone(),
+            "GET",
+            &format!("/designs/demo/export.zip?screens={selection}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{selection}");
+    }
+}
+
+#[tokio::test]
+async fn selected_png_export_captures_only_the_requested_original_screen() {
+    let chrome = crate::screenshots::find_chrome();
+    if chrome.is_none() {
+        return;
+    }
+    let design = sample_design();
+    let selected = design.screens.len() - 1;
+    let response = build_design_zip_response(
+        "demo",
+        &design,
+        "http://127.0.0.1:3000",
+        chrome,
+        Some(&[selected]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/zip");
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    assert_eq!(archive.len(), 1);
+    let mut entry = archive.by_index(0).unwrap();
+    assert_eq!(entry.name(), format!("demo-screen-{}.png", selected + 1));
+    use std::io::Read;
+    let mut signature = [0; 8];
+    entry.read_exact(&mut signature).unwrap();
+    assert_eq!(&signature, b"\x89PNG\r\n\x1a\n");
+}
+
+#[tokio::test]
+async fn parallel_selected_export_keeps_sparse_screens_in_original_order() {
+    let chrome = crate::screenshots::find_chrome();
+    if chrome.is_none() {
+        return;
+    }
+    let mut design = sample_design();
+    design.screens = vec![design.screens[0].clone(); 4];
+    let response = build_design_zip_response(
+        "demo",
+        &design,
+        "http://127.0.0.1:3000",
+        chrome,
+        Some(&[3, 0, 2]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    assert_eq!(archive.len(), 3);
+    for (entry, screen) in [1, 3, 4].into_iter().enumerate() {
+        assert_eq!(
+            archive.by_index(entry).unwrap().name(),
+            format!("demo-screen-{screen}.png")
+        );
+    }
 }
 
 #[test]

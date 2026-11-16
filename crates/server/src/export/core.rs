@@ -1,4 +1,68 @@
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use tokio::task::JoinSet;
+
 use super::*;
+
+/// Optional one-based screen selection for a demo PNG ZIP.
+#[derive(Default, Deserialize)]
+pub(super) struct DesignZipQuery {
+    screens: Option<String>,
+}
+
+/// Parses a bounded selection before any screenshots are taken.
+pub(super) fn selected_screen_indexes(
+    selection: Option<&str>,
+    count: usize,
+) -> Result<Vec<usize>, String> {
+    let Some(selection) = selection else {
+        return Ok((0..count).collect());
+    };
+    if selection.trim().is_empty() {
+        return Err("Cannot export selected screens: select at least one screen.".into());
+    }
+    if selection.len() > 4096 {
+        return Err(
+            "Cannot export selected screens: the selection is too long; use ranges.".into(),
+        );
+    }
+    let mut indexes = BTreeSet::new();
+    for part in selection.split(',') {
+        let part = part.trim();
+        let (first, last) = part.split_once('-').unwrap_or((part, part));
+        let number = |value: &str| {
+            let value = value.trim();
+            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            value.parse::<usize>().ok()
+        };
+        let (Some(first), Some(last)) = (number(first), number(last)) else {
+            return Err(
+                "Cannot export selected screens: use numbers or ranges such as 1,3-5.".into(),
+            );
+        };
+        if first == 0 || first > last || last > count {
+            return Err(format!(
+                "Cannot export selected screens: choose ascending ranges from 1 to {count}."
+            ));
+        }
+        indexes.extend((first - 1)..last);
+    }
+    Ok(indexes.into_iter().collect())
+}
+
+/// Keeps original screen numbers in ZIP entry names, even for a sparse subset.
+pub(super) fn pack_design_images(id: &str, images: &[(usize, Vec<u8>)]) -> anyhow::Result<Vec<u8>> {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    for (index, image) in images {
+        writer.start_file(format!("{id}-screen-{}.png", index + 1), options)?;
+        writer.write_all(image)?;
+    }
+    Ok(writer.finish()?.into_inner())
+}
 
 /// Loads a stored design for an export: 400, 404, or 422 as a response
 /// when the id, the file, or the design is not usable.
@@ -40,40 +104,79 @@ pub(super) async fn export_design(
     file_download(&id, "html", "text/html; charset=utf-8", html.into_bytes())
 }
 
-/// Packs one PNG per screen of a stored design into a zip and returns
-/// it as a file download. 503 when no Chrome is installed.
+/// Packs selected saved screens into a PNG ZIP, keeping their original numbers.
+/// The optional `screens` query accepts one-based numbers and ranges; omission exports all.
+/// Returns 503 when Chrome is unavailable.
 pub(super) async fn export_design_zip(
     State(designs): State<DesignStore>,
     State(settings): State<SettingsStore>,
     Path(id): Path<String>,
+    Query(query): Query<DesignZipQuery>,
 ) -> Response {
     let design = match load_design_for_export(&designs, &id).await {
         Ok(design) => design,
         Err(response) => return response,
     };
+    let indexes = match selected_screen_indexes(query.screens.as_deref(), design.screens.len()) {
+        Ok(indexes) => indexes,
+        Err(message) => {
+            return api_error::error_response(StatusCode::BAD_REQUEST, &message, Vec::new());
+        }
+    };
     let base_url = format!("http://{}", settings.address());
-    build_design_zip_response(&id, &design, &base_url, screenshots::find_chrome()).await
+    build_design_zip_response(
+        &id,
+        &design,
+        &base_url,
+        screenshots::find_chrome(),
+        Some(&indexes),
+    )
+    .await
 }
 
-/// Screenshots every screen and packs the PNGs. `chrome` is a parameter
+/// Screenshots only the selected screens (all when omitted) and packs the PNGs.
+/// `chrome` is a parameter
 /// so the no-Chrome path is testable.
 pub(super) async fn build_design_zip_response(
     id: &str,
     design: &Design,
     base_url: &str,
     chrome: Option<PathBuf>,
+    indexes: Option<&[usize]>,
 ) -> Response {
     if chrome.is_none() {
         return screenshots::chrome_missing_response("PNG exports");
     }
-    let mut images = Vec::with_capacity(design.screens.len());
-    for index in 0..design.screens.len() {
-        match screenshots::screenshot_screen(design, index, base_url).await {
-            Ok(bytes) => images.push(bytes),
-            Err(error) => return api_error::internal_error(&error),
+    let indexes = indexes
+        .map(Vec::from)
+        .unwrap_or_else(|| (0..design.screens.len()).collect());
+    let mut images = Vec::with_capacity(indexes.len());
+    let mut remaining = indexes.into_iter();
+    let design = Arc::new(design.clone());
+    let base_url: Arc<str> = Arc::from(base_url);
+    let mut captures = JoinSet::new();
+    loop {
+        // Bound browser memory while avoiding a separate serial browser wait per page.
+        while captures.len() < 3 {
+            let Some(index) = remaining.next() else { break };
+            let design = Arc::clone(&design);
+            let base_url = Arc::clone(&base_url);
+            captures.spawn(async move {
+                (
+                    index,
+                    screenshots::screenshot_screen(&design, index, &base_url).await,
+                )
+            });
+        }
+        match captures.join_next().await {
+            Some(Ok((index, Ok(bytes)))) => images.push((index, bytes)),
+            Some(Ok((_, Err(error)))) => return api_error::internal_error(&error),
+            Some(Err(error)) => return api_error::internal_error(&error.into()),
+            None => break,
         }
     }
-    match pack_unit_images(id, "screen", &images) {
+    images.sort_by_key(|(index, _)| *index);
+    match pack_design_images(id, &images) {
         Ok(bytes) => {
             tracing::info!(%id, size_bytes = bytes.len(), screen_count = images.len(), "design exported as png zip");
             file_download(id, "zip", "application/zip", bytes)
