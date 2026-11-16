@@ -4,6 +4,8 @@ use design_model::Design;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::instructions::DEMO_SCREEN_RULE;
+
 use super::super::{Attachments, EditOrder, GenerationEngine};
 
 // This contract is included in planning, writing, correction, and review so
@@ -126,7 +128,7 @@ impl GenerationEngine {
             .collect();
         let messages = vec![
             json!({"role": "system", "content":
-            "Resolve the current demo edit requirements. Return JSON only with instruction (a self-contained actionable brief), screens (zero-based existing screen indexes explicitly restricted by the user, or [] for candidate-wide work), minimum_new_screens (minimum additions the user requires, 0 if none), and requirements (a nonempty checklist of independently verifiable deliverables). Read the latest instruction together with the conversation: a clarification such as 'only candidate 4' retains the preceding feature request. Candidate numbers are NOT screen numbers. Ignore prior completed tasks and assistant-invented restrictions. Extending a demo can require BOTH modifying existing screens and adding connected screens; preserve both in the checklist. Include every requested feature, responsive variant, and relevant interaction/state requirement; do not substitute layout repairs. Distinguish proposed concepts from implemented features. A reference to an existing screen does not forbid requested additions. When additions are required, append them to preserve existing indexes. Do not invent restrictions from worker assignments. Candidate write isolation is enforced by the server, not a visual deliverable; do not put it in the checklist. For restyling, preservation means retaining the existing content and behavior, not requiring identical HTML/CSS or implementing missing backend features. This is planning, not evidence of completion."}),
+            "Resolve the current demo edit requirements. Return JSON only with instruction (a self-contained actionable brief), screens (zero-based existing screen indexes explicitly restricted by the user, or [] for candidate-wide work), minimum_new_screens (minimum additions needed to give requested visual views their own screens, 0 if existing screens suffice), and requirements (a nonempty checklist of independently verifiable deliverables). Read the latest instruction together with the conversation: a clarification such as 'only candidate 4' retains the preceding feature request. Candidate numbers are NOT screen numbers. Ignore prior completed tasks and assistant-invented restrictions. Extending a demo can require BOTH modifying existing screens and adding connected screens; preserve both in the checklist. Include every requested feature, responsive variant, and relevant interaction/state requirement; do not substitute layout repairs. Give each requested rendered page or distinct visual state its own checklist item, naming its intended screen, visible-by-default content and clickable transitions. Count required separate views when computing minimum_new_screens, even when the user did not state a numeric screen count. Hidden panels inside one screen do not satisfy multiple view items. Do not turn permitted specification-only behavior into extra visual requirements. Distinguish proposed concepts from implemented features. A reference to an existing screen does not forbid requested additions. When additions are required, append them to preserve existing indexes. Do not invent restrictions from worker assignments. Candidate write isolation is enforced by the server, not a visual deliverable; do not put it in the checklist. For restyling, preservation means retaining the existing content and behavior, not requiring identical HTML/CSS or implementing missing backend features. This is planning, not evidence of completion."}),
             self.user_message(&format!(
                 "Conversation:\n{}\nLatest instruction:\n{}\nRegenerate selected screens: {}\nExisting screens:\n{}",
                 order.conversation, order.instruction, order.is_fresh, json!(inventory)
@@ -134,7 +136,7 @@ impl GenerationEngine {
         ];
         let mut messages = messages;
         messages[0]["content"] = json!(format!(
-            "{}\n{DEMO_ACCEPTANCE_CONTRACT}",
+            "{}\n{DEMO_ACCEPTANCE_CONTRACT}\n{DEMO_SCREEN_RULE}",
             messages[0]["content"].as_str().unwrap_or_default()
         ));
         let reply = self.model.chat(client, &messages, effort).await?;
@@ -147,7 +149,10 @@ impl GenerationEngine {
             plan.instruction = order.instruction.to_owned();
         }
         plan.validate(design)?;
-        plan.instruction = format!("{}\n{DEMO_ACCEPTANCE_CONTRACT}", plan.instruction);
+        plan.instruction = format!(
+            "{}\n{DEMO_ACCEPTANCE_CONTRACT}\n{DEMO_SCREEN_RULE}",
+            plan.instruction
+        );
         plan.source = format!(
             "{}\nLatest instruction: {}",
             order.conversation, order.instruction
@@ -164,7 +169,7 @@ impl GenerationEngine {
     ) -> Result<Vec<String>, String> {
         let messages = vec![
             json!({"role": "system", "content":
-            "Review demo requirement coverage before saving. Return only a JSON object with coverage (one object per checklist item in order, each with complete: boolean and reason: string) and reference_error (null unless a required reference cannot be inspected, then a specific explanation and recovery action), plus unsupported_requirements (an array of explicitly requested executable capabilities the renderer cannot support, empty otherwise). Explain each incomplete item with concrete evidence and an actionable correction. Use the attached references when judging theme matching; do not invent reference colors or fonts. If a required reference is missing or unreadable, report reference_error rather than treating it as an incomplete edit. Judge rendered visual requirements from HTML/CSS and navigation; judge specification-based requirements from complete concrete component/state specifications when the user permits them, not promises of future work. For a styling-only request, theme/CSS-only changes are valid. Require new features or screens only when requested by the current task; a layout-only patch is insufficient only when feature work was requested. Mark missing, partial, disconnected, or unverifiable requirements false. Compare the checklist with the original conversation and latest request; if the plan omitted requested work, mark all items false rather than accepting a narrowed brief. Evaluate only the current task and its clarifications, not earlier completed tasks or assistant-invented restrictions; the latest user requirements resolve conflicts. Requested supported demo interactions must be present in the artifact; renderer-forbidden behavior may instead have a concrete implementation specification when the task permits it. For preservation requirements, compare the before and after artifacts; do not demand identical markup for a styling change, new backend functionality, or responsive behavior absent from the baseline. Candidate isolation is a server-enforced fact: the pending write can only save the identified candidate, not other candidates. Do not reject a candidate-scope checklist item because other candidates are not supplied. This review is not a browser or backend test."}),
+            "Review demo requirement coverage before saving. Return only a JSON object with coverage (one object per checklist item in order, each with complete: boolean and reason: string) and reference_error (null unless a required reference cannot be inspected, then a specific explanation and recovery action), plus unsupported_requirements (an array of explicitly requested executable capabilities the renderer cannot support, empty otherwise). Explain each incomplete item with concrete evidence and an actionable correction. Use the attached references when judging theme matching; do not invent reference colors or fonts. If a required reference is missing or unreadable, report reference_error rather than treating it as an incomplete edit. Judge rendered visual requirements from HTML/CSS and navigation; judge specification-based requirements from complete concrete component/state specifications when the user permits them, not promises of future work. For a styling-only request, theme/CSS-only changes are valid. Require new features or screens only when requested by the current task; a layout-only patch is insufficient only when feature work was requested. Mark missing, partial, disconnected, or unverifiable requirements false. For each requested rendered view, identify its separate screen by number/name and verify that its required content is visible by default. Check that controls link to the appropriate destination screens, including return/cancel actions. Multiple requested pages or visual states hidden behind controls in one HTML fragment are incomplete, even if interactive or described in notes. Give an actionable correction to append the missing independent screens and connect them, preserving unselected existing screens. Ordinary local menu expansion and incidental toggles are allowed; do not reject unrelated legacy patterns or invent extra states during a restyle. Compare the checklist with the original conversation and latest request; if the plan omitted requested work, mark all items false rather than accepting a narrowed brief. Evaluate only the current task and its clarifications, not earlier completed tasks or assistant-invented restrictions; the latest user requirements resolve conflicts. Requested supported demo interactions must be present in the artifact; renderer-forbidden behavior may instead have a concrete implementation specification when the task permits it. For preservation requirements, compare the before and after artifacts; do not demand identical markup for a styling change, new backend functionality, or responsive behavior absent from the baseline. Candidate isolation is a server-enforced fact: the pending write can only save the identified candidate, not other candidates. Do not reject a candidate-scope checklist item because other candidates are not supplied. This review is not a browser or backend test."}),
             self.user_message(&format!(
                 "Pending save target (server-enforced): {}\nOriginal request:\n{}\nEdit brief:\n{}\nChecklist:\n{}\nBefore artifact:\n{}\nAfter artifact:\n{}",
                 evidence.candidate_id, plan.source, plan.instruction, json!(plan.requirements),
@@ -173,7 +178,7 @@ impl GenerationEngine {
         ];
         let mut messages = messages;
         messages[0]["content"] = json!(format!(
-            "{}\n{DEMO_ACCEPTANCE_CONTRACT}",
+            "{}\n{DEMO_ACCEPTANCE_CONTRACT}\n{DEMO_SCREEN_RULE}",
             messages[0]["content"].as_str().unwrap_or_default()
         ));
         let reply = self.model.chat(client, &messages, effort).await?;

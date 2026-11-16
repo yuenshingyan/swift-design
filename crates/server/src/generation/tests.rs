@@ -147,6 +147,14 @@ fn a_second_run_numbers_after_the_first() {
 }
 
 #[test]
+fn built_in_demo_writing_uses_the_shared_separate_view_rule() {
+    let prompt = system_prompt();
+    assert!(prompt.contains(crate::instructions::DEMO_SCREEN_RULE));
+    assert!(prompt.contains("Tabs selecting required page content"));
+    assert!(!prompt.contains("A toggle, a tab set, or a modal is"));
+}
+
+#[test]
 fn system_prompt_names_the_clarification_protocol() {
     let prompt = system_prompt();
     assert!(prompt.contains("The request and the answers are authoritative"));

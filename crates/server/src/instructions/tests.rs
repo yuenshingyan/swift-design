@@ -390,6 +390,29 @@ fn demo_rules_allow_translucent_surfaces_over_a_simulated_desktop() {
 }
 
 #[test]
+fn required_demo_views_are_separate_clickable_exportable_screens() {
+    let rule = crate::instructions::DEMO_SCREEN_RULE;
+    let payload = instructions();
+    assert!(
+        payload["demo_rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some(rule))
+    );
+    assert!(rule.contains("its own entry in screens"));
+    assert!(rule.contains("content visible by default"));
+    assert!(rule.contains("exportable as one PNG"));
+    assert!(rule.contains("clickable <a href='#screen-N'>"));
+    assert!(rule.contains("Do not pack these views"));
+    assert!(rule.contains("Small local menu expansions and incidental toggles may remain inline"));
+    assert!(rule.contains("Do not silently convert unrelated legacy screens"));
+    let rules = DEMO_RULES.join("\n");
+    assert!(!rules.contains("A toggle, a tab set, or a modal is"));
+    assert!(!rules.contains("Put intent, states, and handoff remarks in notes"));
+}
+
+#[test]
 fn the_demo_rules_explain_screen_links_and_css_widgets() {
     let demo = DEMO_RULES.join("\n");
     assert!(demo.contains("`<a href='#screen-3'>`"));

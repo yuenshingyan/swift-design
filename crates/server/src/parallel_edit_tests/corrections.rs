@@ -111,6 +111,84 @@ async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
 }
 
 #[tokio::test]
+async fn requested_hidden_views_are_repaired_as_linked_separate_screens() {
+    let fake = ParallelFakeModel::start(None).await;
+    let original = sample_design();
+    let candidate = ReviewingCandidate::new(&fake);
+    candidate
+        .seed(
+            &original,
+            "Design connected and disconnected views, with clickable transitions.",
+        )
+        .await;
+    fake.watch_baseline(&candidate.path()).await;
+    fake.push_text(r#"{"edit":true}"#.into());
+    fake.push_text(json!({
+        "instruction": "Design connected and disconnected views as separate screens.",
+        "screens": [0], "minimum_new_screens": 0,
+        "requirements": ["Connected view with disconnect link", "Disconnected view with connect link"]
+    }).to_string());
+    let mut packed = original.screens[0].clone();
+    packed.html = "<input id='s1-state' type='checkbox'><label for='s1-state'>Change state</label><section class='on'><h1>Connected</h1></section><section class='off'><h1>Disconnected</h1></section>".into();
+    packed.css = Some(".off{display:none} #s1-state:checked ~ .off{display:block} #s1-state:checked ~ .on{display:none}".into());
+    fake.push_text(json!({"screens":[{"index":0,"screen":packed}]}).to_string());
+    fake.push_text(json!({"coverage":[
+        {"complete":true,"reason":"Connected view visible"},
+        {"complete":false,"reason":"Disconnected is hidden behind a checkbox; append a separate screen with content visible by default and link both directions."}
+    ]}).to_string());
+    let mut connected = original.screens[0].clone();
+    connected.name = "Connected".into();
+    connected.html = format!(
+        "<h1>Connected</h1><a href='#screen-{}'>Disconnect</a>",
+        original.screens.len() + 1
+    );
+    connected.css = None;
+    let mut disconnected = connected.clone();
+    disconnected.name = "Disconnected".into();
+    disconnected.html = "<h1>Disconnected</h1><a href='#screen-1'>Connect</a>".into();
+    fake.push_text(
+        json!({"screens":[
+            {"index":0,"screen":connected},
+            {"index":original.screens.len(),"insert":true,"screen":disconnected}
+        ]})
+        .to_string(),
+    );
+    fake.push_text(json!({"coverage":[
+        {"complete":true,"reason":"Connected screen links to disconnected"},
+        {"complete":true,"reason":"Separate disconnected screen visible by default and links back"}
+    ]}).to_string());
+    let result = candidate.engine.clone().run("talk", log_sink()).await;
+    assert!(result.is_ok(), "{result:?}");
+    let saved = candidate
+        .designs
+        .load("talk-candidate-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.screens.len(), original.screens.len() + 1);
+    assert_eq!(saved.screens[0], connected);
+    assert_eq!(saved.screens.last(), Some(&disconnected));
+    assert_eq!(
+        saved.screens[1..original.screens.len()],
+        original.screens[1..]
+    );
+    assert!(
+        !fake
+            .state
+            .baseline_changed_during_requests
+            .load(Ordering::SeqCst)
+    );
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 6);
+    for request in &requests[1..] {
+        assert!(request_text(request).contains(crate::instructions::DEMO_SCREEN_RULE));
+    }
+    assert!(request_text(&requests[1]).contains("naming its intended screen"));
+    assert!(request_text(&requests[3]).contains("identify its separate screen by number/name"));
+    assert!(request_text(&requests[4]).contains("Disconnected is hidden behind a checkbox"));
+}
+
+#[tokio::test]
 async fn correction_cannot_change_an_unselected_original_screen() {
     let fake = ParallelFakeModel::start(None).await;
     let original = sample_design();

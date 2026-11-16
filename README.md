@@ -147,6 +147,19 @@ Every new candidate takes the next free number: a later run adds candidates afte
 
 In `reviewing`, the chat is the edit input: type what should change and press **Send**. With a candidate chosen, the change is applied to it; otherwise new candidates are written.
 
+Demo generation instructions require each requested page, flow step, tab
+destination, modal/confirmation view and distinct visual deliverable state to be
+its own named screen, visible by default and independently exportable as one PNG.
+Clickable screen links connect those views, including retry, confirm, cancel and
+back actions; a modal screen shows its overlay already open. Hidden panels,
+preview-state selectors and notes cannot substitute for required rendered views.
+Small local menus and incidental toggles can remain interactive within a screen;
+this does not require every hover or control combination to become a new screen.
+The edit planner enumerates requested visual views and accounts for missing
+screens; requirement review checks their separate visible screens and navigation.
+Styling-only edits do not silently restructure unrelated legacy screens, and
+explicitly permitted behavior specifications remain valid specification deliverables.
+
 Demo edits first resolve the current request and its clarifications into a screen
 scope and deliverable checklist. Candidate selection does not prohibit adding
 screens. Existing-screen workers still run in parallel (up to four); a serial
