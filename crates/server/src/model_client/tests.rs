@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 /// Collects the assistant text and token usage from a whole ChatGPT
 /// responses event stream.
 #[cfg(test)]
@@ -34,7 +32,7 @@ async fn retry_after_headers_are_read_without_retrying_before_the_requested_time
         let error = model
             .chat_with(&reqwest::Client::new(), serde_json::json!({}), None)
             .await
-            .unwrap_err();
+            .expect_err("rate-limited model request should report the required wait");
         assert!(error.contains("above the automatic limit"));
         assert_eq!(fake.requests().len(), 1);
     }
@@ -74,7 +72,7 @@ async fn streamed_errors_discard_partial_text_and_retry_the_same_body() {
             None,
         )
         .await
-        .unwrap();
+        .expect("test model conversation should complete");
     assert_eq!(result, "complete reply");
     let requests = fake.requests();
     assert_eq!(requests.len(), 2);
@@ -145,7 +143,8 @@ fn chatgpt_streams_collect_deltas_and_report_failures() {
                   data: {\"type\":\"response.output_text.delta\",\"delta\":\":1}\"}\n\
                   data: {\"type\":\"response.completed\",\
                   \"response\":{\"usage\":{\"input_tokens\":120,\"output_tokens\":7}}}\n";
-    let (content, usage) = parse_chatgpt_stream(stream).unwrap();
+    let (content, usage) =
+        parse_chatgpt_stream(stream).expect("test model response stream should parse");
     assert_eq!(content, "{\"a\":1}");
     assert_eq!(
         usage,
@@ -156,7 +155,11 @@ fn chatgpt_streams_collect_deltas_and_report_failures() {
     );
     let failed = "data: {\"type\":\"response.failed\",\
                   \"response\":{\"error\":{\"message\":\"quota\"}}}\n";
-    assert!(parse_chatgpt_stream(failed).unwrap_err().contains("quota"));
+    assert!(
+        parse_chatgpt_stream(failed)
+            .expect_err("failed model stream should return the provider error")
+            .contains("quota")
+    );
 }
 
 #[test]
@@ -178,7 +181,13 @@ fn stream_lines_collect_text_and_usage_per_wire_format() {
         &mut state
     ));
     assert_eq!(state.collected, "Hel");
-    assert_eq!(state.usage.unwrap().input_tokens, 9);
+    assert_eq!(
+        state
+            .usage
+            .expect("test model response should report usage")
+            .input_tokens,
+        9
+    );
     assert!(state.saw_event);
     let mut anthropic = StreamState::default();
     stream_line(

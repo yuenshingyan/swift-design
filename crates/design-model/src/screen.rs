@@ -37,7 +37,6 @@ pub struct Screen {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::Screen;
     use crate::test_support::sample_design;
@@ -50,14 +49,15 @@ mod tests {
             css: Some("h1 { color: red; }".to_owned()),
             notes: Some("Speak slowly.".to_owned()),
         };
-        let json = serde_json::to_string(&screen).unwrap();
-        let restored: Screen = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&screen).expect("test value should serialize to JSON");
+        let restored: Screen = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(screen, restored);
     }
 
     #[test]
     fn absent_optional_fields_stay_out_of_the_json() {
-        let json = serde_json::to_value(&sample_design().screens[0]).unwrap();
+        let json = serde_json::to_value(&sample_design().screens[0])
+            .expect("test value should convert to JSON");
         assert!(json.get("notes").is_none());
         assert!(json.get("html").is_some());
     }
@@ -66,12 +66,13 @@ mod tests {
     fn screen_name_round_trips_and_stays_out_when_empty() {
         let mut screen = sample_design().screens[0].clone();
         screen.name = String::new();
-        let json = serde_json::to_value(&screen).unwrap();
+        let json = serde_json::to_value(&screen).expect("test value should convert to JSON");
         assert!(json.get("name").is_none());
-        let restored: Screen = serde_json::from_value(json).unwrap();
+        let restored: Screen =
+            serde_json::from_value(json).expect("test JSON value should deserialize");
         assert_eq!(restored.name, "");
         screen.name = "Home".to_owned();
-        let json = serde_json::to_value(&screen).unwrap();
+        let json = serde_json::to_value(&screen).expect("test value should convert to JSON");
         assert_eq!(json["name"], "Home");
     }
 

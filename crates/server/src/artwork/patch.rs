@@ -122,12 +122,12 @@ pub fn apply_patch(artwork: &Artwork, patch: ArtworkPatch) -> Result<Artwork, St
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     fn artwork() -> Artwork {
-        serde_json::from_str(include_str!("../../../../fixtures/sample-artwork.json")).unwrap()
+        serde_json::from_str(include_str!("../../../../fixtures/sample-artwork.json"))
+            .expect("test JSON should deserialize")
     }
 
     fn note_of(cover: &Cover) -> &str {
@@ -143,11 +143,12 @@ mod tests {
         inserted.notes = Some("inserted".to_owned());
         let patch = parse_patch(&format!(
             "{{\"title\":\"New\",\"covers\":[{{\"index\":0,\"cover\":{}}},{{\"index\":1,\"cover\":null}},{{\"index\":2,\"insert\":true,\"cover\":{}}}]}}",
-            serde_json::to_string(&replacement).unwrap(),
-            serde_json::to_string(&inserted).unwrap()
+            serde_json::to_string(&replacement).expect("test value should serialize to JSON"),
+            serde_json::to_string(&inserted).expect("test value should serialize to JSON")
         ))
-        .unwrap();
-        let patched = apply_patch(&original, patch).unwrap();
+        .expect("test patch should parse");
+        let patched =
+            apply_patch(&original, patch).expect("test patch should apply to the fixture");
         assert_eq!(patched.title, "New");
         assert_eq!(patched.covers.len(), 2);
         assert_eq!(note_of(&patched.covers[0]), "replaced");
@@ -158,18 +159,24 @@ mod tests {
     #[test]
     fn out_of_range_indexes_are_errors() {
         let original = artwork();
-        let patch = parse_patch("{\"covers\":[{\"index\":7,\"cover\":null}]}").unwrap();
-        let error = apply_patch(&original, patch).unwrap_err();
+        let patch = parse_patch("{\"covers\":[{\"index\":7,\"cover\":null}]}")
+            .expect("test patch should parse");
+        let error = apply_patch(&original, patch)
+            .expect_err("patch targeting an out-of-range unit should be rejected");
         assert!(error.contains("does not exist"));
-        let patch =
-            parse_patch("{\"covers\":[{\"index\":9,\"insert\":true,\"cover\":null}]}").unwrap();
+        let patch = parse_patch("{\"covers\":[{\"index\":9,\"insert\":true,\"cover\":null}]}")
+            .expect("test patch should parse");
         assert!(apply_patch(&original, patch).is_err());
     }
 
     #[test]
     fn an_empty_patch_keeps_the_artwork() {
         let original = artwork();
-        let patched = apply_patch(&original, parse_patch("Sure: {}").unwrap()).unwrap();
+        let patched = apply_patch(
+            &original,
+            parse_patch("Sure: {}").expect("test patch should parse"),
+        )
+        .expect("test patch should apply to the fixture");
         assert_eq!(patched, original);
         assert!(parse_patch("no json").is_err());
     }

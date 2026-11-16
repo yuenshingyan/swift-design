@@ -35,7 +35,6 @@ pub struct Ad {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::Ad;
     use crate::test_support::sample_campaign;
@@ -47,14 +46,15 @@ mod tests {
             css: Some("h1 { color: red; }".to_owned()),
             notes: Some("Link: https://example.com. Alt: A short hello.".to_owned()),
         };
-        let json = serde_json::to_string(&ad).unwrap();
-        let restored: Ad = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&ad).expect("test value should serialize to JSON");
+        let restored: Ad = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(ad, restored);
     }
 
     #[test]
     fn absent_ad_fields_stay_out_of_the_json() {
-        let json = serde_json::to_value(&sample_campaign().ads[0]).unwrap();
+        let json = serde_json::to_value(&sample_campaign().ads[0])
+            .expect("test value should convert to JSON");
         assert!(json.get("notes").is_none());
         assert!(json.get("html").is_some());
     }

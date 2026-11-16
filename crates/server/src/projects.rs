@@ -276,7 +276,6 @@ fn project_members(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::projects::{ProjectIds, is_in_project, project_members, renamed_id};
 
@@ -300,7 +299,8 @@ mod tests {
             campaigns: &campaigns,
             artworks: &artworks,
         };
-        let members = project_members(&ids, "talk", "pitch").unwrap();
+        let members =
+            project_members(&ids, "talk", "pitch").expect("test project members should be listed");
         assert_eq!(members.designs, ["talk-candidate-1"]);
         assert_eq!(members.decks, ["talk", "talk-candidate-2"]);
         assert_eq!(members.documents, ["talk-candidate-3"]);

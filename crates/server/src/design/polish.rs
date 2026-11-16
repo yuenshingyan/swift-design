@@ -269,7 +269,6 @@ pub fn polish_prompt(design_json: &str, findings: &[String], image_count: usize)
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -316,7 +315,8 @@ mod tests {
             let dom = format!(
                 "<html data-swift-design-findings=\"[{{&quot;screen&quot;:0,&quot;kind&quot;:&quot;{kind}&quot;}}]\" data-swift-design-audited-screens=\"[0]\">"
             );
-            let audit = DemoAudit::from_dom(&dom, 1).unwrap();
+            let audit = DemoAudit::from_dom(&dom, 1)
+                .expect("fixture DOM should contain a valid audit result");
             assert!(audit.require_layout_clean().is_err());
             assert_eq!(audit.score(None), (1, 1));
             assert!(audit.instructions(None).len() == 1);
@@ -328,9 +328,11 @@ mod tests {
     #[test]
     fn tweaks_cannot_delete_insert_or_replace_untouched_screens() {
         let design: Design =
-            serde_json::from_str(include_str!("../../../../fixtures/sample-design.json")).unwrap();
+            serde_json::from_str(include_str!("../../../../fixtures/sample-design.json"))
+                .expect("test JSON should deserialize");
         assert!(apply_tweak(&design, r#"{"screens":[{"index":0,"screen":null}]}"#, None).is_err());
-        let screen = serde_json::to_value(&design.screens[0]).unwrap();
+        let screen =
+            serde_json::to_value(&design.screens[0]).expect("test value should convert to JSON");
         let insertion =
             serde_json::json!({"screens":[{"index":0,"insert":true,"screen":screen}]}).to_string();
         assert!(apply_tweak(&design, &insertion, None).is_err());
@@ -342,7 +344,8 @@ mod tests {
     #[test]
     fn tweaks_can_remove_obsolete_annotations_but_cannot_resize_the_canvas() {
         let mut before: Design =
-            serde_json::from_str(include_str!("../../../../fixtures/sample-design.json")).unwrap();
+            serde_json::from_str(include_str!("../../../../fixtures/sample-design.json"))
+                .expect("test JSON should deserialize");
         before.screens[0].html =
             "<div data-layout-align='left'><p>One</p><p>Two</p></div>".to_owned();
         let mut after = before.clone();

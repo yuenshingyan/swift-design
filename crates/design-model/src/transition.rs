@@ -102,7 +102,6 @@ impl TransitionAxis {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::{DEFAULT_TRANSITION_MS, Transition, TransitionAxis, TransitionEffect};
 
@@ -113,20 +112,21 @@ mod tests {
             axis: TransitionAxis::Horizontal,
             duration_ms: 600,
         };
-        let json = serde_json::to_string(&transition).unwrap();
+        let json = serde_json::to_string(&transition).expect("test value should serialize to JSON");
         assert_eq!(
             json,
             r#"{"effect":"cover","axis":"horizontal","duration_ms":600}"#
         );
         assert_eq!(
-            serde_json::from_str::<Transition>(&json).unwrap(),
+            serde_json::from_str::<Transition>(&json).expect("test JSON should deserialize"),
             transition
         );
     }
 
     #[test]
     fn missing_fields_fall_back_to_the_defaults() {
-        let transition: Transition = serde_json::from_str("{}").unwrap();
+        let transition: Transition =
+            serde_json::from_str("{}").expect("test JSON should deserialize");
         assert_eq!(transition, Transition::default());
         assert_eq!(transition.effect, TransitionEffect::Push);
         assert_eq!(transition.axis, TransitionAxis::Vertical);
@@ -141,11 +141,12 @@ mod tests {
 
     #[test]
     fn the_slide_effect_name_loads_as_push() {
-        let transition: Transition = serde_json::from_str(r#"{"effect":"slide"}"#).unwrap();
+        let transition: Transition =
+            serde_json::from_str(r#"{"effect":"slide"}"#).expect("test JSON should deserialize");
         assert_eq!(transition.effect, TransitionEffect::Push);
         assert!(
             serde_json::to_string(&transition)
-                .unwrap()
+                .expect("test value should serialize to JSON")
                 .contains("\"push\"")
         );
     }

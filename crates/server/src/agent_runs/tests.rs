@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -49,17 +47,20 @@ async fn generating_session(sessions: &SessionStore) {
     sessions
         .create(NewSession::demo("talk", "Talk", "A workspace."))
         .await
-        .unwrap();
+        .expect("test fixture should be created");
     sessions
         .apply("talk", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
 }
 
 async fn wait_for_turns(runner: &AgentRunner, sessions: &SessionStore, count: usize) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let runs = sessions.runs("talk").await.unwrap();
+            let runs = sessions
+                .runs("talk")
+                .await
+                .expect("test run records should be readable");
             if runs.len() == count
                 && runs.iter().all(|run| run.finished_at.is_some())
                 && !runner.is_running_session("talk")
@@ -70,31 +71,50 @@ async fn wait_for_turns(runner: &AgentRunner, sessions: &SessionStore, count: us
         }
     })
     .await
-    .unwrap();
+    .expect("test operation should complete before the timeout");
 }
 
 #[tokio::test]
 async fn queued_prompts_start_in_fifo_order_only_after_the_active_turn_finishes() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (runner, sessions) = command_runner(&directory, "sleep 0.2");
     generating_session(&sessions).await;
-    runner.start("talk").await.unwrap();
+    runner
+        .start("talk")
+        .await
+        .expect("test agent run should start successfully");
     sessions
         .append_message("talk", queued_prompt("First queued prompt"))
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     sessions
         .append_message("talk", queued_prompt("Second queued prompt"))
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     assert!(matches!(
         runner.start("talk").await,
         Err(StartError::AlreadyRunning)
     ));
-    assert!(sessions.messages_for_run("talk").await.unwrap().is_empty());
-    assert_eq!(sessions.runs("talk").await.unwrap().len(), 1);
+    assert!(
+        sessions
+            .messages_for_run("talk")
+            .await
+            .expect("chat messages for the test run should be readable")
+            .is_empty()
+    );
+    assert_eq!(
+        sessions
+            .runs("talk")
+            .await
+            .expect("test run records should be readable")
+            .len(),
+        1
+    );
     wait_for_turns(&runner, &sessions, 3).await;
-    let messages = sessions.messages("talk").await.unwrap();
+    let messages = sessions
+        .messages("talk")
+        .await
+        .expect("test chat messages should be readable");
     assert!(messages.iter().all(|message| !message.is_queued));
     assert_eq!(messages[0].content, "First queued prompt");
     assert_eq!(messages[1].content, "Second queued prompt");
@@ -102,46 +122,54 @@ async fn queued_prompts_start_in_fifo_order_only_after_the_active_turn_finishes(
 
 #[tokio::test]
 async fn answered_turns_resume_before_their_queued_followups() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (runner, sessions) = command_runner(&directory, "sleep 0.2");
     generating_session(&sessions).await;
     sessions
         .apply("talk", design_model::WorkflowEvent::QuestionsAsked)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     sessions
         .append_message("talk", ChatMessage::user("Current prompt", None))
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     sessions
         .append_message("talk", queued_prompt("Later prompt"))
         .await
-        .unwrap();
-    sessions.queue_answered_turn("talk").await.unwrap();
+        .expect("test chat message should be appended");
+    sessions
+        .queue_answered_turn("talk")
+        .await
+        .expect("answered test turn should be queued");
     runner.start_pending().await;
     assert_eq!(
         sessions
             .messages_for_run("talk")
             .await
-            .unwrap()
+            .expect("chat messages for the test run should be readable")
             .last()
-            .unwrap()
+            .expect("test collection should contain a last item")
             .content,
         "Current prompt"
     );
-    assert!(sessions.has_queued_messages("talk").await.unwrap());
+    assert!(
+        sessions
+            .has_queued_messages("talk")
+            .await
+            .expect("queued-message state should be readable")
+    );
     sessions
         .apply("talk", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     wait_for_turns(&runner, &sessions, 2).await;
     assert_eq!(
         sessions
             .messages_for_run("talk")
             .await
-            .unwrap()
+            .expect("chat messages for the test run should be readable")
             .last()
-            .unwrap()
+            .expect("test collection should contain a last item")
             .content,
         "Later prompt"
     );
@@ -149,29 +177,37 @@ async fn answered_turns_resume_before_their_queued_followups() {
 
 #[tokio::test]
 async fn finish_requests_do_not_consume_an_ordinary_queued_prompt() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (runner, sessions) = command_runner(&directory, "sleep 5");
     generating_session(&sessions).await;
     sessions
         .append_message("talk", queued_prompt("Waiting edit"))
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     sessions
         .append_message(
             "talk",
             ChatMessage::continue_request("Finish", "talk-candidate-1"),
         )
         .await
-        .unwrap();
-    runner.start_continue("talk").await.unwrap();
-    assert!(sessions.has_queued_messages("talk").await.unwrap());
+        .expect("test chat message should be appended");
+    runner
+        .start_continue("talk")
+        .await
+        .expect("test continuation should start");
+    assert!(
+        sessions
+            .has_queued_messages("talk")
+            .await
+            .expect("queued-message state should be readable")
+    );
     assert!(
         sessions
             .messages_for_run("talk")
             .await
-            .unwrap()
+            .expect("chat messages for the test run should be readable")
             .last()
-            .unwrap()
+            .expect("test collection should contain a last item")
             .is_continue
     );
     runner.stop();
@@ -180,23 +216,31 @@ async fn finish_requests_do_not_consume_an_ordinary_queued_prompt() {
 
 #[tokio::test]
 async fn rapid_queued_turns_finish_the_correct_run_records() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (runner, sessions) = command_runner(&directory, "true");
     generating_session(&sessions).await;
     for index in 0..12 {
         sessions
             .append_message("talk", queued_prompt(&format!("Prompt {index}")))
             .await
-            .unwrap();
+            .expect("test chat message should be appended");
     }
-    runner.start("talk").await.unwrap();
+    runner
+        .start("talk")
+        .await
+        .expect("test agent run should start successfully");
     wait_for_turns(&runner, &sessions, 12).await;
-    assert!(!sessions.has_queued_messages("talk").await.unwrap());
+    assert!(
+        !sessions
+            .has_queued_messages("talk")
+            .await
+            .expect("queued-message state should be readable")
+    );
     assert!(
         sessions
             .runs("talk")
             .await
-            .unwrap()
+            .expect("test run records should be readable")
             .iter()
             .all(|run| run.result.as_deref() == Some("succeeded"))
     );
@@ -204,95 +248,164 @@ async fn rapid_queued_turns_finish_the_correct_run_records() {
 
 #[tokio::test]
 async fn stopping_between_turns_pauses_the_queue_until_an_explicit_start() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (runner, sessions) = command_runner(&directory, "true");
     generating_session(&sessions).await;
     sessions
         .apply("talk", design_model::WorkflowEvent::GenerationSucceeded)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     sessions
         .append_message("talk", queued_prompt("Waiting prompt"))
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     runner.stop();
     runner.start_pending().await;
-    assert!(sessions.runs("talk").await.unwrap().is_empty());
-    assert!(runner.status()["is_queue_paused"].as_bool().unwrap());
-    runner.start("talk").await.unwrap();
+    assert!(
+        sessions
+            .runs("talk")
+            .await
+            .expect("test run records should be readable")
+            .is_empty()
+    );
+    assert!(
+        runner.status()["is_queue_paused"]
+            .as_bool()
+            .expect("test JSON value should be a boolean")
+    );
+    runner
+        .start("talk")
+        .await
+        .expect("test agent run should start successfully");
     wait_for_turns(&runner, &sessions, 1).await;
-    assert!(!runner.status()["is_queue_paused"].as_bool().unwrap());
+    assert!(
+        !runner.status()["is_queue_paused"]
+            .as_bool()
+            .expect("test JSON value should be a boolean")
+    );
 }
 
 #[tokio::test]
 async fn stopping_a_turn_keeps_the_pending_prompts_queued() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (runner, sessions) = command_runner(&directory, "sleep 5");
     generating_session(&sessions).await;
-    runner.start("talk").await.unwrap();
+    runner
+        .start("talk")
+        .await
+        .expect("test agent run should start successfully");
     sessions
         .append_message("talk", queued_prompt("Keep this request"))
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     runner.stop();
     wait_for_turns(&runner, &sessions, 1).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(sessions.has_queued_messages("talk").await.unwrap());
-    assert_eq!(sessions.runs("talk").await.unwrap().len(), 1);
+    assert!(
+        sessions
+            .has_queued_messages("talk")
+            .await
+            .expect("queued-message state should be readable")
+    );
     assert_eq!(
-        sessions.read("talk").await.unwrap().unwrap().state,
+        sessions
+            .runs("talk")
+            .await
+            .expect("test run records should be readable")
+            .len(),
+        1
+    );
+    assert_eq!(
+        sessions
+            .read("talk")
+            .await
+            .expect("test data should be readable")
+            .expect("test data should be present")
+            .state,
         WorkflowState::Stopped
     );
 }
 
 #[tokio::test]
 async fn a_failed_turn_does_not_start_its_pending_prompts() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (runner, sessions) = command_runner(&directory, "sleep 0.1; exit 1");
     generating_session(&sessions).await;
-    runner.start("talk").await.unwrap();
+    runner
+        .start("talk")
+        .await
+        .expect("test agent run should start successfully");
     sessions
         .append_message("talk", queued_prompt("Keep this request"))
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     wait_for_turns(&runner, &sessions, 1).await;
-    assert!(sessions.has_queued_messages("talk").await.unwrap());
+    assert!(
+        sessions
+            .has_queued_messages("talk")
+            .await
+            .expect("queued-message state should be readable")
+    );
     assert_eq!(
-        sessions.read("talk").await.unwrap().unwrap().state,
+        sessions
+            .read("talk")
+            .await
+            .expect("test data should be readable")
+            .expect("test data should be present")
+            .state,
         WorkflowState::Error
     );
 }
 
 #[tokio::test]
 async fn questions_pause_the_queue_until_the_user_responds() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (runner, sessions) = command_runner(&directory, "sleep 0.1");
     generating_session(&sessions).await;
-    runner.start("talk").await.unwrap();
+    runner
+        .start("talk")
+        .await
+        .expect("test agent run should start successfully");
     sessions
         .append_message("talk", queued_prompt("Keep this request"))
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     sessions
         .apply("talk", design_model::WorkflowEvent::QuestionsAsked)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     wait_for_turns(&runner, &sessions, 1).await;
-    assert!(sessions.has_queued_messages("talk").await.unwrap());
-    runner.start("talk").await.unwrap();
+    assert!(
+        sessions
+            .has_queued_messages("talk")
+            .await
+            .expect("queued-message state should be readable")
+    );
+    runner
+        .start("talk")
+        .await
+        .expect("test agent run should start successfully");
     wait_for_turns(&runner, &sessions, 2).await;
-    assert!(!sessions.has_queued_messages("talk").await.unwrap());
+    assert!(
+        !sessions
+            .has_queued_messages("talk")
+            .await
+            .expect("queued-message state should be readable")
+    );
 }
 
 #[tokio::test]
 async fn a_custom_command_run_captures_output_and_exit_code() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (runner, sessions) = command_runner(&directory, "echo custom-agent");
     sessions
         .create(NewSession::demo("talk", "Talk", "A talk."))
         .await
-        .unwrap();
-    runner.start("talk").await.unwrap();
+        .expect("test fixture should be created");
+    runner
+        .start("talk")
+        .await
+        .expect("test agent run should start successfully");
     let status = wait_until_finished(&runner).await;
     assert_eq!(status["exit_code"], 0);
     assert_eq!(status["active_agent"], "custom");
@@ -300,20 +413,23 @@ async fn a_custom_command_run_captures_output_and_exit_code() {
     assert!(
         status["log_tail"]
             .as_str()
-            .unwrap()
+            .expect("test JSON value should be a string")
             .contains("custom-agent")
     );
 }
 
 #[tokio::test]
 async fn a_second_start_while_running_is_rejected() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (runner, sessions) = command_runner(&directory, "sleep 5");
     sessions
         .create(NewSession::demo("talk", "Talk", "A talk."))
         .await
-        .unwrap();
-    runner.start("talk").await.unwrap();
+        .expect("test fixture should be created");
+    runner
+        .start("talk")
+        .await
+        .expect("test agent run should start successfully");
     assert!(runner.start("talk").await.is_err());
     runner.stop();
     let status = wait_until_finished(&runner).await;
@@ -322,44 +438,54 @@ async fn a_second_start_while_running_is_rejected() {
 
 #[tokio::test]
 async fn a_run_is_refused_when_the_session_is_in_error() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (runner, sessions) = command_runner(&directory, "echo hi");
     sessions
         .create(NewSession::demo("talk", "Talk", "A talk."))
         .await
-        .unwrap();
+        .expect("test fixture should be created");
     sessions
         .apply("talk", design_model::WorkflowEvent::RunFailed)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     assert!(runner.start("talk").await.is_err());
 }
 
 #[tokio::test]
 async fn a_missing_session_is_reported_as_not_found() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (runner, _sessions) = command_runner(&directory, "echo hi");
-    let error = runner.start("missing").await.unwrap_err();
+    let error = runner
+        .start("missing")
+        .await
+        .expect_err("agent run for a missing session should fail");
     assert_eq!(error.status(), axum::http::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn stopping_a_command_leaves_the_session_stopped_not_failed() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     // A command long enough to still be running when stop arrives.
     let (runner, sessions) = command_runner(&directory, "sleep 30");
     sessions
         .create(NewSession::demo("talk", "Talk", "A talk."))
         .await
-        .unwrap();
+        .expect("test fixture should be created");
     sessions
         .apply("talk", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
-    runner.start("talk").await.unwrap();
+        .expect("test workflow transition should apply");
+    runner
+        .start("talk")
+        .await
+        .expect("test agent run should start successfully");
     runner.stop();
     wait_until_finished(&runner).await;
-    let session = sessions.read("talk").await.unwrap().unwrap();
+    let session = sessions
+        .read("talk")
+        .await
+        .expect("test data should be readable")
+        .expect("test data should be present");
     assert_eq!(session.state, design_model::WorkflowState::Stopped);
     // A stop is not a failure, so nothing is reported and the run
     // resumes where it left off.
@@ -372,38 +498,52 @@ async fn stopping_a_command_leaves_the_session_stopped_not_failed() {
 
 #[tokio::test]
 async fn a_failing_command_moves_the_session_to_error_and_names_the_runtime() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (runner, sessions) = command_runner(&directory, "exit 3");
     sessions
         .create(NewSession::demo("talk", "Talk", "A talk."))
         .await
-        .unwrap();
-    runner.start("talk").await.unwrap();
+        .expect("test fixture should be created");
+    runner
+        .start("talk")
+        .await
+        .expect("test agent run should start successfully");
     wait_until_finished(&runner).await;
-    let session = sessions.read("talk").await.unwrap().unwrap();
+    let session = sessions
+        .read("talk")
+        .await
+        .expect("test data should be readable")
+        .expect("test data should be present");
     assert_eq!(session.state, design_model::WorkflowState::Error);
     assert!(
         session
             .error
-            .unwrap()
+            .expect("test failure should contain an error")
             .contains("SWIFT_DESIGN_AGENT_COMMAND")
     );
 }
 
 #[tokio::test]
 async fn a_zero_exit_in_generating_moves_the_session_to_reviewing() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (runner, sessions) = command_runner(&directory, "echo done");
     sessions
         .create(NewSession::demo("talk", "Talk", "A talk."))
         .await
-        .unwrap();
+        .expect("test fixture should be created");
     sessions
         .apply("talk", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
-    runner.start("talk").await.unwrap();
+        .expect("test workflow transition should apply");
+    runner
+        .start("talk")
+        .await
+        .expect("test agent run should start successfully");
     wait_until_finished(&runner).await;
-    let session = sessions.read("talk").await.unwrap().unwrap();
+    let session = sessions
+        .read("talk")
+        .await
+        .expect("test data should be readable")
+        .expect("test data should be present");
     assert_eq!(session.state, design_model::WorkflowState::Reviewing);
 }

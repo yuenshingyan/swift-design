@@ -11,14 +11,14 @@
 use std::collections::{HashMap, HashSet};
 
 use design_model::{
-    A4_VIEWPORT, AdSize, ArtifactKind, CoverSize, DECK_VIEWPORT, EmailFormat, Format,
-    LETTER_VIEWPORT, Orientation, PrintSize, Viewport,
+    A4_VIEWPORT, AdSize, ArtifactKind, CoverSize, EmailFormat, Format, LETTER_VIEWPORT,
+    Orientation, PrintSize, Viewport,
 };
 use dioxus::prelude::*;
 
 use crate::api;
 use crate::icons;
-use crate::settings::{artifact_project, stepped_screen};
+use crate::settings::stepped_screen;
 
 mod cards;
 mod components;

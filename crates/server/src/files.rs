@@ -41,22 +41,41 @@ pub async fn write_atomically(path: &Path, contents: &str) -> anyhow::Result<()>
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::{temporary_path, write_atomically};
     use std::path::Path;
 
     #[tokio::test]
     async fn a_write_replaces_the_file_and_leaves_no_temporary() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
         let path = directory.path().join("design.json");
-        write_atomically(&path, "{\"a\":1}").await.unwrap();
-        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "{\"a\":1}");
-        write_atomically(&path, "{\"a\":2}").await.unwrap();
-        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "{\"a\":2}");
-        let mut entries = tokio::fs::read_dir(directory.path()).await.unwrap();
+        write_atomically(&path, "{\"a\":1}")
+            .await
+            .expect("test fixture should be written atomically");
+        assert_eq!(
+            tokio::fs::read_to_string(&path)
+                .await
+                .expect("test content should be readable as text"),
+            "{\"a\":1}"
+        );
+        write_atomically(&path, "{\"a\":2}")
+            .await
+            .expect("test fixture should be written atomically");
+        assert_eq!(
+            tokio::fs::read_to_string(&path)
+                .await
+                .expect("test content should be readable as text"),
+            "{\"a\":2}"
+        );
+        let mut entries = tokio::fs::read_dir(directory.path())
+            .await
+            .expect("test directory should be readable");
         let mut names = Vec::new();
-        while let Some(entry) = entries.next_entry().await.unwrap() {
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .expect("next test directory entry should be readable")
+        {
             names.push(entry.file_name().to_string_lossy().into_owned());
         }
         assert_eq!(names, vec!["design.json"]);
@@ -70,11 +89,16 @@ mod tests {
         assert_ne!(first, second);
         // The name stays out of a `*.json` listing.
         for temporary in [first, second] {
-            assert_eq!(temporary.extension().unwrap(), "writing");
+            assert_eq!(
+                temporary
+                    .extension()
+                    .expect("test file should have an extension"),
+                "writing"
+            );
             assert!(
                 temporary
                     .file_name()
-                    .unwrap()
+                    .expect("test path should contain a file name")
                     .to_string_lossy()
                     .starts_with("design.json.")
             );

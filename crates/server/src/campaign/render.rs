@@ -135,7 +135,6 @@ fn render_ad(ad: &Ad, index: usize) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use design_model::{AdSize, Campaign};
     use sha2::Digest;
@@ -144,12 +143,18 @@ mod tests {
     use crate::export::base64_encode;
 
     fn sample_campaign() -> Campaign {
-        serde_json::from_str(include_str!("../../../../fixtures/sample-campaign.json")).unwrap()
+        serde_json::from_str(include_str!("../../../../fixtures/sample-campaign.json"))
+            .expect("test JSON should deserialize")
     }
 
     fn script_hash_of(html: &str) -> String {
-        let start = html.find("<script>").unwrap() + "<script>".len();
-        let end = html.find("</script>").unwrap();
+        let start = html
+            .find("<script>")
+            .expect("fixture should contain the expected match")
+            + "<script>".len();
+        let end = html
+            .find("</script>")
+            .expect("fixture should contain the expected match");
         base64_encode(&sha2::Sha256::digest(&html.as_bytes()[start..end]))
     }
 

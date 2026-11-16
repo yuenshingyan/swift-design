@@ -127,7 +127,6 @@ impl Mailing {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::test_support::sample_mailing;
     use crate::{
@@ -137,32 +136,44 @@ mod tests {
     #[test]
     fn mailing_round_trips_through_json() {
         let mailing = sample_mailing();
-        let json = serde_json::to_string(&mailing).unwrap();
+        let json = serde_json::to_string(&mailing).expect("test value should serialize to JSON");
         assert!(json.contains("\"emails\""));
         assert!(json.contains("\"format\":\"standard\""));
         assert!(!json.contains("\"viewport\""));
-        let restored: Mailing = serde_json::from_str(&json).unwrap();
+        let restored: Mailing = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(mailing, restored);
     }
 
     #[test]
     fn rejects_unknown_mailing_fields() {
-        let mut value = serde_json::to_value(sample_mailing()).unwrap();
+        let mut value =
+            serde_json::to_value(sample_mailing()).expect("test value should convert to JSON");
         value["extra"] = serde_json::json!(1);
         assert!(serde_json::from_value::<Mailing>(value.clone()).is_err());
-        value.as_object_mut().unwrap().remove("extra");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("extra");
         value["viewport"] = serde_json::json!({"width": 600, "height": 1200});
         assert!(serde_json::from_value::<Mailing>(value.clone()).is_err());
-        value.as_object_mut().unwrap().remove("viewport");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("viewport");
         value["transition"] = serde_json::json!({"effect": "fade"});
         assert!(serde_json::from_value::<Mailing>(value).is_err());
     }
 
     #[test]
     fn the_format_defaults_to_standard() {
-        let mut value = serde_json::to_value(sample_mailing()).unwrap();
-        value.as_object_mut().unwrap().remove("format");
-        let restored: Mailing = serde_json::from_value(value).unwrap();
+        let mut value =
+            serde_json::to_value(sample_mailing()).expect("test value should convert to JSON");
+        value
+            .as_object_mut()
+            .expect("test JSON value should be a mutable object")
+            .remove("format");
+        let restored: Mailing =
+            serde_json::from_value(value).expect("test JSON value should deserialize");
         assert_eq!(restored.format, EmailFormat::Standard);
         assert_eq!(restored.viewport(), STANDARD_EMAIL_VIEWPORT);
     }
@@ -171,11 +182,15 @@ mod tests {
     fn an_outline_longer_than_the_emails_marks_a_preview() {
         let mut mailing = sample_mailing();
         assert!(!mailing.is_preview());
-        assert!(!serde_json::to_string(&mailing).unwrap().contains("outline"));
+        assert!(
+            !serde_json::to_string(&mailing)
+                .expect("test value should serialize to JSON")
+                .contains("outline")
+        );
         mailing.outline = vec!["Launch".to_owned(), "Follow-up".to_owned()];
         assert!(mailing.is_preview());
-        let json = serde_json::to_string(&mailing).unwrap();
-        let restored: Mailing = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&mailing).expect("test value should serialize to JSON");
+        let restored: Mailing = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(restored.outline, mailing.outline);
         mailing.outline.truncate(1);
         assert!(!mailing.is_preview());
@@ -188,7 +203,7 @@ mod tests {
             assert!(viewport.is_valid(), "{}", format.label());
             assert_eq!(viewport.width, 600, "{}", format.label());
             assert_eq!(EmailFormat::from_name(format.as_str()), Some(format));
-            let json = serde_json::to_string(&format).unwrap();
+            let json = serde_json::to_string(&format).expect("test value should serialize to JSON");
             assert_eq!(json, format!("\"{}\"", format.as_str()));
         }
         assert_eq!(SHORT_EMAIL_VIEWPORT.aspect_ratio_css(), "600 / 800");

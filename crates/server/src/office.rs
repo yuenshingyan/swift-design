@@ -245,7 +245,6 @@ fn numeric_entity(entity: &str) -> Option<char> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::io::Write;
 
@@ -258,10 +257,15 @@ mod tests {
         for (name, content) in parts {
             writer
                 .start_file(*name, SimpleFileOptions::default())
-                .unwrap();
-            writer.write_all(content.as_bytes()).unwrap();
+                .expect("test ZIP entry should be created");
+            writer
+                .write_all(content.as_bytes())
+                .expect("test bytes should be written completely");
         }
-        writer.finish().unwrap().into_inner()
+        writer
+            .finish()
+            .expect("test output should be finalized successfully")
+            .into_inner()
     }
 
     #[test]
@@ -274,7 +278,8 @@ mod tests {
              <w:p><w:r><w:t>Second &#8220;quoted&#x201D;</w:t></w:r></w:p>\
              </w:body></w:document>",
         )]);
-        let text = office_text(DOCX, &bytes).unwrap();
+        let text =
+            office_text(DOCX, &bytes).expect("test Office document text should be extracted");
         assert_eq!(
             text,
             "Quarterly plan & budget\nSecond \u{201c}quoted\u{201d}"
@@ -298,7 +303,8 @@ mod tests {
             ("ppt/slides/slide1.xml", first.as_str()),
             ("ppt/slides/_rels/slide1.xml.rels", "<Relationships/>"),
         ]);
-        let text = office_text(PPTX, &bytes).unwrap();
+        let text =
+            office_text(PPTX, &bytes).expect("test Office document text should be extracted");
         assert_eq!(
             text,
             "Slide 1:\nOne\nOne point\n\nSlide 2:\nTwo\nOne point\n\nSlide 10:\nTen\nOne point"
@@ -321,20 +327,23 @@ mod tests {
                  </sheetData></worksheet>",
             ),
         ]);
-        let text = office_text(XLSX, &bytes).unwrap();
+        let text =
+            office_text(XLSX, &bytes).expect("test Office document text should be extracted");
         assert_eq!(text, "Sheet 1:\nRegion\tRevenue\nNorth\t1200.5\tnote");
     }
 
     #[test]
     fn a_file_that_is_not_a_zip_is_reported() {
-        let error = office_text(DOCX, b"plain text").unwrap_err();
+        let error =
+            office_text(DOCX, b"plain text").expect_err("non-ZIP Office input should be rejected");
         assert!(error.to_string().contains("not a zip archive"));
         let empty = archive_of(&[("other.xml", "<x/>")]);
-        let error = office_text(DOCX, &empty).unwrap_err();
+        let error = office_text(DOCX, &empty).expect_err("non-ZIP Office input should be rejected");
         assert!(error.to_string().contains("word/document.xml"));
-        let error = office_text(PPTX, &empty).unwrap_err();
+        let error = office_text(PPTX, &empty).expect_err("non-ZIP Office input should be rejected");
         assert!(error.to_string().contains("no slide parts"));
-        let error = office_text("text/plain", &empty).unwrap_err();
+        let error =
+            office_text("text/plain", &empty).expect_err("non-ZIP Office input should be rejected");
         assert!(error.to_string().contains("not an Office content type"));
     }
 

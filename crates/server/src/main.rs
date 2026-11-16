@@ -436,5 +436,4 @@ async fn render_artwork(Json(artwork): Json<Artwork>) -> Response {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests;

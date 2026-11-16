@@ -2,12 +2,13 @@ use super::*;
 
 #[tokio::test]
 async fn a_social_session_lists_its_socials_and_chooses_from_the_social_store() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_social_session(&application, "launch").await;
     let (status, body) = send(application.clone(), "GET", "/sessions/launch", None).await;
     assert_eq!(status, StatusCode::OK);
-    let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let view: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
     assert_eq!(view["session"]["artifact_kind"], "social");
     let (status, _) = send(
         application.clone(),
@@ -18,12 +19,31 @@ async fn a_social_session_lists_its_socials_and_chooses_from_the_social_store() 
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (_, body) = send(application.clone(), "GET", "/sessions/launch", None).await;
-    let view: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(view["socials"].as_array().unwrap().len(), 1);
+    let view: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
+    assert_eq!(
+        view["socials"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        1
+    );
     assert_eq!(view["socials"][0]["format"], "portrait");
     assert_eq!(view["socials"][0]["frame_count"], 3);
-    assert_eq!(view["documents"].as_array().unwrap().len(), 0);
-    assert_eq!(view["designs"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        view["documents"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        0
+    );
+    assert_eq!(
+        view["designs"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        0
+    );
     let (status, body) = send(application.clone(), "GET", "/candidates/launch", None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Choose this social post"));
@@ -44,7 +64,7 @@ async fn a_social_session_lists_its_socials_and_chooses_from_the_social_store() 
 
 #[tokio::test]
 async fn renders_a_valid_social_to_html() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (status, body) = send(
         test_application(&directory),
         "POST",
@@ -70,7 +90,7 @@ async fn renders_a_valid_social_to_html() {
 
 #[tokio::test]
 async fn saving_then_fetching_a_social_round_trips() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "launch").await;
     let (status, _) = send(
@@ -89,8 +109,15 @@ async fn saving_then_fetching_a_social_round_trips() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let social: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(social["frames"].as_array().unwrap().len(), 3);
+    let social: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
+    assert_eq!(
+        social["frames"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        3
+    );
     let (status, body) = send(application.clone(), "GET", "/socials", None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("\"frame_count\":3"));

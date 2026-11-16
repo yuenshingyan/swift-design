@@ -31,7 +31,6 @@ pub struct Page {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::Page;
     use crate::test_support::sample_document;
@@ -43,14 +42,15 @@ mod tests {
             css: Some("h1 { color: red; }".to_owned()),
             notes: Some("Cite the survey.".to_owned()),
         };
-        let json = serde_json::to_string(&page).unwrap();
-        let restored: Page = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&page).expect("test value should serialize to JSON");
+        let restored: Page = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(page, restored);
     }
 
     #[test]
     fn absent_page_fields_stay_out_of_the_json() {
-        let json = serde_json::to_value(&sample_document().pages[0]).unwrap();
+        let json = serde_json::to_value(&sample_document().pages[0])
+            .expect("test value should convert to JSON");
         assert!(json.get("notes").is_none());
         assert!(json.get("html").is_some());
     }

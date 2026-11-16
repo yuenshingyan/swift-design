@@ -1,5 +1,4 @@
 //! Exercises verified tweaking through real model and browser boundaries.
-#![allow(clippy::unwrap_used)]
 
 use std::sync::{Arc, Mutex};
 
@@ -20,7 +19,8 @@ use crate::sessions::{RunOptions, SessionStore};
 use crate::test_support::{FakeModelServer, SAMPLE_DESIGN};
 
 fn design() -> Design {
-    let mut design: Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+    let mut design: Design =
+        serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize");
     // Browser layout tests must not depend on Google's font service.
     design.theme.fonts.heading = "Arial".to_owned();
     design.theme.fonts.body = "Arial".to_owned();
@@ -60,13 +60,16 @@ fn report(design: &Design, findings: serde_json::Value) -> String {
     format!(
         "<html data-swift-design-findings=\"{}\" data-swift-design-audited-screens=\"{}\">",
         findings.to_string().replace('"', "&quot;"),
-        serde_json::to_string(&coverage).unwrap()
+        serde_json::to_string(&coverage).expect("test value should serialize to JSON")
     )
 }
 
 fn changing_browser(measured: Arc<Mutex<Vec<Design>>>, cosmetic_warnings: bool) -> DemoDomRunner {
     Arc::new(move |design, _| {
-        measured.lock().unwrap().push(design.clone());
+        measured
+            .lock()
+            .expect("test mutex should not be poisoned")
+            .push(design.clone());
         let findings = if design.screens[0].html.contains("Broken") {
             serde_json::json!([{"screen":0,"kind":"overflow","node":"h1","detail":"clipped text"}])
         } else if cosmetic_warnings {
@@ -81,7 +84,7 @@ fn changing_browser(measured: Arc<Mutex<Vec<Design>>>, cosmetic_warnings: bool) 
 
 #[tokio::test]
 async fn the_last_allowed_tweak_is_measured_and_the_exact_returned_version_is_rechecked() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let fake = FakeModelServer::start().await;
     fake.push_text(r#"{"screens":[{"index":0,"screen":{"html":"<h1>Fixed</h1>"}}]}"#);
     let measured = Arc::new(Mutex::new(Vec::new()));
@@ -93,18 +96,23 @@ async fn the_last_allowed_tweak_is_measured_and_the_exact_returned_version_is_re
     let result = engine
         .polish_design(&reqwest::Client::new(), design(), &context(), &log())
         .await
-        .unwrap();
+        .expect("test design should complete visual review");
     assert_eq!(result.screens[0].html, "<h1>Fixed</h1>");
     assert_eq!(fake.requests().len(), 1);
-    let measured = measured.lock().unwrap();
+    let measured = measured.lock().expect("test mutex should not be poisoned");
     assert_eq!(measured.len(), 3);
-    assert_eq!(measured.last().unwrap(), &result);
+    assert_eq!(
+        measured
+            .last()
+            .expect("test collection should contain a last item"),
+        &result
+    );
     assert!(fake.requests()[0].to_string().contains("clipped text"));
 }
 
 #[tokio::test]
 async fn unresolved_layout_errors_block_completion_when_the_tweak_budget_runs_out() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let fake = FakeModelServer::start().await;
     fake.push_text("{}");
     let measured = Arc::new(Mutex::new(Vec::new()));
@@ -112,21 +120,21 @@ async fn unresolved_layout_errors_block_completion_when_the_tweak_budget_runs_ou
     let error = engine
         .polish_design(&reqwest::Client::new(), design(), &context(), &log())
         .await
-        .unwrap_err();
+        .expect_err("unresolved layout errors should block completion after the tweak budget");
     assert!(error.contains("Layout verification failed"));
     assert_eq!(fake.requests().len(), 1);
 }
 
 #[tokio::test]
 async fn cosmetic_warnings_cannot_outweigh_fixing_a_hard_layout_error() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let fake = FakeModelServer::start().await;
     fake.push_text(r#"{"screens":[{"index":0,"screen":{"html":"<h1>Fixed</h1>"}}]}"#);
     let runner = changing_browser(Arc::new(Mutex::new(Vec::new())), true);
     let result = engine(&fake, &directory, runner)
         .polish_design(&reqwest::Client::new(), design(), &context(), &log())
         .await
-        .unwrap();
+        .expect("test design should complete visual review");
     assert_eq!(result.screens[0].html, "<h1>Fixed</h1>");
 }
 
@@ -136,7 +144,7 @@ async fn unavailable_or_incomplete_browser_audits_never_count_as_clean() {
         Err("Chrome unavailable".to_owned()),
         Ok("<html data-swift-design-findings=\"[]\">".to_owned()),
     ] {
-        let directory = TempDir::new().unwrap();
+        let directory = TempDir::new().expect("temporary test directory should be created");
         let fake = FakeModelServer::start().await;
         let runner: DemoDomRunner = Arc::new(move |_, _| {
             let response = response.clone();
@@ -154,11 +162,11 @@ async fn unavailable_or_incomplete_browser_audits_never_count_as_clean() {
 
 #[tokio::test]
 async fn a_failed_final_recheck_cannot_complete_an_initially_clean_design() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let fake = FakeModelServer::start().await;
     let count = Arc::new(Mutex::new(0));
     let runner: DemoDomRunner = Arc::new(move |design, _| {
-        let mut count = count.lock().unwrap();
+        let mut count = count.lock().expect("test mutex should not be poisoned");
         *count += 1;
         let response = if *count == 1 {
             Ok(report(&design, serde_json::json!([])))
@@ -177,7 +185,7 @@ async fn a_failed_final_recheck_cannot_complete_an_initially_clean_design() {
 
 #[tokio::test]
 async fn a_focused_repair_verifies_screen_three_without_rewriting_existing_errors_on_screen_one() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let fake = FakeModelServer::start().await;
     fake.push_text(r#"{"screens":[{"index":2,"screen":{"html":"<h1>Fixed</h1>"}}]}"#);
     let mut original = design();
@@ -210,7 +218,7 @@ async fn a_focused_repair_verifies_screen_three_without_rewriting_existing_error
     let result = engine
         .fix_edited_design(&reqwest::Client::new(), original.clone(), &fix, &log())
         .await
-        .unwrap();
+        .expect("valid test edit should pass correction");
     assert_eq!(result.0.screens[2].html, "<h1>Fixed</h1>");
     assert_eq!(result.0.screens[0], original.screens[0]);
     assert_eq!(fake.requests().len(), 1);
@@ -218,7 +226,7 @@ async fn a_focused_repair_verifies_screen_three_without_rewriting_existing_error
 
 #[tokio::test]
 async fn a_failed_layout_repair_preserves_the_provider_cause_and_element() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let fake = FakeModelServer::start().await;
     for _ in 0..4 {
         fake.push_error(
@@ -250,7 +258,7 @@ async fn a_failed_layout_repair_preserves_the_provider_cause_and_element() {
     let error = engine
         .fix_edited_design(&reqwest::Client::new(), design(), &fix, &log())
         .await
-        .unwrap_err();
+        .expect_err("failed layout repair should return its provider error");
     assert!(error.contains("The layout repair could not finish"));
     assert!(error.contains("servers are currently overloaded"));
     assert!(error.contains("a.control (0/2)"));
@@ -261,7 +269,7 @@ async fn a_failed_layout_repair_preserves_the_provider_cause_and_element() {
 
 #[tokio::test]
 async fn a_temporary_failure_retries_the_repair_without_restarting_the_edit() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let fake = FakeModelServer::start().await;
     fake.push_error(StatusCode::SERVICE_UNAVAILABLE, "overloaded");
     fake.push_text(r#"{"screens":[{"index":2,"screen":{"html":"<h1>Fixed</h1>"}}]}"#);
@@ -293,7 +301,7 @@ async fn a_temporary_failure_retries_the_repair_without_restarting_the_edit() {
     let result = engine
         .fix_edited_design(&reqwest::Client::new(), original.clone(), &fix, &log())
         .await
-        .unwrap();
+        .expect("valid test edit should pass correction");
     assert_eq!(result.0.screens[2].html, "<h1>Fixed</h1>");
     assert_eq!(result.0.screens[0], original.screens[0]);
     let requests = fake.requests();
@@ -314,8 +322,9 @@ async fn real_chrome_distinguishes_padding_only_scroll_extents_from_three_pixel_
     design.screens[1].css = Some(".clip {width:200px;height:40px;border:1px solid black;overflow:hidden;box-sizing:border-box;} .tall {height:41px;background:black;color:white;font-size:16px;line-height:19px;}".to_owned());
     let dom = chrome_dom_runner()(design, "http://127.0.0.1:3000".to_owned())
         .await
-        .unwrap();
-    let audit = DemoAudit::from_dom(&dom, 3).unwrap();
+        .expect("Chrome should produce the fixture DOM audit");
+    let audit =
+        DemoAudit::from_dom(&dom, 3).expect("fixture DOM should contain a valid audit result");
     assert!(
         audit.require_layout_clean_on(Some(&[0])).is_ok(),
         "{:?}",
@@ -350,8 +359,9 @@ async fn real_chrome_audits_inactive_transition_screens_instead_of_reporting_the
     );
     let dom = chrome_dom_runner()(design, "http://127.0.0.1:3000".to_owned())
         .await
-        .unwrap();
-    let audit = DemoAudit::from_dom(&dom, 3).unwrap();
+        .expect("Chrome should produce the fixture DOM audit");
+    let audit =
+        DemoAudit::from_dom(&dom, 3).expect("fixture DOM should contain a valid audit result");
     assert_eq!(audit.score(Some(&[0])).0, 0);
     assert_eq!(audit.score(Some(&[1])).0, 0);
     assert!(audit.require_layout_clean_on(Some(&[2])).is_err());
@@ -403,8 +413,9 @@ async fn real_chrome_distinguishes_clipping_and_uneven_gaps_from_scrolling_and_h
         design.screens[0].css = Some(css.to_owned());
         let dom = chrome_dom_runner()(design, "http://127.0.0.1:3000".to_owned())
             .await
-            .unwrap();
-        let audit = DemoAudit::from_dom(&dom, 1).unwrap();
+            .expect("Chrome should produce the fixture DOM audit");
+        let audit =
+            DemoAudit::from_dom(&dom, 1).expect("fixture DOM should contain a valid audit result");
         assert_eq!(
             audit.require_layout_clean().is_ok(),
             should_pass,
@@ -431,8 +442,9 @@ async fn real_chrome_marks_small_hidden_and_scrolling_groups_as_unmeasured_not_b
     }
     let dom = chrome_dom_runner()(design, "http://127.0.0.1:3000".into())
         .await
-        .unwrap();
-    let audit = DemoAudit::from_dom(&dom, 3).unwrap();
+        .expect("Chrome should produce the fixture DOM audit");
+    let audit =
+        DemoAudit::from_dom(&dom, 3).expect("fixture DOM should contain a valid audit result");
     assert!(
         audit.require_layout_clean().is_ok(),
         "{:?}",
@@ -453,7 +465,7 @@ async fn real_chrome_measures_alignment_then_verifies_the_models_css_tweak() {
     if find_chrome().is_none() {
         return;
     }
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let fake = FakeModelServer::start().await;
     let mut design = design();
     design.screens.truncate(1);
@@ -466,7 +478,7 @@ async fn real_chrome_measures_alignment_then_verifies_the_models_css_tweak() {
     let result = engine
         .polish_design(&reqwest::Client::new(), design, &context(), &log())
         .await
-        .unwrap();
+        .expect("test design should complete visual review");
     assert_eq!(result.screens[0].css.as_deref(), Some(css));
     assert_eq!(fake.requests().len(), 1);
     assert!(fake.requests()[0].to_string().contains("alignment"));

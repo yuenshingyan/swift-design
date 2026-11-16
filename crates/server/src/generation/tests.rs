@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use std::sync::Arc;
 
 use design_model::{AppWindow, WorkflowState};
@@ -55,29 +53,49 @@ fn engine(
 
 #[tokio::test]
 async fn failed_verification_restores_the_baseline_and_stops_pending_draft_writes() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     let fake = FakeModelServer::start().await;
     let engine = engine(&fake, &designs, &sessions);
-    let original: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
-    designs.save("candidate-1", &original).await.unwrap();
+    let original: design_model::Design =
+        serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize");
+    designs
+        .save("candidate-1", &original)
+        .await
+        .expect("test data should be saved successfully");
     let mut unverified = original.clone();
     unverified.title = "Unverified".to_owned();
     let saver = LiveSaver::new(&engine, "candidate-1");
     saver.offer(unverified.clone(), 1);
-    saver.abort(Some(&original)).await.unwrap();
+    saver
+        .abort(Some(&original))
+        .await
+        .expect("test draft writes should stop and restore the baseline");
     saver.offer(unverified, 2);
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     assert_eq!(
-        designs.load("candidate-1").await.unwrap().unwrap(),
+        designs
+            .load("candidate-1")
+            .await
+            .expect("test record should load successfully")
+            .expect("saved test record should exist"),
         original
     );
     let fresh = LiveSaver::new(&engine, "candidate-2");
     fresh.offer(original, 1);
-    fresh.abort(None).await.unwrap();
+    fresh
+        .abort(None)
+        .await
+        .expect("test draft writes should stop and restore the baseline");
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    assert!(designs.load("candidate-2").await.unwrap().is_none());
+    assert!(
+        designs
+            .load("candidate-2")
+            .await
+            .expect("test record should load successfully")
+            .is_none()
+    );
 }
 
 /// A fresh one-candidate, low-effort session, still in intake.
@@ -85,7 +103,7 @@ async fn fresh_session(sessions: &SessionStore, request: &str) {
     sessions
         .create(NewSession::demo("talk", "Talk", request).with_options(low_effort_options()))
         .await
-        .unwrap();
+        .expect("test fixture should be created");
 }
 
 /// A session past its setup card: the app's own questions were
@@ -95,7 +113,7 @@ async fn set_up_session(sessions: &SessionStore, request: &str) {
     sessions
         .apply("talk", design_model::WorkflowEvent::QuestionsAsked)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
 }
 
 #[test]
@@ -167,7 +185,7 @@ fn system_prompt_names_the_clarification_protocol() {
 async fn the_planner_reads_the_users_source_files() {
     let server = FakeModelServer::start().await;
     server.push_text(r#"{"reply":"Writing it now.","generate":true}"#);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     let uploads = UploadStore::new(directory.path().join("uploads"));
@@ -178,7 +196,7 @@ async fn the_planner_reads_the_users_source_files() {
             b"The deck is for iOS developers new to Swift.",
         )
         .await
-        .unwrap();
+        .expect("test data should be saved successfully");
     fresh_session(&sessions, "An intro deck.").await;
     let _ = engine(&server, &designs, &sessions)
         .with_uploads(uploads)
@@ -195,7 +213,7 @@ async fn the_planner_reads_the_users_source_files() {
 async fn gpt_6_planner_receives_the_adopted_screenshot_as_an_image() {
     let server = FakeModelServer::start().await;
     server.push_text(r#"{"reply":"Which style?","generate":false}"#);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     let uploads = UploadStore::new(directory.path().join("uploads"));
@@ -203,8 +221,11 @@ async fn gpt_6_planner_receives_the_adopted_screenshot_as_an_image() {
     uploads
         .save(crate::uploads::DRAFT_SCOPE, "image.png", screenshot)
         .await
-        .unwrap();
-    uploads.adopt("talk").await.unwrap();
+        .expect("test data should be saved successfully");
+    uploads
+        .adopt("talk")
+        .await
+        .expect("draft test uploads should be adopted by the session");
     fresh_session(&sessions, "Use the attached screenshot.").await;
     let mut configuration = server.configuration();
     configuration.model = "gpt-6-astra".to_owned();
@@ -217,13 +238,18 @@ async fn gpt_6_planner_receives_the_adopted_screenshot_as_an_image() {
         ChangeNotifier::new(),
     )
     .with_uploads(uploads);
-    engine.run("talk", silent_log()).await.unwrap();
+    engine
+        .run("talk", silent_log())
+        .await
+        .expect("test generation run should complete successfully");
     let requests = server.requests();
-    let parts = requests[0]["messages"][1]["content"].as_array().unwrap();
+    let parts = requests[0]["messages"][1]["content"]
+        .as_array()
+        .expect("test JSON value should be an array");
     let image = parts
         .iter()
         .find(|part| part["type"] == "image_url")
-        .unwrap();
+        .expect("fixture should contain the expected match");
     assert_eq!(
         image["image_url"]["url"],
         format!(
@@ -242,13 +268,16 @@ fn an_office_file_reaches_the_prompt_as_its_text() {
             "word/document.xml",
             zip::write::SimpleFileOptions::default(),
         )
-        .unwrap();
+        .expect("test ZIP entry should be created");
     std::io::Write::write_all(
         &mut writer,
         b"<w:document><w:p><w:r><w:t>Pricing starts at 9 a month.</w:t></w:r></w:p></w:document>",
     )
-    .unwrap();
-    let bytes = writer.finish().unwrap().into_inner();
+    .expect("test bytes should be written completely");
+    let bytes = writer
+        .finish()
+        .expect("test output should be finalized successfully")
+        .into_inner();
     let attachments = Attachments {
         files: vec![UploadAttachment {
             name: "brief.docx".to_owned(),
@@ -331,7 +360,7 @@ fn the_inlined_text_stops_at_the_request_budget() {
     assert!(text.contains("no room for more text: d.rs"));
     let inlined: usize = content
         .as_array()
-        .unwrap()
+        .expect("test JSON value should be an array")
         .iter()
         .filter_map(|part| part["text"].as_str())
         .map(|part| part.matches('~').count())
@@ -378,34 +407,41 @@ async fn the_first_turn_asks_the_apps_own_questions_before_it_writes() {
     let server = FakeModelServer::start().await;
     // The planner wants to write at once and asks nothing.
     server.push_text(WRITE_PLAN);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     fresh_session(&sessions, "A landing page.").await;
     let outcome = engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     // The app owns the fixed questions, so the first turn asks them
     // whatever the planner decided.
     assert!(matches!(
         outcome,
         GenerationOutcome::NeedsClarification { question_set: 1 }
     ));
-    let session = sessions.read("talk").await.unwrap().unwrap();
+    let session = sessions
+        .read("talk")
+        .await
+        .expect("test data should be readable")
+        .expect("test data should be present");
     assert_eq!(session.state, WorkflowState::Clarifying);
     let set = sessions
         .read_question_set("talk", 1)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test question set should be readable")
+        .expect("test session should contain the saved question set");
     // No question of the agent's own: the studio draws the app's
     // cards in this set's grid.
     assert!(set.questions.is_empty());
     assert!(set.can_proceed_with_assumptions);
     // The planner promised a write it does not get to make, so the
     // card speaks for itself instead of repeating that promise.
-    let messages = sessions.messages("talk").await.unwrap();
+    let messages = sessions
+        .messages("talk")
+        .await
+        .expect("test chat messages should be readable");
     assert_eq!(messages[0].content, set.message);
     assert!(!messages[0].content.contains("Writing it now"));
     // Nothing was written: the model was called once, to plan.
@@ -418,21 +454,26 @@ async fn the_setup_turn_fills_the_app_questions_the_request_answers() {
     server.push_text(
             r#"{"reply":"A todo app in Zed's style.","questions":[],"suggestions":{"product_kind":"developer_tool","color_mode":"dark","audience":"newcomers","scope":"whole_app"},"generate":false,"edit":false}"#,
         );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     fresh_session(&sessions, "A TODO app with Zed IDE's aesthetics.").await;
     let outcome = engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(
         outcome,
         GenerationOutcome::NeedsClarification { question_set: 1 }
     ));
     // The card opens with the answers the request gave, marked as
     // suggested. A deck axis and an unknown value are dropped.
-    let options = sessions.read("talk").await.unwrap().unwrap().options;
+    let options = sessions
+        .read("talk")
+        .await
+        .expect("test data should be readable")
+        .expect("test data should be present")
+        .options;
     assert_eq!(options.product_kind.as_deref(), Some("developer_tool"));
     assert_eq!(options.color_mode.as_deref(), Some("dark"));
     assert_eq!(options.audience, None);
@@ -445,14 +486,14 @@ async fn a_second_turn_writes_without_asking_again() {
     let server = FakeModelServer::start().await;
     server.push_text(WRITE_PLAN);
     server.push_text(SAMPLE_DESIGN);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     set_up_session(&sessions, "A landing page.").await;
     let outcome = engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
 }
 
@@ -463,7 +504,7 @@ async fn fresh_candidates_and_concepts_receive_the_users_follow_up_requirements(
     server.push_text(r#"{"concepts":[]}"#);
     server.push_text(SAMPLE_DESIGN);
     server.push_text(SAMPLE_DESIGN);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     let mut options = low_effort_options();
@@ -471,11 +512,11 @@ async fn fresh_candidates_and_concepts_receive_the_users_follow_up_requirements(
     sessions
         .create(NewSession::demo("talk", "Talk", "A business app.").with_options(options))
         .await
-        .unwrap();
+        .expect("test fixture should be created");
     sessions
         .apply("talk", design_model::WorkflowEvent::QuestionsAsked)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     for content in [
         "Make another one with Apple glass design.",
         "The entire app must be semi-transparent over a blurred desktop.",
@@ -483,12 +524,12 @@ async fn fresh_candidates_and_concepts_receive_the_users_follow_up_requirements(
         sessions
             .append_message("talk", ChatMessage::user(content, None))
             .await
-            .unwrap();
+            .expect("test chat message should be appended");
     }
     let outcome = engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
     let requests = server.requests();
     assert_eq!(requests.len(), 4);
@@ -508,30 +549,40 @@ async fn a_planner_question_set_moves_the_session_to_clarifying() {
     server.push_text(
             r#"{"reply":"Two things first.","questions":[{"question":"Who is it for?","options":["Developers","Buyers"]}]}"#,
         );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     fresh_session(&sessions, "A landing page.").await;
     let outcome = engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(
         outcome,
         GenerationOutcome::NeedsClarification { question_set: 1 }
     ));
-    let session = sessions.read("talk").await.unwrap().unwrap();
+    let session = sessions
+        .read("talk")
+        .await
+        .expect("test data should be readable")
+        .expect("test data should be present");
     assert_eq!(session.state, WorkflowState::Clarifying);
     let set = sessions
         .read_question_set("talk", 1)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test question set should be readable")
+        .expect("test session should contain the saved question set");
     assert!(set.can_proceed_with_assumptions);
     assert_eq!(set.questions[0].options[1].label, "Buyers");
-    let messages = sessions.messages("talk").await.unwrap();
+    let messages = sessions
+        .messages("talk")
+        .await
+        .expect("test chat messages should be readable");
     assert_eq!(messages[0].question_set, Some(1));
-    let runs = sessions.runs("talk").await.unwrap();
+    let runs = sessions
+        .runs("talk")
+        .await
+        .expect("test run records should be readable");
     assert_eq!(runs[0].result.as_deref(), Some("asked_questions"));
     // The planner saw the request, not a brief.
     let text = server.requests()[0].to_string();
@@ -543,21 +594,33 @@ async fn a_planner_question_set_moves_the_session_to_clarifying() {
 async fn a_plain_reply_keeps_the_state_and_lands_in_the_chat() {
     let server = FakeModelServer::start().await;
     server.push_text(r#"{"reply":"Hello. Tell me what to build."}"#);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     set_up_session(&sessions, "Hi.").await;
     let outcome = engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(outcome, GenerationOutcome::Replied));
-    let session = sessions.read("talk").await.unwrap().unwrap();
+    let session = sessions
+        .read("talk")
+        .await
+        .expect("test data should be readable")
+        .expect("test data should be present");
     assert_eq!(session.state, WorkflowState::Clarifying);
-    let messages = sessions.messages("talk").await.unwrap();
+    let messages = sessions
+        .messages("talk")
+        .await
+        .expect("test chat messages should be readable");
     assert_eq!(messages[0].content, "Hello. Tell me what to build.");
     assert_eq!(
-        sessions.runs("talk").await.unwrap()[0].result.as_deref(),
+        sessions
+            .runs("talk")
+            .await
+            .expect("test run records should be readable")[0]
+            .result
+            .as_deref(),
         Some("replied")
     );
 }
@@ -567,14 +630,14 @@ async fn generation_sends_the_request_and_the_answers_not_a_brief() {
     let server = FakeModelServer::start().await;
     server.push_text(WRITE_PLAN);
     server.push_text(SAMPLE_DESIGN);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     set_up_session(&sessions, "A landing page for retail investors.").await;
     engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     let text = server.requests()[1].to_string();
     assert!(text.contains("retail investors"));
     assert!(text.contains("The request and the answers are authoritative"));
@@ -586,24 +649,41 @@ async fn a_valid_design_reply_is_saved_as_a_candidate_and_recorded_on_the_run() 
     let server = FakeModelServer::start().await;
     server.push_text(WRITE_PLAN);
     server.push_text(SAMPLE_DESIGN);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     set_up_session(&sessions, "A landing page.").await;
     let outcome = engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
-    assert!(designs.load("talk-candidate-1").await.unwrap().is_some());
-    let runs = sessions.runs("talk").await.unwrap();
+    assert!(
+        designs
+            .load("talk-candidate-1")
+            .await
+            .expect("test record should load successfully")
+            .is_some()
+    );
+    let runs = sessions
+        .runs("talk")
+        .await
+        .expect("test run records should be readable");
     assert_eq!(runs[0].result.as_deref(), Some("succeeded"));
     assert_eq!(runs[0].artifacts, vec!["talk-candidate-1"]);
     // The planner's reply landed in the chat before the write.
-    let messages = sessions.messages("talk").await.unwrap();
+    let messages = sessions
+        .messages("talk")
+        .await
+        .expect("test chat messages should be readable");
     assert_eq!(messages[0].content, "Writing it now.");
     assert_eq!(
-        sessions.read("talk").await.unwrap().unwrap().state,
+        sessions
+            .read("talk")
+            .await
+            .expect("test data should be readable")
+            .expect("test data should be present")
+            .state,
         WorkflowState::Generating
     );
 }
@@ -611,21 +691,29 @@ async fn a_valid_design_reply_is_saved_as_a_candidate_and_recorded_on_the_run() 
 #[tokio::test]
 async fn failed_continuation_polish_restores_the_preview_and_preserves_new_work_separately() {
     let server = FakeModelServer::start().await;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     set_up_session(&sessions, "Finish the demo.").await;
-    let mut preview: design_model::Design = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+    let mut preview: design_model::Design =
+        serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize");
     preview.outline = preview
         .screens
         .iter()
         .map(|screen| screen.name.clone())
         .collect();
     preview.outline.push("Statistics".into());
-    designs.save("talk-candidate-1", &preview).await.unwrap();
+    designs
+        .save("talk-candidate-1", &preview)
+        .await
+        .expect("test data should be saved successfully");
     server.push_text(&serde_json::json!({"screens":[{"index":preview.screens.len(),"insert":true,"screen":preview.screens[0]}]}).to_string());
     server.push_text("{}");
-    let session = sessions.read("talk").await.unwrap().unwrap();
+    let session = sessions
+        .read("talk")
+        .await
+        .expect("test data should be readable")
+        .expect("test data should be present");
     let context = GenerationContext {
         request: SessionRequest {
             request: session.request,
@@ -654,13 +742,26 @@ async fn failed_continuation_polish_restores_the_preview_and_preserves_new_work_
             &silent_log(),
         )
         .await;
-    let error = outcomes.into_iter().next().unwrap().1.unwrap_err();
+    let error = outcomes
+        .into_iter()
+        .next()
+        .expect("test iterator should contain another item")
+        .1
+        .expect_err("failed continuation review should block completion");
     assert!(error.contains("Needs review"));
     assert_eq!(
-        designs.load("talk-candidate-1").await.unwrap().unwrap(),
+        designs
+            .load("talk-candidate-1")
+            .await
+            .expect("test record should load successfully")
+            .expect("saved test record should exist"),
         preview
     );
-    let draft = designs.load("talk-candidate-2").await.unwrap().unwrap();
+    let draft = designs
+        .load("talk-candidate-2")
+        .await
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert!(draft.title.starts_with("Needs review"));
     assert_eq!(draft.screens.len(), preview.screens.len() + 1);
     assert_eq!(draft.screens[..preview.screens.len()], preview.screens);
@@ -672,7 +773,7 @@ async fn a_new_candidate_with_failed_polish_is_preserved_as_needs_review() {
     server.push_text(WRITE_PLAN);
     server.push_text(SAMPLE_DESIGN);
     server.push_text("{}");
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     set_up_session(&sessions, "A landing page.").await;
@@ -690,19 +791,26 @@ async fn a_new_candidate_with_failed_polish_is_preserved_as_needs_review() {
         .with_demo_dom_runner(runner)
         .run("talk", silent_log())
         .await
-        .unwrap_err();
+        .expect_err("unverified candidate should not count as successful generation");
     assert!(error.contains("Needs review"));
     assert!(error.contains("Serious clipping"));
     tokio::task::yield_now().await;
-    let draft = designs.load("talk-candidate-1").await.unwrap().unwrap();
+    let draft = designs
+        .load("talk-candidate-1")
+        .await
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert!(draft.title.starts_with("Needs review"));
     assert_eq!(
         draft.screens,
         serde_json::from_str::<design_model::Design>(SAMPLE_DESIGN)
-            .unwrap()
+            .expect("test JSON should deserialize")
             .screens
     );
-    let messages = sessions.messages("talk").await.unwrap();
+    let messages = sessions
+        .messages("talk")
+        .await
+        .expect("test chat messages should be readable");
     assert!(
         messages
             .iter()
@@ -710,7 +818,12 @@ async fn a_new_candidate_with_failed_polish_is_preserved_as_needs_review() {
                 && message.content.contains("not a completed candidate"))
     );
     assert_eq!(
-        sessions.runs("talk").await.unwrap()[0].result.as_deref(),
+        sessions
+            .runs("talk")
+            .await
+            .expect("test run records should be readable")[0]
+            .result
+            .as_deref(),
         Some("failed")
     );
 }
@@ -722,19 +835,23 @@ async fn a_needs_clarification_reply_moves_the_session_back_to_clarifying() {
     server.push_text(
             r#"{"needs_clarification":{"title":"One thing","message":"Which brand color?","questions":[{"id":"color","label":"Which brand color?","kind":"short_text","required":true}]}}"#,
         );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     set_up_session(&sessions, "A landing page.").await;
     let outcome = engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(
         outcome,
         GenerationOutcome::NeedsClarification { .. }
     ));
-    let session = sessions.read("talk").await.unwrap().unwrap();
+    let session = sessions
+        .read("talk")
+        .await
+        .expect("test data should be readable")
+        .expect("test data should be present");
     assert_eq!(session.state, WorkflowState::Clarifying);
 }
 
@@ -746,15 +863,22 @@ async fn an_invalid_design_gets_fix_rounds_then_fails() {
     for _ in 0..3 {
         server.push_text("{}");
     }
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
     set_up_session(&sessions, "A landing page.").await;
     let result = engine(&server, &designs, &sessions)
         .run("talk", silent_log())
         .await;
-    assert!(result.unwrap_err().contains("fix rounds"));
-    let runs = sessions.runs("talk").await.unwrap();
+    assert!(
+        result
+            .expect_err("invalid design should fail after its correction budget is exhausted")
+            .contains("fix rounds")
+    );
+    let runs = sessions
+        .runs("talk")
+        .await
+        .expect("test run records should be readable");
     assert_eq!(runs[0].result.as_deref(), Some("failed"));
 }
 

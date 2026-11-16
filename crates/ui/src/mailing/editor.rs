@@ -1,13 +1,14 @@
-//! The print editor: a chat column, a live sheet preview with a
+//! The mailing editor: a chat column, a live email preview with a
 //! right-click menu, thumbnails, and a properties sheet.
 //!
-//! The print twin of `social_editor.rs`. It shares the preview
+//! The mailing twin of `print/editor.rs`. It shares the preview
 //! bridge, the node inspector, the theme form, and the history section
-//! with the design editor; what differs is the print type, the
-//! `/prints` routes, the sheet vocabulary, the size and orientation
-//! controls, and the exports: PDF and a PNG zip beside the HTML file.
+//! with the design editor; what differs is the mailing type, the
+//! `/mailings` routes, the email vocabulary, the format control, and
+//! the exports: PDF, a PNG zip, and an email-client HTML zip beside
+//! the HTML file.
 
-use design_model::{ArtifactKind, Orientation, Print, PrintSize, Sheet, Theme};
+use design_model::{ArtifactKind, Email, EmailFormat, Mailing, Theme};
 use dioxus::document;
 use dioxus::prelude::*;
 
@@ -28,79 +29,101 @@ mod support;
 
 use support::*;
 
-/// How the print preview takes a click: as a selection, or as a
-/// reader of the printed piece would.
+/// How the mailing preview takes a click: as a selection, or as a
+/// reader in the inbox would.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PrintPreviewMode {
-    /// A click reaches the sheet as it would for a reader.
+pub(crate) enum MailingPreviewMode {
+    /// A click reaches the email as it would for a reader.
     Read,
     /// A click selects a node, a double-click edits its text.
     Edit,
 }
 
-impl PrintPreviewMode {
+impl MailingPreviewMode {
     /// Both modes, in tab order. Read comes first: it is the default,
-    /// so a print opens as its reader sees it.
-    pub(crate) const ALL: [PrintPreviewMode; 2] = [PrintPreviewMode::Read, PrintPreviewMode::Edit];
+    /// so a mailing opens as its reader sees it.
+    pub(crate) const ALL: [MailingPreviewMode; 2] =
+        [MailingPreviewMode::Read, MailingPreviewMode::Edit];
 
     /// The tab label.
     pub(crate) fn label(self) -> &'static str {
         match self {
-            PrintPreviewMode::Read => "Read",
-            PrintPreviewMode::Edit => "Edit",
+            MailingPreviewMode::Read => "Read",
+            MailingPreviewMode::Edit => "Edit",
         }
     }
 
     /// The tab tooltip.
     pub(crate) fn title(self) -> &'static str {
         match self {
-            PrintPreviewMode::Read => "See the sheet as a reader would",
-            PrintPreviewMode::Edit => "Click a node to select it",
+            MailingPreviewMode::Read => "See the email as a reader would",
+            MailingPreviewMode::Edit => "Click a node to select it",
         }
     }
 
     /// The query that asks the render for the editing script. Read mode
-    /// asks for nothing, so the sheet shows with no selection outlines.
+    /// asks for nothing, so the email shows with no selection outlines.
     pub(crate) fn render_query(self) -> &'static str {
         match self {
-            PrintPreviewMode::Read => "",
-            PrintPreviewMode::Edit => "&editable=true",
+            MailingPreviewMode::Read => "",
+            MailingPreviewMode::Edit => "&editable=true",
         }
     }
 }
 
-/// Loads one print, then hands it to the editor.
+/// Fetches a URL and puts the response on the clipboard as rich text
+/// and as plain source, inside one user gesture. The promise-valued
+/// `ClipboardItem` keeps the gesture alive through the fetch, so
+/// Safari accepts the write too. Sends back `ok` or the error text.
+const COPY_EMAIL_TO_CLIPBOARD: &str = "\
+const url = await dioxus.recv();
+try {
+  const text = fetch(url).then((response) => {
+    if (!response.ok) { throw new Error('fetch failed with status ' + response.status); }
+    return response.text();
+  });
+  const item = new ClipboardItem({
+    'text/html': text.then((html) => new Blob([html], { type: 'text/html' })),
+    'text/plain': text.then((html) => new Blob([html], { type: 'text/plain' })),
+  });
+  await navigator.clipboard.write([item]);
+  dioxus.send('ok');
+} catch (error) {
+  dioxus.send(String(error));
+}";
+
+/// Loads one mailing, then hands it to the editor.
 #[component]
-pub fn PrintEditor(print_id: String, on_back: EventHandler<()>) -> Element {
-    let id_for_fetch = print_id.clone();
+pub fn MailingEditor(mailing_id: String, on_back: EventHandler<()>) -> Element {
+    let id_for_fetch = mailing_id.clone();
     let loaded = use_resource(move || {
         let id = id_for_fetch.clone();
-        async move { api::fetch_print(&id).await }
+        async move { crate::mailing::api::fetch_mailing(&id).await }
     });
     let current = loaded.read();
     match &*current {
-        Some(Ok(print)) => rsx! {
-            LoadedPrintEditor { print_id, initial: print.clone(), on_back }
+        Some(Ok(mailing)) => rsx! {
+            LoadedMailingEditor { mailing_id, initial: mailing.clone(), on_back }
         },
         Some(Err(message)) => rsx! {
             p { class: "error", "{message}" }
         },
         None => rsx! {
-            p { "Loading print…" }
+            p { "Loading mailing…" }
         },
     }
 }
 
-/// The editor for a loaded print: chat on the left, preview and
-/// thumbnails on the right, the properties sheet on demand.
+/// The editor for a loaded mailing: chat on the left, preview and
+/// thumbnails on the right, the properties email on demand.
 #[component]
-fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>) -> Element {
-    let mut print = use_signal(|| initial.clone());
+fn LoadedMailingEditor(mailing_id: String, initial: Mailing, on_back: EventHandler<()>) -> Element {
+    let mut mailing = use_signal(|| initial.clone());
     let mut selected = use_signal(|| 0usize);
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
     let mut selection = use_signal(Vec::<SelectionEntry>::new);
-    let mut mode = use_signal(|| PrintPreviewMode::Read);
-    // The sheets pinned for the chat with a command-click on a tile.
+    let mut mode = use_signal(|| MailingPreviewMode::Read);
+    // The emails pinned for the chat with a command-click on a tile.
     let mut pinned = use_signal(Vec::<usize>::new);
     let mut messages = use_signal(Vec::<String>::new);
     let mut preview_version = use_signal(|| 0u32);
@@ -113,15 +136,15 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
     let mut template_name = use_signal(|| Option::<String>::None);
     let mut chat_context = use_signal(|| Option::<String>::None);
     let mut dragged = use_signal(|| Option::<usize>::None);
-    let mut pending_sheet_delete = use_signal(|| Option::<usize>::None);
+    let mut pending_email_delete = use_signal(|| Option::<usize>::None);
     // The tile whose Redo waits for its second click.
     let mut pending_redo = use_signal(|| Option::<usize>::None);
 
-    let authors_id = print_id.clone();
+    let authors_id = mailing_id.clone();
     use_future(move || {
         let id = authors_id.clone();
         async move {
-            if let Ok(paths) = api::fetch_print_user_paths(&id).await {
+            if let Ok(paths) = crate::mailing::api::fetch_mailing_user_paths(&id).await {
                 user_paths.set(paths);
             }
         }
@@ -133,19 +156,20 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
     let can_export_with_chrome = settings().flatten().is_none_or(|view| view.has_chrome);
 
     let save = use_callback({
-        let print_id = print_id.clone();
+        let mailing_id = mailing_id.clone();
         move |reload_preview: bool| {
-            let id = print_id.clone();
-            let snapshot = print();
+            let id = mailing_id.clone();
+            let snapshot = mailing();
             spawn(async move {
-                match api::save_print(&id, &snapshot).await {
+                match crate::mailing::api::save_mailing(&id, &snapshot).await {
                     Ok(()) => {
                         messages.set(Vec::new());
                         is_dirty.set(false);
                         if reload_preview {
                             preview_version += 1;
                         }
-                        if let Ok(paths) = api::fetch_print_user_paths(&id).await {
+                        if let Ok(paths) = crate::mailing::api::fetch_mailing_user_paths(&id).await
+                        {
                             user_paths.set(paths);
                         }
                     }
@@ -156,17 +180,17 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
     });
 
     let reload = use_callback({
-        let print_id = print_id.clone();
+        let mailing_id = mailing_id.clone();
         move |_: ()| {
-            let id = print_id.clone();
+            let id = mailing_id.clone();
             spawn(async move {
-                if let Ok(fetched) = api::fetch_print(&id).await {
-                    print.set(fetched);
+                if let Ok(fetched) = crate::mailing::api::fetch_mailing(&id).await {
+                    mailing.set(fetched);
                     is_dirty.set(false);
                     preview_version += 1;
                     selected_node.set(None);
                 }
-                if let Ok(paths) = api::fetch_print_user_paths(&id).await {
+                if let Ok(paths) = crate::mailing::api::fetch_mailing_user_paths(&id).await {
                     user_paths.set(paths);
                 }
             });
@@ -183,7 +207,7 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                     template_name.set(None);
                 }
                 "swift-design-navigate" => {
-                    let count = print.peek().sheets.len();
+                    let count = mailing.peek().emails.len();
                     let current = selected();
                     let next = if message.step > 0 {
                         (current + 1).min(count.saturating_sub(1))
@@ -195,7 +219,7 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                         selected_node.set(None);
                     }
                 }
-                "swift-design-select" if message.screen < print.peek().sheets.len() => {
+                "swift-design-select" if message.screen < mailing.peek().emails.len() => {
                     selected.set(message.screen);
                     selection.set(selection_of(&message));
                     selected_node.set(SelectedNode::from_message(&message));
@@ -205,9 +229,9 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                         continue;
                     };
                     let is_changed =
-                        print.with_mut(|print| match print.sheets.get_mut(message.screen) {
-                            Some(sheet) if sheet.html != html => {
-                                sheet.html = html;
+                        mailing.with_mut(|mailing| match mailing.emails.get_mut(message.screen) {
+                            Some(email) if email.html != html => {
+                                email.html = html;
                                 true
                             }
                             _ => false,
@@ -220,17 +244,17 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                     }
                 }
                 "swift-design-drag" => match message.action.as_deref() {
-                    Some("start") if message.screen < print.peek().sheets.len() => {
+                    Some("start") if message.screen < mailing.peek().emails.len() => {
                         dragged.set(Some(message.screen));
                     }
                     Some("over") => {
                         let to = message.screen;
                         if let Some(from) = dragged()
                             && from != to
-                            && to < print.peek().sheets.len()
+                            && to < mailing.peek().emails.len()
                         {
-                            print.with_mut(|print| {
-                                move_screen(&mut print.sheets, &mut print.outline, from, to)
+                            mailing.with_mut(|mailing| {
+                                move_screen(&mut mailing.emails, &mut mailing.outline, from, to)
                             });
                             dragged.set(Some(to));
                             selected.set(to);
@@ -250,7 +274,7 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                     Some("pin") => {
                         selected.set(message.screen);
                         chat_context.set(Some(pin_reference(
-                            "sheet",
+                            "email",
                             message.screen,
                             &selection_of(&message),
                         )));
@@ -258,8 +282,8 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                     Some("ask") => {
                         selected.set(message.screen);
                         chat_context.set(Some(match SelectedNode::from_message(&message) {
-                            Some(node) => node_reference("sheet", message.screen, &node),
-                            None => format!("[sheet {}]", message.screen + 1),
+                            Some(node) => node_reference("email", message.screen, &node),
+                            None => format!("[email {}]", message.screen + 1),
                         }));
                     }
                     Some("properties") => {
@@ -268,16 +292,16 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                         show_properties.set(true);
                     }
                     Some("delete-screen") => {
-                        let removed = print.with_mut(|print| {
-                            if print.sheets.len() > 1 && message.screen < print.sheets.len() {
-                                print.sheets.remove(message.screen);
+                        let removed = mailing.with_mut(|mailing| {
+                            if mailing.emails.len() > 1 && message.screen < mailing.emails.len() {
+                                mailing.emails.remove(message.screen);
                                 true
                             } else {
                                 false
                             }
                         });
                         if removed {
-                            let count = print.peek().sheets.len();
+                            let count = mailing.peek().emails.len();
                             selected.set(message.screen.min(count.saturating_sub(1)));
                             selected_node.set(None);
                             save.call(true);
@@ -301,45 +325,45 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
         }
     });
 
-    let sheet_count = print().sheets.len();
-    let outline_count = print().outline.len();
-    // Every sheet shares the size and orientation, so every tile has
-    // the same width.
-    let viewport = print().viewport();
+    let email_count = mailing().emails.len();
+    let outline_count = mailing().outline.len();
+    // Every email shares the format, so every tile has the same
+    // width.
+    let viewport = mailing().viewport();
     let tile_width = frame_width_rem(viewport, STRIP_TILE_HEIGHT_REM);
-    let sheet_ratio = viewport.aspect_ratio_css();
+    let email_ratio = viewport.aspect_ratio_css();
     let stage_class = preview_stage_class(viewport);
-    let planned_count = outline_count.saturating_sub(sheet_count);
-    let summary = strip_summary(sheet_count, planned_count);
-    let total_fields = field_count(&print());
+    let planned_count = outline_count.saturating_sub(email_count);
+    let summary = strip_summary(email_count, planned_count);
+    let total_fields = field_count(&mailing());
     let user_count = user_paths().len().min(total_fields);
     let agent_count = total_fields - user_count;
-    let thumbnail_labels: Vec<String> = print()
-        .sheets
+    let thumbnail_labels: Vec<String> = mailing()
+        .emails
         .iter()
         .enumerate()
-        .map(|(index, sheet)| sheet_label(index, sheet))
+        .map(|(index, email)| email_label(index, email))
         .collect();
-    let sheet_labels = thumbnail_labels.clone();
-    let current_notes = print()
-        .sheets
+    let email_labels = thumbnail_labels.clone();
+    let current_notes = mailing()
+        .emails
         .get(selected())
-        .and_then(|sheet| sheet.notes.clone())
+        .and_then(|email| email.notes.clone())
         .unwrap_or_default();
     rsx! {
         main { class: "editor",
             DesignChat {
-                design_id: print_id.clone(),
+                design_id: mailing_id.clone(),
                 context: chat_context,
-                page: page_reference("sheet", &pinned()),
+                page: page_reference("email", &pinned()),
                 is_pinned: !pinned().is_empty(),
                 on_pin_page: move |index: usize| {
                     if !pinned().contains(&index) {
                         pinned.write().push(index);
                     }
                 },
-                pages: sheet_labels.clone(),
-                page_unit: Some("sheet".to_owned()),
+                pages: email_labels.clone(),
+                page_unit: Some("email".to_owned()),
                 on_drop_page: move |_| pinned.write().clear(),
                 on_before_send: move |_| {
                     if is_dirty() {
@@ -355,9 +379,9 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                         "Project"
                     }
                     span { class: "divider" }
-                    span { class: "preview-heading", "{selected() + 1} / {sheet_count}" }
+                    span { class: "preview-heading", "{selected() + 1} / {email_count}" }
                     div { class: "canvas-tabs preview-modes", role: "tablist",
-                        for candidate in PrintPreviewMode::ALL {
+                        for candidate in MailingPreviewMode::ALL {
                             button {
                                 key: "{candidate.label()}",
                                 role: "tab",
@@ -383,10 +407,43 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                             "Properties"
                         }
                         span { class: "divider" }
-                        PrintExportGroup {
-                            print_id: print_id.clone(),
+                        button {
+                            title: "Copy this email for pasting into a compose window or an HTML template box",
+                            onclick: {
+                                let mailing_id = mailing_id.clone();
+                                move |_| {
+                                    let url = format!("/mailings/{mailing_id}/emails/{}.html", selected() + 1);
+                                    let number = selected() + 1;
+                                    let mut channel = document::eval(COPY_EMAIL_TO_CLIPBOARD); // The clipboard write must start inside
+                                    let _ = channel.send(url);
+                                    spawn(async move {
+                                        match channel.recv::<String>().await {
+                                            Ok(result) if result == "ok" => {
+                                                messages
+                                                    .set(
+                                                        vec![
+                                                            format!(
+                                                                "Copied email {number}. Paste it into a compose window; an HTML template box takes the source.",
+                                                            ),
+                                                        ],
+                                                    );
+                                            }
+                                            Ok(error) => {
+                                                messages.set(vec![format!("Copy failed: {error}")]);
+                                            }
+                                            Err(error) => {
+                                                messages.set(vec![format!("Copy failed: {error:?}")]);
+                                            }
+                                        }
+                                    });
+                                }
+                            },
+                            "Copy"
+                        }
+                        MailingExportGroup {
+                            mailing_id: mailing_id.clone(),
                             selected: selected(),
-                            sheet_count,
+                            email_count,
                             can_export_with_chrome,
                         }
                         button {
@@ -418,7 +475,7 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                                         class: "primary",
                                         disabled: name.trim().is_empty(),
                                         onclick: {
-                                            let print_id = print_id.clone();
+                                            let mailing_id = mailing_id.clone();
                                             move |_| {
                                                 let Some(name) = template_name() else {
                                                     return;
@@ -427,9 +484,9 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                                                 if name.is_empty() {
                                                     return;
                                                 }
-                                                let print_id = print_id.clone();
+                                                let mailing_id = mailing_id.clone();
                                                 spawn(async move {
-                                                    match api::save_print_template(&print_id, &name).await {
+                                                    match api::save_mailing_template(&mailing_id, &name).await {
                                                         Ok(saved) => {
                                                             template_name.set(None);
                                                             is_menu_open.set(false);
@@ -449,7 +506,7 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                                 }
                             } else {
                                 button {
-                                    title: "Keep this print's theme and layout style for a future design, deck, document, or social",
+                                    title: "Keep this mailing's theme and layout style for a future design, deck, document, or social",
                                     onclick: move |_| template_name.set(Some(String::new())),
                                     "Save as template"
                                 }
@@ -461,23 +518,22 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                     for message in messages() {
                         p { class: "error", "{message}" }
                     }
-                    // Every print size, portrait or landscape, is
-                    // narrower than the 16:10 stage, so a sheet is
-                    // limited by height like a phone canvas, without
-                    // the bezel.
+                    // Every mailing format is narrower than the
+                    // 16:10 stage, so an email is limited by height
+                    // like a phone canvas, without the bezel.
                     div { class: "{stage_class}",
                         PreviewFrame {
-                            title: "Print preview",
-                            ratio: "{sheet_ratio}",
-                            src: "/prints/{print_id}/render?version={preview_version()}{mode().render_query()}&sheet={selected() + 1}",
+                            title: "Mailing preview",
+                            ratio: "{email_ratio}",
+                            src: "/mailings/{mailing_id}/render?version={preview_version()}{mode().render_query()}&email={selected() + 1}",
                         }
                     }
                     p { class: "preview-hint",
-                        if mode() == PrintPreviewMode::Read {
-                            span { "The sheet as a reader sees it · switch to Edit to select a node" }
+                        if mode() == MailingPreviewMode::Read {
+                            span { "The email as a reader sees it · switch to Edit to select a node" }
                         } else {
                             span {
-                                "Click a node to select it and edit its text · ⌘-click adds more · right-click and Pin to chat references it · ⌘-click a tile to pin sheets"
+                                "Click a node to select it and edit its text · ⌘-click adds more · right-click and Pin to chat references it · ⌘-click a tile to pin emails"
                             }
                             span { class: "dot", "·" }
                             span { "right-click for quick edits" }
@@ -487,23 +543,23 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                             kbd { "←" }
                             " "
                             kbd { "→" }
-                            " change sheets"
+                            " change emails"
                         }
                     }
                     label { class: "notes-box",
                         span { class: "notes-heading",
                             "Author notes"
-                            span { class: "screen-no", "sheet {selected() + 1}" }
+                            span { class: "screen-no", "email {selected() + 1}" }
                         }
                         textarea {
                             value: "{current_notes}",
-                            placeholder: "Print instructions such as paper stock or bleed, intent, or handoff remarks. Never shown on the sheet.",
+                            placeholder: "The subject line and the preheader, as a Subject: line and a Preheader: line, plus intent or handoff remarks. Never shown on the email.",
                             oninput: move |event| {
                                 let index = selected();
-                                print
-                                    .with_mut(|print| {
-                                        if let Some(sheet) = print.sheets.get_mut(index) {
-                                            sheet.notes = optional(event.value());
+                                mailing
+                                    .with_mut(|mailing| {
+                                        if let Some(email) = mailing.emails.get_mut(index) {
+                                            email.notes = optional(event.value());
                                         }
                                     });
                                 is_dirty.set(true);
@@ -512,22 +568,22 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                         }
                     }
                     div { class: "strip-head",
-                        "Sheets"
+                        "Emails"
                         span { class: "strip-counts", "{summary}" }
-                        // One control writes every planned sheet. A
+                        // One control writes every planned email. A
                         // button on each planned tile did the same thing
                         // and read as if it wrote that one alone.
                         if planned_count > 0 {
                             button {
                                 class: "strip-write",
-                                title: "Write the sheets the outline still plans",
+                                title: "Write the emails the outline still plans",
                                 onclick: {
-                                    let print_id = print_id.clone();
+                                    let mailing_id = mailing_id.clone();
                                     move |_| {
-                                        let print_id = print_id.clone();
+                                        let mailing_id = mailing_id.clone();
                                         spawn(async move {
-                                            let session_id = artifact_project(&print_id);
-                                            let sent = api::continue_artifact(&session_id, &print_id).await;
+                                            let session_id = artifact_project(&mailing_id);
+                                            let sent = api::continue_artifact(&session_id, &mailing_id).await;
                                             if let Err(message) = sent {
                                                 messages.write().push(message);
                                             }
@@ -542,7 +598,7 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                     div { class: "thumbnails",
                         for (index, label) in thumbnail_labels.into_iter().enumerate() {
                             {
-                                let is_deleting = pending_sheet_delete() == Some(index);
+                                let is_deleting = pending_email_delete() == Some(index);
                                 let is_redoing = pending_redo() == Some(index);
                                 let class = thumbnail_class(ThumbnailState {
                                     is_current: index == selected(),
@@ -559,7 +615,7 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                                         style: "--tile-width: {tile_width}rem",
                                         "data-index": "{index}",
                                         onclick: move |event: MouseEvent| {
-                                            // A command-click pins the sheet for
+                                            // A command-click pins the email for
                                             // the chat; a plain click opens it.
                                             if event.modifiers().meta() || event.modifiers().ctrl() {
                                                 toggle_pin(&mut pinned.write(), index);
@@ -567,28 +623,28 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                                             }
                                             selected.set(index);
                                             selected_node.set(None);
-                                            pending_sheet_delete.set(None);
+                                            pending_email_delete.set(None);
                                             pending_redo.set(None);
                                         },
                                         iframe {
-                                            title: "Sheet {index + 1}",
+                                            title: "Email {index + 1}",
                                             tabindex: "-1",
-                                            src: "/prints/{print_id}/render?version={preview_version()}&sheet={index + 1}",
+                                            src: "/mailings/{mailing_id}/render?version={preview_version()}&email={index + 1}",
                                         }
                                         span { class: "thumbnail-number", {format!("{:02}", index + 1)} }
-                                        if sheet_count > 1 {
+                                        if email_count > 1 {
                                             button {
                                                 class: if is_deleting { "thumbnail-delete confirm" } else { "thumbnail-delete" },
-                                                title: "Delete this sheet",
+                                                title: "Delete this email",
                                                 onclick: move |event: Event<MouseData>| {
                                                     event.stop_propagation();
-                                                    if pending_sheet_delete() != Some(index) {
-                                                        pending_sheet_delete.set(Some(index));
+                                                    if pending_email_delete() != Some(index) {
+                                                        pending_email_delete.set(Some(index));
                                                         return;
                                                     }
-                                                    pending_sheet_delete.set(None);
-                                                    print.with_mut(|print| remove_sheet(print, index));
-                                                    selected.set(selected().min(sheet_count.saturating_sub(2)));
+                                                    pending_email_delete.set(None);
+                                                    mailing.with_mut(|mailing| remove_email(mailing, index));
+                                                    selected.set(selected().min(email_count.saturating_sub(2)));
                                                     selected_node.set(None);
                                                     save.call(true);
                                                 },
@@ -598,16 +654,16 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                                                 }
                                             }
                                         }
-                                        // A redo writes the sheet anew: the model
+                                        // A redo writes the email anew: the model
                                         // sees its notes, not its markup.
                                         button {
                                             class: if is_redoing { "thumbnail-redo confirm" } else { "thumbnail-redo" },
-                                            title: "Write this sheet anew",
+                                            title: "Write this email anew",
                                             onclick: {
-                                                let print_id = print_id.clone();
+                                                let mailing_id = mailing_id.clone();
                                                 move |event: Event<MouseData>| {
                                                     event.stop_propagation();
-                                                    pending_sheet_delete.set(None);
+                                                    pending_email_delete.set(None);
                                                     if pending_redo() != Some(index) {
                                                         pending_redo.set(Some(index));
                                                         return;
@@ -616,13 +672,13 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                                                     if is_dirty() {
                                                         save.call(true);
                                                     }
-                                                    let print_id = print_id.clone();
+                                                    let mailing_id = mailing_id.clone();
                                                     spawn(async move {
-                                                        let session_id = artifact_project(&print_id);
+                                                        let session_id = artifact_project(&mailing_id);
                                                         let sent = api::regenerate_unit(
                                                                 &session_id,
-                                                                &print_id,
-                                                                "sheet",
+                                                                &mailing_id,
+                                                                "email",
                                                                 index + 1,
                                                             )
                                                             .await;
@@ -641,20 +697,20 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                                 }
                             }
                         }
-                        if outline_count > sheet_count {
+                        if outline_count > email_count {
                             span { class: "strip-divider" }
                         }
                         // A planned tile is an outline entry nobody has
                         // written. The strip head writes them.
-                        for index in sheet_count..outline_count {
+                        for index in email_count..outline_count {
                             {
-                                let (number, title) = outline_entry(&print().outline, index, "Sheet");
+                                let (number, title) = outline_entry(&mailing().outline, index, "Email");
                                 rsx! {
                                     div {
                                         key: "outline-{index}",
                                         class: "thumbnail outline",
                                         style: "--tile-width: {tile_width}rem",
-                                        title: "{outline_title(&print(), index)} · not written yet",
+                                        title: "{outline_title(&mailing(), index)} · not written yet",
                                         span { class: "outline-kicker",
                                             "{number}"
                                             span { class: "planned-text", " planned" }
@@ -683,85 +739,57 @@ fn LoadedPrintEditor(print_id: String, initial: Print, on_back: EventHandler<()>
                             screen: selected(),
                             node: selected_node(),
                             on_apply: move |command: NodeCommand| apply.call(command),
-                            scope: artifact_project(&print_id),
+                            scope: artifact_project(&mailing_id),
                         }
                         div { class: "sheet-section",
-                            div { class: "head", "Print" }
+                            div { class: "head", "Mailing" }
                             label {
-                                "Print title"
+                                "Mailing title"
                                 input {
-                                    value: "{print().title}",
+                                    value: "{mailing().title}",
                                     oninput: move |event| {
-                                        print.with_mut(|print| print.title = event.value());
+                                        mailing.with_mut(|mailing| mailing.title = event.value());
                                         is_dirty.set(true);
                                         schedule_save(save_generation, save, false);
                                     },
                                 }
                             }
-                            // The size and the orientation share one row:
-                            // together they are the canvas.
-                            div { class: "theme-grid",
-                                label {
-                                    "Size"
-                                    select {
-                                        value: "{print().size.as_str()}",
-                                        onchange: move |event| {
-                                            let Some(size) = PrintSize::from_name(&event.value()) else {
-                                                return;
-                                            };
-                                            print.with_mut(|print| print.size = size);
-                                            is_dirty.set(true);
-                                            // The canvas changes, so the preview
-                                            // reloads on save.
-                                            schedule_save(save_generation, save, true);
-                                        },
-                                        for size in PrintSize::ALL {
-                                            option {
-                                                key: "{size.as_str()}",
-                                                value: "{size.as_str()}",
-                                                selected: print().size == size,
-                                                "{size_option_label(size)}"
-                                            }
-                                        }
-                                    }
-                                }
-                                label {
-                                    "Orientation"
-                                    select {
-                                        value: "{print().orientation.as_str()}",
-                                        onchange: move |event| {
-                                            let Some(orientation) = Orientation::from_name(&event.value()) else {
-                                                return;
-                                            };
-                                            print.with_mut(|print| print.orientation = orientation);
-                                            is_dirty.set(true);
-                                            // The canvas changes, so the preview
-                                            // reloads on save.
-                                            schedule_save(save_generation, save, true);
-                                        },
-                                        for orientation in Orientation::ALL {
-                                            option {
-                                                key: "{orientation.as_str()}",
-                                                value: "{orientation.as_str()}",
-                                                selected: print().orientation == orientation,
-                                                "{orientation.label()}"
-                                            }
+                            label {
+                                "Format"
+                                select {
+                                    value: "{mailing().format.as_str()}",
+                                    onchange: move |event| {
+                                        let Some(format) = EmailFormat::from_name(&event.value()) else {
+                                            return;
+                                        };
+                                        mailing.with_mut(|mailing| mailing.format = format);
+                                        is_dirty.set(true);
+                                        // The canvas changes, so the preview
+                                        // reloads on save.
+                                        schedule_save(save_generation, save, true);
+                                    },
+                                    for format in EmailFormat::ALL {
+                                        option {
+                                            key: "{format.as_str()}",
+                                            value: "{format.as_str()}",
+                                            selected: mailing().format == format,
+                                            "{format_option_label(format)}"
                                         }
                                     }
                                 }
                             }
                         }
                         ThemeForm {
-                            theme: print().theme.clone(),
+                            theme: mailing().theme.clone(),
                             on_change: move |theme: Theme| {
-                                print.with_mut(|print| print.theme = theme);
+                                mailing.with_mut(|mailing| mailing.theme = theme);
                                 is_dirty.set(true);
                                 schedule_save(save_generation, save, true);
                             },
                         }
                         HistorySection {
-                            design_id: print_id.clone(),
-                            kind: ArtifactKind::Print,
+                            design_id: mailing_id.clone(),
+                            kind: ArtifactKind::Mailing,
                             on_restored: move |_| reload.call(()),
                         }
                     }

@@ -72,14 +72,14 @@ pub(crate) fn CandidateCanvas(
         spawn(async move {
             for id in ids {
                 let deleted = match kinds.get(&id).copied().unwrap_or(kind) {
-                    ArtifactKind::Demo => api::delete_design(&id).await,
-                    ArtifactKind::Deck => api::delete_deck(&id).await,
-                    ArtifactKind::Document => api::delete_document(&id).await,
-                    ArtifactKind::Social => api::delete_social(&id).await,
-                    ArtifactKind::Print => api::delete_print(&id).await,
-                    ArtifactKind::Mailing => api::delete_mailing(&id).await,
-                    ArtifactKind::Campaign => api::delete_campaign(&id).await,
-                    ArtifactKind::Artwork => api::delete_artwork(&id).await,
+                    ArtifactKind::Demo => crate::design::api::delete_design(&id).await,
+                    ArtifactKind::Deck => crate::deck::api::delete_deck(&id).await,
+                    ArtifactKind::Document => crate::document::api::delete_document(&id).await,
+                    ArtifactKind::Social => crate::social::api::delete_social(&id).await,
+                    ArtifactKind::Print => crate::print::api::delete_print(&id).await,
+                    ArtifactKind::Mailing => crate::mailing::api::delete_mailing(&id).await,
+                    ArtifactKind::Campaign => crate::campaign::api::delete_campaign(&id).await,
+                    ArtifactKind::Artwork => crate::artwork::api::delete_artwork(&id).await,
                 };
                 if let Err(message) = deleted {
                     on_error.call(message);
@@ -293,9 +293,9 @@ fn CandidateCard(
             if kind != ArtifactKind::Demo {
                 return None;
             }
-            match api::fetch_design_preview(&id).await {
+            match crate::design::api::fetch_design_preview(&id).await {
                 Ok(Some(draft)) => Some((draft, true)),
-                Ok(None) => api::fetch_design(&id)
+                Ok(None) => crate::design::api::fetch_design(&id)
                     .await
                     .ok()
                     .map(|saved| (saved, false)),

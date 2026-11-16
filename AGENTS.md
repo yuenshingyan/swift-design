@@ -72,6 +72,7 @@ use crate::time::rfc3339_now;
 - Put unit tests beside the implementation in `#[cfg(test)]` modules. Put integration tests in each crate's `tests/` directory.
 - Use descriptive `snake_case` test names, such as `invalid_transition_preserves_session_state`.
 - Prefer unit tests and mocks. Add integration tests when unit tests cannot adequately verify the behavior.
+- Use `.expect("...")` and `.expect_err("...")` with contextual failure messages for test-only invariants instead of `.unwrap()` and `.unwrap_err()`. Do not suppress `clippy::unwrap_used`.
 - Add tests for new behavior and bug fixes. Cover normal cases, failures, and relevant boundaries.
 - Maintain at least 90% test coverage across the whole workspace, not just changed code.
 - Do not claim that the coverage target is met without measuring it; passing the test suite alone does not establish coverage.

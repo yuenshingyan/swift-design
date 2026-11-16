@@ -20,14 +20,14 @@ pub(crate) fn SessionWorkspace(
     on_home: EventHandler<()>,
 ) -> Element {
     let mut view = use_signal(|| Option::<api::SessionView>::None);
-    let mut designs = use_signal(Vec::<api::DesignSummary>::new);
-    let mut decks = use_signal(Vec::<api::DeckSummary>::new);
-    let mut documents = use_signal(Vec::<api::DocumentSummary>::new);
-    let mut socials = use_signal(Vec::<api::SocialSummary>::new);
-    let mut prints = use_signal(Vec::<api::PrintSummary>::new);
-    let mut mailings = use_signal(Vec::<api::MailingSummary>::new);
-    let mut campaigns = use_signal(Vec::<api::CampaignSummary>::new);
-    let mut artworks = use_signal(Vec::<api::ArtworkSummary>::new);
+    let mut designs = use_signal(Vec::<crate::design::api::DesignSummary>::new);
+    let mut decks = use_signal(Vec::<crate::deck::api::DeckSummary>::new);
+    let mut documents = use_signal(Vec::<crate::document::api::DocumentSummary>::new);
+    let mut socials = use_signal(Vec::<crate::social::api::SocialSummary>::new);
+    let mut prints = use_signal(Vec::<crate::print::api::PrintSummary>::new);
+    let mut mailings = use_signal(Vec::<crate::mailing::api::MailingSummary>::new);
+    let mut campaigns = use_signal(Vec::<crate::campaign::api::CampaignSummary>::new);
+    let mut artworks = use_signal(Vec::<crate::artwork::api::ArtworkSummary>::new);
     let mut run = use_signal(|| Option::<api::AgentRun>::None);
     let mut settings = use_signal(|| Option::<api::SettingsView>::None);
     let is_configuring = use_signal(|| false);
@@ -81,28 +81,28 @@ pub(crate) fn SessionWorkspace(
                         Ok(fetched) => view.set(Some(fetched)),
                         Err(message) => error.set(Some(message)),
                     }
-                    if let Ok(list) = api::fetch_design_list().await {
+                    if let Ok(list) = crate::design::api::fetch_design_list().await {
                         designs.set(list);
                     }
-                    if let Ok(list) = api::fetch_deck_list().await {
+                    if let Ok(list) = crate::deck::api::fetch_deck_list().await {
                         decks.set(list);
                     }
-                    if let Ok(list) = api::fetch_document_list().await {
+                    if let Ok(list) = crate::document::api::fetch_document_list().await {
                         documents.set(list);
                     }
-                    if let Ok(list) = api::fetch_social_list().await {
+                    if let Ok(list) = crate::social::api::fetch_social_list().await {
                         socials.set(list);
                     }
-                    if let Ok(list) = api::fetch_print_list().await {
+                    if let Ok(list) = crate::print::api::fetch_print_list().await {
                         prints.set(list);
                     }
-                    if let Ok(list) = api::fetch_mailing_list().await {
+                    if let Ok(list) = crate::mailing::api::fetch_mailing_list().await {
                         mailings.set(list);
                     }
-                    if let Ok(list) = api::fetch_campaign_list().await {
+                    if let Ok(list) = crate::campaign::api::fetch_campaign_list().await {
                         campaigns.set(list);
                     }
-                    if let Ok(list) = api::fetch_artwork_list().await {
+                    if let Ok(list) = crate::artwork::api::fetch_artwork_list().await {
                         artworks.set(list);
                     }
                     if let Ok(fetched) = api::fetch_agent_run().await {
@@ -170,30 +170,46 @@ pub(crate) fn SessionWorkspace(
 
     let artifact_kind = session.artifact_kind;
     let cards = match session.artifact_kind {
-        ArtifactKind::Demo => {
-            cards_from_designs(&designs(), &session_id, session.chosen_design.as_deref())
-        }
-        ArtifactKind::Deck => {
-            cards_from_decks(&decks(), &session_id, session.chosen_design.as_deref())
-        }
-        ArtifactKind::Document => {
-            cards_from_documents(&documents(), &session_id, session.chosen_design.as_deref())
-        }
-        ArtifactKind::Social => {
-            cards_from_socials(&socials(), &session_id, session.chosen_design.as_deref())
-        }
-        ArtifactKind::Print => {
-            cards_from_prints(&prints(), &session_id, session.chosen_design.as_deref())
-        }
-        ArtifactKind::Mailing => {
-            cards_from_mailings(&mailings(), &session_id, session.chosen_design.as_deref())
-        }
-        ArtifactKind::Campaign => {
-            cards_from_campaigns(&campaigns(), &session_id, session.chosen_design.as_deref())
-        }
-        ArtifactKind::Artwork => {
-            cards_from_artworks(&artworks(), &session_id, session.chosen_design.as_deref())
-        }
+        ArtifactKind::Demo => crate::design::canvas::cards_from_designs(
+            &designs(),
+            &session_id,
+            session.chosen_design.as_deref(),
+        ),
+        ArtifactKind::Deck => crate::deck::canvas::cards_from_decks(
+            &decks(),
+            &session_id,
+            session.chosen_design.as_deref(),
+        ),
+        ArtifactKind::Document => crate::document::canvas::cards_from_documents(
+            &documents(),
+            &session_id,
+            session.chosen_design.as_deref(),
+        ),
+        ArtifactKind::Social => crate::social::canvas::cards_from_socials(
+            &socials(),
+            &session_id,
+            session.chosen_design.as_deref(),
+        ),
+        ArtifactKind::Print => crate::print::canvas::cards_from_prints(
+            &prints(),
+            &session_id,
+            session.chosen_design.as_deref(),
+        ),
+        ArtifactKind::Mailing => crate::mailing::canvas::cards_from_mailings(
+            &mailings(),
+            &session_id,
+            session.chosen_design.as_deref(),
+        ),
+        ArtifactKind::Campaign => crate::campaign::canvas::cards_from_campaigns(
+            &campaigns(),
+            &session_id,
+            session.chosen_design.as_deref(),
+        ),
+        ArtifactKind::Artwork => crate::artwork::canvas::cards_from_artworks(
+            &artworks(),
+            &session_id,
+            session.chosen_design.as_deref(),
+        ),
     };
     // A placeholder before the first card takes the kind's canvas: the
     // paper the options name for a document, the format they name for
@@ -859,14 +875,14 @@ pub(crate) fn SessionWorkspace(
                         on_fork: move |artifact_id: String| {
                             spawn(async move {
                                 let forked = match artifact_kind {
-                                    ArtifactKind::Demo => api::fork_design(&artifact_id).await,
-                                    ArtifactKind::Deck => api::fork_deck(&artifact_id).await,
-                                    ArtifactKind::Document => api::fork_document(&artifact_id).await,
-                                    ArtifactKind::Social => api::fork_social(&artifact_id).await,
-                                    ArtifactKind::Print => api::fork_print(&artifact_id).await,
-                                    ArtifactKind::Mailing => api::fork_mailing(&artifact_id).await,
-                                    ArtifactKind::Campaign => api::fork_campaign(&artifact_id).await,
-                                    ArtifactKind::Artwork => api::fork_artwork(&artifact_id).await,
+                                    ArtifactKind::Demo => crate::design::api::fork_design(&artifact_id).await,
+                                    ArtifactKind::Deck => crate::deck::api::fork_deck(&artifact_id).await,
+                                    ArtifactKind::Document => crate::document::api::fork_document(&artifact_id).await,
+                                    ArtifactKind::Social => crate::social::api::fork_social(&artifact_id).await,
+                                    ArtifactKind::Print => crate::print::api::fork_print(&artifact_id).await,
+                                    ArtifactKind::Mailing => crate::mailing::api::fork_mailing(&artifact_id).await,
+                                    ArtifactKind::Campaign => crate::campaign::api::fork_campaign(&artifact_id).await,
+                                    ArtifactKind::Artwork => crate::artwork::api::fork_artwork(&artifact_id).await,
                                 };
                                 if let Err(message) = forked {
                                     error.set(Some(message));

@@ -5,18 +5,19 @@
 //! crate's directory.
 
 mod api;
-mod artwork_editor;
-mod campaign_editor;
+mod artwork;
+mod campaign;
 mod canvas;
 mod chat;
 mod chat_controls;
-mod deck_editor;
-mod document_editor;
+mod deck;
+mod design;
+mod document;
 mod editor;
 mod home;
 mod icons;
-mod mailing_editor;
-mod print_editor;
+mod mailing;
+mod print;
 mod prompt_history;
 mod question_card;
 mod revert;
@@ -25,11 +26,10 @@ mod run_settings;
 mod select;
 mod session;
 mod settings;
-mod social_editor;
+mod social;
 mod status;
 mod uploads;
 
-use dioxus::document;
 use dioxus::prelude::*;
 
 use crate::route::View;
@@ -100,11 +100,11 @@ fn App() -> Element {
     // The arrow keys move the caret inside a draft; only on its first
     // or last line do they recall an earlier prompt.
     use_hook(|| {
-        document::eval(prompt_history::ARROW_GUARD);
+        dioxus::document::eval(prompt_history::ARROW_GUARD);
     });
     // Read the hash on load and on every hashchange.
     use_future(move || async move {
-        let mut channel = document::eval(route::HASH_LISTENER);
+        let mut channel = dioxus::document::eval(route::HASH_LISTENER);
         while let Ok(hash) = channel.recv::<String>().await {
             let next = route::route_from_hash(&hash);
             if view.peek().as_ref() != Some(&next) {
@@ -115,7 +115,7 @@ fn App() -> Element {
     // Write the hash the app chose.
     use_effect(move || {
         if let Some(current) = view() {
-            let writer = document::eval(route::WRITE_HASH);
+            let writer = dioxus::document::eval(route::WRITE_HASH);
             let _ = writer.send(route::hash_for(&current));
         }
     });
@@ -160,7 +160,7 @@ fn App() -> Element {
             Some(View::Design(id)) => {
                 let session = settings::artifact_project(&id);
                 rsx! {
-                    editor::Editor {
+                    crate::design::editor::Editor {
                         design_id: id,
                         on_back: move |_| view.set(Some(View::Session(session.clone()))),
                     }
@@ -169,7 +169,7 @@ fn App() -> Element {
             Some(View::Deck(id)) => {
                 let session = settings::artifact_project(&id);
                 rsx! {
-                    deck_editor::DeckEditor {
+                    crate::deck::editor::DeckEditor {
                         deck_id: id,
                         on_back: move |_| view.set(Some(View::Session(session.clone()))),
                     }
@@ -178,7 +178,7 @@ fn App() -> Element {
             Some(View::Document(id)) => {
                 let session = settings::artifact_project(&id);
                 rsx! {
-                    document_editor::DocumentEditor {
+                    crate::document::editor::DocumentEditor {
                         document_id: id,
                         on_back: move |_| view.set(Some(View::Session(session.clone()))),
                     }
@@ -187,7 +187,7 @@ fn App() -> Element {
             Some(View::Social(id)) => {
                 let session = settings::artifact_project(&id);
                 rsx! {
-                    social_editor::SocialEditor {
+                    crate::social::editor::SocialEditor {
                         social_id: id,
                         on_back: move |_| view.set(Some(View::Session(session.clone()))),
                     }
@@ -196,7 +196,7 @@ fn App() -> Element {
             Some(View::Print(id)) => {
                 let session = settings::artifact_project(&id);
                 rsx! {
-                    print_editor::PrintEditor {
+                    crate::print::editor::PrintEditor {
                         print_id: id,
                         on_back: move |_| view.set(Some(View::Session(session.clone()))),
                     }
@@ -205,7 +205,7 @@ fn App() -> Element {
             Some(View::Mailing(id)) => {
                 let session = settings::artifact_project(&id);
                 rsx! {
-                    mailing_editor::MailingEditor {
+                    crate::mailing::editor::MailingEditor {
                         mailing_id: id,
                         on_back: move |_| view.set(Some(View::Session(session.clone()))),
                     }
@@ -214,7 +214,7 @@ fn App() -> Element {
             Some(View::Campaign(id)) => {
                 let session = settings::artifact_project(&id);
                 rsx! {
-                    campaign_editor::CampaignEditor {
+                    crate::campaign::editor::CampaignEditor {
                         campaign_id: id,
                         on_back: move |_| view.set(Some(View::Session(session.clone()))),
                     }
@@ -223,7 +223,7 @@ fn App() -> Element {
             Some(View::Artwork(id)) => {
                 let session = settings::artifact_project(&id);
                 rsx! {
-                    artwork_editor::ArtworkEditor {
+                    crate::artwork::editor::ArtworkEditor {
                         artwork_id: id,
                         on_back: move |_| view.set(Some(View::Session(session.clone()))),
                     }

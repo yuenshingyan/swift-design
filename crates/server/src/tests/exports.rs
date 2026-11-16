@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn exporting_a_mailing_returns_an_email_html_zip() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "launch").await;
     send(
@@ -16,17 +16,33 @@ async fn exporting_a_mailing_returns_an_email_html_zip() {
         .method("GET")
         .uri("/mailings/launch/export.email.zip")
         .body(Body::empty())
-        .unwrap();
-    let response = application.clone().oneshot(request).await.unwrap();
+        .expect("test HTTP request body should be valid");
+    let response = application
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("test HTTP request should complete");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers()["content-disposition"],
         "attachment; filename=\"launch.email.zip\""
     );
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("test response body should be collected")
+        .to_bytes();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec()))
+        .expect("test bytes should form a readable ZIP archive");
     let names: Vec<String> = (0..archive.len())
-        .map(|index| archive.by_index(index).unwrap().name().to_owned())
+        .map(|index| {
+            archive
+                .by_index(index)
+                .expect("ZIP should contain the entry at the expected index")
+                .name()
+                .to_owned()
+        })
         .collect();
     assert_eq!(
         names,
@@ -38,10 +54,12 @@ async fn exporting_a_mailing_returns_an_email_html_zip() {
     );
     let mut first = String::new();
     std::io::Read::read_to_string(
-        &mut archive.by_name("launch-email-1.html").unwrap(),
+        &mut archive
+            .by_name("launch-email-1.html")
+            .expect("ZIP should contain the named entry"),
         &mut first,
     )
-    .unwrap();
+    .expect("test content should be readable as text");
     assert!(first.contains("<!--[if mso]>"));
     assert!(first.contains("<h1 style="));
     assert!(!first.contains("var("));
@@ -49,7 +67,7 @@ async fn exporting_a_mailing_returns_an_email_html_zip() {
 
 #[tokio::test]
 async fn exporting_a_mailing_returns_an_html_download() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "launch").await;
     send(
@@ -63,24 +81,33 @@ async fn exporting_a_mailing_returns_an_html_download() {
         .method("GET")
         .uri("/mailings/launch/export")
         .body(Body::empty())
-        .unwrap();
-    let response = application.clone().oneshot(request).await.unwrap();
+        .expect("test HTTP request body should be valid");
+    let response = application
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("test HTTP request should complete");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers()["content-disposition"],
         "attachment; filename=\"launch.html\""
     );
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("test response body should be collected")
+        .to_bytes();
     assert!(
         String::from_utf8(bytes.to_vec())
-            .unwrap()
+            .expect("test bytes should contain valid UTF-8")
             .contains("<h1>Six kinds. One chat.</h1>")
     );
 }
 
 #[tokio::test]
 async fn exporting_an_artwork_returns_an_html_download() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "launch").await;
     send(
@@ -94,17 +121,26 @@ async fn exporting_an_artwork_returns_an_html_download() {
         .method("GET")
         .uri("/artworks/launch/export")
         .body(Body::empty())
-        .unwrap();
-    let response = application.clone().oneshot(request).await.unwrap();
+        .expect("test HTTP request body should be valid");
+    let response = application
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("test HTTP request should complete");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers()["content-disposition"],
         "attachment; filename=\"launch.html\""
     );
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("test response body should be collected")
+        .to_bytes();
     assert!(
         String::from_utf8(bytes.to_vec())
-            .unwrap()
+            .expect("test bytes should contain valid UTF-8")
             .contains("<h1>Eight kinds. One chat.</h1>")
     );
 }
@@ -121,15 +157,23 @@ async fn assert_scoped_export(
         .method("GET")
         .uri(uri)
         .body(Body::empty())
-        .unwrap();
-    let response = application.oneshot(request).await.unwrap();
+        .expect("test HTTP request body should be valid");
+    let response = application
+        .oneshot(request)
+        .await
+        .expect("test HTTP request should complete");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers()["content-disposition"],
         format!("attachment; filename=\"{filename}\"")
     );
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let html = String::from_utf8(bytes.to_vec()).unwrap();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("test response body should be collected")
+        .to_bytes();
+    let html = String::from_utf8(bytes.to_vec()).expect("test bytes should contain valid UTF-8");
     let (present, absent) = markers;
     assert!(html.contains(present), "missing {present} in {uri}");
     assert!(!html.contains(absent), "unexpected {absent} in {uri}");
@@ -137,7 +181,7 @@ async fn assert_scoped_export(
 
 #[tokio::test]
 async fn exporting_one_frame_returns_that_frame_alone() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "launch").await;
     send(
@@ -167,7 +211,7 @@ async fn exporting_one_frame_returns_that_frame_alone() {
 
 #[tokio::test]
 async fn exporting_one_sheet_returns_that_sheet_alone() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "launch").await;
     send(
@@ -197,7 +241,7 @@ async fn exporting_one_sheet_returns_that_sheet_alone() {
 
 #[tokio::test]
 async fn exporting_one_email_returns_that_email_alone() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "launch").await;
     send(
@@ -227,7 +271,7 @@ async fn exporting_one_email_returns_that_email_alone() {
 
 #[tokio::test]
 async fn exporting_one_ad_returns_that_ad_alone() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "launch").await;
     send(
@@ -257,7 +301,7 @@ async fn exporting_one_ad_returns_that_ad_alone() {
 
 #[tokio::test]
 async fn exporting_one_cover_returns_that_cover_alone() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "launch").await;
     send(
@@ -287,7 +331,7 @@ async fn exporting_one_cover_returns_that_cover_alone() {
 
 #[tokio::test]
 async fn exporting_a_campaign_returns_an_html_download() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "launch").await;
     send(
@@ -301,24 +345,33 @@ async fn exporting_a_campaign_returns_an_html_download() {
         .method("GET")
         .uri("/campaigns/launch/export")
         .body(Body::empty())
-        .unwrap();
-    let response = application.clone().oneshot(request).await.unwrap();
+        .expect("test HTTP request body should be valid");
+    let response = application
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("test HTTP request should complete");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers()["content-disposition"],
         "attachment; filename=\"launch.html\""
     );
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("test response body should be collected")
+        .to_bytes();
     assert!(
         String::from_utf8(bytes.to_vec())
-            .unwrap()
+            .expect("test bytes should contain valid UTF-8")
             .contains("<h1>Seven kinds. One chat.</h1>")
     );
 }
 
 #[tokio::test]
 async fn exporting_a_print_returns_an_html_download() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "poster").await;
     send(
@@ -332,24 +385,33 @@ async fn exporting_a_print_returns_an_html_download() {
         .method("GET")
         .uri("/prints/poster/export")
         .body(Body::empty())
-        .unwrap();
-    let response = application.clone().oneshot(request).await.unwrap();
+        .expect("test HTTP request body should be valid");
+    let response = application
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("test HTTP request should complete");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers()["content-disposition"],
         "attachment; filename=\"poster.html\""
     );
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("test response body should be collected")
+        .to_bytes();
     assert!(
         String::from_utf8(bytes.to_vec())
-            .unwrap()
+            .expect("test bytes should contain valid UTF-8")
             .contains("<h1>One harness. Five kinds.</h1>")
     );
 }
 
 #[tokio::test]
 async fn exporting_a_social_returns_an_html_download() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "launch").await;
     send(
@@ -363,17 +425,26 @@ async fn exporting_a_social_returns_an_html_download() {
         .method("GET")
         .uri("/socials/launch/export")
         .body(Body::empty())
-        .unwrap();
-    let response = application.clone().oneshot(request).await.unwrap();
+        .expect("test HTTP request body should be valid");
+    let response = application
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("test HTTP request should complete");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers()["content-disposition"],
         "attachment; filename=\"launch.html\""
     );
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("test response body should be collected")
+        .to_bytes();
     assert!(
         String::from_utf8(bytes.to_vec())
-            .unwrap()
+            .expect("test bytes should contain valid UTF-8")
             .contains("<h1>One harness. Four kinds.</h1>")
     );
     let (status, _) = send(
@@ -398,7 +469,7 @@ async fn exporting_a_social_returns_an_html_download() {
 
 #[tokio::test]
 async fn exporting_a_document_returns_an_html_download() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "report").await;
     send(
@@ -412,17 +483,26 @@ async fn exporting_a_document_returns_an_html_download() {
         .method("GET")
         .uri("/documents/report/export")
         .body(Body::empty())
-        .unwrap();
-    let response = application.clone().oneshot(request).await.unwrap();
+        .expect("test HTTP request body should be valid");
+    let response = application
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("test HTTP request should complete");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers()["content-disposition"],
         "attachment; filename=\"report.html\""
     );
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("test response body should be collected")
+        .to_bytes();
     assert!(
         String::from_utf8(bytes.to_vec())
-            .unwrap()
+            .expect("test bytes should contain valid UTF-8")
             .contains("<h1>Swift Design</h1>")
     );
     let (status, _) = send(
@@ -445,8 +525,11 @@ async fn exporting_a_document_returns_an_html_download() {
         .method("GET")
         .uri("/documents/report/export.docx")
         .body(Body::empty())
-        .unwrap();
-    let response = application.oneshot(request).await.unwrap();
+        .expect("test HTTP request body should be valid");
+    let response = application
+        .oneshot(request)
+        .await
+        .expect("test HTTP request should complete");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers()["content-disposition"],
@@ -455,17 +538,22 @@ async fn exporting_a_document_returns_an_html_download() {
     assert!(
         response.headers()["content-type"]
             .to_str()
-            .unwrap()
+            .expect("test file name should contain valid UTF-8")
             .contains("wordprocessingml")
     );
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("test response body should be collected")
+        .to_bytes();
     // A ZIP starts with `PK`.
     assert_eq!(&bytes[..2], b"PK");
 }
 
 #[tokio::test]
 async fn exporting_a_deck_returns_an_html_download() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "talk").await;
     send(application.clone(), "PUT", "/decks/talk", Some(SAMPLE_DECK)).await;
@@ -473,17 +561,26 @@ async fn exporting_a_deck_returns_an_html_download() {
         .method("GET")
         .uri("/decks/talk/export")
         .body(Body::empty())
-        .unwrap();
-    let response = application.clone().oneshot(request).await.unwrap();
+        .expect("test HTTP request body should be valid");
+    let response = application
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("test HTTP request should complete");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers()["content-disposition"],
         "attachment; filename=\"talk.html\""
     );
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("test response body should be collected")
+        .to_bytes();
     assert!(
         String::from_utf8(bytes.to_vec())
-            .unwrap()
+            .expect("test bytes should contain valid UTF-8")
             .contains("<h1>Swift Design</h1>")
     );
     let (status, _) = send(
@@ -500,7 +597,7 @@ async fn exporting_a_deck_returns_an_html_download() {
 
 #[tokio::test]
 async fn exporting_a_design_returns_an_html_download() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "overview").await;
     send(
@@ -516,15 +613,20 @@ async fn exporting_a_design_returns_an_html_download() {
                 .method("GET")
                 .uri("/designs/overview/export")
                 .body(Body::empty())
-                .unwrap(),
+                .expect("test HTTP request body should be valid"),
         )
         .await
-        .unwrap();
+        .expect("test HTTP request should complete");
     assert_eq!(response.status(), StatusCode::OK);
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("test response body should be collected")
+        .to_bytes();
     assert!(
         String::from_utf8(bytes.to_vec())
-            .unwrap()
+            .expect("test bytes should contain valid UTF-8")
             .starts_with("<!doctype html>")
     );
 }

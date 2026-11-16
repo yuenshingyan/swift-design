@@ -145,7 +145,6 @@ pub(crate) fn latest_edit_report_note(messages: &[ChatMessage], targets: &[Strin
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -167,7 +166,8 @@ mod tests {
             let before = artifact(kind);
             let mut after = before.clone();
             after[plural][1]["html"] = Value::String("<h1>Add Task</h1>".to_owned());
-            let report = saved_edit_report("example-candidate-4", kind, &before, &after).unwrap();
+            let report = saved_edit_report("example-candidate-4", kind, &before, &after)
+                .expect("saved-edit report should be generated");
             assert!(report.contains(&format!("Modified {unit} 2 (\"Tasks\")")));
             assert!(!report.contains(&format!("Modified {unit} 1")));
         }
@@ -179,11 +179,13 @@ mod tests {
         let mut after = before.clone();
         after["screens"]
             .as_array_mut()
-            .unwrap()
+            .expect("test JSON value should be a mutable array")
             .push(serde_json::json!({ "html": "<h1>New</h1>" }));
-        let report = saved_edit_report("a", ArtifactKind::Demo, &before, &after).unwrap();
+        let report = saved_edit_report("a", ArtifactKind::Demo, &before, &after)
+            .expect("saved-edit report should be generated");
         assert!(report.contains("Added screen 3."));
-        let report = saved_edit_report("a", ArtifactKind::Demo, &after, &before).unwrap();
+        let report = saved_edit_report("a", ArtifactKind::Demo, &after, &before)
+            .expect("saved-edit report should be generated");
         assert!(report.contains("Removed screen 3."));
     }
 
@@ -192,17 +194,20 @@ mod tests {
         let before = artifact(ArtifactKind::Document);
         let mut after = before.clone();
         after["pages"][0]["notes"] = Value::String("Updated handoff".to_owned());
-        let report = saved_edit_report("a", ArtifactKind::Document, &before, &after).unwrap();
+        let report = saved_edit_report("a", ArtifactKind::Document, &before, &after)
+            .expect("saved-edit report should be generated");
         assert!(report.contains("Updated notes only for page 1"));
         assert!(!report.contains("Modified page"));
         let mut after = before.clone();
         after["theme"]["colors"]["background"] = Value::String("#101418".to_owned());
         after["title"] = Value::String("New title".to_owned());
-        let report = saved_edit_report("a", ArtifactKind::Document, &before, &after).unwrap();
+        let report = saved_edit_report("a", ArtifactKind::Document, &before, &after)
+            .expect("saved-edit report should be generated");
         assert!(report.contains("Shared theme changed (affects all pages)"));
         assert!(report.contains("Shared settings changed: title"));
         assert!(!report.contains("Modified page"));
-        let report = saved_edit_report("a", ArtifactKind::Document, &before, &before).unwrap();
+        let report = saved_edit_report("a", ArtifactKind::Document, &before, &before)
+            .expect("saved-edit report should be generated");
         assert!(report.contains("No saved changes."));
     }
 
@@ -212,7 +217,8 @@ mod tests {
         let mut after = before.clone();
         after["screens"][1]["css"] = Value::String("h1 { color: teal; }".to_owned());
         after["screens"][1]["name"] = Value::String("Task\n  creation".to_owned());
-        let report = saved_edit_report("a", ArtifactKind::Demo, &before, &after).unwrap();
+        let report = saved_edit_report("a", ArtifactKind::Demo, &before, &after)
+            .expect("saved-edit report should be generated");
         assert!(report.contains("Modified screen 2 (\"Task creation\")"));
     }
 

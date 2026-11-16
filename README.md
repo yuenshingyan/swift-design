@@ -244,6 +244,25 @@ scripts/rendering primitives and review findings remain in `render.rs`,
 `crate::artwork::core::ArtworkStore` and `crate::artwork::patch::apply_patch`.
 HTTP routes, JSON formats, and storage directories are unchanged.
 
+`crates/ui/src/` uses the same eight singular artifact folders:
+
+```text
+artwork/
+  mod.rs       # module declarations
+  api.rs       # artwork HTTP calls and response types
+  canvas.rs    # artwork candidate-card construction
+  editor.rs    # artwork editor components and state
+  editor/      # artwork-specific editor helpers and tests
+```
+
+Nested helper directories are retained where needed. Shared HTTP transport and
+responses stay in `api.rs` and `api/`; shared preview, inspector, history, theme,
+transition, and thumbnail helpers stay in `editor.rs` and `editor/`. Common
+candidate-card controls and geometry remain under `canvas.rs` and `canvas/`.
+Chat, sessions, uploads, navigation, settings, and status remain shared. Artifact
+imports use paths such as `crate::artwork::api::fetch_artwork` and
+`crate::artwork::editor::ArtworkEditor`, without old-name compatibility modules.
+
 ## Run it
 
 ```sh

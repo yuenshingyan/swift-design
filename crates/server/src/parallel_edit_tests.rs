@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 #[path = "parallel_edit_tests/corrections.rs"]
 mod corrections;
 #[path = "parallel_edit_tests/flows.rs"]
@@ -83,8 +81,12 @@ impl ParallelFakeModel {
         let router = Router::new()
             .route("/v1/chat/completions", post(handle_parallel_fake))
             .with_state(Arc::clone(&state));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind to an available local port");
+        let address = listener
+            .local_addr()
+            .expect("test listener should expose its local address");
         tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         });
@@ -105,15 +107,28 @@ impl ParallelFakeModel {
     }
 
     fn push_text(&self, content: String) {
-        self.state.replies.lock().unwrap().push_back(content);
+        self.state
+            .replies
+            .lock()
+            .expect("test mutex should not be poisoned")
+            .push_back(content);
     }
 
     fn requests(&self) -> Vec<Value> {
-        self.state.requests.lock().unwrap().clone()
+        self.state
+            .requests
+            .lock()
+            .expect("test mutex should not be poisoned")
+            .clone()
     }
 
     fn auto_worker_patches(&self, kind: ArtifactKind, original: &Value, marker: &str) {
-        *self.state.auto_worker.lock().unwrap() = Some((kind, original.clone(), marker.to_owned()));
+        *self
+            .state
+            .auto_worker
+            .lock()
+            .expect("test mutex should not be poisoned") =
+            Some((kind, original.clone(), marker.to_owned()));
     }
 
     async fn wait_for_workers(&self, count: usize) {
@@ -126,12 +141,18 @@ impl ParallelFakeModel {
             }
         })
         .await
-        .unwrap();
+        .expect("test operation should complete before the timeout");
     }
 
     async fn watch_baseline(&self, path: &Path) {
-        let bytes = tokio::fs::read(path).await.unwrap();
-        *self.state.baseline_file.lock().unwrap() = Some((path.to_owned(), bytes));
+        let bytes = tokio::fs::read(path)
+            .await
+            .expect("test data should be readable");
+        *self
+            .state
+            .baseline_file
+            .lock()
+            .expect("test mutex should not be poisoned") = Some((path.to_owned(), bytes));
     }
 }
 
@@ -143,9 +164,16 @@ async fn handle_parallel_fake(
     let is_worker = prompt.contains("Assigned unit index (zero-based):");
     let is_coordinator = prompt.contains("Coordinate the parallel edits.");
     if is_worker || is_coordinator {
-        let baseline = state.baseline_file.lock().unwrap().clone();
+        let baseline = state
+            .baseline_file
+            .lock()
+            .expect("test mutex should not be poisoned")
+            .clone();
         if let Some((path, bytes)) = baseline
-            && tokio::fs::read(path).await.unwrap() != bytes
+            && tokio::fs::read(path)
+                .await
+                .expect("test data should be readable")
+                != bytes
         {
             state
                 .baseline_changed_during_requests
@@ -166,18 +194,34 @@ async fn handle_parallel_fake(
         state.coordinator_count.fetch_add(1, Ordering::SeqCst);
     }
 
-    state.requests.lock().unwrap().push(body);
+    state
+        .requests
+        .lock()
+        .expect("test mutex should not be poisoned")
+        .push(body);
     let reply = if is_worker {
-        let auto = state.auto_worker.lock().unwrap().clone();
+        let auto = state
+            .auto_worker
+            .lock()
+            .expect("test mutex should not be poisoned")
+            .clone();
         match auto.and_then(|(kind, original, marker)| {
             assigned_index(&prompt)
                 .map(|index| patch_for(kind, &original, index, &format!("{marker} {index}")))
         }) {
             Some(content) => Some(content),
-            None => state.replies.lock().unwrap().pop_front(),
+            None => state
+                .replies
+                .lock()
+                .expect("test mutex should not be poisoned")
+                .pop_front(),
         }
     } else {
-        state.replies.lock().unwrap().pop_front()
+        state
+            .replies
+            .lock()
+            .expect("test mutex should not be poisoned")
+            .pop_front()
     };
     if is_worker {
         state.active_workers.fetch_sub(1, Ordering::SeqCst);
@@ -204,7 +248,7 @@ fn update_max(maximum: &AtomicUsize, candidate: usize) {
 }
 
 fn request_text(body: &Value) -> String {
-    serde_json::to_string(body).unwrap()
+    serde_json::to_string(body).expect("test value should serialize to JSON")
 }
 
 fn assigned_index(prompt: &str) -> Option<usize> {
@@ -218,7 +262,7 @@ fn assigned_index(prompt: &str) -> Option<usize> {
 }
 
 fn sample_design() -> design_model::Design {
-    serde_json::from_str(SAMPLE_DESIGN).unwrap()
+    serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize")
 }
 
 fn succeeded<T>(result: Result<T, GenerationStop>) -> T {
@@ -238,7 +282,7 @@ fn log_sink() -> LogSink {
 }
 
 fn test_engine(configuration: ModelConfiguration) -> GenerationEngine {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     GenerationEngine::new(
         configuration,
         DesignStore::new(directory.path().join("designs"))
@@ -260,7 +304,7 @@ struct ReviewingCandidate {
 
 impl ReviewingCandidate {
     fn new(fake: &ParallelFakeModel) -> Self {
-        let directory = TempDir::new().unwrap();
+        let directory = TempDir::new().expect("temporary test directory should be created");
         let designs = DesignStore::new(directory.path().join("designs"))
             .with_history(HistoryStore::new(directory.path().join("history")));
         let sessions = SessionStore::new(directory.path().join("sessions"));
@@ -285,19 +329,22 @@ impl ReviewingCandidate {
         self.designs
             .save("talk-candidate-1", original)
             .await
-            .unwrap();
+            .expect("test data should be saved successfully");
         self.sessions
             .create(
                 NewSession::demo("talk", "Talk", "A workspace.").with_options(low_effort_options()),
             )
             .await
-            .unwrap();
+            .expect("test fixture should be created");
         for event in [
             design_model::WorkflowEvent::QuestionsAsked,
             design_model::WorkflowEvent::GenerationStarted,
             design_model::WorkflowEvent::GenerationSucceeded,
         ] {
-            self.sessions.apply("talk", event).await.unwrap();
+            self.sessions
+                .apply("talk", event)
+                .await
+                .expect("test workflow transition should apply");
         }
         self.sessions
             .append_message(
@@ -305,7 +352,7 @@ impl ReviewingCandidate {
                 ChatMessage::user(instruction, Some("talk-candidate-1")),
             )
             .await
-            .unwrap();
+            .expect("test chat message should be appended");
     }
 
     fn path(&self) -> PathBuf {
@@ -398,8 +445,9 @@ async fn request_edit_for<T>(
 where
     T: ParallelEditable,
 {
-    let client = ModelClient::build_http_client().unwrap();
-    let artifact_json = serde_json::to_string(original).unwrap();
+    let client = ModelClient::build_http_client().expect("test HTTP client should be constructed");
+    let artifact_json =
+        serde_json::to_string(original).expect("test value should serialize to JSON");
     let input = edit_input(&artifact_json, "Make the selected units clearer.", "");
     let messages = vec![json!({
         "role": "user",

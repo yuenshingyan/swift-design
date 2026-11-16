@@ -122,12 +122,12 @@ pub fn apply_patch(deck: &Deck, patch: DeckPatch) -> Result<Deck, String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     fn deck() -> Deck {
-        serde_json::from_str(include_str!("../../../../fixtures/sample-deck.json")).unwrap()
+        serde_json::from_str(include_str!("../../../../fixtures/sample-deck.json"))
+            .expect("test JSON should deserialize")
     }
 
     fn note_of(slide: &Slide) -> &str {
@@ -143,11 +143,12 @@ mod tests {
         inserted.notes = Some("inserted".to_owned());
         let patch = parse_patch(&format!(
             "{{\"title\":\"New\",\"slides\":[{{\"index\":0,\"slide\":{}}},{{\"index\":1,\"slide\":null}},{{\"index\":3,\"insert\":true,\"slide\":{}}}]}}",
-            serde_json::to_string(&replacement).unwrap(),
-            serde_json::to_string(&inserted).unwrap()
+            serde_json::to_string(&replacement).expect("test value should serialize to JSON"),
+            serde_json::to_string(&inserted).expect("test value should serialize to JSON")
         ))
-        .unwrap();
-        let patched = apply_patch(&original, patch).unwrap();
+        .expect("test patch should parse");
+        let patched =
+            apply_patch(&original, patch).expect("test patch should apply to the fixture");
         assert_eq!(patched.title, "New");
         assert_eq!(patched.slides.len(), 3);
         assert_eq!(note_of(&patched.slides[0]), "replaced");
@@ -159,18 +160,24 @@ mod tests {
     #[test]
     fn out_of_range_indexes_are_errors() {
         let original = deck();
-        let patch = parse_patch("{\"slides\":[{\"index\":7,\"slide\":null}]}").unwrap();
-        let error = apply_patch(&original, patch).unwrap_err();
+        let patch = parse_patch("{\"slides\":[{\"index\":7,\"slide\":null}]}")
+            .expect("test patch should parse");
+        let error = apply_patch(&original, patch)
+            .expect_err("patch targeting an out-of-range unit should be rejected");
         assert!(error.contains("does not exist"));
-        let patch =
-            parse_patch("{\"slides\":[{\"index\":9,\"insert\":true,\"slide\":null}]}").unwrap();
+        let patch = parse_patch("{\"slides\":[{\"index\":9,\"insert\":true,\"slide\":null}]}")
+            .expect("test patch should parse");
         assert!(apply_patch(&original, patch).is_err());
     }
 
     #[test]
     fn an_empty_patch_keeps_the_deck() {
         let original = deck();
-        let patched = apply_patch(&original, parse_patch("Sure: {}").unwrap()).unwrap();
+        let patched = apply_patch(
+            &original,
+            parse_patch("Sure: {}").expect("test patch should parse"),
+        )
+        .expect("test patch should apply to the fixture");
         assert_eq!(patched, original);
         assert!(parse_patch("no json").is_err());
     }

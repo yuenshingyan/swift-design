@@ -1,11 +1,10 @@
-#![allow(clippy::unwrap_used)]
-
 use std::io::Read;
 
 use super::*;
 
 fn sample_deck() -> Deck {
-    serde_json::from_str(include_str!("../../../../../fixtures/sample-deck.json")).unwrap()
+    serde_json::from_str(include_str!("../../../../../fixtures/sample-deck.json"))
+        .expect("test JSON should deserialize")
 }
 
 fn text_record() -> TextRecord {
@@ -42,18 +41,20 @@ fn inputs_from(deck: &Deck) -> Vec<SlideInput> {
 }
 
 fn part_names(bytes: &[u8]) -> Vec<String> {
-    let archive = zip::ZipArchive::new(Cursor::new(bytes.to_vec())).unwrap();
+    let archive = zip::ZipArchive::new(Cursor::new(bytes.to_vec()))
+        .expect("test bytes should form a readable ZIP archive");
     archive.file_names().map(ToOwned::to_owned).collect()
 }
 
 fn read_part(bytes: &[u8], name: &str) -> String {
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes.to_vec())).unwrap();
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes.to_vec()))
+        .expect("test bytes should form a readable ZIP archive");
     let mut part = String::new();
     archive
         .by_name(name)
-        .unwrap()
+        .expect("ZIP should contain the named entry")
         .read_to_string(&mut part)
-        .unwrap();
+        .expect("test content should be readable as text");
     part
 }
 
@@ -74,8 +75,16 @@ fn font_size_from_pixels_is_hundredths_of_a_point() {
 
 #[test]
 fn hex_from_rgb_reads_rgb_and_rgba() {
-    assert_eq!(hex_from_rgb("rgb(255, 0, 128)").unwrap(), "FF0080");
-    assert_eq!(hex_from_rgb("rgba(16, 20, 24, 0.5)").unwrap(), "101418");
+    assert_eq!(
+        hex_from_rgb("rgb(255, 0, 128)")
+            .expect("valid test RGB color should convert to hexadecimal"),
+        "FF0080"
+    );
+    assert_eq!(
+        hex_from_rgb("rgba(16, 20, 24, 0.5)")
+            .expect("valid test RGB color should convert to hexadecimal"),
+        "101418"
+    );
     assert!(hex_from_rgb("rgba(0, 0, 0, 0)").is_none());
     assert!(hex_from_rgb("#fff").is_none());
     assert!(hex_from_rgb("rgb(1, 2)").is_none());
@@ -139,9 +148,15 @@ fn the_slide_part_orders_background_pictures_and_text() {
         bytes: b"IMG".to_vec(),
     });
     let part = slide_part(&input);
-    let background = part.find("name=\"Picture 2\"").unwrap();
-    let picture = part.find("name=\"Picture 3\"").unwrap();
-    let text = part.find("name=\"Text 4\"").unwrap();
+    let background = part
+        .find("name=\"Picture 2\"")
+        .expect("fixture should contain the expected match");
+    let picture = part
+        .find("name=\"Picture 3\"")
+        .expect("fixture should contain the expected match");
+    let text = part
+        .find("name=\"Text 4\"")
+        .expect("fixture should contain the expected match");
     assert!(background < picture && picture < text);
     assert!(part.contains("<a:srgbClr val=\"101418\"/>"));
     assert!(part.contains("<a:ext cx=\"12192000\" cy=\"6858000\"/>"));
@@ -154,7 +169,7 @@ fn the_slide_part_orders_background_pictures_and_text() {
 #[test]
 fn the_built_zip_holds_every_required_part() {
     let deck = sample_deck();
-    let bytes = build_package(&inputs_from(&deck)).unwrap();
+    let bytes = build_package(&inputs_from(&deck)).expect("test Office package should be built");
     let names = part_names(&bytes);
     for required in [
         "[Content_Types].xml",
@@ -184,7 +199,7 @@ fn the_built_zip_holds_every_required_part() {
 fn a_deck_with_notes_adds_the_notes_parts() {
     let deck = sample_deck();
     assert!(deck.slides[0].notes.is_some());
-    let bytes = build_package(&inputs_from(&deck)).unwrap();
+    let bytes = build_package(&inputs_from(&deck)).expect("test Office package should be built");
     let names = part_names(&bytes);
     for required in [
         "ppt/notesMasters/notesMaster1.xml",
@@ -206,7 +221,7 @@ fn a_deck_with_no_notes_adds_no_notes_part() {
     for slide in &mut deck.slides {
         slide.notes = None;
     }
-    let bytes = build_package(&inputs_from(&deck)).unwrap();
+    let bytes = build_package(&inputs_from(&deck)).expect("test Office package should be built");
     assert!(
         part_names(&bytes)
             .iter()
@@ -220,7 +235,7 @@ fn a_deck_with_no_notes_adds_no_notes_part() {
 #[test]
 fn the_measurement_json_parses_into_the_record_type() {
     let dom = "<html><body><main></main><div id=\"swift-design-measure\" hidden=\"\">[{\"background\":\"rgb(16, 20, 24)\",\"texts\":[{\"x\":96,\"y\":200.5,\"width\":800,\"height\":120,\"font_family\":\"Inter, sans-serif\",\"font_size\":48,\"font_weight\":700,\"font_style\":\"normal\",\"color\":\"rgb(245, 245, 245)\",\"text_align\":\"start\",\"line_height\":57.6,\"text\":\"a &lt; b &amp; c\"}],\"images\":[{\"x\":1,\"y\":2,\"width\":3,\"height\":4,\"src\":\"/uploads/editor.png\"}]}]</div></body></html>";
-    let measures = parse_measurements(dom).unwrap();
+    let measures = parse_measurements(dom).expect("fixture DOM should contain layout measurements");
     assert_eq!(measures.len(), 1);
     assert_eq!(measures[0].background, "rgb(16, 20, 24)");
     assert_eq!(measures[0].texts[0].text, "a < b & c");
@@ -237,9 +252,9 @@ fn measurement_records_round_trip_through_json() {
         texts: vec![text_record()],
         images: vec![ImageRecord::default()],
     };
-    let json = serde_json::to_string(&measure).unwrap();
+    let json = serde_json::to_string(&measure).expect("test value should serialize to JSON");
     assert_eq!(
-        serde_json::from_str::<SlideMeasure>(&json).unwrap(),
+        serde_json::from_str::<SlideMeasure>(&json).expect("test JSON should deserialize"),
         measure
     );
 }

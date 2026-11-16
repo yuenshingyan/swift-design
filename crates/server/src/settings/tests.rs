@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use axum::extract::Query;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
@@ -24,7 +22,7 @@ fn subscription_catalog_accepts_new_slugs_and_omits_hidden_models() {
         { "visibility": "list" }
     ] });
     assert_eq!(
-        chatgpt_model_ids(&value).unwrap(),
+        chatgpt_model_ids(&value).expect("test model response should contain model IDs"),
         vec!["gpt-6.0-sol", "gpt-6.1-sol"]
     );
 }
@@ -54,7 +52,7 @@ fn model_lookup_errors_use_the_api_error_status() {
 
 #[tokio::test]
 async fn subscription_catalog_requires_a_login() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = SettingsStore::new(
         directory.path().join("settings.json"),
         "127.0.0.1:3001".to_owned(),
@@ -63,7 +61,7 @@ async fn subscription_catalog_requires_a_login() {
     assert_eq!(
         load_chatgpt_models(&store, &mut settings)
             .await
-            .unwrap_err(),
+            .expect_err("subscription model lookup without login should fail"),
         "sign in to ChatGPT first"
     );
 }
@@ -76,10 +74,16 @@ async fn subscription_catalog_uses_authenticated_live_lookup() {
             "/denied",
             get(|| async { (StatusCode::UNAUTHORIZED, "private provider response") }),
         );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind to an available local port");
+    let address = listener
+        .local_addr()
+        .expect("test listener should expose its local address");
     let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
+        axum::serve(listener, router)
+            .await
+            .expect("test HTTP server should serve requests");
     });
     let oauth = StoredOauth {
         access_token: "test-token".to_owned(),
@@ -89,11 +93,11 @@ async fn subscription_catalog_uses_authenticated_live_lookup() {
     };
     let models = fetch_chatgpt_models(&oauth, &format!("http://{address}/models"))
         .await
-        .unwrap();
+        .expect("test model list should be fetched");
     assert_eq!(models, vec!["gpt-6.1-sol"]);
     let error = fetch_chatgpt_models(&oauth, &format!("http://{address}/denied"))
         .await
-        .unwrap_err();
+        .expect_err("unauthorized subscription model lookup should fail");
     assert!(error.contains("401"));
     assert!(!error.contains("private provider response"));
     assert!(!error.contains("test-token"));
@@ -115,7 +119,8 @@ async fn subscription_catalog_reply(
 
 #[test]
 fn pkce_values_are_url_safe() {
-    let (verifier, challenge) = pkce_pair().unwrap();
+    let (verifier, challenge) =
+        pkce_pair().expect("test PKCE verifier and challenge should be generated");
     for value in [&verifier, &challenge] {
         assert!(!value.contains(['+', '/', '=']));
         assert!(value.len() >= 43);
@@ -149,7 +154,10 @@ fn jwt_account_ids_decode_from_access_tokens() {
 fn base64_url_decoding_reverses_encoding() {
     let bytes = b"swift-design?~\xfb\xff";
     let encoded = base64_url_encode(bytes);
-    assert_eq!(base64_url_decode(&encoded).unwrap(), bytes.to_vec());
+    assert_eq!(
+        base64_url_decode(&encoded).expect("test base64url value should decode"),
+        bytes.to_vec()
+    );
     assert_eq!(base64_url_decode("!!"), None);
 }
 
@@ -180,7 +188,12 @@ fn auth_method_reflects_stored_credentials() {
         account_id: None,
     });
     assert_eq!(settings.auth_method(), "login");
-    assert!(!is_login_expiring(settings.oauth.as_ref().unwrap()));
+    assert!(!is_login_expiring(
+        settings
+            .oauth
+            .as_ref()
+            .expect("optional test value should be present")
+    ));
 }
 
 #[test]

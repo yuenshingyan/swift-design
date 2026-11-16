@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use std::sync::Arc;
 
 use design_model::{ArtifactKind, WorkflowState};
@@ -25,11 +23,19 @@ const WRITE_PLAN: &str = r#"{"reply":"Writing it now.","generate":true}"#;
 #[test]
 fn a_focused_artwork_edit_shows_only_the_named_covers_and_their_findings() {
     let artwork = sample_artwork();
-    let focused = focused_artwork_json(&artwork, &[1], false).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&focused).unwrap();
+    let focused = focused_artwork_json(&artwork, &[1], false)
+        .expect("artwork fixture should produce focused JSON");
+    let value: serde_json::Value =
+        serde_json::from_str(&focused).expect("test JSON should deserialize");
     assert_eq!(value["cover_count"], artwork.covers.len());
     assert_eq!(value["size"], "thumbnail");
-    assert_eq!(value["covers"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        value["covers"]
+            .as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        1
+    );
     assert_eq!(value["covers"][0]["index"], 1);
     let request = SessionRequest {
         request: "A launch cover.".to_owned(),
@@ -121,7 +127,7 @@ async fn artwork_session(sessions: &SessionStore) {
                 .with_options(low_effort_options()),
         )
         .await
-        .unwrap();
+        .expect("test fixture should be created");
 }
 
 /// An artwork session past its setup card: the app's own questions
@@ -131,7 +137,7 @@ async fn set_up_artwork_session(sessions: &SessionStore) {
     sessions
         .apply("report", design_model::WorkflowEvent::QuestionsAsked)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
 }
 
 #[test]
@@ -150,7 +156,8 @@ fn artwork_system_prompt_carries_artwork_rules_the_schema_and_the_example() {
 #[test]
 fn partial_artwork_returns_complete_covers_only() {
     let text = r##"{"title":"T","theme":{"name":"m","colors":{"background":"#ffffff","text":"#1a1d21","accent":"#2f6fdd","muted":"#6b7480"},"fonts":{"heading":"Inter","body":"Inter","mono":"Inter"}},"size":"banner","covers":[{"html":"<h1>One</h1>"},{"html":"<h1>Tw"##;
-    let artwork = partial_artwork(text).unwrap();
+    let artwork =
+        partial_artwork(text).expect("streamed artwork fixture should contain a safe preview");
     assert_eq!(artwork.covers.len(), 1);
     assert_eq!(artwork.size, design_model::CoverSize::Banner);
     assert!(partial_artwork("{\"title\":\"T\"").is_none());
@@ -162,10 +169,16 @@ fn continuation_covers_reject_a_short_reply() {
     preview.outline = vec!["A".to_owned(), "B".to_owned(), "C".to_owned()];
     assert!(apply_artwork_continuation(&preview, "{\"covers\":[]}").is_err());
     let patch = r#"{"covers":[{"index":2,"insert":true,"cover":{"html":"<h2>C</h2>"}}]}"#;
-    let continued = apply_artwork_continuation(&preview, patch).unwrap();
+    let continued = apply_artwork_continuation(&preview, patch)
+        .expect("artwork continuation should apply to the fixture");
     assert_eq!(continued.covers.len(), 3);
     assert!(continued.outline.is_empty());
-    assert_eq!(continuation_covers(2, patch).unwrap().len(), 1);
+    assert_eq!(
+        continuation_covers(2, patch)
+            .expect("continuation fixture should contain valid covers")
+            .len(),
+        1
+    );
     assert!(continuation_covers(2, "{\"slides\":[]}").is_err());
     assert!(parse_artwork("no json").is_err());
 }
@@ -190,13 +203,13 @@ async fn a_artwork_run_asks_the_apps_own_questions_before_it_writes() {
     let server = FakeModelServer::start().await;
     // The planner wants to write at once and asks nothing.
     server.push_text(WRITE_PLAN);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     artwork_session(&stores.sessions).await;
     let outcome = engine(&server, &stores)
         .run("report", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(
         outcome,
         GenerationOutcome::NeedsClarification { question_set: 1 }
@@ -205,8 +218,8 @@ async fn a_artwork_run_asks_the_apps_own_questions_before_it_writes() {
         .sessions
         .read_question_set("report", 1)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test question set should be readable")
+        .expect("test session should contain the saved question set");
     assert!(set.questions.is_empty());
     assert!(set.can_proceed_with_assumptions);
     assert_eq!(server.requests().len(), 1);
@@ -217,20 +230,20 @@ async fn a_valid_artwork_reply_is_saved_as_a_candidate() {
     let server = FakeModelServer::start().await;
     server.push_text(WRITE_PLAN);
     server.push_text(SAMPLE_ARTWORK);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     set_up_artwork_session(&stores.sessions).await;
     let outcome = engine(&server, &stores)
         .run("report", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(outcome, GenerationOutcome::Wrote { .. }));
     assert!(
         stores
             .artworks
             .load("report-candidate-1")
             .await
-            .unwrap()
+            .expect("test record should load successfully")
             .is_some()
     );
     assert!(
@@ -238,7 +251,7 @@ async fn a_valid_artwork_reply_is_saved_as_a_candidate() {
             .designs
             .load("report-candidate-1")
             .await
-            .unwrap()
+            .expect("test record should load successfully")
             .is_none()
     );
     let planner = server.requests()[0].to_string();
@@ -246,7 +259,11 @@ async fn a_valid_artwork_reply_is_saved_as_a_candidate() {
     let request = server.requests()[1].to_string();
     assert!(request.contains("cover art as JSON artworks"));
     assert!(request.contains("Build an artwork"));
-    let runs = stores.sessions.runs("report").await.unwrap();
+    let runs = stores
+        .sessions
+        .runs("report")
+        .await
+        .expect("test run records should be readable");
     assert_eq!(runs[0].artifacts, vec!["report-candidate-1"]);
 }
 
@@ -257,24 +274,24 @@ async fn a_chat_request_with_a_artwork_open_patches_that_artwork() {
     server.push_text(
             r#"{"covers":[{"index":0,"cover":{"html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:40px;}"}}]}"#,
         );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     stores
         .artworks
         .save("report-candidate-1", &sample_artwork())
         .await
-        .unwrap();
+        .expect("test data should be saved successfully");
     artwork_session(&stores.sessions).await;
     stores
         .sessions
         .apply("report", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     stores
         .sessions
         .apply("report", design_model::WorkflowEvent::GenerationSucceeded)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     stores
         .sessions
         .append_message(
@@ -282,20 +299,24 @@ async fn a_chat_request_with_a_artwork_open_patches_that_artwork() {
             ChatMessage::user("[cover 1] Tighten the title.", Some("report-candidate-1")),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &stores)
         .run("report", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     let GenerationOutcome::Edited { reports, .. } = outcome else {
         panic!("expected a saved edit report");
     };
     assert!(reports[0].contains("Modified cover 1"));
-    let messages = stores.sessions.messages("report").await.unwrap();
+    let messages = stores
+        .sessions
+        .messages("report")
+        .await
+        .expect("test chat messages should be readable");
     assert!(
         messages
             .last()
-            .unwrap()
+            .expect("test collection should contain a last item")
             .content
             .contains("Modified cover 1")
     );
@@ -303,11 +324,17 @@ async fn a_chat_request_with_a_artwork_open_patches_that_artwork() {
         .artworks
         .load("report-candidate-1")
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert!(edited.covers[0].html.contains("Tighter"));
     assert_eq!(
-        stores.sessions.read("report").await.unwrap().unwrap().state,
+        stores
+            .sessions
+            .read("report")
+            .await
+            .expect("test data should be readable")
+            .expect("test data should be present")
+            .state,
         WorkflowState::Generating
     );
 }
@@ -319,19 +346,19 @@ async fn reviewing_artwork_session_with(stores: &Stores, count: usize) {
             .artworks
             .save(&format!("report-candidate-{number}"), &sample_artwork())
             .await
-            .unwrap();
+            .expect("test data should be saved successfully");
     }
     set_up_artwork_session(&stores.sessions).await;
     stores
         .sessions
         .apply("report", design_model::WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     stores
         .sessions
         .apply("report", design_model::WorkflowEvent::GenerationSucceeded)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
 }
 
 #[tokio::test]
@@ -341,7 +368,7 @@ async fn a_regenerated_cover_is_written_without_its_old_markup() {
     server.push_text(
             r#"{"covers":[{"index":0,"cover":{"html":"<h1 class='title'>Fresh</h1>","css":".title{font-size:40px;}"}}]}"#,
         );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     let mut artwork = sample_artwork();
     artwork.covers[0].html = "<h1>Old title markup</h1>".to_owned();
@@ -349,7 +376,7 @@ async fn a_regenerated_cover_is_written_without_its_old_markup() {
         .artworks
         .save("report-candidate-1", &artwork)
         .await
-        .unwrap();
+        .expect("test data should be saved successfully");
     reviewing_artwork_session_with(&stores, 0).await;
     stores
         .sessions
@@ -361,11 +388,11 @@ async fn a_regenerated_cover_is_written_without_its_old_markup() {
             ),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &stores)
         .run("report", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     assert!(matches!(outcome, GenerationOutcome::Edited { .. }));
     let text = server.requests()[0].to_string();
     assert!(text.contains("Write cover 1 of"));
@@ -374,8 +401,8 @@ async fn a_regenerated_cover_is_written_without_its_old_markup() {
         .artworks
         .load("report-candidate-1")
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert!(edited.covers[0].html.contains("Fresh"));
     assert_eq!(edited.covers.len(), artwork.covers.len());
 }
@@ -387,7 +414,7 @@ async fn a_merge_of_two_pinned_artworks_writes_a_new_one() {
     server.push_text(SAMPLE_ARTWORK);
     // The polish round, when Chrome can measure: no change.
     server.push_text(r#"{"covers":[]}"#);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     reviewing_artwork_session_with(&stores, 2).await;
     let pinned = vec![
@@ -405,11 +432,11 @@ async fn a_merge_of_two_pinned_artworks_writes_a_new_one() {
             .with_pinned(pinned),
         )
         .await
-        .unwrap();
+        .expect("test chat message should be appended");
     let outcome = engine(&server, &stores)
         .run("report", silent_log())
         .await
-        .unwrap();
+        .expect("test generation run should complete successfully");
     let GenerationOutcome::Wrote { design_ids } = outcome else {
         panic!("expected a write");
     };
@@ -419,7 +446,7 @@ async fn a_merge_of_two_pinned_artworks_writes_a_new_one() {
             .artworks
             .load("report-candidate-3")
             .await
-            .unwrap()
+            .expect("test record should load successfully")
             .is_some()
     );
     let text = server.requests()[1].to_string();
@@ -433,7 +460,7 @@ async fn a_artwork_session_without_a_artwork_store_fails_plainly() {
     let server = FakeModelServer::start().await;
     server.push_text(WRITE_PLAN);
     server.push_text(SAMPLE_ARTWORK);
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let stores = stores(&directory);
     set_up_artwork_session(&stores.sessions).await;
     let engine = GenerationEngine::new(
@@ -444,6 +471,9 @@ async fn a_artwork_session_without_a_artwork_store_fails_plainly() {
         "http://127.0.0.1:3000".to_owned(),
         ChangeNotifier::new(),
     );
-    let error = engine.run("report", silent_log()).await.unwrap_err();
+    let error = engine
+        .run("report", silent_log())
+        .await
+        .expect_err("artwork generation without its store should fail");
     assert!(error.contains("no artwork store"));
 }

@@ -98,16 +98,16 @@ impl ArtifactKind {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::ArtifactKind;
 
     #[test]
     fn artifact_kind_round_trips_through_json() {
         for kind in ArtifactKind::ALL {
-            let json = serde_json::to_string(&kind).unwrap();
+            let json = serde_json::to_string(&kind).expect("test value should serialize to JSON");
             assert_eq!(json, format!("\"{}\"", kind.as_str()));
-            let restored: ArtifactKind = serde_json::from_str(&json).unwrap();
+            let restored: ArtifactKind =
+                serde_json::from_str(&json).expect("test JSON should deserialize");
             assert_eq!(restored, kind);
         }
     }

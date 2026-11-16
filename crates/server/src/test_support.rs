@@ -5,7 +5,6 @@
 //! ephemeral port that returns canned OpenAI chat-completion replies.
 //! The engines read it exactly as they read a real provider, so their
 //! tests exercise the whole request path without a network.
-#![allow(clippy::unwrap_used)]
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -48,7 +47,7 @@ pub(crate) const SAMPLE_DECK: &str = include_str!("../../../fixtures/sample-deck
 
 /// The canonical valid deck, parsed.
 pub(crate) fn sample_deck() -> design_model::Deck {
-    serde_json::from_str(SAMPLE_DECK).unwrap()
+    serde_json::from_str(SAMPLE_DECK).expect("test JSON should deserialize")
 }
 
 /// The canonical valid document, as JSON.
@@ -56,7 +55,7 @@ pub(crate) const SAMPLE_DOCUMENT: &str = include_str!("../../../fixtures/sample-
 
 /// The canonical valid document, parsed.
 pub(crate) fn sample_document() -> design_model::Document {
-    serde_json::from_str(SAMPLE_DOCUMENT).unwrap()
+    serde_json::from_str(SAMPLE_DOCUMENT).expect("test JSON should deserialize")
 }
 
 /// The canonical valid social, as JSON.
@@ -64,7 +63,7 @@ pub(crate) const SAMPLE_SOCIAL: &str = include_str!("../../../fixtures/sample-so
 
 /// The canonical valid social, parsed.
 pub(crate) fn sample_social() -> design_model::Social {
-    serde_json::from_str(SAMPLE_SOCIAL).unwrap()
+    serde_json::from_str(SAMPLE_SOCIAL).expect("test JSON should deserialize")
 }
 
 /// The canonical valid print, as JSON.
@@ -72,7 +71,7 @@ pub(crate) const SAMPLE_PRINT: &str = include_str!("../../../fixtures/sample-pri
 
 /// The canonical valid print, parsed.
 pub(crate) fn sample_print() -> design_model::Print {
-    serde_json::from_str(SAMPLE_PRINT).unwrap()
+    serde_json::from_str(SAMPLE_PRINT).expect("test JSON should deserialize")
 }
 
 /// The canonical valid mailing, as JSON.
@@ -80,7 +79,7 @@ pub(crate) const SAMPLE_MAILING: &str = include_str!("../../../fixtures/sample-m
 
 /// The canonical valid mailing, parsed.
 pub(crate) fn sample_mailing() -> design_model::Mailing {
-    serde_json::from_str(SAMPLE_MAILING).unwrap()
+    serde_json::from_str(SAMPLE_MAILING).expect("test JSON should deserialize")
 }
 
 /// The canonical valid campaign, as JSON.
@@ -88,7 +87,7 @@ pub(crate) const SAMPLE_CAMPAIGN: &str = include_str!("../../../fixtures/sample-
 
 /// The canonical valid campaign, parsed.
 pub(crate) fn sample_campaign() -> design_model::Campaign {
-    serde_json::from_str(SAMPLE_CAMPAIGN).unwrap()
+    serde_json::from_str(SAMPLE_CAMPAIGN).expect("test JSON should deserialize")
 }
 
 /// The canonical valid artwork, as JSON.
@@ -96,7 +95,7 @@ pub(crate) const SAMPLE_ARTWORK: &str = include_str!("../../../fixtures/sample-a
 
 /// The canonical valid artwork, parsed.
 pub(crate) fn sample_artwork() -> design_model::Artwork {
-    serde_json::from_str(SAMPLE_ARTWORK).unwrap()
+    serde_json::from_str(SAMPLE_ARTWORK).expect("test JSON should deserialize")
 }
 
 /// The multipart boundary the upload helper uses.
@@ -182,12 +181,24 @@ pub(crate) async fn send_raw(
         builder = builder.header("content-type", content_type);
     }
     let response = application
-        .oneshot(builder.body(body).unwrap())
+        .oneshot(
+            builder
+                .body(body)
+                .expect("test HTTP request body should be valid"),
+        )
         .await
-        .unwrap();
+        .expect("test HTTP request should complete");
     let status = response.status();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    (status, String::from_utf8(bytes.to_vec()).unwrap())
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("test response body should be collected")
+        .to_bytes();
+    (
+        status,
+        String::from_utf8(bytes.to_vec()).expect("test bytes should contain valid UTF-8"),
+    )
 }
 
 /// Sends a JSON request, or a bodyless one when `json` is `None`.
@@ -225,11 +236,22 @@ pub(crate) async fn send_user_put(
         .header("content-type", "application/json")
         .header("x-swift-design-author", "user")
         .body(Body::from(json.to_owned()))
-        .unwrap();
-    let response = application.oneshot(request).await.unwrap();
+        .expect("test HTTP request body should be valid");
+    let response = application
+        .oneshot(request)
+        .await
+        .expect("test HTTP request should complete");
     let status = response.status();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    (status, String::from_utf8(bytes.to_vec()).unwrap())
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("test response body should be collected")
+        .to_bytes();
+    (
+        status,
+        String::from_utf8(bytes.to_vec()).expect("test bytes should contain valid UTF-8"),
+    )
 }
 
 /// The multipart body for one uploaded file.
@@ -262,7 +284,8 @@ pub(crate) async fn send_upload(
 /// A copy of the sample design with an empty title and no screens, for
 /// validation tests.
 pub(crate) fn invalid_sample_design() -> String {
-    let mut design: serde_json::Value = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+    let mut design: serde_json::Value =
+        serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize");
     design["title"] = serde_json::json!("");
     design["screens"] = serde_json::json!([]);
     design.to_string()
@@ -365,7 +388,7 @@ pub(crate) fn clean_demo_dom_runner() -> DemoDomRunner {
             let screens: Vec<usize> = (0..design.screens.len()).collect();
             Ok(format!(
                 "<html data-swift-design-findings=\"[]\" data-swift-design-audited-screens=\"{}\">",
-                serde_json::to_string(&screens).unwrap()
+                serde_json::to_string(&screens).expect("test value should serialize to JSON")
             ))
         })
     })
@@ -415,8 +438,12 @@ impl FakeModelServer {
         let router = Router::new()
             .route("/v1/chat/completions", post(handle))
             .with_state(Arc::clone(&state));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind to an available local port");
+        let address = listener
+            .local_addr()
+            .expect("test listener should expose its local address");
         tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         });
@@ -431,7 +458,7 @@ impl FakeModelServer {
         self.state
             .replies
             .lock()
-            .unwrap()
+            .expect("test mutex should not be poisoned")
             .push_back(FakeReply::Text(content.to_owned()));
     }
 
@@ -440,7 +467,7 @@ impl FakeModelServer {
         self.state
             .replies
             .lock()
-            .unwrap()
+            .expect("test mutex should not be poisoned")
             .push_back(FakeReply::Error(status, message.to_owned()));
     }
 
@@ -454,7 +481,7 @@ impl FakeModelServer {
         self.state
             .replies
             .lock()
-            .unwrap()
+            .expect("test mutex should not be poisoned")
             .push_back(FakeReply::RetryAfter(
                 status,
                 message.to_owned(),
@@ -467,13 +494,17 @@ impl FakeModelServer {
         self.state
             .replies
             .lock()
-            .unwrap()
+            .expect("test mutex should not be poisoned")
             .push_back(FakeReply::Stream(events.to_owned()));
     }
 
     /// The request bodies the server received, in order.
     pub(crate) fn requests(&self) -> Vec<serde_json::Value> {
-        self.state.requests.lock().unwrap().clone()
+        self.state
+            .requests
+            .lock()
+            .expect("test mutex should not be poisoned")
+            .clone()
     }
 
     /// A model configuration pointing at this server. The provider name
@@ -496,8 +527,16 @@ async fn handle(
     State(state): State<Arc<FakeState>>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> Response {
-    state.requests.lock().unwrap().push(body);
-    let reply = state.replies.lock().unwrap().pop_front();
+    state
+        .requests
+        .lock()
+        .expect("test mutex should not be poisoned")
+        .push(body);
+    let reply = state
+        .replies
+        .lock()
+        .expect("test mutex should not be poisoned")
+        .pop_front();
     match reply {
         Some(FakeReply::Text(content)) => axum::Json(serde_json::json!({
             "id": "fake",

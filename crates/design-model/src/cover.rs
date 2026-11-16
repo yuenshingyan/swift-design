@@ -36,7 +36,6 @@ pub struct Cover {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::Cover;
     use crate::test_support::sample_artwork;
@@ -48,14 +47,15 @@ mod tests {
             css: Some("h1 { color: red; }".to_owned()),
             notes: Some("Title: A short hello. Alt: A red greeting.".to_owned()),
         };
-        let json = serde_json::to_string(&cover).unwrap();
-        let restored: Cover = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&cover).expect("test value should serialize to JSON");
+        let restored: Cover = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(cover, restored);
     }
 
     #[test]
     fn absent_cover_fields_stay_out_of_the_json() {
-        let json = serde_json::to_value(&sample_artwork().covers[0]).unwrap();
+        let json = serde_json::to_value(&sample_artwork().covers[0])
+            .expect("test value should convert to JSON");
         assert!(json.get("notes").is_none());
         assert!(json.get("html").is_some());
     }

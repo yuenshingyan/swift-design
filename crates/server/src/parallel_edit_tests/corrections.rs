@@ -44,19 +44,27 @@ async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
                 .collect();
             fake.push_text(json!({"coverage": coverage, "reference_error": null}).to_string());
         }
-        let before = tokio::fs::read(candidate.path()).await.unwrap();
+        let before = tokio::fs::read(candidate.path())
+            .await
+            .expect("test data should be readable");
         let result = candidate.engine.clone().run("talk", log_sink()).await;
         if let Some(expected) = expected_error {
-            let error = result.unwrap_err();
+            let error =
+                result.expect_err("stalled or exhausted corrections should fail acceptance");
             assert!(error.contains(expected), "{error}");
             assert!(error.contains("remaining issues"));
-            assert_eq!(tokio::fs::read(candidate.path()).await.unwrap(), before);
+            assert_eq!(
+                tokio::fs::read(candidate.path())
+                    .await
+                    .expect("test data should be readable"),
+                before
+            );
             assert!(
                 candidate
                     .designs
                     .history("talk-candidate-1")
                     .await
-                    .unwrap()
+                    .expect("test history should be listed")
                     .is_empty()
             );
         } else {
@@ -65,8 +73,8 @@ async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
                 .designs
                 .load("talk-candidate-1")
                 .await
-                .unwrap()
-                .unwrap();
+                .expect("test record should load successfully")
+                .expect("saved test record should exist");
             assert!(saved.screens[0].html.contains("Draft 3"));
             assert_eq!(json!(saved.theme)["colors"]["accent"], "#8dd8bc");
             assert_eq!(saved.screens[1..], original.screens[1..]);
@@ -94,16 +102,16 @@ async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
             assert!(edit.contains("Complete checklist item"));
             let review = requests[3 + round * 2]["messages"][1]["content"]
                 .as_str()
-                .unwrap();
+                .expect("test JSON value should be a string");
             let baseline = review
                 .split_once("Before artifact:\n")
-                .unwrap()
+                .expect("test value should contain the expected separator")
                 .1
                 .split_once("\nAfter artifact:\n")
-                .unwrap()
+                .expect("test value should contain the expected separator")
                 .0;
             assert_eq!(
-                serde_json::from_str::<Value>(baseline).unwrap(),
+                serde_json::from_str::<Value>(baseline).expect("test JSON should deserialize"),
                 json!(original)
             );
         }
@@ -163,8 +171,8 @@ async fn requested_hidden_views_are_repaired_as_linked_separate_screens() {
         .designs
         .load("talk-candidate-1")
         .await
-        .unwrap()
-        .unwrap();
+        .expect("test record should load successfully")
+        .expect("saved test record should exist");
     assert_eq!(saved.screens.len(), original.screens.len() + 1);
     assert_eq!(saved.screens[0], connected);
     assert_eq!(saved.screens.last(), Some(&disconnected));
@@ -207,22 +215,29 @@ async fn correction_cannot_change_an_unselected_original_screen() {
     let mut unrelated = original.screens[1].clone();
     unrelated.html = "<h1>Unrequested change</h1>".into();
     fake.push_text(json!({"screens":[{"index":1,"screen":unrelated}]}).to_string());
-    let before = tokio::fs::read(candidate.path()).await.unwrap();
+    let before = tokio::fs::read(candidate.path())
+        .await
+        .expect("test data should be readable");
     let error = candidate
         .engine
         .clone()
         .run("talk", log_sink())
         .await
-        .unwrap_err();
+        .expect_err("correction changing an unselected screen should be rejected");
     assert!(error.contains("unselected screen changed"), "{error}");
     assert_eq!(fake.requests().len(), 5);
-    assert_eq!(tokio::fs::read(candidate.path()).await.unwrap(), before);
+    assert_eq!(
+        tokio::fs::read(candidate.path())
+            .await
+            .expect("test data should be readable"),
+        before
+    );
     assert!(
         candidate
             .designs
             .load("talk-candidate-2")
             .await
-            .unwrap()
+            .expect("test record should load successfully")
             .is_none()
     );
     assert!(
@@ -230,7 +245,7 @@ async fn correction_cannot_change_an_unselected_original_screen() {
             .designs
             .history("talk-candidate-1")
             .await
-            .unwrap()
+            .expect("test history should be listed")
             .is_empty()
     );
 }
@@ -258,23 +273,30 @@ async fn unsupported_executable_requirements_stop_without_correction_or_save() {
         "unsupported_requirements":["Executable date validation"], "reference_error":null})
         .to_string(),
     );
-    let before = tokio::fs::read(candidate.path()).await.unwrap();
+    let before = tokio::fs::read(candidate.path())
+        .await
+        .expect("test data should be readable");
     let error = candidate
         .engine
         .clone()
         .run("talk", log_sink())
         .await
-        .unwrap_err();
+        .expect_err("unsupported executable requirements should block the edit");
     assert!(error.contains("unsupported executable requirements"));
     assert!(error.contains("approve a design/specification alternative"));
     assert_eq!(fake.requests().len(), 4);
-    assert_eq!(tokio::fs::read(candidate.path()).await.unwrap(), before);
+    assert_eq!(
+        tokio::fs::read(candidate.path())
+            .await
+            .expect("test data should be readable"),
+        before
+    );
     assert!(
         candidate
             .designs
             .history("talk-candidate-1")
             .await
-            .unwrap()
+            .expect("test history should be listed")
             .is_empty()
     );
 }

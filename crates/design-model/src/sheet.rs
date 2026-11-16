@@ -34,7 +34,6 @@ pub struct Sheet {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use crate::Sheet;
     use crate::test_support::sample_print;
@@ -46,14 +45,15 @@ mod tests {
             css: Some("h1 { color: red; }".to_owned()),
             notes: Some("Stock: 300 gsm matte.".to_owned()),
         };
-        let json = serde_json::to_string(&sheet).unwrap();
-        let restored: Sheet = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&sheet).expect("test value should serialize to JSON");
+        let restored: Sheet = serde_json::from_str(&json).expect("test JSON should deserialize");
         assert_eq!(sheet, restored);
     }
 
     #[test]
     fn absent_sheet_fields_stay_out_of_the_json() {
-        let json = serde_json::to_value(&sample_print().sheets[0]).unwrap();
+        let json = serde_json::to_value(&sample_print().sheets[0])
+            .expect("test value should convert to JSON");
         assert!(json.get("notes").is_none());
         assert!(json.get("html").is_some());
     }

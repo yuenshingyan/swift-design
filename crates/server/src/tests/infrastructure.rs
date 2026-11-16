@@ -2,22 +2,24 @@ use super::*;
 
 #[tokio::test]
 async fn uploading_stores_lists_and_serves_a_file() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (status, body) =
         send_upload(test_application(&directory), "Chart Final.PNG", "PNGDATA").await;
     assert_eq!(status, StatusCode::OK);
-    let stored: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let stored: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
     assert_eq!(stored[0]["name"], "chart-final.png");
     let (status, body) = send(test_application(&directory), "GET", "/uploads", None).await;
     assert_eq!(status, StatusCode::OK);
-    let listing: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let listing: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
     assert_eq!(listing[0]["size_bytes"], 7);
     assert_eq!(listing[0]["is_image"], true);
 }
 
 #[tokio::test]
 async fn deleting_a_missing_or_traversal_upload_is_rejected() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (status, body) = send(
         test_application(&directory),
         "DELETE",
@@ -39,7 +41,7 @@ async fn deleting_a_missing_or_traversal_upload_is_rejected() {
 
 #[tokio::test]
 async fn root_shows_not_built_page_without_a_ui_bundle() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (status, body) = send(test_application(&directory), "GET", "/", None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("The editor UI is not built yet"));
@@ -47,14 +49,14 @@ async fn root_shows_not_built_page_without_a_ui_bundle() {
 
 #[tokio::test]
 async fn blocks_hidden_and_traversal_static_paths() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (status, _) = send(test_application(&directory), "GET", "/.env", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn history_lists_snapshots_and_restores_one() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "overview").await;
     send(
@@ -88,9 +90,18 @@ async fn history_lists_snapshots_and_restores_one() {
         None,
     )
     .await;
-    let rows: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(rows.as_array().unwrap().len(), 1);
-    let stamp = rows[0]["stamp"].as_str().unwrap().to_owned();
+    let rows: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
+    assert_eq!(
+        rows.as_array()
+            .expect("test JSON value should be an array")
+            .len(),
+        1
+    );
+    let stamp = rows[0]["stamp"]
+        .as_str()
+        .expect("test JSON value should be a string")
+        .to_owned();
     let (status, _) = send(
         application.clone(),
         "POST",
@@ -105,7 +116,7 @@ async fn history_lists_snapshots_and_restores_one() {
 
 #[tokio::test]
 async fn user_saves_are_allowed_while_reviewing() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     open_generating_session(&application, "talk").await;
     send(
@@ -117,7 +128,8 @@ async fn user_saves_are_allowed_while_reviewing() {
     .await;
     // Complete the run so the session is reviewing.
     send(application.clone(), "POST", "/sessions/talk/complete", None).await;
-    let mut edited: serde_json::Value = serde_json::from_str(SAMPLE_DESIGN).unwrap();
+    let mut edited: serde_json::Value =
+        serde_json::from_str(SAMPLE_DESIGN).expect("test JSON should deserialize");
     edited["title"] = serde_json::json!("Edited by hand");
     let (status, _) =
         send_user_put(application.clone(), "/designs/talk", &edited.to_string()).await;
@@ -129,20 +141,21 @@ async fn user_saves_are_allowed_while_reviewing() {
 
 #[tokio::test]
 async fn settings_report_chrome_availability() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (status, body) = send(test_application(&directory), "GET", "/settings", None).await;
     assert_eq!(status, StatusCode::OK);
-    let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
     assert!(payload["has_chrome"].is_boolean());
 }
 
 #[tokio::test]
 async fn mutations_bump_the_events_revision() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);
     let (_, body) = send(application.clone(), "GET", "/events", None).await;
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&body).unwrap()["revision"],
+        serde_json::from_str::<serde_json::Value>(&body).expect("test JSON should deserialize")["revision"],
         0
     );
     send(
@@ -154,16 +167,16 @@ async fn mutations_bump_the_events_revision() {
     .await;
     let (_, body) = send(application, "GET", "/events", None).await;
     assert!(
-        serde_json::from_str::<serde_json::Value>(&body).unwrap()["revision"]
+        serde_json::from_str::<serde_json::Value>(&body).expect("test JSON should deserialize")["revision"]
             .as_u64()
-            .unwrap()
+            .expect("test JSON value should be an unsigned integer")
             >= 1
     );
 }
 
 #[tokio::test]
 async fn agent_run_starts_and_reports_its_log() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let application = application_with_command(&directory, Some("echo test-agent".to_owned()));
     send(
         application.clone(),
@@ -181,9 +194,15 @@ async fn agent_run_starts_and_reports_its_log() {
     .await;
     for _ in 0..100 {
         let (_, body) = send(application.clone(), "GET", "/agent-runs", None).await;
-        let run: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let run: serde_json::Value =
+            serde_json::from_str(&body).expect("test JSON should deserialize");
         if run["is_running"] == false {
-            assert!(run["log_tail"].as_str().unwrap().contains("test-agent"));
+            assert!(
+                run["log_tail"]
+                    .as_str()
+                    .expect("test JSON value should be a string")
+                    .contains("test-agent")
+            );
             assert_eq!(run["mode"], "generation");
             return;
         }
@@ -194,10 +213,11 @@ async fn agent_run_starts_and_reports_its_log() {
 
 #[tokio::test]
 async fn instructions_and_schemas_are_served_by_the_app() {
-    let directory = TempDir::new().unwrap();
+    let directory = TempDir::new().expect("temporary test directory should be created");
     let (status, body) = send(test_application(&directory), "GET", "/instructions", None).await;
     assert_eq!(status, StatusCode::OK);
-    let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(&body).expect("test JSON should deserialize");
     assert_eq!(payload["routes"]["session"], "GET /sessions/{id}");
     assert!(payload.to_string().contains("There is no brief"));
     for (path, key) in [
@@ -209,7 +229,8 @@ async fn instructions_and_schemas_are_served_by_the_app() {
     ] {
         let (status, body) = send(test_application(&directory), "GET", path, None).await;
         assert_eq!(status, StatusCode::OK, "{path}");
-        let schema: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let schema: serde_json::Value =
+            serde_json::from_str(&body).expect("test JSON should deserialize");
         assert!(schema["properties"][key].is_object(), "{path}");
     }
 }

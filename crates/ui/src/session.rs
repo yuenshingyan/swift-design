@@ -7,11 +7,7 @@ use std::collections::{HashMap, HashSet};
 use dioxus::prelude::*;
 
 use crate::api;
-use crate::canvas::{
-    CandidateCanvas, candidate_label, cards_from_artworks, cards_from_campaigns, cards_from_decks,
-    cards_from_designs, cards_from_documents, cards_from_mailings, cards_from_prints,
-    cards_from_socials, queued_finishes,
-};
+use crate::canvas::{CandidateCanvas, candidate_label, queued_finishes};
 use crate::chat::{mention_at, recall_prompt, remove_mention, use_follow_thread, watch_caret};
 use crate::chat_controls::{ModelChip, SendButton, with_effort};
 use crate::prompt_history::{PromptHistory, prompt_entries};

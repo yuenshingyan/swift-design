@@ -1,4 +1,10 @@
-use super::*;
+#![allow(dead_code)]
+
+use design_model::Design;
+use gloo_net::http::Request;
+use serde::Deserialize;
+
+use crate::api::*;
 
 // -- Designs -------------------------------------------------------------
 
@@ -122,12 +128,6 @@ pub async fn delete_design(id: &str) -> Result<(), String> {
     .await
 }
 
-/// Response of a fork: the id of the new candidate.
-#[derive(Debug, Deserialize)]
-struct ForkResponse {
-    id: String,
-}
-
 /// Copies one design candidate under the next free number of its
 /// session. Returns the new id.
 pub async fn fork_design(id: &str) -> Result<String, String> {
@@ -140,112 +140,11 @@ pub async fn fork_design(id: &str) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-/// Copies one deck candidate under the next free number of its
-/// session. Returns the new id.
-pub async fn fork_deck(id: &str) -> Result<String, String> {
-    let request = built(Request::post(&format!("/decks/{id}/fork")))?;
-    let response = send_checked(request, "POST /decks/fork").await?;
-    response
-        .json::<ForkResponse>()
-        .await
-        .map(|fork| fork.id)
-        .map_err(|error| error.to_string())
-}
-
-/// Copies one document candidate under the next free number of its
-/// session. Returns the new id.
-pub async fn fork_document(id: &str) -> Result<String, String> {
-    let request = built(Request::post(&format!("/documents/{id}/fork")))?;
-    let response = send_checked(request, "POST /documents/fork").await?;
-    response
-        .json::<ForkResponse>()
-        .await
-        .map(|fork| fork.id)
-        .map_err(|error| error.to_string())
-}
-
-/// Copies one social candidate under the next free number of its
-/// session. Returns the new id.
-pub async fn fork_social(id: &str) -> Result<String, String> {
-    let request = built(Request::post(&format!("/socials/{id}/fork")))?;
-    let response = send_checked(request, "POST /socials/fork").await?;
-    response
-        .json::<ForkResponse>()
-        .await
-        .map(|fork| fork.id)
-        .map_err(|error| error.to_string())
-}
-
-/// Copies one print candidate under the next free number of its
-/// session. Returns the new id.
-pub async fn fork_print(id: &str) -> Result<String, String> {
-    let request = built(Request::post(&format!("/prints/{id}/fork")))?;
-    let response = send_checked(request, "POST /prints/fork").await?;
-    response
-        .json::<ForkResponse>()
-        .await
-        .map(|fork| fork.id)
-        .map_err(|error| error.to_string())
-}
-
-/// Copies one mailing candidate under the next free number of its
-/// session. Returns the new id.
-pub async fn fork_mailing(id: &str) -> Result<String, String> {
-    let request = built(Request::post(&format!("/mailings/{id}/fork")))?;
-    let response = send_checked(request, "POST /mailings/fork").await?;
-    response
-        .json::<ForkResponse>()
-        .await
-        .map(|fork| fork.id)
-        .map_err(|error| error.to_string())
-}
-
-/// Copies one campaign candidate under the next free number of its
-/// session. Returns the new id.
-pub async fn fork_campaign(id: &str) -> Result<String, String> {
-    let request = built(Request::post(&format!("/campaigns/{id}/fork")))?;
-    let response = send_checked(request, "POST /campaigns/fork").await?;
-    response
-        .json::<ForkResponse>()
-        .await
-        .map(|fork| fork.id)
-        .map_err(|error| error.to_string())
-}
-
-/// Copies one artwork candidate under the next free number of its
-/// session. Returns the new id.
-pub async fn fork_artwork(id: &str) -> Result<String, String> {
-    let request = built(Request::post(&format!("/artworks/{id}/fork")))?;
-    let response = send_checked(request, "POST /artworks/fork").await?;
-    response
-        .json::<ForkResponse>()
-        .await
-        .map(|fork| fork.id)
-        .map_err(|error| error.to_string())
-}
-
-/// Response of `GET /designs/{id}/authors`.
-#[derive(Debug, Deserialize)]
-pub(crate) struct AuthorsResponse {
-    pub(crate) user_paths: Vec<String>,
-}
-
 /// Fetches the field paths the user changed in this design.
 pub async fn fetch_user_paths(id: &str) -> Result<Vec<String>, String> {
     get_json::<AuthorsResponse>(&format!("/designs/{id}/authors"))
         .await
         .map(|authors| authors.user_paths)
-}
-
-/// One row of `GET /designs/{id}/history`.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub struct HistorySnapshot {
-    /// File stem of the snapshot.
-    pub stamp: String,
-    /// When it was taken, RFC 3339.
-    pub saved_at: String,
-    /// Size of the snapshot file.
-    pub size_bytes: u64,
 }
 
 /// Fetches the saved snapshots of one design.

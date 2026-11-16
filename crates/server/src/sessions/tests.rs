@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use super::*;
 
 #[test]
@@ -8,11 +6,13 @@ fn a_user_turn_keeps_the_candidates_it_pinned() {
         "talk-candidate-1".to_owned(),
         "talk-candidate-3".to_owned(),
     ]);
-    let json = serde_json::to_value(&message).unwrap();
+    let json = serde_json::to_value(&message).expect("test value should convert to JSON");
     assert_eq!(json["pinned"][1], "talk-candidate-3");
-    let back: ChatMessage = serde_json::from_value(json).unwrap();
+    let back: ChatMessage =
+        serde_json::from_value(json).expect("test JSON value should deserialize");
     assert_eq!(back, message);
-    let plain = serde_json::to_value(ChatMessage::user("Hi.", None)).unwrap();
+    let plain = serde_json::to_value(ChatMessage::user("Hi.", None))
+        .expect("test value should convert to JSON");
     assert!(plain.get("pinned").is_none());
 }
 
@@ -22,11 +22,13 @@ fn a_regenerate_turn_names_its_artifact_and_round_trips() {
     assert!(message.is_regenerate);
     assert!(!message.is_continue);
     assert_eq!(message.design.as_deref(), Some("talk-candidate-1"));
-    let json = serde_json::to_value(&message).unwrap();
+    let json = serde_json::to_value(&message).expect("test value should convert to JSON");
     assert_eq!(json["is_regenerate"], true);
-    let back: ChatMessage = serde_json::from_value(json).unwrap();
+    let back: ChatMessage =
+        serde_json::from_value(json).expect("test JSON value should deserialize");
     assert_eq!(back, message);
-    let plain = serde_json::to_value(ChatMessage::user("Hi.", None)).unwrap();
+    let plain = serde_json::to_value(ChatMessage::user("Hi.", None))
+        .expect("test value should convert to JSON");
     assert!(plain.get("is_regenerate").is_none());
 }
 
@@ -112,7 +114,7 @@ fn the_axes_of_a_demo_leave_out_the_audience_and_the_tone() {
 use design_model::{QuestionKind, QuestionOption};
 
 fn store() -> (tempfile::TempDir, SessionStore) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = SessionStore::new(directory.path().join("sessions"));
     (directory, store)
 }
@@ -157,7 +159,7 @@ async fn creating_a_session_starts_in_intake_and_survives_a_new_store() {
             "Design a landing page.",
         ))
         .await
-        .unwrap();
+        .expect("test fixture should be created");
     assert_eq!(session.state, WorkflowState::Intake);
     assert_eq!(session.artifact_kind, ArtifactKind::Demo);
     assert!(
@@ -167,10 +169,21 @@ async fn creating_a_session_starts_in_intake_and_survives_a_new_store() {
             .is_err()
     );
     let reopened = SessionStore::new(directory.path().join("sessions"));
-    let loaded = reopened.read("finance-app").await.unwrap().unwrap();
+    let loaded = reopened
+        .read("finance-app")
+        .await
+        .expect("test data should be readable")
+        .expect("test data should be present");
     assert_eq!(loaded.request, "Design a landing page.");
     assert_eq!(loaded.state, WorkflowState::Intake);
-    assert_eq!(store.list().await.unwrap().len(), 1);
+    assert_eq!(
+        store
+            .list()
+            .await
+            .expect("test records should be listed")
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -179,20 +192,30 @@ async fn a_session_rewrite_replaces_the_record_and_leaves_no_temporary() {
     store
         .create(NewSession::demo("talk", "Talk", "A talk."))
         .await
-        .unwrap();
+        .expect("test fixture should be created");
     store
         .apply("talk", WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     let names: Vec<String> = std::fs::read_dir(store.session_directory("talk"))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .expect("test directory should be readable")
+        .map(|entry| {
+            entry
+                .expect("test archive entry should be readable")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     assert!(
         names.iter().all(|name| !name.contains(".writing")),
         "leftover temporary in {names:?}"
     );
-    let loaded = store.read("talk").await.unwrap().unwrap();
+    let loaded = store
+        .read("talk")
+        .await
+        .expect("test data should be readable")
+        .expect("test data should be present");
     assert_eq!(loaded.state, WorkflowState::Generating);
 }
 
@@ -202,19 +225,19 @@ async fn question_sets_number_in_order_and_answers_attach_to_the_latest() {
     store
         .create(NewSession::demo("talk", "Talk", "A talk."))
         .await
-        .unwrap();
+        .expect("test fixture should be created");
     assert_eq!(
         store
             .write_question_set("talk", &set("platform"))
             .await
-            .unwrap(),
+            .expect("test question set should be saved"),
         1
     );
     assert_eq!(
         store
             .write_question_set("talk", &set("audience"))
             .await
-            .unwrap(),
+            .expect("test question set should be saved"),
         2
     );
     store
@@ -228,12 +251,22 @@ async fn question_sets_number_in_order_and_answers_attach_to_the_latest() {
             }],
         )
         .await
-        .unwrap();
-    let answered = store.answered_questions("talk").await.unwrap();
+        .expect("test answers should be recorded");
+    let answered = store
+        .answered_questions("talk")
+        .await
+        .expect("answered test questions should be listed");
     assert_eq!(answered.len(), 1);
     assert_eq!(answered[0].0.id, "audience");
     assert_eq!(answered[0].1.values, vec!["a"]);
-    assert_eq!(store.question_sets("talk").await.unwrap().len(), 2);
+    assert_eq!(
+        store
+            .question_sets("talk")
+            .await
+            .expect("test question sets should be listed")
+            .len(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -242,19 +275,23 @@ async fn apply_rejects_illegal_events_and_keeps_the_file() {
     store
         .create(NewSession::demo("talk", "Talk", "A talk."))
         .await
-        .unwrap();
+        .expect("test fixture should be created");
     assert!(
         store
             .apply("talk", WorkflowEvent::GenerationSucceeded)
             .await
             .is_err()
     );
-    let session = store.read("talk").await.unwrap().unwrap();
+    let session = store
+        .read("talk")
+        .await
+        .expect("test data should be readable")
+        .expect("test data should be present");
     assert_eq!(session.state, WorkflowState::Intake);
     let after = store
         .apply("talk", WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     assert_eq!(after.state, WorkflowState::Generating);
 }
 
@@ -264,23 +301,29 @@ async fn run_failed_remembers_the_previous_state_for_retry() {
     store
         .create(NewSession::demo("talk", "Talk", "A talk."))
         .await
-        .unwrap();
+        .expect("test fixture should be created");
     store
         .apply("talk", WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     store
         .update("talk", |session| {
             session.error = Some("boom".to_owned());
         })
         .await
-        .unwrap();
-    let failed = store.apply("talk", WorkflowEvent::RunFailed).await.unwrap();
+        .expect("test session update should be saved");
+    let failed = store
+        .apply("talk", WorkflowEvent::RunFailed)
+        .await
+        .expect("test workflow transition should apply");
     assert_eq!(failed.state, WorkflowState::Error);
     assert_eq!(failed.resume_state, Some(WorkflowState::Generating));
     // The run halted in generating; the user resumes on the canvas.
     assert_eq!(
-        store.recovery_target("talk").await.unwrap(),
+        store
+            .recovery_target("talk")
+            .await
+            .expect("stopped test session should have a recovery target"),
         WorkflowState::Reviewing
     );
     let recovered = store
@@ -291,7 +334,7 @@ async fn run_failed_remembers_the_previous_state_for_retry() {
             },
         )
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     assert_eq!(recovered.state, WorkflowState::Generating);
     assert_eq!(recovered.error, None);
     assert_eq!(recovered.resume_state, None);
@@ -303,21 +346,24 @@ async fn a_stop_halts_without_recording_a_failure() {
     store
         .create(NewSession::demo("talk", "Talk", "A talk."))
         .await
-        .unwrap();
+        .expect("test fixture should be created");
     store
         .apply("talk", WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     let stopped = store
         .apply("talk", WorkflowEvent::RunStopped)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     assert_eq!(stopped.state, WorkflowState::Stopped);
     // A stop has nothing to report, so no failure message is kept.
     assert_eq!(stopped.error, None);
     assert_eq!(stopped.resume_state, Some(WorkflowState::Generating));
     assert_eq!(
-        store.recovery_target("talk").await.unwrap(),
+        store
+            .recovery_target("talk")
+            .await
+            .expect("stopped test session should have a recovery target"),
         WorkflowState::Reviewing
     );
     let resumed = store
@@ -328,7 +374,7 @@ async fn a_stop_halts_without_recording_a_failure() {
             },
         )
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     assert_eq!(resumed.state, WorkflowState::Generating);
     assert_eq!(resumed.resume_state, None);
 }
@@ -339,18 +385,22 @@ async fn a_record_written_before_the_stop_state_still_resumes() {
     store
         .create(NewSession::demo("talk", "Talk", "A talk."))
         .await
-        .unwrap();
+        .expect("test fixture should be created");
     store
         .apply("talk", WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
-    store.apply("talk", WorkflowEvent::RunFailed).await.unwrap();
+        .expect("test workflow transition should apply");
+    store
+        .apply("talk", WorkflowEvent::RunFailed)
+        .await
+        .expect("test workflow transition should apply");
     // Records written before the rename name the field
     // `state_before_error`; the alias keeps them resumable.
-    let raw = std::fs::read_to_string(store.session_path("talk")).unwrap();
+    let raw = std::fs::read_to_string(store.session_path("talk"))
+        .expect("test content should be readable as text");
     let old = raw.replace("\"resume_state\"", "\"state_before_error\"");
     assert!(old.contains("state_before_error"));
-    let loaded: Session = serde_json::from_str(&old).unwrap();
+    let loaded: Session = serde_json::from_str(&old).expect("test JSON should deserialize");
     assert_eq!(loaded.resume_state, Some(WorkflowState::Generating));
 }
 
@@ -370,7 +420,7 @@ async fn runs_record_revision_runtime_and_result() {
     store
         .create(NewSession::demo("talk", "Talk", "A talk."))
         .await
-        .unwrap();
+        .expect("test fixture should be created");
     let run_id = store
         .start_run(
             "talk",
@@ -388,7 +438,7 @@ async fn runs_record_revision_runtime_and_result() {
             },
         )
         .await
-        .unwrap();
+        .expect("test run record should be created");
     store
         .finish_run(
             "talk",
@@ -398,8 +448,11 @@ async fn runs_record_revision_runtime_and_result() {
             vec!["talk-candidate-1".to_owned()],
         )
         .await
-        .unwrap();
-    let runs = store.runs("talk").await.unwrap();
+        .expect("test run result should be recorded");
+    let runs = store
+        .runs("talk")
+        .await
+        .expect("test run records should be readable");
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].mode, RunMode::Generation);
     assert_eq!(runs[0].result.as_deref(), Some("succeeded"));
@@ -408,7 +461,7 @@ async fn runs_record_revision_runtime_and_result() {
 
 #[test]
 fn old_run_modes_read_as_generation() {
-    let mode: RunMode = serde_json::from_str("\"briefing\"").unwrap();
+    let mode: RunMode = serde_json::from_str("\"briefing\"").expect("test JSON should deserialize");
     assert_eq!(mode, RunMode::Generation);
 }
 
@@ -418,12 +471,32 @@ async fn rename_moves_the_directory() {
     store
         .create(NewSession::demo("old-name", "Old", "A talk."))
         .await
-        .unwrap();
-    assert!(store.rename("old-name", "new-name").await.unwrap());
-    assert!(store.read("old-name").await.unwrap().is_none());
-    let moved = store.read("new-name").await.unwrap().unwrap();
+        .expect("test fixture should be created");
+    assert!(
+        store
+            .rename("old-name", "new-name")
+            .await
+            .expect("test artifact should be renamed")
+    );
+    assert!(
+        store
+            .read("old-name")
+            .await
+            .expect("test data should be readable")
+            .is_none()
+    );
+    let moved = store
+        .read("new-name")
+        .await
+        .expect("test data should be readable")
+        .expect("test data should be present");
     assert_eq!(moved.id, "new-name");
-    assert!(!store.rename("missing", "x").await.unwrap());
+    assert!(
+        !store
+            .rename("missing", "x")
+            .await
+            .expect("test artifact should be renamed")
+    );
 }
 
 #[tokio::test]
@@ -432,17 +505,22 @@ async fn a_session_carries_its_artifact_kind() {
     store
         .create(NewSession::demo("talk", "Talk", "A talk.").with_kind(ArtifactKind::Deck))
         .await
-        .unwrap();
-    let session = store.read("talk").await.unwrap().unwrap();
+        .expect("test fixture should be created");
+    let session = store
+        .read("talk")
+        .await
+        .expect("test data should be readable")
+        .expect("test data should be present");
     assert_eq!(session.artifact_kind, ArtifactKind::Deck);
     assert_eq!(
-        store.list().await.unwrap()[0].artifact_kind,
+        store.list().await.expect("test records should be listed")[0].artifact_kind,
         ArtifactKind::Deck
     );
     // A record written before the field existed loads as a demo.
-    let raw = std::fs::read_to_string(store.session_path("talk")).unwrap();
+    let raw = std::fs::read_to_string(store.session_path("talk"))
+        .expect("test content should be readable as text");
     let without_kind = raw.replace("\"artifact_kind\": \"deck\",", "");
-    let old: Session = serde_json::from_str(&without_kind).unwrap();
+    let old: Session = serde_json::from_str(&without_kind).expect("test JSON should deserialize");
     assert_eq!(old.artifact_kind, ArtifactKind::Demo);
 }
 
@@ -470,12 +548,17 @@ async fn an_appended_message_is_stamped_with_its_time() {
     store
         .create(NewSession::demo("talk", "Talk", "A talk."))
         .await
-        .unwrap();
+        .expect("test fixture should be created");
     store
         .append_message("talk", ChatMessage::user("Hello.", None))
         .await
-        .unwrap();
-    let message = store.messages("talk").await.unwrap().pop().unwrap();
+        .expect("test chat message should be appended");
+    let message = store
+        .messages("talk")
+        .await
+        .expect("test chat messages should be readable")
+        .pop()
+        .expect("test collection should contain an item to remove");
     let at = message.at.expect("a time");
     assert!(at.ends_with('Z') && at.len() == 20, "{at}");
 }
@@ -486,11 +569,11 @@ async fn a_run_the_last_process_left_behind_is_stopped_at_boot() {
     store
         .create(NewSession::demo("talk", "Talk", "A landing page."))
         .await
-        .unwrap();
+        .expect("test fixture should be created");
     store
         .apply("talk", WorkflowEvent::GenerationStarted)
         .await
-        .unwrap();
+        .expect("test workflow transition should apply");
     let record = RunRecord {
         run_id: String::new(),
         mode: RunMode::Generation,
@@ -503,21 +586,46 @@ async fn a_run_the_last_process_left_behind_is_stopped_at_boot() {
         error: None,
         artifacts: Vec::new(),
     };
-    let run_id = store.start_run("talk", record).await.unwrap();
-    assert_eq!(store.stop_orphaned_runs().await.unwrap(), vec!["talk"]);
-    let session = store.read("talk").await.unwrap().unwrap();
+    let run_id = store
+        .start_run("talk", record)
+        .await
+        .expect("test run record should be created");
+    assert_eq!(
+        store
+            .stop_orphaned_runs()
+            .await
+            .expect("orphaned test runs should be stopped"),
+        vec!["talk"]
+    );
+    let session = store
+        .read("talk")
+        .await
+        .expect("test data should be readable")
+        .expect("test data should be present");
     assert_eq!(session.state, WorkflowState::Stopped);
-    let runs = store.runs("talk").await.unwrap();
-    let record = runs.iter().find(|record| record.run_id == run_id).unwrap();
+    let runs = store
+        .runs("talk")
+        .await
+        .expect("test run records should be readable");
+    let record = runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("fixture should contain the expected match");
     assert_eq!(record.result.as_deref(), Some("stopped"));
     assert!(record.finished_at.is_some());
     // A second boot finds nothing to do.
-    assert!(store.stop_orphaned_runs().await.unwrap().is_empty());
+    assert!(
+        store
+            .stop_orphaned_runs()
+            .await
+            .expect("orphaned test runs should be stopped")
+            .is_empty()
+    );
 }
 
 #[test]
 fn a_new_session_id_is_a_random_version_4_uuid() {
-    let id = new_session_id().unwrap();
+    let id = new_session_id().expect("new test session ID should be generated");
     assert_eq!(id.len(), 36);
     let groups: Vec<&str> = id.split('-').collect();
     assert_eq!(
@@ -531,5 +639,8 @@ fn a_new_session_id_is_a_random_version_4_uuid() {
     );
     // The id is a file stem and a URL segment everywhere it goes.
     assert!(is_valid_session_id(&id));
-    assert_ne!(id, new_session_id().unwrap());
+    assert_ne!(
+        id,
+        new_session_id().expect("new test session ID should be generated")
+    );
 }

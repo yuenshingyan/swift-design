@@ -76,23 +76,25 @@ pub fn diff_paths<T: Serialize>(old: &T, new: &T) -> anyhow::Result<(Vec<String>
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use design_model::{Deck, Design};
 
     use crate::provenance::{diff_paths, field_paths};
 
     fn sample_design() -> Design {
-        serde_json::from_str(include_str!("../../../fixtures/sample-design.json")).unwrap()
+        serde_json::from_str(include_str!("../../../fixtures/sample-design.json"))
+            .expect("test JSON should deserialize")
     }
 
     fn sample_deck() -> Deck {
-        serde_json::from_str(include_str!("../../../fixtures/sample-deck.json")).unwrap()
+        serde_json::from_str(include_str!("../../../fixtures/sample-deck.json"))
+            .expect("test JSON should deserialize")
     }
 
     #[test]
     fn field_paths_cover_theme_and_screens() {
-        let paths = field_paths(&sample_design()).unwrap();
+        let paths =
+            field_paths(&sample_design()).expect("test artifact field paths should be available");
         assert!(paths.contains(&"title".to_owned()));
         assert!(paths.contains(&"theme/colors/background".to_owned()));
         assert!(paths.contains(&"screens/0/html".to_owned()));
@@ -106,7 +108,8 @@ mod tests {
         let mut new = old.clone();
         new.title = "Changed".to_owned();
         new.screens.pop();
-        let (changed, removed) = diff_paths(&old, &new).unwrap();
+        let (changed, removed) =
+            diff_paths(&old, &new).expect("test artifacts should produce a field-path comparison");
         assert_eq!(changed, ["title"]);
         assert!(removed.iter().all(|path| path.starts_with("screens/2/")));
         assert!(!removed.is_empty());
@@ -115,7 +118,8 @@ mod tests {
     #[test]
     fn identical_designs_have_no_diff() {
         let design = sample_design();
-        let (changed, removed) = diff_paths(&design, &design).unwrap();
+        let (changed, removed) = diff_paths(&design, &design)
+            .expect("test artifacts should produce a field-path comparison");
         assert!(changed.is_empty());
         assert!(removed.is_empty());
     }
@@ -123,12 +127,13 @@ mod tests {
     #[test]
     fn diff_paths_work_for_a_deck() {
         let old = sample_deck();
-        let paths = field_paths(&old).unwrap();
+        let paths = field_paths(&old).expect("test artifact field paths should be available");
         assert!(paths.contains(&"slides/0/html".to_owned()));
         assert!(!paths.iter().any(|path| path.starts_with("screens/")));
         let mut new = old.clone();
         new.slides[1].html = "<p>Changed</p>".to_owned();
-        let (changed, removed) = diff_paths(&old, &new).unwrap();
+        let (changed, removed) =
+            diff_paths(&old, &new).expect("test artifacts should produce a field-path comparison");
         assert_eq!(changed, ["slides/1/html"]);
         assert!(removed.is_empty());
     }

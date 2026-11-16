@@ -1,23 +1,27 @@
-#![allow(clippy::unwrap_used)]
-
 use super::routes::image_number;
 use super::*;
 
 #[test]
 fn chrome_discovery_finds_the_app_managed_browser_without_path() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let chrome = directory
         .path()
         .join("swift-design/chrome/chrome-linux64/chrome");
-    std::fs::create_dir_all(chrome.parent().unwrap()).unwrap();
-    std::fs::write(&chrome, b"browser").unwrap();
+    std::fs::create_dir_all(
+        chrome
+            .parent()
+            .expect("test file path should have a parent directory"),
+    )
+    .expect("test directory tree should be created");
+    std::fs::write(&chrome, b"browser").expect("test fixture should be written successfully");
     assert_eq!(
         find_chrome_in(None, Some(directory.path().to_owned()), None),
         Some(chrome.clone())
     );
 
     let custom = directory.path().join("custom-chrome");
-    std::fs::write(&custom, b"custom browser").unwrap();
+    std::fs::write(&custom, b"custom browser")
+        .expect("test fixture should be written successfully");
     assert_eq!(
         find_chrome_in(
             Some(custom.clone()),
@@ -42,7 +46,7 @@ fn chrome_discovery_finds_the_app_managed_browser_without_path() {
 async fn chrome_preflight_requires_a_successful_script_report() {
     use std::os::unix::fs::PermissionsExt;
 
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let chrome = directory.path().join("chrome");
     for (script, should_pass) in [
         (
@@ -52,8 +56,9 @@ async fn chrome_preflight_requires_a_successful_script_report() {
         ("#!/bin/sh\nprintf '<html></html>'", false),
         ("#!/bin/sh\nexit 1", false),
     ] {
-        std::fs::write(&chrome, script).unwrap();
-        std::fs::set_permissions(&chrome, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(&chrome, script).expect("test fixture should be written successfully");
+        std::fs::set_permissions(&chrome, std::fs::Permissions::from_mode(0o700))
+            .expect("test file permissions should be updated");
         let result = check_chrome(&chrome).await;
         assert_eq!(result.is_ok(), should_pass, "{result:?}");
         if let Err(message) = result {
