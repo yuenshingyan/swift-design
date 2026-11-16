@@ -4,7 +4,7 @@ use super::*;
 /// plus `{id}-subjects.txt` with the subject and preheader lines.
 pub(super) fn pack_email_html_files(
     id: &str,
-    files: &[email_html::EmailHtmlFile],
+    files: &[crate::mailing::email_html::EmailHtmlFile],
 ) -> anyhow::Result<Vec<u8>> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default();

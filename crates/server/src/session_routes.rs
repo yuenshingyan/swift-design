@@ -26,23 +26,23 @@ use serde::Deserialize;
 use crate::AppState;
 use crate::agent_runs::AgentRunner;
 use crate::api_error;
-use crate::artworks::ArtworkStore;
-use crate::campaigns::CampaignStore;
+use crate::artwork::core::ArtworkStore;
+use crate::campaign::core::CampaignStore;
 use crate::candidates::{CANDIDATE_LIMIT, PLATFORM_LIMIT};
 use crate::capture::capture_urls;
-use crate::decks::DeckStore;
-use crate::designs::{DesignStore, is_valid_design_id};
-use crate::documents::DocumentStore;
+use crate::deck::core::DeckStore;
+use crate::design::core::{DesignStore, is_valid_design_id};
+use crate::document::core::DocumentStore;
 use crate::edit_focus::referenced_indexes;
 use crate::events::ChangeNotifier;
-use crate::mailings::MailingStore;
+use crate::mailing::core::MailingStore;
 use crate::planner::relax_question_set;
-use crate::prints::PrintStore;
+use crate::print::core::PrintStore;
 use crate::sessions::{
     AnswerRecord, ChatMessage, NewSession, RunOptions, Session, SessionError, SessionStore,
     SessionSummary, SessionView, is_valid_session_id, new_session_id, session_id_of_artifact,
 };
-use crate::socials::SocialStore;
+use crate::social::core::SocialStore;
 use crate::uploads::UploadStore;
 
 /// Most slides a deck run may be asked for. Past this the run costs

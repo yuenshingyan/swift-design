@@ -28,14 +28,14 @@ use tokio::sync::{Barrier, Notify};
 use design_model::ArtifactKind;
 
 use super::*;
-use crate::designs::DesignStore;
+use crate::design::core::DesignStore;
+use crate::design::polish::DemoDomRunner;
 use crate::edit_focus::EditInput;
 use crate::edit_report::EDIT_REPORT_PREFIX;
 use crate::events::ChangeNotifier;
 use crate::generation::{ArtifactRequest, GenerationEngine, GenerationOutcome, GenerationStop};
 use crate::history::HistoryStore;
 use crate::model_client::{LogSink, ModelClient, ModelConfiguration, ProviderAuth, WireFormat};
-use crate::polish::DemoDomRunner;
 use crate::sessions::{ChatMessage, NewSession, SessionStore};
 use crate::test_support::{
     SAMPLE_ARTWORK, SAMPLE_CAMPAIGN, SAMPLE_DECK, SAMPLE_DESIGN, SAMPLE_DOCUMENT, SAMPLE_MAILING,

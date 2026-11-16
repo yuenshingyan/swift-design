@@ -99,7 +99,11 @@ pub(super) async fn export_design(
     if let Err(error) = inline_uploaded_images(&mut design, &uploads).await {
         return api_error::internal_error(&error);
     }
-    let html = inline_google_fonts(render::render_design(&design, false), fetch_as_browser).await;
+    let html = inline_google_fonts(
+        crate::design::render::render_design(&design, false),
+        fetch_as_browser,
+    )
+    .await;
     tracing::info!(%id, size_bytes = html.len(), "design exported");
     file_download(&id, "html", "text/html; charset=utf-8", html.into_bytes())
 }
@@ -217,7 +221,11 @@ pub(super) async fn export_deck(
     if let Err(error) = inline_uploaded_slide_images(&mut deck, &uploads).await {
         return api_error::internal_error(&error);
     }
-    let html = inline_google_fonts(deck_render::render_deck(&deck, false), fetch_as_browser).await;
+    let html = inline_google_fonts(
+        crate::deck::render::render_deck(&deck, false),
+        fetch_as_browser,
+    )
+    .await;
     tracing::info!(%id, size_bytes = html.len(), "deck exported");
     file_download(&id, "html", "text/html; charset=utf-8", html.into_bytes())
 }
@@ -293,11 +301,11 @@ pub(super) async fn build_deck_pdf_response(
     if let Err(error) = inline_uploaded_slide_images(&mut deck, uploads).await {
         return api_error::internal_error(&error);
     }
-    let html = deck_render::render_deck_with(
+    let html = crate::deck::render::render_deck_with(
         &deck,
-        deck_render::RenderOptions {
+        crate::deck::render::RenderOptions {
             is_print: true,
-            ..deck_render::RenderOptions::default()
+            ..crate::deck::render::RenderOptions::default()
         },
     );
     match screenshots::print_html_to_pdf(&chrome, &html, DECK_VIEWPORT).await {
@@ -321,7 +329,7 @@ pub(super) async fn export_deck_pptx(
         Ok(deck) => deck,
         Err(response) => return response,
     };
-    let sources = pptx::ExportSources {
+    let sources = crate::deck::pptx::ExportSources {
         uploads: &uploads,
         base_url: format!("http://{}", settings.address()),
     };
@@ -333,13 +341,13 @@ pub(super) async fn export_deck_pptx(
 pub(super) async fn build_pptx_response(
     id: &str,
     deck: &Deck,
-    sources: &pptx::ExportSources<'_>,
+    sources: &crate::deck::pptx::ExportSources<'_>,
     chrome: Option<PathBuf>,
 ) -> Response {
     if chrome.is_none() {
         return screenshots::chrome_missing_response("PPTX exports");
     }
-    match pptx::export_deck(deck, sources).await {
+    match crate::deck::pptx::export_deck(deck, sources).await {
         Ok(bytes) => {
             tracing::info!(%id, size_bytes = bytes.len(), "deck exported as pptx");
             file_download(id, "pptx", PPTX_CONTENT_TYPE, bytes)
@@ -384,7 +392,7 @@ pub(super) async fn export_document(
         return api_error::internal_error(&error);
     }
     let html = inline_google_fonts(
-        document_render::render_document(&document, false),
+        crate::document::render::render_document(&document, false),
         fetch_as_browser,
     )
     .await;
@@ -459,10 +467,10 @@ pub(super) async fn export_document_docx(
         Ok(document) => document,
         Err(response) => return response,
     };
-    match docx::export_document(&document, &uploads).await {
+    match crate::document::docx::export_document(&document, &uploads).await {
         Ok(bytes) => {
             tracing::info!(%id, size_bytes = bytes.len(), "document exported as docx");
-            file_download(&id, "docx", docx::DOCX_CONTENT_TYPE, bytes)
+            file_download(&id, "docx", crate::document::docx::DOCX_CONTENT_TYPE, bytes)
         }
         Err(error) => api_error::internal_error(&error),
     }
@@ -483,11 +491,11 @@ pub(super) async fn build_document_pdf_response(
     if let Err(error) = inline_uploaded_page_images(&mut document, uploads).await {
         return api_error::internal_error(&error);
     }
-    let html = document_render::render_document_with(
+    let html = crate::document::render::render_document_with(
         &document,
-        document_render::RenderOptions {
+        crate::document::render::RenderOptions {
             is_print: true,
-            ..document_render::RenderOptions::default()
+            ..crate::document::render::RenderOptions::default()
         },
     );
     match screenshots::print_html_to_pdf(&chrome, &html, document.viewport()).await {
@@ -569,11 +577,11 @@ pub(super) async fn export_social(
         return api_error::internal_error(&error);
     }
     let html = inline_google_fonts(
-        social_render::render_social_with(
+        crate::social::render::render_social_with(
             &social,
-            social_render::RenderOptions {
+            crate::social::render::RenderOptions {
                 only_frame,
-                ..social_render::RenderOptions::default()
+                ..crate::social::render::RenderOptions::default()
             },
         ),
         fetch_as_browser,
@@ -643,12 +651,12 @@ pub(super) async fn build_social_pdf_response(
     if let Err(error) = inline_uploaded_frame_images(&mut social, uploads).await {
         return api_error::internal_error(&error);
     }
-    let html = social_render::render_social_with(
+    let html = crate::social::render::render_social_with(
         &social,
-        social_render::RenderOptions {
+        crate::social::render::RenderOptions {
             is_print: true,
             only_frame: scope.only,
-            ..social_render::RenderOptions::default()
+            ..crate::social::render::RenderOptions::default()
         },
     );
     match screenshots::print_html_to_pdf(&chrome, &html, social.viewport()).await {

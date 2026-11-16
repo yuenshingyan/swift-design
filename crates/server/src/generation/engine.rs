@@ -43,7 +43,7 @@ impl GenerationEngine {
     }
 
     /// Measures a complete demo and rejects unavailable or incomplete browser reports.
-    pub(super) async fn audit_demo(&self, design: &Design) -> Result<DemoAudit, String> {
+    pub(crate) async fn audit_demo(&self, design: &Design) -> Result<DemoAudit, String> {
         let dom = (self.demo_dom_runner)(design.clone(), self.base_url()).await?;
         DemoAudit::from_dom(&dom, design.screens.len())
     }
@@ -705,6 +705,5 @@ impl GenerationEngine {
 }
 
 mod continue_run;
-mod edit_requirements;
 mod request;
 mod work;

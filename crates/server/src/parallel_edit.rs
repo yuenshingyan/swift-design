@@ -13,17 +13,13 @@ use tokio::task::JoinSet;
 
 use design_model::ArtifactKind;
 
+use crate::design::generation::live_preview::{PreviewBoard, patch_sink, worker_sink};
 use crate::edit_focus::{EditInput, focus_note};
 use crate::edit_report::unit_names;
-use crate::generation::live_preview::{PreviewBoard, patch_sink, worker_sink};
 use crate::generation::{
     ArtifactRequest, DRAFT_SHARE, GenerationEngine, GenerationStop, Validated,
 };
 use crate::model_client::{LogSink, TextSink};
-use crate::{
-    artwork_patch, campaign_patch, deck_patch, document_patch, mailing_patch, patch, print_patch,
-    social_patch,
-};
 
 /// The most page-writing requests in flight for one candidate edit.
 pub(crate) const PARALLEL_EDIT_LIMIT: usize = 4;
@@ -41,12 +37,15 @@ pub(crate) trait ParallelEditable:
 }
 
 macro_rules! editable {
-    ($type:ty, $kind:ident, $patch:ident, $units:ident) => {
+    ($type:ty, $kind:ident, $artifact:ident, $units:ident) => {
         impl ParallelEditable for $type {
             const KIND: ArtifactKind = ArtifactKind::$kind;
 
             fn apply_edit(original: &Self, content: &str) -> Result<Self, String> {
-                $patch::apply_patch(original, $patch::parse_patch(content)?)
+                $crate::$artifact::patch::apply_patch(
+                    original,
+                    $crate::$artifact::patch::parse_patch(content)?,
+                )
             }
 
             fn merge_unit(&mut self, index: usize, edited: Self) -> Result<(), String> {
@@ -66,14 +65,14 @@ macro_rules! editable {
     };
 }
 
-editable!(design_model::Design, Demo, patch, screens);
-editable!(design_model::Deck, Deck, deck_patch, slides);
-editable!(design_model::Document, Document, document_patch, pages);
-editable!(design_model::Social, Social, social_patch, frames);
-editable!(design_model::Print, Print, print_patch, sheets);
-editable!(design_model::Mailing, Mailing, mailing_patch, emails);
-editable!(design_model::Campaign, Campaign, campaign_patch, ads);
-editable!(design_model::Artwork, Artwork, artwork_patch, covers);
+editable!(design_model::Design, Demo, design, screens);
+editable!(design_model::Deck, Deck, deck, slides);
+editable!(design_model::Document, Document, document, pages);
+editable!(design_model::Social, Social, social, frames);
+editable!(design_model::Print, Print, print, sheets);
+editable!(design_model::Mailing, Mailing, mailing, emails);
+editable!(design_model::Campaign, Campaign, campaign, ads);
+editable!(design_model::Artwork, Artwork, artwork, covers);
 
 /// The original artifact, normal edit prompt, scope, and validation context.
 pub(crate) struct EditExecution<'a, T> {

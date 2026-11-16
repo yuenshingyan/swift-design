@@ -13,45 +13,35 @@ use design_model::{
     ArtifactKind, BriefQuestionSet, Design, QuestionSetError, validate_question_set,
 };
 
-use crate::artworks::ArtworkStore;
-use crate::campaigns::CampaignStore;
-use crate::candidates::{candidate_id, next_candidate_number};
-use crate::concepts::{Concept, concept_input, concept_note, concept_prompt, parse_concepts};
-use crate::decks::DeckStore;
-use crate::designs::{DesignStore, PENDING_SCREEN_CLASS, is_pending_screen};
-use crate::documents::DocumentStore;
-use crate::edit_focus::{
-    EditFix, EditInput, EditOrder, MergeInput, conversation_block, findings_for, findings_note,
-    fix_instruction, focus_note, fresh_note, merge_note, merge_sources, touched_indexes,
-};
-use crate::edit_report::{EDIT_REPORT_PREFIX, saved_edit_report};
+use crate::artwork::core::ArtworkStore;
+use crate::campaign::core::CampaignStore;
+use crate::candidates::candidate_id;
+use crate::concepts::{Concept, concept_input, concept_prompt, parse_concepts};
+use crate::deck::core::DeckStore;
+use crate::design::core::DesignStore;
+use crate::design::polish::{DemoAudit, DemoDomRunner, chrome_dom_runner};
+use crate::document::core::DocumentStore;
+use crate::edit_focus::EditOrder;
+use crate::edit_report::EDIT_REPORT_PREFIX;
 use crate::events::ChangeNotifier;
 use crate::export::base64_encode;
 use crate::history::Snapshot;
-use crate::instructions::DEMO_RULES;
-use crate::mailings::MailingStore;
+use crate::mailing::core::MailingStore;
 use crate::model_client::{LogSink, ModelClient, ModelConfiguration, TextSink, UsageSink};
 use crate::office::{is_office_type, office_text};
-use crate::parallel_edit::EditExecution;
-use crate::patch::{PATCH_FORMAT, apply_patch, parse_patch};
 use crate::planner::{
     ANSWERED_QUESTION_LIMIT, app_question_set, conversation_note, parse_plan, planner_input,
     planner_prompt, recent_conversation,
 };
-use crate::polish::{
-    DemoAudit, DemoDomRunner, PolishStop, apply_tweak, chrome_dom_runner, polish_prompt,
-    polish_round_limit,
-};
-use crate::prints::PrintStore;
-use crate::render::escape_html;
-use crate::request::{SessionRequest, answered_questions_from_answers, request_input};
-use crate::screenshots::{POLISH_IMAGE_LIMIT, find_chrome, screenshot_screen, supports_vision};
+use crate::print::core::PrintStore;
+use crate::request::{SessionRequest, answered_questions_from_answers};
+use crate::screenshots::supports_vision;
 use crate::sessions::session_id_of_artifact;
 use crate::sessions::{
     AnswerRecord, ChatMessage, RunMode, RunOptions, RunRecord, Session, SessionStore,
 };
 use crate::settings::SettingsStore;
-use crate::socials::SocialStore;
+use crate::social::core::SocialStore;
 use crate::templates::{Template, TemplateStore};
 use crate::time::rfc3339_now;
 use crate::uploads::UploadStore;
@@ -349,10 +339,6 @@ impl ProgressGroup {
     }
 }
 
-/// The screens each continuation chunk has produced so far, shared
-/// between the chunks that run at once.
-type ChunkBoard = Arc<std::sync::Mutex<Vec<Vec<design_model::Screen>>>>;
-
 /// The share of a design request that the first valid draft completes;
 /// the polish rounds fill the rest.
 pub(crate) const DRAFT_SHARE: f32 = 0.6;
@@ -405,11 +391,10 @@ fn trailing_regenerate(messages: &[ChatMessage]) -> Option<(String, String)> {
     Some((design, latest.content.clone()))
 }
 
-mod artifacts;
+pub(crate) mod artifacts;
 mod attachments;
 mod engine;
-pub(crate) mod live_preview;
-mod streaming;
+pub(crate) mod streaming;
 
 pub(crate) use artifacts::{
     ArtifactRequest, Validated, candidate_template, failure_message, stop_to_string, template_note,

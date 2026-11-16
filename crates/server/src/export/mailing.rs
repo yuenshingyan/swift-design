@@ -70,11 +70,11 @@ pub(super) async fn export_mailing(
         return api_error::internal_error(&error);
     }
     let html = inline_google_fonts(
-        mailing_render::render_mailing_with(
+        crate::mailing::render::render_mailing_with(
             &mailing,
-            mailing_render::RenderOptions {
+            crate::mailing::render::RenderOptions {
                 only_email,
-                ..mailing_render::RenderOptions::default()
+                ..crate::mailing::render::RenderOptions::default()
             },
         ),
         fetch_as_browser,
@@ -144,12 +144,12 @@ pub(super) async fn build_mailing_pdf_response(
     if let Err(error) = inline_uploaded_email_images(&mut mailing, uploads).await {
         return api_error::internal_error(&error);
     }
-    let html = mailing_render::render_mailing_with(
+    let html = crate::mailing::render::render_mailing_with(
         &mailing,
-        mailing_render::RenderOptions {
+        crate::mailing::render::RenderOptions {
             is_print: true,
             only_email: scope.only,
-            ..mailing_render::RenderOptions::default()
+            ..crate::mailing::render::RenderOptions::default()
         },
     );
     match screenshots::print_html_to_pdf(&chrome, &html, mailing.viewport()).await {
@@ -202,7 +202,7 @@ pub(super) async fn export_mailing_email_zip(
     if let Err(error) = inline_uploaded_email_images(&mut mailing, &uploads).await {
         return api_error::internal_error(&error);
     }
-    let files = email_html::export_mailing_emails(&mailing);
+    let files = crate::mailing::email_html::export_mailing_emails(&mailing);
     match pack_email_html_files(&id, &files) {
         Ok(bytes) => {
             tracing::info!(%id, size_bytes = bytes.len(), email_count = files.len(), "mailing exported as email html zip");
@@ -238,7 +238,7 @@ pub(crate) async fn email_client_html(
     if let Err(error) = inline_uploaded_email_images(&mut mailing, uploads).await {
         return api_error::internal_error(&error);
     }
-    let mut files = email_html::export_mailing_emails(&mailing);
+    let mut files = crate::mailing::email_html::export_mailing_emails(&mailing);
     let file = files.remove(number - 1);
     Html(file.html).into_response()
 }

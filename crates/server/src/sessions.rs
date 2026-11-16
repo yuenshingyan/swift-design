@@ -32,15 +32,15 @@ use design_model::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::artworks::ArtworkSummary;
-use crate::campaigns::CampaignSummary;
-use crate::decks::DeckSummary;
-use crate::designs::{DesignSummary, is_valid_design_id};
-use crate::documents::DocumentSummary;
+use crate::artwork::core::ArtworkSummary;
+use crate::campaign::core::CampaignSummary;
+use crate::deck::core::DeckSummary;
+use crate::design::core::{DesignSummary, is_valid_design_id};
+use crate::document::core::DocumentSummary;
 use crate::files::write_atomically;
-use crate::mailings::MailingSummary;
-use crate::prints::PrintSummary;
-use crate::socials::SocialSummary;
+use crate::mailing::core::MailingSummary;
+use crate::print::core::PrintSummary;
+use crate::social::core::SocialSummary;
 use crate::time::{rfc3339_now, unix_now_seconds};
 
 /// The candidate-id marker: a session id may not contain it, so a

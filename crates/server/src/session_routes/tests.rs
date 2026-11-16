@@ -4,8 +4,8 @@ use axum::http::StatusCode;
 use design_model::WorkflowEvent;
 use tempfile::TempDir;
 
-use crate::decks::DeckStore;
-use crate::designs::DesignStore;
+use crate::deck::core::DeckStore;
+use crate::design::core::DesignStore;
 use crate::sessions::SessionStore;
 use crate::test_support::{sample_deck, send, test_application};
 
