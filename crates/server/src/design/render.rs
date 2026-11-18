@@ -13,6 +13,10 @@ use crate::screen_css::{google_fonts_link, scope_css};
 
 use crate::render::*;
 
+const PROTOTYPE_SCRIPT: &str = include_str!("render/prototype.js");
+const PROTOTYPE_STYLE: &str =
+    "[data-swift-design-root] [data-demo-panel][hidden] { display: none !important; }\n";
+
 /// How to render a design page.
 #[derive(Clone, Debug, Default)]
 pub struct RenderOptions {
@@ -107,7 +111,7 @@ pub fn render_design_with(design: &Design, options: RenderOptions) -> String {
          script-src {script_source}; style-src 'unsafe-inline' https://fonts.googleapis.com; \
          font-src 'self' https://fonts.gstatic.com; img-src {image_sources}; connect-src 'none'; \
          object-src 'none'; frame-src 'none'; form-action 'none'\">\n\
-         <title>{title}</title>\n{fonts}<style>\n{style}{print_style}{transition_style}{screen_styles}</style>\n</head>\n<body>\n\
+         <title>{title}</title>\n{fonts}<style>\n{style}{print_style}{transition_style}{screen_styles}{PROTOTYPE_STYLE}</style>\n</head>\n<body>\n\
          <main class=\"design\" data-swift-design-width=\"{width}\" data-swift-design-height=\"{height}\"{main_attributes}>\n{sections}</main>\n\
          {script_element}</body>\n</html>\n",
         title = escape_html(&design.title),
@@ -131,6 +135,9 @@ fn page_script(options: &RenderOptions) -> String {
         return script;
     }
     script.push_str(LAYOUT_SCRIPT);
+    if !options.is_editable {
+        script.push_str(PROTOTYPE_SCRIPT);
+    }
     script.push_str(NAVIGATION_SCRIPT);
     if options.is_editable {
         script.push_str(EDITING_SCRIPT);

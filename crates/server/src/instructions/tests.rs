@@ -460,6 +460,8 @@ fn the_demo_rules_explain_screen_links_and_css_widgets() {
     assert!(demo.contains("Do not write `<button>`."));
     assert!(demo.contains("Every control acts."));
     assert!(demo.contains("`static_control`"));
+    assert!(demo.contains("data-demo-action='group:state'"));
+    assert!(demo.contains("They do not fetch data or run custom code."));
     let deck = DECK_RULES.join("\n");
     assert!(!deck.contains("#screen-"));
     assert!(deck.contains("`<input>` with type `checkbox` or `radio`"));

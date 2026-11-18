@@ -195,9 +195,12 @@ impl GenerationEngine {
             live: Some(live_preview.edit_sink(&continued)),
         };
         let fallback = continued.clone();
-        let final_design = match self
-            .polish_design(client, continued, &polish_context, log)
-            .await
+        let final_design = match async {
+            design_model::markup::validate_demo_navigation(&continued, Some(&preview))?;
+            self.polish_design(client, continued, &polish_context, log)
+                .await
+        }
+        .await
         {
             Ok(design) => design,
             Err(error) => {
@@ -476,6 +479,7 @@ impl GenerationEngine {
                 }
             }
         }
+        design_model::markup::validate_demo_navigation(&merged, Some(design))?;
         if let Some(sink) = &fix.context.live
             && let Ok(text) = serde_json::to_string(&merged)
         {

@@ -313,6 +313,7 @@ impl GenerationEngine {
         let mut correction = String::new();
         let mut attempt = 0;
         let mut previous_missing = None;
+        let mut last_navigation_error = None;
         let progress = self.shared_progress(&[design_id.to_owned()], 5, 95).pop();
         let (final_design, verified_indexes, layout_warnings) = loop {
             // Fresh regeneration drops old markup only once; corrections must
@@ -372,6 +373,27 @@ impl GenerationEngine {
                     log,
                 )
                 .await?;
+            plan.check_structure(&design, &edited)
+                .map_err(GenerationStop::Failed)?;
+            if let Err(error) =
+                design_model::markup::validate_demo_navigation(&edited, Some(&design))
+            {
+                if attempt == 3 || last_navigation_error.as_ref() == Some(&error) {
+                    return Err(GenerationStop::Failed(format!(
+                        "Cannot save demo edit: {error}"
+                    )));
+                }
+                log(&format!(
+                    "{label}: correcting navigation before layout review: {error}"
+                ));
+                correction = format!(
+                    "Repair this navigation issue in the latest draft. Preserve other completed work. {error}"
+                );
+                last_navigation_error = Some(error);
+                draft = edited;
+                attempt += 1;
+                continue;
+            }
             preview.show(&edited);
             // A fix can make a new problem. The touched screens are measured
             // again, and the model tweaks them until they measure clean or
