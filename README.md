@@ -298,7 +298,13 @@ locations and `PATH` are also checked. `SWIFT_DESIGN_CHROME` is an optional
 explicit override, not required for the app-managed installation. Before a
 built-in demo run sends any model requests, the server checks that Chrome can
 launch and execute JavaScript. A missing or broken browser blocks the run with
-a setup error instead of failing after generation.
+a setup error instead of failing after generation. Whole-page layout audits have
+a separate 90-second browser deadline, rather than the 40-second screenshot limit,
+because they also wait for page stylesheets and fonts. A timeout retries the same
+rendered page once, without repeating model generation; other browser failures are
+not retried by this policy. A second timeout remains a verification failure and a
+generated demo draft is preserved separately, never silently accepted. Timeout
+messages identify possible slow page resources rather than claiming Chrome is broken.
 
 The demo editor exports **All** screens, the current **Screen N**, or a subset.
 Hover over a screen thumbnail to reveal its top-left checkbox, then check the

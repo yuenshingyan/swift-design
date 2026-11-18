@@ -42,12 +42,19 @@ pub(crate) type DemoDomRunner = Arc<
 pub(crate) fn chrome_dom_runner() -> DemoDomRunner {
     Arc::new(|design, base_url| {
         Box::pin(async move {
-            dump_design_dom(&design, &base_url).await.map_err(|error| {
-                tracing::warn!(%error, "demo layout audit failed");
-                "Could not run the browser layout audit. Check Chrome and retry.".to_owned()
-            })
+            dump_design_dom(&design, &base_url)
+                .await
+                .map_err(browser_audit_failure)
         })
     })
+}
+
+fn browser_audit_failure(error: anyhow::Error) -> String {
+    tracing::warn!(%error, "demo layout audit failed");
+    if error.is::<tokio::time::error::Elapsed>() {
+        return "The browser layout audit timed out after one browser-only retry; fonts or other page resources may be slow. Layout verification is incomplete.".to_owned();
+    }
+    "Could not run the browser layout audit. Check Chrome and retry.".to_owned()
 }
 
 /// A complete browser measurement of one exact design version.
@@ -273,6 +280,28 @@ mod tests {
     use super::*;
 
     use crate::render::AUDIT_SCRIPT;
+
+    #[tokio::test]
+    async fn audit_timeouts_are_distinguished_from_browser_installation_failures() {
+        let elapsed = tokio::time::timeout(
+            std::time::Duration::from_millis(1),
+            std::future::pending::<()>(),
+        )
+        .await
+        .expect_err("pending browser operation should exceed its deadline");
+        let message = browser_audit_failure(
+            anyhow::Error::new(elapsed)
+                .context("internal rendered page path must not appear in session errors"),
+        );
+        assert!(message.contains("timed out after one browser-only retry"));
+        assert!(message.contains("fonts or other page resources may be slow"));
+        assert!(!message.contains("Check Chrome"));
+        assert!(!message.contains("internal rendered page"));
+        assert_eq!(
+            browser_audit_failure(anyhow::anyhow!("private browser path")),
+            "Could not run the browser layout audit. Check Chrome and retry."
+        );
+    }
 
     #[test]
     fn mandatory_audits_reject_missing_malformed_or_incomplete_reports() {

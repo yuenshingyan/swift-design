@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use anyhow::Context;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
@@ -43,6 +44,9 @@ pub const CHROME_ENVIRONMENT_VARIABLE: &str = "SWIFT_DESIGN_CHROME";
 
 /// Longest time to wait for one screenshot.
 const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(40);
+
+/// Whole-page audits also wait for stylesheets, fonts and all rendered screens.
+const AUDIT_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Longest time to wait for one PDF: a whole design with its fonts and
 /// images.
@@ -132,7 +136,7 @@ fn find_chrome_in(
 /// Checks browser startup and script execution before a paid demo run.
 pub(crate) async fn check_chrome(chrome: &std::path::Path) -> Result<(), String> {
     let url = "data:text/html,<script>document.documentElement.setAttribute('data-swift-browser-check','ok')</script>";
-    match run_chrome_dump(chrome, url, Viewport::default()).await {
+    match run_chrome_dump(chrome, url, Viewport::default(), SCREENSHOT_TIMEOUT).await {
         Ok(dom) if dom.contains("data-swift-browser-check=\"ok\"") => Ok(()),
         Ok(_) => Err("Cannot start the demo: Chrome did not execute the browser check; repair the browser installation and retry.".to_owned()),
         Err(error) => {
@@ -518,7 +522,7 @@ pub async fn dump_rendered_dom(
     })?;
     let (html_path, _) = scratch_paths("-audit", "dom").await?;
     tokio::fs::write(&html_path, with_base_href(html, base_url)).await?;
-    let result = run_chrome_dump(&chrome, &file_url(&html_path), viewport).await;
+    let result = run_chrome_audit(&chrome, &file_url(&html_path), viewport, AUDIT_TIMEOUT).await;
     let _ = tokio::fs::remove_file(&html_path).await;
     result
 }
@@ -530,7 +534,7 @@ pub(crate) async fn dump_url(
     url: &str,
     viewport: Viewport,
 ) -> anyhow::Result<String> {
-    run_chrome_dump(chrome, url, viewport).await
+    run_chrome_dump(chrome, url, viewport, SCREENSHOT_TIMEOUT).await
 }
 
 /// Opens `url` in Chrome and returns a PNG of the first viewport.
@@ -591,12 +595,32 @@ fn chrome_command(
     command
 }
 
+/// Retries a timed-out audit once against the same rendered page, without model work.
+async fn run_chrome_audit(
+    chrome: &std::path::Path,
+    url: &str,
+    viewport: Viewport,
+    timeout: Duration,
+) -> anyhow::Result<String> {
+    match run_chrome_dump(chrome, url, viewport, timeout).await {
+        Err(error) if error.is::<tokio::time::error::Elapsed>() => {
+            tracing::warn!(
+                ?timeout,
+                "browser audit timed out; retrying the same rendered page once"
+            );
+            run_chrome_dump(chrome, url, viewport, timeout).await
+        }
+        result => result,
+    }
+}
+
 /// Runs Chrome headless with `--dump-dom` and returns the serialized
 /// page after scripts ran.
 async fn run_chrome_dump(
     chrome: &std::path::Path,
     url: &str,
     viewport: Viewport,
+    timeout: Duration,
 ) -> anyhow::Result<String> {
     for headless_flag in ["--headless=new", "--headless"] {
         let command = chrome_command(chrome, headless_flag, 2500, viewport)
@@ -604,11 +628,9 @@ async fn run_chrome_dump(
             .arg(url)
             .stdout(std::process::Stdio::piped())
             .output();
-        let output = tokio::time::timeout(SCREENSHOT_TIMEOUT, command)
+        let output = tokio::time::timeout(timeout, command)
             .await
-            .map_err(|_| {
-                anyhow::anyhow!("Chrome did not finish within {SCREENSHOT_TIMEOUT:?}")
-            })??;
+            .with_context(|| format!("Chrome did not finish within {timeout:?}"))??;
         if output.status.success() && !output.stdout.is_empty() {
             return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
         }
