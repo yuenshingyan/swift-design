@@ -926,6 +926,22 @@ div.brief-attachments:has(+ ul.brief-attachments) { padding-bottom: 0.4rem; }
   white-space: nowrap; }
 .thumbnail.portrait .thumbnail-redo.confirm { width: 1.5rem; height: 1.5rem; padding: 0; }
 .thumbnail.portrait .thumbnail-redo.confirm .redo-text { display: none; }
+/* Put screen redo at the corner; narrow tiles reserve the other top corner for export. */
+.demo-thumbnails .thumbnail-redo:not(.confirm) { right: 0.25rem; }
+.demo-thumbnails .thumbnail-delete:not(.confirm) { right: 1.85rem; }
+.demo-thumbnails .thumbnail.portrait .thumbnail-delete:not(.confirm) {
+  top: auto; right: 0.125rem; bottom: 0.125rem; }
+.demo-thumbnails .thumbnail.portrait .thumbnail-redo:not(.confirm),
+.demo-thumbnails .thumbnail.portrait .thumbnail-export-checkbox {
+  top: 0.125rem; width: min(1rem, calc(50% - 0.125rem)); height: 1rem; }
+.demo-thumbnails .thumbnail.portrait .thumbnail-redo:not(.confirm) { right: 0.125rem; }
+.demo-thumbnails .thumbnail.portrait .thumbnail-export-checkbox { left: 0.125rem; }
+.demo-thumbnails .thumbnail:focus-within .thumbnail-redo:not(:disabled),
+.demo-thumbnails .thumbnail:focus-within .thumbnail-delete { display: inline-flex; }
+@media (hover: none) {
+  .demo-thumbnails .thumbnail-redo:not(:disabled),
+  .demo-thumbnails .thumbnail-delete { display: inline-flex; }
+}
 .strip-divider { flex: none; align-self: stretch; width: 1px; margin: 0 0.25rem;
   background: var(--line); }
 /* A planned tile is the size of a written tile and reads as a label, not

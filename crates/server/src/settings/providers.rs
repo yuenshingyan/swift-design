@@ -297,7 +297,7 @@ pub(super) const CHATGPT_MODELS_URL: &str = "https://chatgpt.com/backend-api/cod
 
 // The catalog uses the Codex client version for protocol compatibility.
 // This is not a model allowlist: new slugs come from the live response.
-pub(super) const CHATGPT_CATALOG_CLIENT_VERSION: &str = "0.161.0";
+pub(super) const CHATGPT_CATALOG_CLIENT_VERSION: &str = "0.170.0";
 
 /// The OAuth client id of the Codex CLI public client, used for
 /// ChatGPT-subscription logins (the flow pi and Codex use).

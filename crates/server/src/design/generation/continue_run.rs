@@ -1,5 +1,8 @@
 use super::*;
 
+use crate::design::generation::live_preview::{PreviewBoard, worker_sink};
+use crate::parallel_edit::PARALLEL_EDIT_LIMIT;
+
 impl GenerationEngine {
     /// Writes the remaining screens of the preview design `design_id` in
     /// chunks of `CONTINUE_CHUNK_SCREENS`. A separate visual draft shows
@@ -370,54 +373,19 @@ impl GenerationEngine {
             let round = round + 1;
             rounds_taken = round;
             log(&format!(
-                "{label}: tweak round {round} of at most {limit} ({} findings on the touched screens)",
+                "{label}: tweak round {round} of at most {limit} ({} findings, up to {PARALLEL_EDIT_LIMIT} concurrent screen repairs)",
                 findings.len()
             ));
-            let design_json = focused_design_json(&design, &fix.indexes, false)
-                .map_err(|error| error.to_string())?;
-            let note = focus_note("screen", "screens", &fix.indexes, design.screens.len());
-            let instruction = fix_instruction("screens");
-            // A fix round repairs the layout; history is noise there.
-            let input = EditInput {
-                instruction: &instruction,
-                artifact_json: &design_json,
-                note: &note,
-                findings: &findings,
-                conversation: "",
-            };
-            let messages = vec![
-                serde_json::json!({ "role": "system", "content": system_prompt() }),
-                serde_json::json!({ "role": "user", "content": edit_prompt(fix.request, &input) }),
-            ];
-            let live = fix.context.live.as_ref().map(|sink| {
-                crate::design::generation::live_preview::patch_sink(&design, Arc::clone(sink))
-            });
-            let reply = self
-                .model
-                .chat_with(
-                    client,
-                    self.model
-                        .request_body(&messages, writing_effort(&fix.context.effort)),
-                    live.as_deref(),
-                )
-                .await;
-            // A failed repair must report its cause, not masquerade as exhausted layout rounds.
-            let content = match reply {
-                Ok(content) => content,
-                Err(error) => {
+            design = self
+                .repair_demo_screens(client, &design, fix, &audit)
+                .await
+                .map_err(|error| {
                     log(&format!("{label}: fix round {round} failed: {error}"));
-                    return Err(format!(
+                    format!(
                         "The layout repair could not finish: {error}. No verified final version was saved. Remaining layout findings: {}",
                         findings.join("; ")
-                    ));
-                }
-            };
-            match apply_tweak(&design, &content, Some(&fix.indexes)) {
-                Ok(improved) => design = improved,
-                Err(error) => log(&format!(
-                    "{label}: tweak reply unusable ({error}); keeping the previous version"
-                )),
-            }
+                    )
+                })?;
             fix.context.report(
                 (DRAFT_SHARE + (1.0 - DRAFT_SHARE) * round as f32 / limit as f32).min(0.98),
             );
@@ -438,6 +406,82 @@ impl GenerationEngine {
         ));
         fix.context.report(1.0);
         Ok((best, final_audit))
+    }
+
+    /// Repairs independent screens from one measured baseline; the caller re-audits the merge.
+    async fn repair_demo_screens(
+        &self,
+        client: &reqwest::Client,
+        design: &Design,
+        fix: &EditFix<'_, Design>,
+        audit: &DemoAudit,
+    ) -> Result<Design, String> {
+        let targets: Vec<_> = (0..design.screens.len())
+            .filter(|index| fix.indexes.contains(index))
+            .filter_map(|index| {
+                let findings = audit.layout_instructions(&[index]);
+                (!findings.is_empty()).then_some((index, findings))
+            })
+            .collect();
+        let board = PreviewBoard::default();
+        let mut merged = design.clone();
+        for batch in targets.chunks(PARALLEL_EDIT_LIMIT) {
+            let mut workers = tokio::task::JoinSet::new();
+            for (index, findings) in batch {
+                let index = *index;
+                let artifact_json = focused_design_json(design, &[index], false)
+                    .map_err(|error| error.to_string())?;
+                let instruction = format!(
+                    "{} Work only on the assigned screen; preserve all shared settings.",
+                    fix_instruction("screens")
+                );
+                let input = EditInput {
+                    instruction: &instruction,
+                    artifact_json: &artifact_json,
+                    note: &focus_note("screen", "screens", &[index], design.screens.len()),
+                    findings,
+                    conversation: "",
+                };
+                let messages = [
+                    serde_json::json!({ "role": "system", "content": system_prompt() }),
+                    serde_json::json!({ "role": "user", "content": edit_prompt(fix.request, &input) }),
+                ];
+                let model = self.model.clone();
+                let body = model.request_body(&messages, writing_effort(&fix.context.effort));
+                let client = client.clone();
+                let live = fix.context.live.as_ref().map(|sink| {
+                    worker_sink(design.clone(), index, Arc::clone(&board), Arc::clone(sink))
+                });
+                workers.spawn(async move {
+                    (index, model.chat_with(&client, body, live.as_deref()).await)
+                });
+            }
+            while let Some(result) = workers.join_next().await {
+                let (index, reply) =
+                    result.map_err(|error| format!("layout worker stopped: {error}"))?;
+                let content = reply.map_err(|error| format!("screen {}: {error}", index + 1))?;
+                match apply_tweak(design, &content, Some(&[index])) {
+                    Ok(improved)
+                        if improved.title == design.title && improved.theme == design.theme =>
+                    {
+                        merged.screens[index] = improved.screens[index].clone();
+                    }
+                    Ok(_) => tracing::warn!(
+                        screen = index + 1,
+                        "tweak tried to change shared settings; retaining the previous screen"
+                    ),
+                    Err(error) => {
+                        tracing::warn!(screen = index + 1, %error, "tweak reply unusable; retaining the previous screen")
+                    }
+                }
+            }
+        }
+        if let Some(sink) = &fix.context.live
+            && let Ok(text) = serde_json::to_string(&merged)
+        {
+            sink(&text);
+        }
+        Ok(merged)
     }
 
     /// PNG screenshots of the design's screens for the polish pass, at most

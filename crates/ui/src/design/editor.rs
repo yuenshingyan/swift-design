@@ -673,7 +673,7 @@ fn LoadedEditor(
                             }
                         }
                     }
-                    div { class: "thumbnails",
+                    div { class: "thumbnails demo-thumbnails",
                         for (index, label) in thumbnail_labels.into_iter().enumerate() {
                             {
                                 let is_deleting = pending_screen_delete() == Some(index);

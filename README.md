@@ -176,8 +176,11 @@ without publishing a promise or writing candidates. Existing candidates remain i
 Demo edits first resolve the current request and its clarifications into a screen
 scope and deliverable checklist. Candidate selection does not prohibit adding
 screens. Existing-screen workers still run in parallel (up to four); a serial
-coordination pass connects their changes and adds requested screens. Before saving,
-structural checks enforce required additions and protect unselected screens, then
+coordination pass connects their changes and adds requested screens. Within each
+layout tweak round, touched screens with blocking findings are repaired in parallel
+(up to four); each worker can change only its own screen. Chrome measures the
+merged draft before the next round or acceptance. Before saving, structural checks
+enforce required additions and protect unselected screens, then
 a model compares the original and proposed markup against the checklist and
 request. Preservation checks use that baseline; they do not require identical
 markup or new functionality for a restyle. Candidate isolation is enforced by

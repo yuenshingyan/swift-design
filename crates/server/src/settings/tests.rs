@@ -14,7 +14,8 @@ use crate::settings::{
 fn subscription_catalog_accepts_new_slugs_and_omits_hidden_models() {
     let value = serde_json::json!({ "models": [
         { "slug": "gpt-6.1-sol", "visibility": "list" },
-        { "slug": "gpt-6.0-sol", "visibility": "list" },
+        { "slug": "gpt-6.2-sol", "visibility": "list" },
+        { "slug": "gpt-6.2-astra", "visibility": "list" },
         { "slug": "gpt-6.1-sol", "visibility": "list" },
         { "slug": "hidden", "visibility": "hide" },
         { "slug": "internal", "visibility": "none" },
@@ -23,7 +24,7 @@ fn subscription_catalog_accepts_new_slugs_and_omits_hidden_models() {
     ] });
     assert_eq!(
         chatgpt_model_ids(&value).expect("test model response should contain model IDs"),
-        vec!["gpt-6.0-sol", "gpt-6.1-sol"]
+        vec!["gpt-6.1-sol", "gpt-6.2-astra", "gpt-6.2-sol"]
     );
 }
 
