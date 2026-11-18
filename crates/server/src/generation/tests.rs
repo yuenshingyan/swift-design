@@ -29,7 +29,8 @@ use crate::test_support::{
 use crate::uploads::UploadStore;
 
 /// The planner reply that writes candidates.
-const WRITE_PLAN: &str = r#"{"reply":"Writing it now.","generate":true}"#;
+const WRITE_PLAN: &str =
+    r#"{"reply":"Writing it now.","generate":true,"unsupported_requirements":[]}"#;
 
 fn silent_log() -> LogSink {
     Arc::new(|_line: &str| {})
@@ -184,7 +185,7 @@ fn system_prompt_names_the_clarification_protocol() {
 #[tokio::test]
 async fn the_planner_reads_the_users_source_files() {
     let server = FakeModelServer::start().await;
-    server.push_text(r#"{"reply":"Writing it now.","generate":true}"#);
+    server.push_text(WRITE_PLAN);
     let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
@@ -212,7 +213,7 @@ async fn the_planner_reads_the_users_source_files() {
 #[tokio::test]
 async fn gpt_6_planner_receives_the_adopted_screenshot_as_an_image() {
     let server = FakeModelServer::start().await;
-    server.push_text(r#"{"reply":"Which style?","generate":false}"#);
+    server.push_text(r#"{"reply":"Which style?","generate":false,"unsupported_requirements":[]}"#);
     let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
@@ -452,7 +453,7 @@ async fn the_first_turn_asks_the_apps_own_questions_before_it_writes() {
 async fn the_setup_turn_fills_the_app_questions_the_request_answers() {
     let server = FakeModelServer::start().await;
     server.push_text(
-            r#"{"reply":"A todo app in Zed's style.","questions":[],"suggestions":{"product_kind":"developer_tool","color_mode":"dark","audience":"newcomers","scope":"whole_app"},"generate":false,"edit":false}"#,
+            r#"{"reply":"A todo app in Zed's style.","questions":[],"suggestions":{"product_kind":"developer_tool","color_mode":"dark","audience":"newcomers","scope":"whole_app"},"generate":false,"edit":false,"unsupported_requirements":[]}"#,
         );
     let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
@@ -500,7 +501,9 @@ async fn a_second_turn_writes_without_asking_again() {
 #[tokio::test]
 async fn fresh_candidates_and_concepts_receive_the_users_follow_up_requirements() {
     let server = FakeModelServer::start().await;
-    server.push_text(r#"{"reply":"PLANNER_PROMISE_ONLY","generate":true}"#);
+    server.push_text(
+        r#"{"reply":"PLANNER_PROMISE_ONLY","generate":true,"unsupported_requirements":[]}"#,
+    );
     server.push_text(r#"{"concepts":[]}"#);
     server.push_text(SAMPLE_DESIGN);
     server.push_text(SAMPLE_DESIGN);
@@ -547,7 +550,7 @@ async fn fresh_candidates_and_concepts_receive_the_users_follow_up_requirements(
 async fn a_planner_question_set_moves_the_session_to_clarifying() {
     let server = FakeModelServer::start().await;
     server.push_text(
-            r#"{"reply":"Two things first.","questions":[{"question":"Who is it for?","options":["Developers","Buyers"]}]}"#,
+            r#"{"reply":"Two things first.","questions":[{"question":"Who is it for?","options":["Developers","Buyers"]}],"unsupported_requirements":[]}"#,
         );
     let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
@@ -593,7 +596,7 @@ async fn a_planner_question_set_moves_the_session_to_clarifying() {
 #[tokio::test]
 async fn a_plain_reply_keeps_the_state_and_lands_in_the_chat() {
     let server = FakeModelServer::start().await;
-    server.push_text(r#"{"reply":"Hello. Tell me what to build."}"#);
+    server.push_text(r#"{"reply":"Hello. Tell me what to build.","unsupported_requirements":[]}"#);
     let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
@@ -908,4 +911,5 @@ fn answers_count_per_request_from_the_last_write() {
     assert_eq!(answers_since_last_write(&messages[..1], &records), 5);
 }
 
+mod capabilities;
 mod edit;

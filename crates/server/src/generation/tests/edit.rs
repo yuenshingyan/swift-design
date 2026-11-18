@@ -162,7 +162,8 @@ fn a_progress_group_takes_shares_as_they_start() {
 #[tokio::test]
 async fn an_edit_on_a_preview_is_not_a_continue() {
     let server = FakeModelServer::start().await;
-    server.push_text(r#"{"reply":"Tightening the hero.","edit":true}"#);
+    server
+        .push_text(r#"{"reply":"Tightening the hero.","edit":true,"unsupported_requirements":[]}"#);
     server.push_text(EDIT_PLAN);
     server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:64px;}"}}]}"#);
     server.push_text(
@@ -214,7 +215,8 @@ async fn an_edit_on_a_preview_is_not_a_continue() {
 #[tokio::test]
 async fn a_chat_request_with_a_design_open_patches_that_design() {
     let server = FakeModelServer::start().await;
-    server.push_text(r#"{"reply":"Tightening the hero.","edit":true}"#);
+    server
+        .push_text(r#"{"reply":"Tightening the hero.","edit":true,"unsupported_requirements":[]}"#);
     server.push_text(EDIT_PLAN);
     server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:64px;}"}}]}"#);
     server.push_text(
@@ -279,7 +281,7 @@ async fn a_chat_request_with_a_design_open_patches_that_design() {
 #[tokio::test]
 async fn demo_edit_planning_and_review_receive_the_reference_screenshot() {
     let server = FakeModelServer::start().await;
-    server.push_text(r#"{"edit":true}"#);
+    server.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#);
     server.push_text(EDIT_PLAN);
     server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1>Mint hero</h1>","css":"h1{color:#aaffcc}"}}]}"#);
     server.push_text(
@@ -338,7 +340,7 @@ async fn demo_edit_planning_and_review_receive_the_reference_screenshot() {
 #[tokio::test]
 async fn a_message_with_pinned_candidates_patches_each_of_them() {
     let server = FakeModelServer::start().await;
-    server.push_text(r#"{"reply":"Tightening both.","edit":true}"#);
+    server.push_text(r#"{"reply":"Tightening both.","edit":true,"unsupported_requirements":[]}"#);
     for _ in 0..2 {
         server.push_text(EDIT_PLAN);
         server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:64px;}"}}]}"#);
@@ -463,7 +465,7 @@ async fn reviewing_session_with(
 #[tokio::test]
 async fn a_merge_of_two_pinned_candidates_writes_a_new_one() {
     let server = FakeModelServer::start().await;
-    server.push_text(r#"{"reply":"Merging the two.","merge":true}"#);
+    server.push_text(r#"{"reply":"Merging the two.","merge":true,"unsupported_requirements":[]}"#);
     server.push_text(SAMPLE_DESIGN);
     // The polish round, when Chrome can measure: no change.
     server.push_text(r#"{"screens":[]}"#);
@@ -511,7 +513,7 @@ async fn a_merge_of_two_pinned_candidates_writes_a_new_one() {
 #[tokio::test]
 async fn a_merge_across_canvases_is_refused() {
     let server = FakeModelServer::start().await;
-    server.push_text(r#"{"reply":"Merging the two.","merge":true}"#);
+    server.push_text(r#"{"reply":"Merging the two.","merge":true,"unsupported_requirements":[]}"#);
     let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
@@ -550,7 +552,7 @@ async fn a_merge_across_canvases_is_refused() {
 #[tokio::test]
 async fn a_merge_with_one_pin_is_an_edit() {
     let server = FakeModelServer::start().await;
-    server.push_text(r#"{"reply":"Changing it.","merge":true}"#);
+    server.push_text(r#"{"reply":"Changing it.","merge":true,"unsupported_requirements":[]}"#);
     server.push_text(EDIT_PLAN);
     server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:64px;}"}}]}"#);
     server.push_text(
@@ -589,7 +591,8 @@ async fn a_merge_with_one_pin_is_an_edit() {
 #[tokio::test]
 async fn a_regenerated_screen_is_written_without_its_old_markup() {
     let server = FakeModelServer::start().await;
-    // No turn planner: the edit requirements are resolved directly.
+    // Capability checking runs before the direct regeneration dispatch.
+    server.push_text(r#"{"unsupported_requirements":[]}"#);
     server.push_text(EDIT_PLAN);
     server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Fresh</h1>","css":".title{font-size:64px;}"}}]}"#);
     server.push_text(
@@ -617,7 +620,7 @@ async fn a_regenerated_screen_is_written_without_its_old_markup() {
         .await
         .expect("test generation run should complete successfully");
     assert!(matches!(outcome, GenerationOutcome::Edited { .. }));
-    let text = server.requests()[1].to_string();
+    let text = server.requests()[2].to_string();
     assert!(text.contains("Write screen 1 of"));
     assert!(text.contains("anew"));
     assert!(!text.contains("Old hero markup"));

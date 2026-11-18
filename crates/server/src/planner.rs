@@ -263,6 +263,61 @@ pub(crate) fn relax_question_set(set: &mut BriefQuestionSet) {
     }
 }
 
+/// Checks the structured capability verdict before any promise or generation.
+pub(crate) fn capability_rejection(content: &str) -> Result<Option<String>, String> {
+    #[derive(serde::Deserialize)]
+    struct CapabilityReview {
+        unsupported_requirements: Vec<String>,
+    }
+
+    let review = content
+        .find('{')
+        .zip(content.rfind('}'))
+        .and_then(|(start, end)| content.get(start..=end))
+        .and_then(|json| serde_json::from_str::<CapabilityReview>(json).ok())
+        .ok_or("Cannot check request capabilities: expected an unsupported_requirements array.")?;
+    if review.unsupported_requirements.is_empty() {
+        return Ok(None);
+    }
+    if review
+        .unsupported_requirements
+        .iter()
+        .any(|item| item.trim().is_empty())
+    {
+        return Err(
+            "Cannot check request capabilities: an unsupported requirement has no explanation."
+                .into(),
+        );
+    }
+    Ok(Some(format!(
+        "Swift Design cannot fulfil these mandatory requirements:\n- {}\n\nI have not started generation or changed any candidates. A supported alternative requires your explicit approval; please revise the request or approve a design/specification alternative.",
+        review.unsupported_requirements.join("\n- ")
+    )))
+}
+
+/// The actual artifact restrictions used to judge requests before dispatch.
+pub(crate) fn capability_prompt(kind: ArtifactKind) -> String {
+    use crate::instructions::{
+        ARTWORK_RULES, CAMPAIGN_RULES, DECK_RULES, DEMO_RULES, DOCUMENT_RULES, MAILING_RULES,
+        PRINT_RULES, SOCIAL_RULES,
+    };
+
+    let rules = match kind {
+        ArtifactKind::Demo => DEMO_RULES,
+        ArtifactKind::Deck => DECK_RULES,
+        ArtifactKind::Document => DOCUMENT_RULES,
+        ArtifactKind::Social => SOCIAL_RULES,
+        ArtifactKind::Print => PRINT_RULES,
+        ArtifactKind::Mailing => MAILING_RULES,
+        ArtifactKind::Campaign => CAMPAIGN_RULES,
+        ArtifactKind::Artwork => ARTWORK_RULES,
+    };
+    format!(
+        "Capability check: Before promising or starting work, compare the current mandatory deliverables with the actual artifact rules below. Return unsupported_requirements as an array of specific unmet execution or output capabilities, empty when supported. A nonempty array blocks generation, editing and merging even when other flags or questions suggest proceeding. Explain each limitation; never promise an unsupported deliverable. Do not silently drop requirements or substitute notes, source code, screenshots or specifications for required working behavior. Offer a supported alternative only with explicit user approval. A rejected request remains rejected if the user insists or merely says retry; only an explicit revised scope or approval changes it. Read the current request with its clarifications; do not resurrect earlier completed work or let assistant promises authorize an alternative. Distinguish source code for review, quoted examples and concrete permitted implementation specifications from code that must execute in the preview or exported artifact. Mentioning JavaScript, Python or another language alone is not unsupported. HTML/CSS renderers do not execute user scripts, custom keyboard handlers, asynchronous controllers, backend operations or other language runtimes. Screen links and CSS interactions are supported where the selected artifact rules permit them. Static visual states and explicitly permitted behavior specifications remain supported. Do not claim a separate executable file, runtime or integration can be delivered when this artifact format cannot carry it. Do not ask ordinary setup questions to work around a capability conflict.\nActual artifact rules:\n{}",
+        rules.join("\n")
+    )
+}
+
 /// The planner's system prompt: one turn of the conversation.
 pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
     let (subject, owned) = match kind {
@@ -307,7 +362,8 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
     format!(
         "{subject}\n\
          Read the request, the answers, and the conversation. Reply with only this JSON:\n\
-         {{\"reply\":\"text for the user\",\"questions\":[{{\"question\":\"...\",\"options\":[\"...\"],\"multi\":false}}],\"suggestions\":{{\"{first_key}\":\"{first_value}\"}},\"generate\":false,\"edit\":false,\"merge\":false}}\n\
+         {{\"reply\":\"text for the user\",\"questions\":[{{\"question\":\"...\",\"options\":[\"...\"],\"multi\":false}}],\"suggestions\":{{\"{first_key}\":\"{first_value}\"}},\"generate\":false,\"edit\":false,\"merge\":false,\"unsupported_requirements\":[]}}\n\
+         {capabilities}\n\
          The app always asks the user its own fixed questions first. Your questions are added to that card.\n\
          The app questions, as key (wording): values:\n\
          {axes}\n\
@@ -330,6 +386,7 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
          When the user only chats, set generate to false and answer in reply.\n\
          Use saved edit reports to answer which units changed. Do not infer saved changes from an earlier promise. A saved edit report does not prove that an interaction or a backend works.\n\
          Keep reply to 1 to 3 sentences. Reply with only the JSON.",
+        capabilities = capability_prompt(kind),
         per_turn = QUESTIONS_PER_TURN_LIMIT,
         answered = ANSWERED_QUESTION_LIMIT,
         first_key = example.key,
@@ -452,6 +509,55 @@ mod tests {
     use crate::sessions::RunOptions;
 
     #[test]
+    fn capability_verdicts_require_a_complete_structured_check() {
+        assert_eq!(
+            capability_rejection(r#"{"unsupported_requirements":[]}"#)
+                .expect("empty capability verdict should be supported"),
+            None
+        );
+        for invalid in [
+            "not JSON",
+            r#"{"generate":true}"#,
+            r#"{"unsupported_requirements":null}"#,
+            r#"{"unsupported_requirements":"JavaScript"}"#,
+            r#"{"unsupported_requirements":[1]}"#,
+            r#"{"unsupported_requirements":[" "]}"#,
+        ] {
+            assert!(capability_rejection(invalid).is_err(), "{invalid}");
+        }
+        let rejection = capability_rejection(
+            r#"{"reply":"I will build it!","generate":true,"unsupported_requirements":["Executable JavaScript in the preview is unsupported","A Python runtime is unavailable"]}"#,
+        )
+        .expect("specific limitations should produce a rejection")
+        .expect("unsupported mandatory requirements should block work");
+        assert!(rejection.contains("Executable JavaScript"));
+        assert!(rejection.contains("Python runtime"));
+        assert!(rejection.contains("explicit approval"));
+        assert!(!rejection.contains("I will build it"));
+    }
+
+    #[test]
+    fn capability_prompts_use_each_artifacts_real_rules_and_distinguish_source_from_execution() {
+        for kind in ArtifactKind::ALL {
+            let prompt = planner_prompt(kind);
+            assert!(prompt.contains(&capability_prompt(kind)));
+            assert!(prompt.contains("Do not write `<script>`"));
+            assert!(prompt.contains("source code for review"));
+            assert!(prompt.contains("explicit user approval"));
+            assert!(prompt.contains("only an explicit revised scope or approval changes it"));
+            assert!(
+                prompt
+                    .contains("Screen links and CSS interactions are supported where the selected artifact rules permit them")
+            );
+        }
+        assert!(
+            capability_prompt(ArtifactKind::Demo).contains(crate::instructions::DEMO_SCREEN_RULE)
+        );
+        assert!(capability_prompt(ArtifactKind::Deck).contains("1920 by 1080"));
+        assert!(capability_prompt(ArtifactKind::Mailing).contains("600"));
+    }
+
+    #[test]
     fn run_context_is_bounded_and_keeps_failures_distinct_from_later_success() {
         assert!(recent_run_note(&[]).is_empty());
         let runs: Vec<RunRecord> = (0..8)
@@ -551,7 +657,7 @@ mod tests {
         assert!(!plan.should_generate);
         assert!(!parse_plan(r#"{"reply":"Hi.","edit":true}"#).should_merge);
         let prompt = planner_prompt(ArtifactKind::Demo);
-        assert!(prompt.contains("\"edit\":false,\"merge\":false}"));
+        assert!(prompt.contains("\"edit\":false,\"merge\":false,\"unsupported_requirements\":[]}"));
         assert!(prompt.contains("set merge to true and edit to false"));
         assert!(prompt.contains("The app writes one new candidate."));
     }
