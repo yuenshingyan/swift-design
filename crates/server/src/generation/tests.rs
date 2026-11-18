@@ -167,10 +167,11 @@ fn a_second_run_numbers_after_the_first() {
 }
 
 #[test]
-fn built_in_demo_writing_uses_the_shared_separate_view_rule() {
+fn built_in_demo_writing_distinguishes_page_navigation_from_local_actions() {
     let prompt = system_prompt();
     assert!(prompt.contains(crate::instructions::DEMO_SCREEN_RULE));
-    assert!(prompt.contains("Tabs selecting required page content"));
+    assert!(prompt.contains(crate::instructions::DEMO_PROTOTYPE_RULE));
+    assert!(prompt.contains("Use built-in prototype actions for local tabs and overlays."));
     assert!(!prompt.contains("A toggle, a tab set, or a modal is"));
 }
 

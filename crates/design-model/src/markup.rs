@@ -166,6 +166,10 @@ pub fn window_marker_summary(html: &str) -> WindowMarkerSummary {
     checker.window_summary
 }
 
+mod navigation;
+
+pub use navigation::validate_demo_navigation;
+
 /// Remaps local screen links in valid HTML with a zero-based old-to-new index map.
 /// Leaves text, styles, external URLs, invalid targets, and malformed HTML unchanged.
 pub fn remap_screen_links(html: &str, old_to_new: &[usize]) -> String {
@@ -240,6 +244,7 @@ struct HtmlChecker<'html> {
     has_window_marker: bool,
     window_summary: WindowMarkerSummary,
     screen_links: Vec<(usize, usize, usize)>,
+    demo: Option<navigation::DemoMarkup>,
     layout_declarations: Vec<(String, String)>,
     source: &'html str,
 }
@@ -256,6 +261,7 @@ impl<'html> HtmlChecker<'html> {
             has_window_marker: false,
             window_summary: WindowMarkerSummary::default(),
             screen_links: Vec::new(),
+            demo: None,
             layout_declarations: Vec::new(),
             source,
         }
@@ -353,6 +359,7 @@ impl<'html> HtmlChecker<'html> {
                 .push(format!("contains <{name}>: this tag is not allowed"));
         }
         let mut is_self_closing = false;
+        let mut demo_tag = self.demo.is_some().then(navigation::DemoTag::default);
         self.input_type = None;
         self.has_window_marker = false;
         loop {
@@ -402,7 +409,13 @@ impl<'html> HtmlChecker<'html> {
             } else {
                 None
             };
+            if let Some(tag) = &mut demo_tag {
+                tag.read(&attribute, value.as_deref());
+            }
             self.check_attribute(&name, &attribute, value.as_deref());
+        }
+        if let (Some(demo), Some(tag)) = (&mut self.demo, demo_tag) {
+            demo.record(&name, tag);
         }
         if name == "input" {
             self.check_input_type();

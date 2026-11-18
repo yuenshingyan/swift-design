@@ -190,7 +190,7 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
     const acts = (element) => {
       const tag = element.tagName.toLowerCase();
       const href = element.getAttribute('href') || '';
-      if (tag === 'a') { return /^#screen-\d+$/.test(href) || /^(https?:|mailto:|tel:)/i.test(href); }
+      if (tag === 'a') { return element.hasAttribute('data-swift-design-action-ready') || /^#screen-\d+$/.test(href) || /^(https?:|mailto:|tel:)/i.test(href); }
       if (tag === 'label') { return !!element.getAttribute('for'); }
       return tag === 'summary' || tag === 'details' || tag === 'input';
     };

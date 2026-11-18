@@ -188,6 +188,7 @@ pub(crate) fn apply_tweak(
         return Err("A focused layout tweak must not change the shared theme.".to_owned());
     }
     let improved = apply_patch(design, patch)?;
+    design_model::markup::validate_demo_navigation(&improved, Some(design))?;
     if !improved.validate().is_empty() || !respects_layout_contracts(design, &improved) {
         return Err("The tweak failed validation or changed a layout contract.".to_owned());
     }

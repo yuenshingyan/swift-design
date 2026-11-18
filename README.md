@@ -147,18 +147,12 @@ Every new candidate takes the next free number: a later run adds candidates afte
 
 In `reviewing`, the chat is the edit input: type what should change and press **Send**. With a candidate chosen, the change is applied to it; otherwise new candidates are written.
 
-Demo generation instructions require each requested page, flow step, tab
-destination, modal/confirmation view and distinct visual deliverable state to be
-its own named screen, visible by default and independently exportable as one PNG.
-Clickable screen links connect those views, including retry, confirm, cancel and
-back actions; a modal screen shows its overlay already open. Hidden panels,
-preview-state selectors and notes cannot substitute for required rendered views.
-Small local menus and incidental toggles can remain interactive within a screen;
-this does not require every hover or control combination to become a new screen.
-The edit planner enumerates requested visual views and accounts for missing
-screens; requirement review checks their separate visible screens and navigation.
-Styling-only edits do not silently restructure unrelated legacy screens, and
-explicitly permitted behavior specifications remain valid specification deliverables.
+Each requested page or independent visual deliverable gets a named screen. Its
+required content appears by default and exports as one PNG. Clickable links connect
+separate pages. Keep local tabs, overlays, and selections interactive on the same
+screen unless the user requests a separate export. Hidden panels cannot replace
+requested independent views. The edit planner and reviewer distinguish these
+cases. Styling-only edits preserve unrelated legacy screens.
 
 Before promising work or starting generation, the built-in planner checks mandatory
 requirements against the selected artifact's actual renderer rules. Unsupported
@@ -189,9 +183,19 @@ Planning, editing, and review receive the same session reference attachments.
 Planning, writing, correction, and review share an acceptance contract that separates
 rendered designs from implementation specifications. Complete component/state
 specifications are accepted when the request permits them; missing visual controls
-or responsive layouts cannot be replaced by promises. The renderer's restrictions
-remain unchanged, and explicitly required executable behavior it cannot support
-is reported separately rather than retried indefinitely.
+or responsive layouts cannot be replaced by promises. The renderer still prohibits
+model-generated scripts and backend operations. It reports unsupported behavior
+before starting work.
+
+In Play mode, demo controls can switch local panels on the same screen. The model
+supplies the panels and their actions. The viewer supports named destinations,
+previous and next panels, and jumps to the first or last panel. It handles clicks
+and keyboard input. Ordinary page links still navigate between screens. The
+built-in generator checks that both kinds of destination exist before saving.
+Independent visual deliverables still get their own screen. Images and PDFs show
+the default state. Local actions do not execute model code, access a backend, or
+persist state.
+
 Review returns specific reasons for unmet requirements. Up to three correction
 rounds repair the latest draft while preservation checks still use the saved
 original. Corrections stop early if the number of incomplete checklist items does

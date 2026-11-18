@@ -29,6 +29,7 @@ impl GenerationEngine {
             label: format!("candidate {}", request.candidate_number),
             parse: Box::new(move |content| {
                 let design = parse_design(content)?;
+                design_model::markup::validate_demo_navigation(&design, None)?;
                 if needs_app_window && design.app_window.is_none() {
                     return Err("This app candidate needs shared app_window bounds. Mark one top-level data-swift-design-window shell in every screen.".to_owned());
                 }

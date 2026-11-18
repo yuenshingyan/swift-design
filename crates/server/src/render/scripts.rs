@@ -220,7 +220,7 @@ function step(amount) {
 }
 if (effect && frames.length) { frames[0].setAttribute('data-swift-design-state', 'current'); }
 document.addEventListener('keydown', (event) => {
-  if (isFollowing || (event.target && event.target.isContentEditable)) { return; }
+  if (event.defaultPrevented || isFollowing || (event.target && event.target.isContentEditable)) { return; }
   const isNext = event.key === 'ArrowRight' || event.key === 'PageDown';
   const isPrevious = event.key === 'ArrowLeft' || event.key === 'PageUp';
   if (!isNext && !isPrevious) { return; }

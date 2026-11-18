@@ -25,6 +25,56 @@ fn a_screen_link_opens_the_screen_in_play_mode_and_only_selects_in_edit_mode() {
     assert!(html.contains("id=\"screen-2\""));
 }
 
+#[tokio::test]
+async fn play_mode_switches_local_panels_without_navigating_to_another_screen() {
+    if crate::screenshots::find_chrome().is_none() {
+        return;
+    }
+    let mut design = sample_design();
+    design.theme.fonts.heading = "Arial".into();
+    design.theme.fonts.body = "Arial".into();
+    design.theme.fonts.mono = "Courier New".into();
+    let prototype = "<section data-demo-panel='filter:first'>First</section><section hidden data-demo-panel='filter:second'>Second</section><a class='next' href='#demo-panel' data-demo-action='filter:@next'>Next</a><a class='previous' href='#demo-panel' data-demo-action='filter:@previous'>Previous</a><a class='jump' href='#demo-panel' data-demo-action='filter:second'>Choose second</a><a class='page' href='#screen-2'>Other page</a>";
+    design.screens[0].html = prototype.into();
+    design.screens[1].html = prototype.into();
+    design_model::markup::validate_demo_navigation(&design, None)
+        .expect("test demo should have valid page and local targets");
+    let html = render_design(&design, false);
+    assert!(!render_design(&design, true).contains("demoPanel"));
+    let script = super::page_script(&RenderOptions::default());
+    let (original_hash, original_element) = crate::render::script_markup(&script);
+    let probe = r#"
+const rootTest = document.querySelector('#screen-1 [data-swift-design-root]');
+const firstTest = rootTest.querySelector('[data-demo-panel="filter:first"]');
+const secondTest = rootTest.querySelector('[data-demo-panel="filter:second"]');
+const nextTest = rootTest.querySelector('.next');
+const previousTest = rootTest.querySelector('.previous');
+const jumpTest = rootTest.querySelector('.jump');
+const otherTest = document.querySelector('#screen-2 [data-demo-panel="filter:second"]');
+const startTest = !firstTest.hidden && secondTest.hidden && previousTest.getAttribute('aria-disabled') === 'true';
+nextTest.click();
+const clickTest = firstTest.hidden && !secondTest.hidden && otherTest.hidden &&
+  frames[0].getAttribute('data-swift-design-state') === 'current' &&
+  jumpTest.getAttribute('aria-current') === 'true' && nextTest.getAttribute('aria-disabled') === 'true';
+nextTest.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }));
+const homeTest = !firstTest.hidden && secondTest.hidden;
+nextTest.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+const keyTest = firstTest.hidden && !secondTest.hidden && frames[0].getAttribute('data-swift-design-state') === 'current';
+rootTest.querySelector('.page').click();
+const pageTest = frames[1].getAttribute('data-swift-design-state') === 'current';
+document.documentElement.setAttribute('data-prototype-test', String(startTest && clickTest && homeTest && keyTest && pageTest));
+"#;
+    let (test_hash, test_element) = crate::render::script_markup(&format!("{script}\n{probe}"));
+    let html = html
+        .replace(&original_hash, &test_hash)
+        .replace(&original_element, &test_element);
+    let dom =
+        crate::screenshots::dump_rendered_dom(&html, "http://127.0.0.1:3000", design.viewport)
+            .await
+            .expect("Chrome should exercise the rendered prototype");
+    assert!(dom.contains("data-prototype-test=\"true\""));
+}
+
 #[test]
 fn renders_one_section_per_screen_with_the_html_as_written() {
     let design = sample_design();
