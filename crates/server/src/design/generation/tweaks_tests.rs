@@ -225,6 +225,91 @@ async fn a_focused_repair_verifies_screen_three_without_rewriting_existing_error
 }
 
 #[tokio::test]
+async fn one_tweak_round_repairs_blocked_screens_concurrently_and_audits_the_merge() {
+    let directory = TempDir::new().expect("temporary test directory should be created");
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let provider = axum::Router::new().route(
+        "/chat",
+        axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let barrier = Arc::clone(&barrier);
+            async move {
+                let prompt = body["messages"][1]["content"]
+                    .as_str()
+                    .expect("the repair should send a text prompt");
+                let first = prompt.contains("first repair evidence");
+                let third = prompt.contains("third repair evidence");
+                assert_ne!(first, third, "each worker should receive only its own finding");
+                assert!(!prompt.contains("untouched clipping"));
+                barrier.wait().await;
+                let index = if first { 0 } else { 2 };
+                let patch = serde_json::json!({"screens": [{"index": index, "screen": {"html": format!("<h1>Fixed {index}</h1>")}}]});
+                axum::Json(serde_json::json!({ "choices": [{ "message": { "content": patch.to_string() }}] }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test provider should listen on an available port");
+    let address = listener
+        .local_addr()
+        .expect("test provider should expose its address");
+    let provider_task = tokio::spawn(async move { axum::serve(listener, provider).await });
+    let runner: DemoDomRunner = Arc::new(|design, _| {
+        let mut findings =
+            vec![serde_json::json!({"screen":1,"kind":"overflow","detail":"untouched clipping"})];
+        for (index, detail) in [(0, "first repair evidence"), (2, "third repair evidence")] {
+            if !design.screens[index].html.contains("Fixed") {
+                findings
+                    .push(serde_json::json!({"screen":index,"kind":"overflow","detail":detail}));
+            }
+        }
+        let dom = report(&design, serde_json::json!(findings));
+        Box::pin(async move { Ok(dom) })
+    });
+    let engine = GenerationEngine::new(
+        crate::model_client::ModelConfiguration {
+            provider: "fake".to_owned(),
+            chat_url: format!("http://{address}/chat"),
+            auth: crate::model_client::ProviderAuth::None,
+            wire: crate::model_client::WireFormat::OpenAiChat,
+            model: "fake-model".to_owned(),
+        },
+        DesignStore::new(directory.path().join("designs")),
+        SessionStore::new(directory.path().join("sessions")),
+        None,
+        "http://127.0.0.1:3000".to_owned(),
+        ChangeNotifier::new(),
+    )
+    .with_demo_dom_runner(runner);
+    let original = design();
+    let fix = EditFix {
+        request: &SessionRequest {
+            request: "Fix clipping on the first and third screens".to_owned(),
+            conversation: String::new(),
+            kind: ArtifactKind::Demo,
+            answers: Vec::new(),
+            options: RunOptions::default(),
+        },
+        context: &context(),
+        indexes: vec![0, 2],
+    };
+    let (merged, audit) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        engine.fix_edited_design(&reqwest::Client::new(), original.clone(), &fix, &log()),
+    )
+    .await
+    .expect("both requests must reach the barrier in the same round")
+    .expect("the merged design should complete layout verification");
+    provider_task.abort();
+    assert_eq!(merged.screens[0].html, "<h1>Fixed 0</h1>");
+    assert_eq!(merged.screens[2].html, "<h1>Fixed 2</h1>");
+    assert_eq!(merged.screens[1], original.screens[1]);
+    assert_eq!(merged.theme, original.theme);
+    assert!(audit.require_layout_clean_on(Some(&fix.indexes)).is_ok());
+    assert!(audit.require_layout_clean_on(None).is_err());
+}
+
+#[tokio::test]
 async fn a_failed_layout_repair_preserves_the_provider_cause_and_element() {
     let directory = TempDir::new().expect("temporary test directory should be created");
     let fake = FakeModelServer::start().await;
