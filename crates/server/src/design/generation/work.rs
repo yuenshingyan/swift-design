@@ -231,39 +231,32 @@ impl GenerationEngine {
         if !design.validate().is_empty() {
             return Err("Cannot preserve review draft: the artifact failed validation.".into());
         }
-        let id = if is_new {
-            source_id.to_owned()
-        } else {
-            let rows = self
-                .designs
-                .list()
+        if is_new {
+            let mut draft = design.clone();
+            draft.title = format!("Needs review — {}", draft.title);
+            self.designs
+                .save(source_id, &draft)
                 .await
                 .map_err(|error| error.to_string())?;
-            let number = crate::candidates::next_candidate_number(
-                session_id,
-                rows.iter().map(|row| row.id.as_str()),
-            );
-            crate::candidates::candidate_id(session_id, number)
-        };
-        let mut draft = design.clone();
-        draft.title = format!("Needs review — {}", draft.title);
-        self.designs
-            .save(&id, &draft)
-            .await
-            .map_err(|error| error.to_string())?;
+        } else {
+            self.designs
+                .keep_review_draft(source_id, design)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         self.notifier.notify();
         let preservation = if is_new {
             "This is a draft, not a completed candidate."
         } else {
-            "The original candidate is unchanged."
+            "The saved version is unchanged. Open the same candidate to see the review draft."
         };
         let message = format!(
-            "Needs review: preserved draft `{id}`. {preservation} Layout and requirement completion are not verified.\n{issue}"
+            "Needs review: preserved draft for `{source_id}`. {preservation} Layout and requirement completion are not verified.\n{issue}"
         );
         self.sessions
             .append_message(
                 session_id,
-                ChatMessage::assistant(&message).with_artifacts(vec![id]),
+                ChatMessage::assistant(&message).with_artifacts(vec![source_id.to_owned()]),
             )
             .await
             .map_err(|error| format!("{message}\nCannot record draft notice: {error}"))?;
@@ -375,6 +368,14 @@ impl GenerationEngine {
                 .await?;
             plan.check_structure(&design, &edited)
                 .map_err(GenerationStop::Failed)?;
+            if edited != design {
+                self.designs
+                    .keep_review_draft(design_id, &edited)
+                    .await
+                    .map_err(|error| {
+                        GenerationStop::Failed(format!("Cannot checkpoint the edit draft: {error}"))
+                    })?;
+            }
             if let Err(error) =
                 design_model::markup::validate_demo_navigation(&edited, Some(&design))
             {
@@ -427,6 +428,16 @@ impl GenerationEngine {
             };
             plan.check_structure(&design, &final_design)
                 .map_err(GenerationStop::Failed)?;
+            if final_design != design && final_design != fallback {
+                self.designs
+                    .keep_review_draft(design_id, &final_design)
+                    .await
+                    .map_err(|error| {
+                        GenerationStop::Failed(format!(
+                            "Cannot checkpoint the reviewed edit: {error}"
+                        ))
+                    })?;
+            }
             if let Err(error) = audit.require_layout_clean_on(Some(&fix.indexes)) {
                 let notice = self
                     .save_review_draft(design_id, &final_design, &error, false)
@@ -498,6 +509,9 @@ impl GenerationEngine {
             .save(design_id, &final_design)
             .await
             .map_err(|error| GenerationStop::Failed(error.to_string()))?;
+        if let Err(error) = self.designs.clear_review_draft(design_id).await {
+            tracing::warn!(%design_id, %error, "could not clear the accepted review draft");
+        }
         self.notifier.notify();
         log(&format!("edit {design_id}: saved"));
         Ok(report)

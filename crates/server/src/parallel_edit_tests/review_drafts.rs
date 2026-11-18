@@ -29,7 +29,9 @@ async fn an_unavailable_layout_audit_preserves_an_unverified_draft_not_a_success
         "requirements":["Updated design"]})
         .to_string(),
     );
-    fake.push_text(json!({"screens":[{"index":0,"screen":original.screens[0]}]}).to_string());
+    let mut edited = original.screens[0].clone();
+    edited.html = "<h1>Draft for the original candidate</h1>".into();
+    fake.push_text(json!({"screens":[{"index":0,"screen":edited}]}).to_string());
     let error = candidate
         .engine
         .clone()
@@ -50,16 +52,87 @@ async fn an_unavailable_layout_audit_preserves_an_unverified_draft_not_a_success
             .designs
             .load("talk-candidate-2")
             .await
-            .expect("test record should load successfully")
-            .expect("saved test record should exist")
-            .title
-            .starts_with("Needs review")
+            .expect("candidate lookup should succeed")
+            .is_none()
     );
+    let draft = candidate
+        .designs
+        .load_review_draft("talk-candidate-1")
+        .await
+        .expect("draft lookup should succeed")
+        .expect("same-candidate review draft should exist");
+    assert_eq!(draft.screens[0], edited);
     assert_eq!(fake.requests().len(), 3);
 }
 
 #[tokio::test]
-async fn advisory_polish_saves_with_review_notes_but_serious_defects_preserve_a_separate_draft() {
+async fn stopping_during_layout_review_keeps_the_completed_edit_on_its_candidate() {
+    let original = sample_design();
+    let fake = ParallelFakeModel::start(None).await;
+    let mut candidate = ReviewingCandidate::new(&fake);
+    let reviewing = Arc::new(tokio::sync::Notify::new());
+    let calls = AtomicUsize::new(0);
+    let on_review = Arc::clone(&reviewing);
+    let runner: DemoDomRunner = Arc::new(move |design, _| {
+        let after_edit = calls.fetch_add(1, Ordering::SeqCst) > 0;
+        let on_review = Arc::clone(&on_review);
+        Box::pin(async move {
+            if after_edit {
+                on_review.notify_one();
+                return std::future::pending().await;
+            }
+            let coverage: Vec<_> = (0..design.screens.len()).collect();
+            Ok(format!(
+                "<html data-swift-design-findings=\"[]\" data-swift-design-audited-screens=\"{}\">",
+                json!(coverage)
+            ))
+        })
+    });
+    candidate.engine = candidate.engine.with_demo_dom_runner(runner);
+    candidate.seed(&original, "Update only screen 1.").await;
+    fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
+    fake.push_text(json!({"instruction":"Update screen 1", "screens":[0], "minimum_new_screens":0, "requirements":["Updated design"]}).to_string());
+    let mut edited = original.screens[0].clone();
+    edited.html = "<h1>Keep the draft after stopping</h1>".into();
+    fake.push_text(json!({"screens":[{"index":0,"screen":edited}]}).to_string());
+    let engine = candidate.engine.clone();
+    let task = tokio::spawn(async move { engine.run("talk", log_sink()).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), reviewing.notified())
+        .await
+        .expect("the completed draft should reach layout review");
+    task.abort();
+    assert!(
+        task.await
+            .expect_err("the test should cancel the review")
+            .is_cancelled()
+    );
+    assert_eq!(
+        candidate
+            .designs
+            .load("talk-candidate-1")
+            .await
+            .expect("original should load"),
+        Some(original)
+    );
+    let draft = candidate
+        .designs
+        .load_review_draft("talk-candidate-1")
+        .await
+        .expect("draft should load")
+        .expect("cancellation should retain the checkpoint");
+    assert_eq!(draft.screens[0], edited);
+    assert!(
+        candidate
+            .designs
+            .load("talk-candidate-2")
+            .await
+            .expect("candidate lookup should succeed")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn advisory_polish_saves_but_serious_defects_keep_a_draft_on_the_same_candidate() {
     for kind in [
         "alignment",
         "alignment_unmeasured",
@@ -110,7 +183,15 @@ async fn advisory_polish_saves_with_review_notes_but_serious_defects_preserve_a_
             let error =
                 result.expect_err("serious layout defects should block verified completion");
             assert!(error.contains("Needs review"), "{error}");
-            assert!(error.contains("talk-candidate-2"));
+            assert!(error.contains("talk-candidate-1"));
+            assert!(
+                candidate
+                    .designs
+                    .load("talk-candidate-2")
+                    .await
+                    .expect("candidate lookup should succeed")
+                    .is_none()
+            );
             assert_eq!(
                 tokio::fs::read(candidate.path())
                     .await
@@ -127,18 +208,17 @@ async fn advisory_polish_saves_with_review_notes_but_serious_defects_preserve_a_
             );
             let draft = candidate
                 .designs
-                .load("talk-candidate-2")
+                .load_review_draft("talk-candidate-1")
                 .await
-                .expect("test record should load successfully")
-                .expect("saved test record should exist");
-            assert!(draft.title.starts_with("Needs review"));
+                .expect("test draft should load successfully")
+                .expect("retained test draft should exist");
             assert_eq!(draft.screens[0], screen);
             assert_eq!(draft.screens[1..], original.screens[1..]);
             assert!(messages.iter().any(|message| {
                 message
                     .content
                     .contains("requirement completion are not verified")
-                    && message.artifacts == ["talk-candidate-2"]
+                    && message.artifacts == ["talk-candidate-1"]
             }));
         } else {
             assert!(result.is_ok(), "{result:?}");
@@ -156,6 +236,14 @@ async fn advisory_polish_saves_with_review_notes_but_serious_defects_preserve_a_
                 .content;
             assert!(report.contains("Needs review — advisory layout findings"));
             assert!(!report.contains("Rendered layout verified"));
+            assert!(
+                candidate
+                    .designs
+                    .load_review_draft("talk-candidate-1")
+                    .await
+                    .expect("draft lookup should succeed")
+                    .is_none()
+            );
             assert!(
                 candidate
                     .designs

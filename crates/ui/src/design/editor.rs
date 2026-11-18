@@ -17,6 +17,7 @@ use dioxus::prelude::*;
 use crate::api;
 use crate::canvas::{frame_width_rem, is_portrait_canvas};
 use crate::chat::DesignChat;
+use crate::design::api::DesignPreview;
 use crate::icons;
 use crate::settings::artifact_project;
 
@@ -32,6 +33,12 @@ fn preview_design<'a>(saved: &'a Design, draft: Option<&'a Design>, is_dirty: bo
     draft.filter(|_| !is_dirty).unwrap_or(saved)
 }
 
+fn visible_preview(preview: Option<&DesignPreview>, show_recovery: bool) -> Option<&Design> {
+    preview
+        .filter(|preview| !preview.is_recovery || show_recovery)
+        .map(|preview| &preview.design)
+}
+
 /// Loads one design, then hands it to the editor.
 #[component]
 pub fn Editor(design_id: String, on_back: EventHandler<()>) -> Element {
@@ -42,7 +49,7 @@ pub fn Editor(design_id: String, on_back: EventHandler<()>) -> Element {
             match crate::design::api::fetch_design(&id).await {
                 Ok(saved) => Ok((saved, true)),
                 Err(error) => match crate::design::api::fetch_design_preview(&id).await? {
-                    Some(draft) => Ok((draft, false)),
+                    Some(draft) => Ok((draft.design, false)),
                     None => Err(error),
                 },
             }
@@ -93,7 +100,13 @@ fn LoadedEditor(
             .write()
             .retain(|&screen| screen <= saved_screen_count);
     }));
-    let mut live_draft = use_signal(|| (!initially_saved).then(|| initial.clone()));
+    let mut live_draft = use_signal(|| {
+        (!initially_saved).then(|| DesignPreview {
+            design: initial.clone(),
+            is_recovery: false,
+        })
+    });
+    let mut show_recovery = use_signal(|| true);
     let mut selected = use_signal(|| 0usize);
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
     let mut selection = use_signal(Vec::<SelectionEntry>::new);
@@ -103,9 +116,19 @@ fn LoadedEditor(
     let mut preview_version = use_signal(|| 0u32);
     let mut user_paths = use_signal(Vec::<String>::new);
     let mut is_dirty = use_signal(|| false);
-    let is_read_only = use_memo(move || !has_saved() || (live_draft().is_some() && !is_dirty()));
-    let displayed =
-        use_memo(move || preview_design(&design(), live_draft().as_ref(), is_dirty()).clone());
+    let is_read_only = use_memo(move || {
+        !has_saved()
+            || (visible_preview(live_draft.read().as_ref(), show_recovery()).is_some()
+                && !is_dirty())
+    });
+    let displayed = use_memo(move || {
+        preview_design(
+            &design.read(),
+            visible_preview(live_draft.read().as_ref(), show_recovery()),
+            is_dirty(),
+        )
+        .clone()
+    });
     // Autosave: the newest change wins the delay.
     let save_generation = use_signal(|| 0u64);
     let mut show_properties = use_signal(|| false);
@@ -189,7 +212,7 @@ fn LoadedEditor(
                             .collect(),
                     );
                     if design.peek().ne(&fetched) {
-                        if live_draft.peek().is_none() {
+                        if visible_preview(live_draft.peek().as_ref(), show_recovery()).is_none() {
                             selected.set(selected().min(fetched.screens.len().saturating_sub(1)));
                         }
                         design.set(fetched);
@@ -218,6 +241,9 @@ fn LoadedEditor(
                 if let Ok(preview) = preview {
                     let before = displayed.peek().clone();
                     if live_draft.peek().ne(&preview) {
+                        if preview.is_none() {
+                            show_recovery.set(true);
+                        }
                         live_draft.set(preview);
                     }
                     if !is_dirty() {
@@ -235,9 +261,12 @@ fn LoadedEditor(
                             }
                             has_saved.set(true);
                         }
-                        let after =
-                            preview_design(&design.peek(), live_draft.peek().as_ref(), false)
-                                .clone();
+                        let after = preview_design(
+                            &design.peek(),
+                            visible_preview(live_draft.peek().as_ref(), show_recovery()),
+                            false,
+                        )
+                        .clone();
                         if before != after {
                             preview_version += 1;
                             selected.set(selected().min(after.screens.len().saturating_sub(1)));
@@ -492,7 +521,27 @@ fn LoadedEditor(
                             }
                         }
                     }
-                    if is_read_only() {
+                    if live_draft.read().as_ref().is_some_and(|preview| preview.is_recovery) {
+                        if is_read_only() {
+                            span { class: "badge", "Needs review · unverified draft" }
+                        }
+                        if has_saved() {
+                            button {
+                                class: "canvas-tab",
+                                disabled: is_dirty(),
+                                onclick: move |_| {
+                                    let show = !show_recovery();
+                                    show_recovery.set(show);
+                                    let count = preview_design(&design.peek(), visible_preview(live_draft.peek().as_ref(), show), false).screens.len();
+                                    selected.set(selected().min(count.saturating_sub(1)));
+                                    selected_node.set(None);
+                                    selection.set(Vec::new());
+                                    preview_version += 1;
+                                },
+                                if show_recovery() { "Saved version" } else { "Review draft" }
+                            }
+                        }
+                    } else if is_read_only() {
                         span { class: "badge", "Live draft — unverified · read-only" }
                     }
                     span { class: "badge", "agent {agent_count}" }

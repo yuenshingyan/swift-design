@@ -761,12 +761,18 @@ async fn failed_continuation_polish_restores_the_preview_and_preserves_new_work_
             .expect("saved test record should exist"),
         preview
     );
+    assert!(
+        designs
+            .load("talk-candidate-2")
+            .await
+            .expect("candidate lookup should succeed")
+            .is_none()
+    );
     let draft = designs
-        .load("talk-candidate-2")
+        .load_review_draft("talk-candidate-1")
         .await
-        .expect("test record should load successfully")
-        .expect("saved test record should exist");
-    assert!(draft.title.starts_with("Needs review"));
+        .expect("draft lookup should succeed")
+        .expect("continued draft should stay on its original candidate");
     assert_eq!(draft.screens.len(), preview.screens.len() + 1);
     assert_eq!(draft.screens[..preview.screens.len()], preview.screens);
 }

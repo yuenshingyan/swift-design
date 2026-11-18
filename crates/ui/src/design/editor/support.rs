@@ -306,7 +306,8 @@ pub(super) fn field_count(design: &Design) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::design::editor::preview_design;
+    use crate::design::api::DesignPreview;
+    use crate::design::editor::{preview_design, visible_preview};
 
     #[test]
     fn selected_export_href_requires_nonempty_saved_screen_selection() {
@@ -455,6 +456,21 @@ mod tests {
         assert_eq!(preview_design(&saved, Some(&draft), false), &draft);
         assert_eq!(preview_design(&saved, Some(&draft), true), &saved);
         assert_eq!(saved.title, "T");
+    }
+
+    #[test]
+    fn saved_version_can_hide_recovery_without_hiding_an_active_run() {
+        let mut preview = DesignPreview {
+            design: design(),
+            is_recovery: true,
+        };
+        assert!(visible_preview(Some(&preview), false).is_none());
+        assert_eq!(visible_preview(Some(&preview), true), Some(&preview.design));
+        preview.is_recovery = false;
+        assert_eq!(
+            visible_preview(Some(&preview), false),
+            Some(&preview.design)
+        );
     }
 
     #[test]

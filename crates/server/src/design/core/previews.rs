@@ -1,6 +1,7 @@
-//! Run-owned, validated previews. These never enter saved files or history.
+//! Run-owned previews and durable review drafts, separate from accepted designs.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -8,8 +9,9 @@ use std::time::{Duration, Instant};
 use design_model::Design;
 use serde::Serialize;
 
-use super::{DesignStore, DesignSummary, is_pending_screen};
+use super::{DesignStore, DesignSummary, is_pending_screen, is_valid_design_id};
 use crate::events::ChangeNotifier;
+use crate::files::write_atomically;
 
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 
@@ -25,6 +27,7 @@ struct PreviewEntry {
 #[derive(Serialize)]
 pub(super) struct PreviewView {
     pub(super) design: Design,
+    pub(super) is_recovery: bool,
 }
 
 /// Keeps a candidate's preview alive until its request and workers finish.
@@ -79,7 +82,63 @@ impl DesignStore {
         let entries = self.previews.0.lock().ok()?;
         Some(PreviewView {
             design: entries.get(id)?.design.clone()?,
+            is_recovery: false,
         })
+    }
+
+    pub(super) async fn preview_view(&self, id: &str) -> anyhow::Result<Option<PreviewView>> {
+        if let Some(live) = self.preview(id) {
+            return Ok(Some(live));
+        }
+        Ok(self.load_review_draft(id).await?.map(|design| PreviewView {
+            design,
+            is_recovery: true,
+        }))
+    }
+
+    fn review_draft_path(&self, id: &str) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(
+            is_valid_design_id(id),
+            "Cannot access review draft: invalid design ID."
+        );
+        Ok(self
+            .directory
+            .join(".review-drafts")
+            .join(format!("{id}.json")))
+    }
+
+    /// Checkpoints an unverified edit under its existing source candidate only.
+    pub(crate) async fn keep_review_draft(
+        &self,
+        source_id: &str,
+        design: &Design,
+    ) -> anyhow::Result<()> {
+        let path = self.review_draft_path(source_id)?;
+        anyhow::ensure!(
+            design.validate().is_empty(),
+            "Cannot preserve review draft: invalid design."
+        );
+        tokio::fs::metadata(self.path_of(source_id)).await?;
+        tokio::fs::create_dir_all(self.directory.join(".review-drafts")).await?;
+        write_atomically(&path, &serde_json::to_string(design)?).await
+    }
+
+    /// Loads the durable unverified draft, without reading or changing accepted data.
+    pub(crate) async fn load_review_draft(&self, id: &str) -> anyhow::Result<Option<Design>> {
+        match tokio::fs::read(self.review_draft_path(id)?).await {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Removes the draft after the candidate is accepted or deleted.
+    pub(crate) async fn clear_review_draft(&self, id: &str) -> anyhow::Result<()> {
+        match tokio::fs::remove_file(self.review_draft_path(id)?).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub(super) fn overlay_previews(&self, summaries: &mut Vec<DesignSummary>) {

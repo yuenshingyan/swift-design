@@ -57,12 +57,16 @@ pub async fn fetch_design(id: &str) -> Result<Design, String> {
     get_json(&format!("/designs/{id}")).await
 }
 
-/// Fetches a temporary draft without ever substituting it for saved data.
-pub async fn fetch_design_preview(id: &str) -> Result<Option<Design>, String> {
-    #[derive(Deserialize)]
-    struct PreviewResponse {
-        design: Design,
-    }
+/// The separate, read-only preview of a demo.
+#[derive(Clone, Deserialize, PartialEq)]
+pub(crate) struct DesignPreview {
+    pub(crate) design: Design,
+    #[serde(default)]
+    pub(crate) is_recovery: bool,
+}
+
+/// Fetches an active or retained draft without substituting it for saved data.
+pub(crate) async fn fetch_design_preview(id: &str) -> Result<Option<DesignPreview>, String> {
     let url = format!("/designs/{id}/previews");
     let response = built(Request::get(&url))?
         .send()
@@ -78,9 +82,9 @@ pub async fn fetch_design_preview(id: &str) -> Result<Option<Design>, String> {
         ));
     }
     response
-        .json::<PreviewResponse>()
+        .json::<DesignPreview>()
         .await
-        .map(|preview| Some(preview.design))
+        .map(Some)
         .map_err(|error| error.to_string())
 }
 

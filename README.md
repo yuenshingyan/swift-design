@@ -136,9 +136,11 @@ not shown as competing versions. Drafts are read-only in the editor and kept
 separate from saved data; dirty local changes take priority. Edits and continuations
 leave the saved candidate unchanged until acceptance. Only complete model replies
 can pass acceptance: completing markup for display never approves an edit.
-Temporary previews are cleared when a run finishes, fails or is cancelled; the UI
-returns to saved data. Validated work retained as **Needs review** is a separate
-candidate, not an overwrite. Exports, history and ordinary render URLs use saved
+Temporary previews clear when the run ends. A complete, valid edit draft is
+saved as a recovery copy under the same candidate before review. If review fails
+or the run stops after that checkpoint, the editor shows **Needs review**. Use
+**Saved version** or **Review draft** to switch. No new candidate is allocated.
+Exports, history and ordinary render URLs use saved
 data; `GET /designs/{id}/previews` and `render?preview=true` explicitly opt into drafts.
 The run status distinguishes **Reviewing candidates…** from **Tweaking candidates…**,
 including requirement review and correction rounds, rather than calling every phase writing.
@@ -211,11 +213,11 @@ completion. Obsolete alignment annotations may be corrected or removed rather
 than forcing filler content into a layout.
 Demo edits with only advisory findings can save after requirement review, with
 **Needs review** notes instead of an unqualified layout-verification claim. If
-layout repair or its audit fails, a valid, scope-preserving draft is retained as a
-separate candidate titled **Needs review**, with its issues recorded in chat. It
-is not selected automatically and is not claimed as requirement-complete; the
-original remains unchanged. Failed continuation polish likewise restores the
-preview and retains its new work separately. Fresh generation keeps its validated
+layout repair, browser audit, or requirement review fails, the latest complete,
+valid, scope-preserving checkpoint stays attached to the selected candidate as
+**Needs review**. It does not replace the accepted version or enter its history.
+Failed continuation polish also keeps its draft under the source candidate.
+Fresh generation keeps its validated
 draft under its already reserved candidate id, labelled **Needs review**; mere
 presence on disk never counts as a successfully completed generation. Invalid or
 out-of-scope drafts are never preserved.

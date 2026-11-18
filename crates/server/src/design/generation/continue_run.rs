@@ -195,6 +195,10 @@ impl GenerationEngine {
             live: Some(live_preview.edit_sink(&continued)),
         };
         let fallback = continued.clone();
+        self.designs
+            .keep_review_draft(design_id, &fallback)
+            .await
+            .map_err(|error| format!("Cannot checkpoint the continuation draft: {error}"))?;
         let final_design = match async {
             design_model::markup::validate_demo_navigation(&continued, Some(&preview))?;
             self.polish_design(client, continued, &polish_context, log)
@@ -211,6 +215,10 @@ impl GenerationEngine {
             }
         };
         saver.finish(&final_design).await?;
+        if let Err(error) = self.designs.clear_review_draft(design_id).await {
+            tracing::warn!(%design_id, %error, "could not clear the accepted review draft");
+        }
+        self.notifier.notify();
         progress(1.0);
         log(&format!("{label}: saved with {added} new screens"));
         Ok(added)

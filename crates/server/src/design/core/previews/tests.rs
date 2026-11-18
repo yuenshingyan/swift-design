@@ -105,6 +105,80 @@ async fn live_preview_never_changes_saved_design_history_or_default_render() {
 }
 
 #[tokio::test]
+async fn recovery_stays_read_only_on_the_same_candidate_after_reopening_the_store() {
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
+    let original = sample();
+    let mut draft = original.clone();
+    draft.title = "Recover these screens".into();
+    {
+        let store = DesignStore::new(directory.path().join("designs"));
+        assert!(
+            store
+                .keep_review_draft("demo-candidate-2", &draft)
+                .await
+                .is_err()
+        );
+        store
+            .save("demo-candidate-1", &original)
+            .await
+            .expect("original should save");
+        store
+            .keep_review_draft("demo-candidate-1", &draft)
+            .await
+            .expect("review draft should checkpoint");
+    }
+    let store = DesignStore::new(directory.path().join("designs"));
+    assert_eq!(
+        store
+            .load("demo-candidate-1")
+            .await
+            .expect("saved candidate should load"),
+        Some(original)
+    );
+    let preview = get_preview(State(store.clone()), Path("demo-candidate-1".into())).await;
+    let preview: serde_json::Value =
+        serde_json::from_str(&body(preview).await).expect("preview API should return JSON");
+    assert_eq!(preview["is_recovery"], true);
+    assert_eq!(preview["design"]["title"], draft.title);
+    let rendered = body(
+        render_stored_design(
+            State(store.clone()),
+            Path("demo-candidate-1".into()),
+            Query(RenderQuery {
+                editable: true,
+                preview: true,
+                screen: Some(1),
+            }),
+        )
+        .await,
+    )
+    .await;
+    assert!(rendered.contains("Needs review — unverified draft"));
+    assert!(!rendered.contains("swift-design-html"));
+    assert_eq!(
+        store
+            .list()
+            .await
+            .expect("listing should be readable")
+            .iter()
+            .map(|summary| summary.id.as_str())
+            .collect::<Vec<_>>(),
+        ["demo-candidate-1"]
+    );
+    store
+        .delete("demo-candidate-1")
+        .await
+        .expect("deleting the candidate should succeed");
+    assert!(
+        store
+            .load_review_draft("demo-candidate-1")
+            .await
+            .expect("deleted draft lookup should succeed")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn new_draft_is_listed_without_creating_a_saved_file_and_disappears_on_drop() {
     let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let store = DesignStore::new(directory.path().join("not-created"));
