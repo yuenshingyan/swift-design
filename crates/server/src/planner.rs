@@ -268,6 +268,8 @@ pub(crate) fn capability_rejection(content: &str) -> Result<Option<String>, Stri
     #[derive(serde::Deserialize)]
     struct CapabilityReview {
         unsupported_requirements: Vec<String>,
+        #[serde(default)]
+        supported_alternatives: Vec<String>,
     }
 
     let review = content
@@ -289,9 +291,33 @@ pub(crate) fn capability_rejection(content: &str) -> Result<Option<String>, Stri
                 .into(),
         );
     }
+    if review.supported_alternatives.len() != review.unsupported_requirements.len()
+        || review
+            .supported_alternatives
+            .iter()
+            .any(|item| item.trim().is_empty())
+    {
+        return Err(
+            "Cannot check request capabilities: each unsupported requirement needs a concrete supported alternative or an explicit omission proposal.".into(),
+        );
+    }
+    let proposals = review
+        .unsupported_requirements
+        .iter()
+        .zip(&review.supported_alternatives)
+        .enumerate()
+        .map(|(index, (requirement, alternative))| {
+            format!(
+                "{}. {}\n   Suggested alternative: {}",
+                index + 1,
+                requirement,
+                alternative
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
     Ok(Some(format!(
-        "Swift Design cannot fulfil these mandatory requirements:\n- {}\n\nI have not started generation or changed any candidates. A supported alternative requires your explicit approval; please revise the request or approve a design/specification alternative.",
-        review.unsupported_requirements.join("\n- ")
+        "Swift Design cannot fulfil these mandatory requirements as written:\n\n{proposals}\n\nThese alternatives change the requested scope; they are not equivalent implementations of the blocked requirements. I have not started generation or changed any candidates.\n\nWould you like to approve all these changes, or revise specific ones? Any remaining mandatory blockers must be resolved. I will wait for your explicit approval of a revised scope before generating anything."
     )))
 }
 
@@ -313,7 +339,7 @@ pub(crate) fn capability_prompt(kind: ArtifactKind) -> String {
         ArtifactKind::Artwork => ARTWORK_RULES,
     };
     format!(
-        "Capability check: Before promising or starting work, compare the current mandatory deliverables with the actual artifact rules below. Return unsupported_requirements as an array of specific unmet execution or output capabilities, empty when supported. A nonempty array blocks generation, editing and merging even when other flags or questions suggest proceeding. Explain each limitation; never promise an unsupported deliverable. Do not silently drop requirements or substitute notes, source code, screenshots or specifications for required working behavior. Offer a supported alternative only with explicit user approval. A rejected request remains rejected if the user insists or merely says retry; only an explicit revised scope or approval changes it. Read the current request with its clarifications; do not resurrect earlier completed work or let assistant promises authorize an alternative. Distinguish source code for review, quoted examples and concrete permitted implementation specifications from code that must execute in the preview or exported artifact. Mentioning JavaScript, Python or another language alone is not unsupported. HTML/CSS renderers do not execute user scripts, custom keyboard handlers, asynchronous controllers, backend operations or other language runtimes. Screen links and CSS interactions are supported where the selected artifact rules permit them. Static visual states and explicitly permitted behavior specifications remain supported. Do not claim a separate executable file, runtime or integration can be delivered when this artifact format cannot carry it. Do not ask ordinary setup questions to work around a capability conflict.\nActual artifact rules:\n{}",
+        "Capability check: Before promising or starting work, compare the current mandatory deliverables with the actual artifact rules below. Return unsupported_requirements as an array of specific unmet execution or output capabilities, empty when supported. Also return supported_alternatives: one concrete, feasible scope revision for each unsupported requirement, in the same order, or [] when supported. Each proposal must say what can actually be delivered, what must change or be omitted, and which behavior or guarantee will not be provided; generic 'approve an alternative' advice is insufficient. A nonempty array blocks generation, editing and merging even when other flags or questions suggest proceeding. Explain each limitation; never promise an unsupported deliverable. Do not silently drop requirements or substitute notes, source code, screenshots or specifications for required working behavior. Automatically propose supported alternatives, but never execute or accept a changed scope without explicit user approval. Approval applies only to the clearly described changes the user accepts; partial approval leaves other mandatory requirements intact. Asking for suggestions is not approval. Base each proposal on the actual artifact rules and preserve unaffected requirements. For executable behavior, where applicable propose linked static state screens plus concrete controller/accessibility specifications, explicitly not a running prototype. Do not promise renderer-managed font requests can be disabled: for a strict network-free requirement, propose explicitly relaxing that guarantee where necessary. For unsupported HTML semantics, propose permitted markup and disclose the semantic gap. For multiple viewport sizes, where applicable propose narrower component specimens inside the unchanged canvas, explicitly not independently sized full-workspace layouts; separate viewport candidates require explicit approval to expand candidate scope. Never suggest a nonexistent export mode, runtime, font setting or other feature. If there is no equivalent supported substitute, identify the deliverable that must be omitted and propose the remaining supported work honestly. A rejected request remains rejected if the user insists or merely says retry; only an explicit revised scope or approval changes it. Read the current request with its clarifications; do not resurrect earlier completed work or let assistant promises authorize an alternative. Distinguish source code for review, quoted examples and concrete permitted implementation specifications from code that must execute in the preview or exported artifact. Mentioning JavaScript, Python or another language alone is not unsupported. HTML/CSS renderers do not execute user scripts, custom keyboard handlers, asynchronous controllers, backend operations or other language runtimes. Screen links and CSS interactions are supported where the selected artifact rules permit them. Static visual states and explicitly permitted behavior specifications remain supported. Do not claim a separate executable file, runtime or integration can be delivered when this artifact format cannot carry it. Do not ask ordinary setup questions to work around a capability conflict.\nActual artifact rules:\n{}",
         rules.join("\n")
     )
 }
@@ -362,7 +388,7 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
     format!(
         "{subject}\n\
          Read the request, the answers, and the conversation. Reply with only this JSON:\n\
-         {{\"reply\":\"text for the user\",\"questions\":[{{\"question\":\"...\",\"options\":[\"...\"],\"multi\":false}}],\"suggestions\":{{\"{first_key}\":\"{first_value}\"}},\"generate\":false,\"edit\":false,\"merge\":false,\"unsupported_requirements\":[]}}\n\
+         {{\"reply\":\"text for the user\",\"questions\":[{{\"question\":\"...\",\"options\":[\"...\"],\"multi\":false}}],\"suggestions\":{{\"{first_key}\":\"{first_value}\"}},\"generate\":false,\"edit\":false,\"merge\":false,\"unsupported_requirements\":[],\"supported_alternatives\":[]}}\n\
          {capabilities}\n\
          The app always asks the user its own fixed questions first. Your questions are added to that card.\n\
          The app questions, as key (wording): values:\n\
@@ -522,17 +548,28 @@ mod tests {
             r#"{"unsupported_requirements":"JavaScript"}"#,
             r#"{"unsupported_requirements":[1]}"#,
             r#"{"unsupported_requirements":[" "]}"#,
+            r#"{"unsupported_requirements":["Requires JavaScript"]}"#,
+            r#"{"unsupported_requirements":["Requires JavaScript"],"supported_alternatives":[]}"#,
+            r#"{"unsupported_requirements":["Requires JavaScript"],"supported_alternatives":[" "]}"#,
+            r#"{"unsupported_requirements":["Requires JavaScript"],"supported_alternatives":["Static screens","Extra unpaired proposal"]}"#,
+            r#"{"unsupported_requirements":["Requires JavaScript"],"supported_alternatives":null}"#,
+            r#"{"unsupported_requirements":["Requires JavaScript"],"supported_alternatives":[1]}"#,
         ] {
             assert!(capability_rejection(invalid).is_err(), "{invalid}");
         }
         let rejection = capability_rejection(
-            r#"{"reply":"I will build it!","generate":true,"unsupported_requirements":["Executable JavaScript in the preview is unsupported","A Python runtime is unavailable"]}"#,
+            r#"{"reply":"I will build it!","generate":true,"unsupported_requirements":["Executable JavaScript in the preview is unsupported","A Python runtime is unavailable"],"supported_alternatives":["Use linked HTML/CSS state screens and concrete keyboard specifications, not executing JavaScript.","Show Python source as escaped text for review, without executing or verifying it."]}"#,
         )
         .expect("specific limitations should produce a rejection")
         .expect("unsupported mandatory requirements should block work");
         assert!(rejection.contains("Executable JavaScript"));
         assert!(rejection.contains("Python runtime"));
         assert!(rejection.contains("explicit approval"));
+        assert!(rejection.contains("1. Executable JavaScript"));
+        assert!(rejection.contains("2. A Python runtime"));
+        assert!(rejection.contains("Suggested alternative: Use linked HTML/CSS state screens"));
+        assert!(rejection.contains("Suggested alternative: Show Python source as escaped text"));
+        assert!(rejection.contains("not equivalent implementations"));
         assert!(!rejection.contains("I will build it"));
     }
 
@@ -544,6 +581,16 @@ mod tests {
             assert!(prompt.contains("Do not write `<script>`"));
             assert!(prompt.contains("source code for review"));
             assert!(prompt.contains("explicit user approval"));
+            assert!(prompt.contains("Automatically propose supported alternatives"));
+            assert!(prompt.contains(
+                "one concrete, feasible scope revision for each unsupported requirement"
+            ));
+            assert!(prompt.contains("Never suggest a nonexistent export mode"));
+            assert!(
+                prompt.contains("Do not promise renderer-managed font requests can be disabled")
+            );
+            assert!(prompt.contains("disclose the semantic gap"));
+            assert!(prompt.contains("separate viewport candidates require explicit approval"));
             assert!(prompt.contains("only an explicit revised scope or approval changes it"));
             assert!(
                 prompt
@@ -657,7 +704,7 @@ mod tests {
         assert!(!plan.should_generate);
         assert!(!parse_plan(r#"{"reply":"Hi.","edit":true}"#).should_merge);
         let prompt = planner_prompt(ArtifactKind::Demo);
-        assert!(prompt.contains("\"edit\":false,\"merge\":false,\"unsupported_requirements\":[]}"));
+        assert!(prompt.contains("\"edit\":false,\"merge\":false,\"unsupported_requirements\":[],\"supported_alternatives\":[]}"));
         assert!(prompt.contains("set merge to true and edit to false"));
         assert!(prompt.contains("The app writes one new candidate."));
     }

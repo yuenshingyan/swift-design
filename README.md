@@ -163,7 +163,10 @@ explicitly permitted behavior specifications remain valid specification delivera
 Before promising work or starting generation, the built-in planner checks mandatory
 requirements against the selected artifact's actual renderer rules. Unsupported
 execution or output requirements stop the turn with a specific explanation and a
-request for explicit approval of a supported alternative. Ordinary setup questions,
+concrete supported alternative for each blocker, including the scope changes and
+capabilities that would be omitted. These proposals use existing renderer features,
+not invented runtimes, exports or settings. The user must explicitly approve a revised
+scope before generation; suggesting an alternative does not authorize it. Ordinary setup questions,
 question limits, retries, and explicit write/regenerate/continue actions cannot bypass
 this check. Source code for review and explicitly permitted behavior specifications
 are distinct from required executable behavior; a technology name alone is not a
