@@ -236,6 +236,19 @@ async fn extension_requires_additions_and_feature_coverage_before_saving() {
             assert_eq!(saved.screens.len(), original.screens.len() + 1);
             assert!(saved.screens[0].html.contains("Discussion"));
         } else {
+            let draft = candidate
+                .designs
+                .load_review_draft("talk-candidate-1")
+                .await
+                .expect("draft lookup should succeed");
+            assert_eq!(
+                draft.is_some(),
+                adds_page,
+                "only a scope-valid changed draft should survive an unsuccessful review"
+            );
+            if let Some(draft) = draft {
+                assert_eq!(draft.screens.len(), original.screens.len() + 1);
+            }
             assert_eq!(
                 tokio::fs::read(candidate.path())
                     .await

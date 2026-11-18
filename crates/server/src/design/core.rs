@@ -50,7 +50,7 @@ pub struct DesignStore {
     directory: PathBuf,
     /// Where each save keeps the previous file. `None` keeps no history.
     history: Option<HistoryStore>,
-    /// Run-owned visual drafts, never persisted or included in history.
+    /// Active run previews, separate from saved designs and durable review drafts.
     previews: PreviewStore,
     /// Ids of malformed files already reported, so the listing warns
     /// once per file and not on every request.
@@ -325,6 +325,9 @@ impl DesignStore {
     /// Returns false when no file with that id exists.
     pub async fn delete(&self, id: &str) -> anyhow::Result<bool> {
         self.clear_user_paths(id).await?;
+        if is_valid_design_id(id) {
+            self.clear_review_draft(id).await?;
+        }
         // The history goes with the file. A later design with the same
         // id is a different design and must start with no snapshots.
         if let Some(history) = &self.history
@@ -423,14 +426,15 @@ async fn list_designs(State(store): State<DesignStore>) -> Response {
     }
 }
 
-/// Returns only an active visual draft; saved designs stay on the ordinary route.
+/// Returns the active preview or a retained review draft, never the saved design.
 async fn get_preview(State(store): State<DesignStore>, Path(id): Path<String>) -> Response {
     if !is_valid_design_id(&id) {
         return api_error::invalid_design_id(&id);
     }
-    let mut response = match store.preview(&id) {
-        Some(preview) => Json(preview).into_response(),
-        None => api_error::design_not_found(&id),
+    let mut response = match store.preview_view(&id).await {
+        Ok(Some(preview)) => Json(preview).into_response(),
+        Ok(None) => api_error::design_not_found(&id),
+        Err(error) => api_error::internal_error(&error),
     };
     response.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
@@ -683,8 +687,16 @@ async fn render_stored_design(
     if !is_valid_design_id(&id) {
         return api_error::invalid_design_id(&id);
     }
-    let preview = query.preview.then(|| store.preview(&id)).flatten();
+    let preview = if query.preview {
+        match store.preview_view(&id).await {
+            Ok(preview) => preview,
+            Err(error) => return api_error::internal_error(&error),
+        }
+    } else {
+        None
+    };
     let is_preview = preview.is_some();
+    let is_recovery = preview.as_ref().is_some_and(|view| view.is_recovery);
     let loaded = match preview {
         Some(preview) => Ok(Some(preview.design)),
         None => store.load(&id).await,
@@ -716,7 +728,12 @@ async fn render_stored_design(
             };
             let mut html = crate::design::render::render_design_with(&design, options);
             if is_preview {
-                html = html.replace("</body>", "<aside style=\"position:fixed;top:8px;right:8px;z-index:2147483647;padding:5px 9px;border-radius:6px;background:#171b25;color:#fff;font:12px sans-serif;pointer-events:none\" aria-label=\"Unverified live draft\">Live draft — unverified</aside></body>");
+                let label = if is_recovery {
+                    "Needs review — unverified draft"
+                } else {
+                    "Live draft — unverified"
+                };
+                html = html.replace("</body>", &format!("<aside style=\"position:fixed;top:8px;right:8px;z-index:2147483647;padding:5px 9px;border-radius:6px;background:#171b25;color:#fff;font:12px sans-serif;pointer-events:none\">{label}</aside></body>"));
             }
             let mut response = Html(html).into_response();
             if query.preview {

@@ -294,8 +294,8 @@ fn CandidateCard(
                 return None;
             }
             match crate::design::api::fetch_design_preview(&id).await {
-                Ok(Some(draft)) => Some((draft, true)),
-                Ok(None) => crate::design::api::fetch_design(&id)
+                Ok(Some(draft)) if !draft.is_recovery => Some((draft.design, true)),
+                Ok(_) => crate::design::api::fetch_design(&id)
                     .await
                     .ok()
                     .map(|saved| (saved, false)),
