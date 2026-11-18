@@ -18,7 +18,7 @@ async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
             )
             .await;
         fake.watch_baseline(&candidate.path()).await;
-        fake.push_text(r#"{"edit":true}"#.into());
+        fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
         fake.push_text(json!({
             "instruction": "Redesign screen 1 with visible controls and concrete state specifications.",
             "screens": [0], "minimum_new_screens": 0,
@@ -130,7 +130,7 @@ async fn requested_hidden_views_are_repaired_as_linked_separate_screens() {
         )
         .await;
     fake.watch_baseline(&candidate.path()).await;
-    fake.push_text(r#"{"edit":true}"#.into());
+    fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
     fake.push_text(json!({
         "instruction": "Design connected and disconnected views as separate screens.",
         "screens": [0], "minimum_new_screens": 0,
@@ -202,7 +202,7 @@ async fn correction_cannot_change_an_unselected_original_screen() {
     let original = sample_design();
     let candidate = ReviewingCandidate::new(&fake);
     candidate.seed(&original, "Only edit screen 1.").await;
-    fake.push_text(r#"{"edit":true}"#.into());
+    fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
     fake.push_text(
         json!({"instruction":"Only edit screen 1", "screens":[0],
         "minimum_new_screens":0, "requirements":["Visible retry action"]})
@@ -261,7 +261,7 @@ async fn unsupported_executable_requirements_stop_without_correction_or_save() {
             "Require executable date validation, not a specification.",
         )
         .await;
-    fake.push_text(r#"{"edit":true}"#.into());
+    fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
     fake.push_text(
         json!({"instruction":"Executable date validation", "screens":[0],
         "minimum_new_screens":0, "requirements":["Executable date validation"]})

@@ -285,7 +285,39 @@ impl GenerationEngine {
         let client = ModelClient::build_http_client()?;
         // A session already generating asked to write now: no planner.
         let write_now = session.state == design_model::WorkflowState::Generating;
-        let task = match self.pick_task(&context).await? {
+        let direct_task = self.pick_task(&context).await?;
+        if direct_task.is_some() || write_now {
+            match self
+                .check_request_capabilities(&client, &context, &log)
+                .await
+            {
+                Ok(Some(message)) => {
+                    self.say(session_id, &message).await?;
+                    if session.state == design_model::WorkflowState::Generating {
+                        self.sessions
+                            .apply(session_id, design_model::WorkflowEvent::QuestionsAsked)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        self.notifier.notify();
+                    }
+                    self.finish_run(session_id, &run_id, "replied", None, Vec::new())
+                        .await;
+                    return Ok(GenerationOutcome::Replied);
+                }
+                Ok(None) => {}
+                Err(message) => {
+                    return self
+                        .settle(
+                            session_id,
+                            &run_id,
+                            Err(GenerationStop::Failed(message)),
+                            &log,
+                        )
+                        .await;
+                }
+            }
+        }
+        let task = match direct_task {
             Some(task) => task,
             None if write_now => GenerationTask::Candidates,
             None => match self.plan_turn(&client, &session, &context, &log).await {
@@ -463,6 +495,29 @@ impl GenerationEngine {
         Ok(())
     }
 
+    /// Checks explicit write, regenerate and continue actions that bypass the planner.
+    async fn check_request_capabilities(
+        &self,
+        client: &reqwest::Client,
+        context: &GenerationContext,
+        log: &LogSink,
+    ) -> Result<Option<String>, String> {
+        let attachments = self.load_attachments(&context.session_id, log).await;
+        let messages = vec![
+            serde_json::json!({"role": "system", "content": format!(
+                "{}\nReturn JSON only: {{\"unsupported_requirements\":[]}}. This is a capability check, not a generation request.",
+                crate::planner::capability_prompt(context.request.kind)
+            )}),
+            self.user_message(
+                &crate::request::request_input(&context.request),
+                &attachments,
+            ),
+        ];
+        log("checking request capabilities before generation");
+        let reply = self.model.chat(client, &messages, context.effort()).await?;
+        crate::planner::capability_rejection(&reply)
+    }
+
     /// Asks the planner what this turn does: questions, a write, an
     /// edit of the open artifact, or a reply.
     pub(super) async fn plan_turn(
@@ -497,6 +552,11 @@ impl GenerationEngine {
         ];
         log("planning the turn");
         let reply = self.model.chat(client, &request, context.effort()).await?;
+        if let Some(message) = crate::planner::capability_rejection(&reply)? {
+            self.say(session_id, &message).await?;
+            log("unsupported mandatory requirements; waiting for explicit scope approval");
+            return Ok(PlanStep::Replied);
+        }
         let plan = parse_plan(&reply);
         // The first turn always asks. The app owns a fixed list of
         // questions and asks it before anything is written; the planner

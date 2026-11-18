@@ -23,7 +23,7 @@ async fn an_unavailable_layout_audit_preserves_an_unverified_draft_not_a_success
     let before = tokio::fs::read(candidate.path())
         .await
         .expect("test data should be readable");
-    fake.push_text(r#"{"edit":true}"#.into());
+    fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
     fake.push_text(
         json!({"instruction":"Update screen 1", "screens":[0], "minimum_new_screens":0,
         "requirements":["Updated design"]})
@@ -85,7 +85,7 @@ async fn advisory_polish_saves_with_review_notes_but_serious_defects_preserve_a_
         let before = tokio::fs::read(candidate.path())
             .await
             .expect("test data should be readable");
-        fake.push_text(r#"{"edit":true}"#.into());
+        fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
         fake.push_text(
             json!({"instruction":"Update screen 1", "screens":[0],
             "minimum_new_screens":0, "requirements":["Updated screen"]})

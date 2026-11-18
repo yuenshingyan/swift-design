@@ -18,7 +18,8 @@ use crate::sessions::{ChatMessage, NewSession, SessionStore};
 use crate::test_support::{FakeModelServer, SAMPLE_DECK, low_effort_options, sample_deck};
 
 /// The planner reply that writes candidates.
-const WRITE_PLAN: &str = r#"{"reply":"Writing it now.","generate":true}"#;
+const WRITE_PLAN: &str =
+    r#"{"reply":"Writing it now.","generate":true,"unsupported_requirements":[]}"#;
 
 #[test]
 fn a_focused_deck_edit_shows_only_the_named_slides_and_their_findings() {
@@ -267,7 +268,9 @@ async fn a_valid_deck_reply_is_saved_as_a_candidate() {
 #[tokio::test]
 async fn a_chat_request_with_a_deck_open_patches_that_deck() {
     let server = FakeModelServer::start().await;
-    server.push_text(r#"{"reply":"Tightening the title.","edit":true}"#);
+    server.push_text(
+        r#"{"reply":"Tightening the title.","edit":true,"unsupported_requirements":[]}"#,
+    );
     server.push_text(
             r#"{"slides":[{"index":0,"slide":{"html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:96px;}"}}]}"#,
         );
@@ -361,6 +364,7 @@ async fn reviewing_deck_session_with(stores: &Stores, count: usize) {
 #[tokio::test]
 async fn a_regenerated_slide_is_written_without_its_old_markup() {
     let server = FakeModelServer::start().await;
+    server.push_text(r#"{"unsupported_requirements":[]}"#);
     // No planner turn: the request names its slide itself.
     server.push_text(
             r#"{"slides":[{"index":0,"slide":{"html":"<h1 class='title'>Fresh</h1>","css":".title{font-size:96px;}"}}]}"#,
@@ -388,7 +392,7 @@ async fn a_regenerated_slide_is_written_without_its_old_markup() {
         .await
         .expect("test generation run should complete successfully");
     assert!(matches!(outcome, GenerationOutcome::Edited { .. }));
-    let text = server.requests()[0].to_string();
+    let text = server.requests()[1].to_string();
     assert!(text.contains("Write slide 1 of"));
     assert!(!text.contains("Old title markup"));
     let edited = stores
@@ -404,7 +408,7 @@ async fn a_regenerated_slide_is_written_without_its_old_markup() {
 #[tokio::test]
 async fn a_merge_of_two_pinned_decks_writes_a_new_one() {
     let server = FakeModelServer::start().await;
-    server.push_text(r#"{"reply":"Merging the two.","merge":true}"#);
+    server.push_text(r#"{"reply":"Merging the two.","merge":true,"unsupported_requirements":[]}"#);
     server.push_text(SAMPLE_DECK);
     // The polish round, when Chrome can measure: no change.
     server.push_text(r#"{"slides":[]}"#);

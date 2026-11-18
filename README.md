@@ -160,6 +160,16 @@ screens; requirement review checks their separate visible screens and navigation
 Styling-only edits do not silently restructure unrelated legacy screens, and
 explicitly permitted behavior specifications remain valid specification deliverables.
 
+Before promising work or starting generation, the built-in planner checks mandatory
+requirements against the selected artifact's actual renderer rules. Unsupported
+execution or output requirements stop the turn with a specific explanation and a
+request for explicit approval of a supported alternative. Ordinary setup questions,
+question limits, retries, and explicit write/regenerate/continue actions cannot bypass
+this check. Source code for review and explicitly permitted behavior specifications
+are distinct from required executable behavior; a technology name alone is not a
+reason to reject a request. Missing or malformed capability verdicts stop safely
+without publishing a promise or writing candidates. Existing candidates remain intact.
+
 Demo edits first resolve the current request and its clarifications into a screen
 scope and deliverable checklist. Candidate selection does not prohibit adding
 screens. Existing-screen workers still run in parallel (up to four); a serial

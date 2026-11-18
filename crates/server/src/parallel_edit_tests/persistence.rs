@@ -5,7 +5,7 @@ async fn theme_review_has_comparison_evidence_and_failure_reaches_follow_up_chat
     for accepted in [true, false] {
         let original = sample_design();
         let fake = ParallelFakeModel::start(None).await;
-        fake.push_text(r#"{"edit":true}"#.into());
+        fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
         fake.push_text(r#"{"instruction":"Use a light theme without changing content or navigation.","screens":[],"minimum_new_screens":0,"requirements":["Light theme","Preserve existing content and navigation","Leave other candidates unchanged"]}"#.into());
         fake.auto_worker_patches(ArtifactKind::Demo, &json!(original), "worker");
         let mut theme = json!(original.theme);
@@ -110,7 +110,7 @@ async fn theme_review_has_comparison_evidence_and_failure_reaches_follow_up_chat
                 .await
                 .expect("test chat message should be appended");
             fake.push_text(
-                r#"{"reply":"The recorded preservation check rejected the edit."}"#.into(),
+                r#"{"reply":"The recorded preservation check rejected the edit.","unsupported_requirements":[]}"#.into(),
             );
             candidate
                 .engine
@@ -150,7 +150,7 @@ async fn extension_requires_additions_and_feature_coverage_before_saving() {
     ] {
         let original = sample_design();
         let fake = ParallelFakeModel::start(None).await;
-        fake.push_text(r#"{"edit":true}"#.into());
+        fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
         fake.push_text(r#"{"instruction":"Extend candidate 4: modify Task details and add connected Notifications.","screens":[],"minimum_new_screens":1,"requirements":["Task discussion and connected Notifications"]}"#.into());
         fake.auto_worker_patches(
             ArtifactKind::Demo,
@@ -280,7 +280,10 @@ pub(super) async fn verify_queued_edit_baseline(
         .expect("next queued test message should activate")
         .expect("queued test message should be activated");
     fake.watch_baseline(&candidate.path()).await;
-    fake.push_text(r#"{"reply":"Applying the queued change.","edit":true}"#.to_owned());
+    fake.push_text(
+        r#"{"reply":"Applying the queued change.","edit":true,"unsupported_requirements":[]}"#
+            .to_owned(),
+    );
     fake.push_text(EDIT_PLAN.to_owned());
     fake.auto_worker_patches(
         ArtifactKind::Demo,
@@ -330,7 +333,10 @@ pub(super) async fn an_unrepaired_layout_after_parallel_editing_does_not_replace
  {
     let original = sample_design();
     let fake = ParallelFakeModel::start(None).await;
-    fake.push_text(r#"{"reply":"Editing selected screens.","edit":true}"#.to_owned());
+    fake.push_text(
+        r#"{"reply":"Editing selected screens.","edit":true,"unsupported_requirements":[]}"#
+            .to_owned(),
+    );
     fake.push_text(EDIT_PLAN.to_owned());
     fake.auto_worker_patches(
         ArtifactKind::Demo,
@@ -395,7 +401,10 @@ pub(super) async fn an_unrepaired_layout_after_parallel_editing_does_not_replace
 pub(super) async fn coordination_failure_leaves_the_real_saved_candidate_and_history_unchanged() {
     let original = sample_design();
     let fake = ParallelFakeModel::start(None).await;
-    fake.push_text(r#"{"reply":"Editing selected screens.","edit":true}"#.to_owned());
+    fake.push_text(
+        r#"{"reply":"Editing selected screens.","edit":true,"unsupported_requirements":[]}"#
+            .to_owned(),
+    );
     fake.push_text(EDIT_PLAN.to_owned());
     fake.auto_worker_patches(
         ArtifactKind::Demo,
