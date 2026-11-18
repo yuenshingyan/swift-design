@@ -11,7 +11,8 @@ async fn unsupported_intake_stops_before_setup_questions_or_a_promise_for_every_
             "reply": "I will build the executable prototype now.",
             "generate": true, "edit": true, "merge": true,
             "questions": [{"question": "Which style?", "options": ["A", "B"]}],
-            "unsupported_requirements": ["Executing custom JavaScript is unsupported in this artifact"]
+            "unsupported_requirements": ["Executing custom JavaScript is unsupported in this artifact"],
+            "supported_alternatives": ["Provide linked HTML/CSS state screens and a controller specification, not an executable JavaScript prototype."]
         }).to_string());
         let directory = tempfile::tempdir().expect("capability test directory should be created");
         let designs = DesignStore::new(directory.path().join("designs"));
@@ -40,6 +41,16 @@ async fn unsupported_intake_stops_before_setup_questions_or_a_promise_for_every_
         assert_eq!(messages.len(), 1);
         assert!(messages[0].content.contains("custom JavaScript"));
         assert!(messages[0].content.contains("explicit approval"));
+        assert!(
+            messages[0]
+                .content
+                .contains("Suggested alternative: Provide linked HTML/CSS state screens")
+        );
+        assert!(
+            messages[0]
+                .content
+                .contains("not an executable JavaScript prototype")
+        );
         assert!(!messages[0].content.contains("I will build"));
         assert_eq!(
             sessions
@@ -75,6 +86,90 @@ async fn unsupported_intake_stops_before_setup_questions_or_a_promise_for_every_
 }
 
 #[tokio::test]
+async fn every_blocker_gets_a_concrete_proposal_and_partial_approval_does_not_start_work() {
+    let blockers = [
+        "Custom JavaScript controllers cannot execute in this renderer.",
+        "The renderer loads theme fonts from Google Fonts, so strict zero-network operation cannot be guaranteed.",
+        "The required native time element is not permitted.",
+        "One candidate cannot have multiple independent full-workspace viewport sizes.",
+    ];
+    let alternatives = [
+        "Provide linked HTML/CSS event and error-state screens plus a concrete keyboard, batching and recovery specification; JavaScript will not execute.",
+        "Keep the existing theme and approve renderer-managed font requests; the result will not be strictly network-free.",
+        "Show HKT timestamps in allowed span elements and retain original ISO timestamps in data attributes; this does not provide native time-element semantics.",
+        "Keep candidate 4's viewport and shell unchanged and show narrower component specimens within it, not independent full-workspace device layouts. Separate viewport candidates need additional scope approval.",
+    ];
+    let server = FakeModelServer::start().await;
+    for first_blocker in [0, 1] {
+        server.push_text(
+            &json!({
+                "reply": "PROMISE_MUST_NOT_REACH_CHAT", "generate": true, "edit": true,
+                "unsupported_requirements": &blockers[first_blocker..],
+                "supported_alternatives": &alternatives[first_blocker..],
+            })
+            .to_string(),
+        );
+    }
+    let directory = tempfile::tempdir().expect("multiple-blocker test directory should be created");
+    let designs = DesignStore::new(directory.path().join("designs"));
+    let sessions = SessionStore::new(directory.path().join("sessions"));
+    set_up_session(&sessions,
+        "Only candidate 4: require executing JavaScript, zero network requests, native time elements and independent 1440, 768 and 390px full-workspace specimens."
+    ).await;
+    let engine = engine(&server, &designs, &sessions);
+    for first_blocker in [0, 1] {
+        if first_blocker == 1 {
+            sessions.append_message("talk", ChatMessage::user(
+                "I approve static screens and controller specifications instead of JavaScript. Keep the other requirements unchanged.", None
+            )).await.expect("partial scope approval should be appended");
+        }
+        assert!(matches!(
+            engine
+                .clone()
+                .run("talk", silent_log())
+                .await
+                .expect("blockers should receive actionable proposals"),
+            GenerationOutcome::Replied
+        ));
+        let messages = sessions
+            .messages("talk")
+            .await
+            .expect("proposal reply should load");
+        let reply = &messages
+            .last()
+            .expect("proposal reply should exist")
+            .content;
+        for (blocker, alternative) in blockers[first_blocker..]
+            .iter()
+            .zip(&alternatives[first_blocker..])
+        {
+            assert!(reply.contains(blocker));
+            assert!(reply.contains(alternative));
+        }
+        assert_eq!(
+            reply.matches("Suggested alternative:").count(),
+            4 - first_blocker
+        );
+        assert!(reply.contains("not equivalent implementations"));
+        assert!(reply.contains("Any remaining mandatory blockers must be resolved"));
+        assert!(reply.contains("explicit approval"));
+        assert!(
+            designs
+                .list()
+                .await
+                .expect("candidate listing should succeed")
+                .is_empty()
+        );
+        assert_eq!(server.requests().len(), first_blocker + 1);
+    }
+    assert!(
+        server.requests()[1]
+            .to_string()
+            .contains("Keep the other requirements unchanged")
+    );
+}
+
+#[tokio::test]
 async fn unsupported_edits_merges_and_direct_actions_preserve_saved_candidates() {
     for action in ["edit", "merge", "regenerate", "continue", "write"] {
         let server = FakeModelServer::start().await;
@@ -82,7 +177,8 @@ async fn unsupported_edits_merges_and_direct_actions_preserve_saved_candidates()
             "reply": "PROMISE_MUST_NOT_REACH_CHAT",
             "generate": action == "write", "edit": action == "edit", "merge": action == "merge",
             "questions": [{"question": "Which style?", "options": ["A", "B"]}],
-            "unsupported_requirements": ["Custom keyboard handlers cannot execute in the preview"]
+            "unsupported_requirements": ["Custom keyboard handlers cannot execute in the preview"],
+            "supported_alternatives": ["Use clickable links between event-state screens and document keyboard handling; custom key handling will not execute."]
         }).to_string());
         let directory =
             tempfile::tempdir().expect("candidate capability test directory should be created");
@@ -197,8 +293,7 @@ async fn unsupported_edits_merges_and_direct_actions_preserve_saved_candidates()
 #[tokio::test]
 async fn explicit_approval_can_resume_generation_but_retry_alone_cannot() {
     let server = FakeModelServer::start().await;
-    let unsupported =
-        r#"{"generate":true,"unsupported_requirements":["Executable JavaScript is unsupported"]}"#;
+    let unsupported = r#"{"generate":true,"unsupported_requirements":["Executable JavaScript is unsupported"],"supported_alternatives":["Provide linked HTML/CSS screens and concrete behavior specifications instead of running JavaScript."]}"#;
     server.push_text(unsupported);
     server.push_text(unsupported);
     server.push_text(WRITE_PLAN);

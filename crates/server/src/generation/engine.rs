@@ -505,7 +505,7 @@ impl GenerationEngine {
         let attachments = self.load_attachments(&context.session_id, log).await;
         let messages = vec![
             serde_json::json!({"role": "system", "content": format!(
-                "{}\nReturn JSON only: {{\"unsupported_requirements\":[]}}. This is a capability check, not a generation request.",
+                "{}\nReturn JSON only: {{\"unsupported_requirements\":[],\"supported_alternatives\":[]}}. This is a capability check, not a generation request.",
                 crate::planner::capability_prompt(context.request.kind)
             )}),
             self.user_message(
