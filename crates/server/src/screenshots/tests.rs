@@ -1,6 +1,86 @@
 use super::routes::image_number;
 use super::*;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn browser_audits_retry_only_timeouts_once_and_keep_the_timeout_category() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for (mode, expected_calls, should_pass, is_timeout) in [
+        ("success", 1, true, false),
+        ("timeout-once", 2, true, false),
+        ("timeout-always", 2, false, true),
+        ("failure", 2, false, false),
+    ] {
+        let directory =
+            tempfile::tempdir().expect("browser audit test directory should be created");
+        let chrome = directory.path().join("chrome");
+        let script = format!(
+            r#"#!/bin/sh
+dir="$(dirname "$0")"
+printf x >> "$dir/calls"
+for arg in "$@"; do last="$arg"; done
+printf '%s\n' "$last" >> "$dir/urls"
+case '{mode}' in
+  timeout-once)
+    if [ ! -e "$dir/attempted" ]; then
+      : > "$dir/attempted"
+      exec sleep 5
+    fi
+    ;;
+  timeout-always) exec sleep 5 ;;
+  failure) exit 1 ;;
+esac
+printf '<html data-swift-design-findings="[]" data-swift-design-audited-screens="[0]"></html>'
+"#
+        );
+        std::fs::write(&chrome, script).expect("fake browser executable should be written");
+        std::fs::set_permissions(&chrome, std::fs::Permissions::from_mode(0o700))
+            .expect("fake browser should be executable");
+        let result = run_chrome_audit(
+            &chrome,
+            "file:///same-rendered-draft.html",
+            Viewport::default(),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(result.is_ok(), should_pass, "{mode}: {result:?}");
+        assert_eq!(
+            std::fs::read(directory.path().join("calls"))
+                .expect("browser invocation count should be readable")
+                .len(),
+            expected_calls,
+            "{mode}"
+        );
+        let urls = std::fs::read_to_string(directory.path().join("urls"))
+            .expect("audited page URLs should be readable");
+        assert_eq!(urls.lines().count(), expected_calls);
+        assert!(
+            urls.lines()
+                .all(|url| url == "file:///same-rendered-draft.html")
+        );
+        if !should_pass {
+            let error = result.expect_err("failing browser fixture should return an error");
+            assert_eq!(
+                error.is::<tokio::time::error::Elapsed>(),
+                is_timeout,
+                "{mode}"
+            );
+        }
+    }
+    let directory = tempfile::tempdir().expect("missing browser test directory should be created");
+    let error = run_chrome_audit(
+        &directory.path().join("missing"),
+        "file:///draft.html",
+        Viewport::default(),
+        Duration::from_secs(1),
+    )
+    .await
+    .expect_err("missing browser should fail without a timeout retry");
+    assert!(error.is::<std::io::Error>());
+    assert!(!error.is::<tokio::time::error::Elapsed>());
+}
+
 #[test]
 fn chrome_discovery_finds_the_app_managed_browser_without_path() {
     let directory = tempfile::tempdir().expect("temporary test directory should be created");
