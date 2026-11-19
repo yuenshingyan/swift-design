@@ -57,13 +57,14 @@ pub(super) fn regenerate_problem(session: &Session, request: &MessageRequest) ->
 /// session starts a generation run over the named design. A
 /// `regenerate` action rewrites the units its content names.
 pub(super) async fn post_message(
-    State(sessions): State<SessionStore>,
-    State(runner): State<AgentRunner>,
-    State(notifier): State<ChangeNotifier>,
+    State(app): State<crate::AppState>,
     Path(id): Path<String>,
     Json(request): Json<MessageRequest>,
 ) -> Response {
-    let session = match require_session(&sessions, &id).await {
+    let sessions = &app.sessions;
+    let runner = &app.agent;
+    let notifier = &app.changes;
+    let session = match require_session(sessions, &id).await {
         Ok(session) => session,
         Err(response) => return response,
     };
@@ -89,13 +90,17 @@ pub(super) async fn post_message(
     }
     let is_continue = request.action.as_deref() == Some("continue");
     let is_regenerate = request.action.as_deref() == Some("regenerate");
+    let is_review_draft = request.action.as_deref() == Some("repair_draft");
     if let Some(action) = &request.action
         && !is_continue
         && !is_regenerate
+        && !is_review_draft
     {
         return api_error::error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
-            &format!("action `{action}` is unknown: use continue or regenerate, or omit it"),
+            &format!(
+                "action `{action}` is unknown: use continue, regenerate, repair_draft, or omit it"
+            ),
             Vec::new(),
         );
     }
@@ -121,6 +126,27 @@ pub(super) async fn post_message(
             return conflict("continue is only allowed while reviewing, generating, or halted");
         }
     }
+    let repair = if is_review_draft {
+        let Some(candidate) = request.design.as_deref().filter(|candidate| {
+            session_id_of_artifact(candidate) == id
+                && request.pinned.is_empty()
+                && session.artifact_kind == design_model::ArtifactKind::Demo
+        }) else {
+            return conflict("Repair draft requires one demo candidate in this session.");
+        };
+        if session.state != WorkflowState::Reviewing && !session.state.is_halted() {
+            return conflict("Wait for the current run to finish before repairing the draft.");
+        }
+        if let Err(error) = app.designs.review_draft_for_edit(candidate).await {
+            tracing::debug!(%error, %candidate, "could not open draft for repair");
+            return conflict("There is no repairable draft for this saved version.");
+        }
+        let mut message = ChatMessage::user(content, Some(candidate));
+        message.is_review_draft = true;
+        Some(message)
+    } else {
+        None
+    };
     // A message after a halted run is the resume: the session returns to
     // the state the run halted in, then takes the turn.
     if session.state.is_halted() {
@@ -135,11 +161,15 @@ pub(super) async fn post_message(
             return session_error_response(&error);
         }
     }
-    let mut message = match (is_continue, is_regenerate, request.design.as_deref()) {
-        (true, _, Some(design)) => ChatMessage::continue_request(content, design),
-        (_, true, Some(design)) => ChatMessage::regenerate_request(content, design),
-        _ => ChatMessage::user(content, request.design.as_deref()).with_pinned(request.pinned),
-    };
+    let mut message =
+        repair.unwrap_or_else(
+            || match (is_continue, is_regenerate, request.design.as_deref()) {
+                (true, _, Some(design)) => ChatMessage::continue_request(content, design),
+                (_, true, Some(design)) => ChatMessage::regenerate_request(content, design),
+                _ => ChatMessage::user(content, request.design.as_deref())
+                    .with_pinned(request.pinned),
+            },
+        );
     // Each ordinary prompt gets its own turn. Defer link captures until that
     // turn starts, so they cannot affect the run already in flight.
     message.is_queued = !is_continue;
@@ -156,7 +186,7 @@ pub(super) async fn post_message(
             tracing::debug!(%error, session_id = %id, "continue waits for the active run");
         }
     } else {
-        try_start(&runner, &id).await;
+        try_start(runner, &id).await;
     }
     StatusCode::NO_CONTENT.into_response()
 }

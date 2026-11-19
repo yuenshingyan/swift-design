@@ -15,6 +15,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use design_model::Design;
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 use crate::design::patch::{PATCH_FORMAT, apply_patch, parse_patch};
 use crate::polish::*;
@@ -42,9 +44,13 @@ pub(crate) type DemoDomRunner = Arc<
 pub(crate) fn chrome_dom_runner() -> DemoDomRunner {
     Arc::new(|design, base_url| {
         Box::pin(async move {
-            dump_design_dom(&design, &base_url)
+            let dom = dump_design_dom(&design, &base_url)
                 .await
-                .map_err(browser_audit_failure)
+                .map_err(browser_audit_failure)?;
+            if !dom.contains("data-swift-design-prototype-checks=\"") {
+                return Err("Chrome did not return a prototype audit report.".into());
+            }
+            Ok(dom)
         })
     })
 }
@@ -61,6 +67,24 @@ fn browser_audit_failure(error: anyhow::Error) -> String {
 #[derive(Debug)]
 pub(crate) struct DemoAudit {
     findings: Vec<Finding>,
+    prototype_checks: Vec<PrototypeCheck>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrototypeCheck {
+    screen: usize,
+    group: String,
+    clicks: usize,
+    keys: usize,
+    focus: usize,
+    failures: usize,
+    issues: Vec<String>,
+}
+
+fn audit_attribute<T: DeserializeOwned>(dom: &str, marker: &str) -> Option<T> {
+    let rest = dom.split_once(marker)?.1;
+    let value = rest.split_once('"')?.0;
+    serde_json::from_str(&value.replace("&quot;", "\"")).ok()
 }
 
 impl DemoAudit {
@@ -69,12 +93,7 @@ impl DemoAudit {
         let findings = measured_findings(dom).ok_or_else(|| {
             "The layout audit returned no valid report. Retry the run.".to_owned()
         })?;
-        let marker = "data-swift-design-audited-screens=\"";
-        let coverage = dom.find(marker).and_then(|start| {
-            let rest = &dom[start + marker.len()..];
-            let end = rest.find('"')?;
-            serde_json::from_str::<Vec<usize>>(&rest[..end].replace("&quot;", "\"")).ok()
-        });
+        let coverage = audit_attribute::<Vec<usize>>(dom, "data-swift-design-audited-screens=\"");
         let expected: Vec<usize> = (0..screen_count).collect();
         if coverage.as_ref() != Some(&expected)
             || findings
@@ -83,35 +102,87 @@ impl DemoAudit {
         {
             return Err("The layout audit did not measure every screen. Retry the run.".to_owned());
         }
-        Ok(Self { findings })
+        let marker = "data-swift-design-prototype-checks=\"";
+        let prototype_checks: Vec<PrototypeCheck> = if dom.contains(marker) {
+            audit_attribute(dom, marker)
+                .ok_or("The prototype browser audit returned an invalid report.")?
+        } else {
+            Vec::new()
+        };
+        if prototype_checks
+            .iter()
+            .any(|check| check.screen >= screen_count || check.clicks == 0 || check.keys == 0)
+        {
+            return Err(
+                "The prototype browser audit returned invalid screen or check counts.".into(),
+            );
+        }
+        Ok(Self {
+            findings,
+            prototype_checks,
+        })
+    }
+
+    /// Reports actual browser probes rather than asking a model to infer execution.
+    pub(crate) fn prototype_evidence(&self) -> String {
+        self.prototype_checks.iter().map(|check| format!(
+            "Screen {}: {} programmatic click, {} synthetic keyboard and {} programmatic focus checks. {} failures. Group: {}. {}",
+            check.screen + 1, check.clicks, check.keys, check.focus, check.failures, check.group, check.issues.join("; "),
+        )).collect::<Vec<_>>().join("\n")
+    }
+
+    fn prototype_failures(&self, indexes: Option<&[usize]>) -> impl Iterator<Item = String> {
+        self.prototype_checks
+            .iter()
+            .filter(move |check| {
+                check.failures != 0 && indexes.is_none_or(|indexes| indexes.contains(&check.screen))
+            })
+            .map(|check| {
+                format!(
+                    "screens[{}] prototype group {}: {}",
+                    check.screen,
+                    check.group,
+                    check.issues.join("; ")
+                )
+            })
     }
 
     /// Returns prioritized instructions for all screens or a focused edit.
     pub(crate) fn instructions(&self, indexes: Option<&[usize]>) -> Vec<String> {
-        prioritized(
-            self.findings
+        self.prototype_failures(indexes)
+            .chain(
+                prioritized(
+                    self.findings
+                        .iter()
+                        .filter(|finding| {
+                            indexes.is_none_or(|indexes| indexes.contains(&finding.screen))
+                        })
+                        .cloned()
+                        .collect(),
+                )
                 .iter()
-                .filter(|finding| indexes.is_none_or(|indexes| indexes.contains(&finding.screen)))
-                .cloned()
-                .collect(),
-        )
-        .iter()
-        .map(format_finding)
-        .collect()
+                .map(format_finding),
+            )
+            .collect()
     }
 
     /// Returns only layout blockers for repair rounds after a focused user edit.
     pub(crate) fn layout_instructions(&self, indexes: &[usize]) -> Vec<String> {
-        prioritized(
-            self.findings
+        self.prototype_failures(Some(indexes))
+            .chain(
+                prioritized(
+                    self.findings
+                        .iter()
+                        .filter(|finding| {
+                            indexes.contains(&finding.screen) && is_blocking(&finding.kind)
+                        })
+                        .cloned()
+                        .collect(),
+                )
                 .iter()
-                .filter(|finding| indexes.contains(&finding.screen) && is_blocking(&finding.kind))
-                .cloned()
-                .collect(),
-        )
-        .iter()
-        .map(format_finding)
-        .collect()
+                .map(format_finding),
+            )
+            .collect()
     }
 
     /// Scores hard layout errors before optional visual improvements.
@@ -121,12 +192,14 @@ impl DemoAudit {
             .iter()
             .filter(|finding| indexes.is_none_or(|indexes| indexes.contains(&finding.screen)))
             .collect();
+        let prototype_failures = self.prototype_failures(indexes).count();
         (
-            findings
-                .iter()
-                .filter(|finding| is_blocking(&finding.kind))
-                .count(),
-            findings.len(),
+            prototype_failures
+                + findings
+                    .iter()
+                    .filter(|finding| is_blocking(&finding.kind))
+                    .count(),
+            prototype_failures + findings.len(),
         )
     }
 
@@ -138,21 +211,24 @@ impl DemoAudit {
     /// Verifies the touched screens without claiming that untouched legacy screens are clean.
     pub(crate) fn require_layout_clean_on(&self, indexes: Option<&[usize]>) -> Result<(), String> {
         let blockers: Vec<String> = self
-            .findings
-            .iter()
-            .filter(|finding| {
-                is_blocking(&finding.kind)
-                    && indexes.is_none_or(|indexes| indexes.contains(&finding.screen))
-            })
-            .map(|finding| {
-                format!(
-                    "screen {} {} at {}: {}",
-                    finding.screen + 1,
-                    finding.kind,
-                    finding.node,
-                    finding.detail
-                )
-            })
+            .prototype_failures(indexes)
+            .chain(
+                self.findings
+                    .iter()
+                    .filter(|finding| {
+                        is_blocking(&finding.kind)
+                            && indexes.is_none_or(|indexes| indexes.contains(&finding.screen))
+                    })
+                    .map(|finding| {
+                        format!(
+                            "screen {} {} at {}: {}",
+                            finding.screen + 1,
+                            finding.kind,
+                            finding.node,
+                            finding.detail
+                        )
+                    }),
+            )
             .take(8)
             .collect();
         if blockers.is_empty() {
@@ -390,6 +466,7 @@ mod tests {
     #[test]
     fn focused_verification_does_not_claim_untouched_legacy_errors_are_clean() {
         let audit = DemoAudit {
+            prototype_checks: Vec::new(),
             findings: vec![Finding {
                 screen: 1,
                 node: String::new(),
@@ -415,6 +492,7 @@ mod tests {
             "minor_overflow",
         ] {
             let audit = DemoAudit {
+                prototype_checks: Vec::new(),
                 findings: vec![Finding {
                     screen: 0,
                     node: String::new(),

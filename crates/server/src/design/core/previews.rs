@@ -112,13 +112,22 @@ impl DesignStore {
         &self,
         source_id: &str,
         design: &Design,
+        before: Option<&Design>,
     ) -> anyhow::Result<()> {
         let path = self.review_draft_path(source_id)?;
         anyhow::ensure!(
             design.validate().is_empty(),
             "Cannot preserve review draft: invalid design."
         );
-        tokio::fs::metadata(self.path_of(source_id)).await?;
+        let _writer = self.write_lock.lock().await;
+        if let Some(before) = before {
+            anyhow::ensure!(
+                self.load(source_id).await?.as_ref() == Some(before),
+                "The saved version changed during the edit. The review draft was not replaced."
+            );
+        } else {
+            tokio::fs::metadata(self.path_of(source_id)).await?;
+        }
         tokio::fs::create_dir_all(self.directory.join(".review-drafts")).await?;
         write_atomically(&path, &serde_json::to_string(design)?).await
     }
@@ -130,6 +139,24 @@ impl DesignStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Loads a draft for repair only if the accepted file did not change after it.
+    pub(crate) async fn review_draft_for_edit(&self, id: &str) -> anyhow::Result<Design> {
+        let _writer = self.write_lock.lock().await;
+        let draft = self
+            .load_review_draft(id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("This candidate has no retained review draft."))?;
+        let written = tokio::fs::metadata(self.review_draft_path(id)?)
+            .await?
+            .modified()?;
+        let saved = tokio::fs::metadata(self.path_of(id)).await?.modified()?;
+        anyhow::ensure!(
+            saved <= written,
+            "The saved version changed after this review draft. Repairing it could overwrite newer work."
+        );
+        Ok(draft)
     }
 
     /// Removes the draft after the candidate is accepted or deleted.

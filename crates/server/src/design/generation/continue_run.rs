@@ -196,7 +196,7 @@ impl GenerationEngine {
         };
         let fallback = continued.clone();
         self.designs
-            .keep_review_draft(design_id, &fallback)
+            .keep_review_draft(design_id, &fallback, None)
             .await
             .map_err(|error| format!("Cannot checkpoint the continuation draft: {error}"))?;
         let final_design = match async {

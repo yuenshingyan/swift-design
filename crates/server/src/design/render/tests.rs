@@ -75,6 +75,40 @@ document.documentElement.setAttribute('data-prototype-test', String(startTest &&
     assert!(dom.contains("data-prototype-test=\"true\""));
 }
 
+#[tokio::test]
+async fn browser_audit_reports_working_controls_and_a_control_missing_from_keyboard_order() {
+    if crate::screenshots::find_chrome().is_none() {
+        return;
+    }
+    let mut design = sample_design();
+    design.theme.fonts.heading = "Arial".into();
+    design.theme.fonts.body = "Arial".into();
+    design.theme.fonts.mono = "Courier New".into();
+    let controls = "<section data-demo-panel='filter:first'>First</section><section hidden data-demo-panel='filter:second'>Second</section><a href='#demo-panel' data-demo-action='filter:@next'>Next</a>";
+    design.screens[0].html = controls.into();
+    design.screens[1].html = controls.replace("<a href", "<a tabindex='-1' href");
+    let dom = crate::screenshots::dump_design_dom(&design, "http://127.0.0.1:3000")
+        .await
+        .expect("Chrome should return a prototype audit");
+    let audit = crate::design::polish::DemoAudit::from_dom(&dom, design.screens.len())
+        .expect("the complete audit should parse");
+    let evidence = audit.prototype_evidence();
+    assert!(evidence.contains("Screen 1: 1 programmatic click, 7 synthetic keyboard and 1 programmatic focus checks. 0 failures."), "{evidence}");
+    assert!(evidence.contains("Screen 2: 1 programmatic click, 7 synthetic keyboard and 1 programmatic focus checks. 1 failures."), "{evidence}");
+    assert!(
+        audit
+            .layout_instructions(&[1])
+            .iter()
+            .any(|issue| issue.contains("prototype"))
+    );
+    assert!(
+        !audit
+            .layout_instructions(&[0])
+            .iter()
+            .any(|issue| issue.contains("prototype"))
+    );
+}
+
 #[test]
 fn renders_one_section_per_screen_with_the_html_as_written() {
     let design = sample_design();

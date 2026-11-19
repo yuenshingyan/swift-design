@@ -139,9 +139,16 @@ can pass acceptance: completing markup for display never approves an edit.
 Temporary previews clear when the run ends. A complete, valid edit draft is
 saved as a recovery copy under the same candidate before review. If review fails
 or the run stops after that checkpoint, the editor shows **Needs review**. Use
-**Saved version** or **Review draft** to switch. No new candidate is allocated.
+**Saved version** or **Review draft** to switch. **Play review draft** opens the
+full unverified prototype; **Repair draft** starts from that draft on the same
+candidate. It preserves untouched saved screens and refuses to overwrite a saved
+version that changed after the checkpoint. No new candidate is allocated.
 Exports, history and ordinary render URLs use saved
 data; `GET /designs/{id}/previews` and `render?preview=true` explicitly opt into drafts.
+Chrome checks how built-in controls respond to programmatic clicks, Space, arrow
+keys, Home and End, and checks focus and ARIA state. These results inform
+requirement review. The probes do not verify native Tab order, hit-testing or
+backend behavior.
 The run status distinguishes **Reviewing candidates…** from **Tweaking candidates…**,
 including requirement review and correction rounds, rather than calling every phase writing.
 

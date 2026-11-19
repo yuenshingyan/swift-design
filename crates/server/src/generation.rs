@@ -100,6 +100,8 @@ pub(crate) enum GenerationTask {
     Candidates,
     /// Apply the user's latest request to each artifact named.
     Edit {
+        /// Demo-only: start from the retained draft, not accepted data.
+        is_review_draft: bool,
         /// The artifact ids to edit: the candidates the user pinned,
         /// the artifact open in the editor, or the chosen one.
         designs: Vec<String>,

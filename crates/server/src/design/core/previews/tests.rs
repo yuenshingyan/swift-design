@@ -9,6 +9,67 @@ use crate::design::core::{
 };
 use crate::history::HistoryStore;
 
+#[tokio::test]
+async fn a_new_saved_version_prevents_a_stale_draft_from_overwriting_it() {
+    let directory = tempfile::TempDir::new().expect("temporary test directory should be created");
+    let store = DesignStore::new(directory.path().to_owned());
+    let original = sample();
+    let id = "demo-candidate-1";
+    store
+        .save(id, &original)
+        .await
+        .expect("initial candidate should save");
+    let mut draft = original.clone();
+    draft.title = "Review draft".into();
+    store
+        .keep_review_draft(id, &draft, Some(&original))
+        .await
+        .expect("draft should checkpoint");
+    assert_eq!(
+        store
+            .review_draft_for_edit(id)
+            .await
+            .expect("current draft should be repairable"),
+        draft
+    );
+    let mut saved = original.clone();
+    saved.title = "Newer saved version".into();
+    store
+        .save(id, &saved)
+        .await
+        .expect("newer version should save");
+    std::fs::File::options()
+        .write(true)
+        .open(store.path_of(id))
+        .expect("test should open the saved file")
+        .set_modified(std::time::SystemTime::now() + Duration::from_secs(2))
+        .expect("test should mark the saved file as newer than the checkpoint");
+    assert!(store.review_draft_for_edit(id).await.is_err());
+    assert!(
+        store
+            .save_if_current(id, &draft, Some(&original))
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .keep_review_draft(id, &saved, Some(&original))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.load(id).await.expect("saved version should load"),
+        Some(saved)
+    );
+    assert_eq!(
+        store
+            .load_review_draft(id)
+            .await
+            .expect("read-only draft should load"),
+        Some(draft)
+    );
+}
+
 fn sample() -> Design {
     serde_json::from_str(include_str!(
         "../../../../../../fixtures/sample-design.json"
@@ -114,7 +175,7 @@ async fn recovery_stays_read_only_on_the_same_candidate_after_reopening_the_stor
         let store = DesignStore::new(directory.path().join("designs"));
         assert!(
             store
-                .keep_review_draft("demo-candidate-2", &draft)
+                .keep_review_draft("demo-candidate-2", &draft, None)
                 .await
                 .is_err()
         );
@@ -123,7 +184,7 @@ async fn recovery_stays_read_only_on_the_same_candidate_after_reopening_the_stor
             .await
             .expect("original should save");
         store
-            .keep_review_draft("demo-candidate-1", &draft)
+            .keep_review_draft("demo-candidate-1", &draft, None)
             .await
             .expect("review draft should checkpoint");
     }

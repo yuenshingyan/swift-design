@@ -47,6 +47,45 @@ async fn a_message_pins_candidates_of_its_own_session_only() {
 }
 
 #[tokio::test]
+async fn a_repair_request_rejects_another_sessions_candidate_and_a_missing_draft() {
+    let directory = TempDir::new().expect("temporary test directory should be created");
+    let application = test_application(&directory);
+    create(&application, "finance-app").await;
+    let sessions = SessionStore::new(directory.path().join("data/sessions"));
+    for event in [
+        WorkflowEvent::QuestionsAsked,
+        WorkflowEvent::GenerationStarted,
+        WorkflowEvent::GenerationSucceeded,
+    ] {
+        sessions
+            .apply("finance-app", event)
+            .await
+            .expect("the fixture should reach review");
+    }
+    for (id, expected) in [
+        ("other-candidate-1", "one demo candidate in this session"),
+        ("finance-app-candidate-1", "no repairable draft"),
+    ] {
+        let payload =
+            serde_json::json!({"content":"Repair draft.", "design":id, "action":"repair_draft"})
+                .to_string();
+        let (status, body) = send(
+            application.clone(),
+            "POST",
+            "/sessions/finance-app/messages",
+            Some(&payload),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains(expected), "{body}");
+    }
+    assert_eq!(
+        view(&application, "finance-app").await["messages"],
+        serde_json::json!([])
+    );
+}
+
+#[tokio::test]
 async fn a_regenerate_request_names_a_unit() {
     let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);

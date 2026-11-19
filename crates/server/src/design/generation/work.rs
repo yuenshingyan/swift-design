@@ -1,6 +1,27 @@
 use super::edit_requirements::DemoEditEvidence;
 use super::*;
 
+fn require_repair_scope(
+    before: &Design,
+    retained: &Design,
+    edited: &Design,
+) -> Result<(), GenerationStop> {
+    if edited.title != retained.title
+        || edited.theme != retained.theme
+        || edited.app_window != retained.app_window
+        || edited.screens.len() < retained.screens.len()
+        || before
+            .screens
+            .iter()
+            .zip(&retained.screens)
+            .zip(&edited.screens)
+            .any(|((saved, retained), edited)| saved == retained && edited != saved)
+    {
+        return Err(GenerationStop::Failed("Cannot repair draft: shared settings or protected screens changed, or a retained screen was removed.".into()));
+    }
+    Ok(())
+}
+
 impl GenerationEngine {
     /// Writes one design per requested variation. Returns the ids.
     pub(crate) async fn generate_candidates(
@@ -192,14 +213,15 @@ impl GenerationEngine {
         &self,
         client: &reqwest::Client,
         context: &GenerationContext,
-        order: &EditOrder<'_>,
+        edit: (&EditOrder<'_>, bool),
         log: &LogSink,
     ) -> Result<Vec<(String, String)>, GenerationStop> {
+        let (order, _) = edit;
         let mut saved = Vec::new();
         let mut last_error = None;
         for design_id in order.artifact_ids {
             match self
-                .edit_design(client, context, design_id, order, log)
+                .edit_design(client, context, design_id, edit, log)
                 .await
             {
                 Ok(report) => saved.push((design_id.clone(), report)),
@@ -227,7 +249,6 @@ impl GenerationEngine {
         issue: &str,
         is_new: bool,
     ) -> Result<String, String> {
-        let session_id = session_id_of_artifact(source_id);
         if !design.validate().is_empty() {
             return Err("Cannot preserve review draft: the artifact failed validation.".into());
         }
@@ -240,10 +261,19 @@ impl GenerationEngine {
                 .map_err(|error| error.to_string())?;
         } else {
             self.designs
-                .keep_review_draft(source_id, design)
+                .keep_review_draft(source_id, design, None)
                 .await
                 .map_err(|error| error.to_string())?;
         }
+        self.review_draft_notice(source_id, issue, is_new).await
+    }
+
+    async fn review_draft_notice(
+        &self,
+        source_id: &str,
+        issue: &str,
+        is_new: bool,
+    ) -> Result<String, String> {
         self.notifier.notify();
         let preservation = if is_new {
             "This is a draft, not a completed candidate."
@@ -251,16 +281,16 @@ impl GenerationEngine {
             "The saved version is unchanged. Open the same candidate to see the review draft."
         };
         let message = format!(
-            "Needs review: preserved draft for `{source_id}`. {preservation} Layout and requirement completion are not verified.\n{issue}"
+            "Needs review: preserved draft for `{source_id}`. {preservation} Layout and requirement completion are not verified."
         );
         self.sessions
             .append_message(
-                session_id,
+                session_id_of_artifact(source_id),
                 ChatMessage::assistant(&message).with_artifacts(vec![source_id.to_owned()]),
             )
             .await
-            .map_err(|error| format!("{message}\nCannot record draft notice: {error}"))?;
-        Ok(message)
+            .map_err(|error| format!("{message}\n{issue}\nCannot record draft notice: {error}"))?;
+        Ok(format!("{message}\n{issue}"))
     }
 
     pub(crate) async fn edit_design(
@@ -268,9 +298,10 @@ impl GenerationEngine {
         client: &reqwest::Client,
         context: &GenerationContext,
         design_id: &str,
-        order: &EditOrder<'_>,
+        edit: (&EditOrder<'_>, bool),
         log: &LogSink,
     ) -> Result<String, GenerationStop> {
+        let (order, use_review_draft) = edit;
         let design = self
             .designs
             .load(design_id)
@@ -280,6 +311,16 @@ impl GenerationEngine {
                 GenerationStop::Failed(format!("design `{design_id}` does not exist"))
             })?;
         let label = format!("edit {design_id}");
+        let mut draft = if use_review_draft {
+            log(&format!("{label}: repairing the retained review draft"));
+            self.designs
+                .review_draft_for_edit(design_id)
+                .await
+                .map_err(|error| GenerationStop::Failed(error.to_string()))?
+        } else {
+            design.clone()
+        };
+        let retained = use_review_draft.then(|| draft.clone());
         log(&format!("{label}: resolving edit requirements and scope"));
         let attachments = self.load_attachments(&context.session_id, log).await;
         let plan = self
@@ -289,21 +330,32 @@ impl GenerationEngine {
         let instruction = plan.instruction.as_str();
         // Structural edits need the full artifact in coordination. Workers remain
         // isolated; the requirements check protects unselected existing screens.
-        let indexes = if plan.minimum_new_screens > 0 {
+        let indexes = if use_review_draft || plan.minimum_new_screens > 0 {
             Vec::new()
         } else {
             plan.screens.clone()
         };
         log(&format!("{label}: checking layout before editing"));
-        let measured = self.audit_demo(&design).await?.instructions(None);
+        let measured = self.audit_demo(&draft).await?.instructions(None);
         let findings = findings_for(&measured, "screens", &indexes);
+        let preview_scope = if use_review_draft {
+            touched_indexes(&design.screens, &draft.screens, &[])
+        } else {
+            plan.screens.clone()
+        };
         let preview = self.designs.start_preview(
             design_id,
             &self.notifier,
-            Some((design.clone(), plan.screens.clone())),
+            Some((design.clone(), preview_scope)),
         );
-        let mut draft = design.clone();
-        let mut correction = String::new();
+        if use_review_draft {
+            preview.show(&draft);
+        }
+        let mut correction = if use_review_draft {
+            "The supplied design is the retained draft, not the accepted baseline. Repair only the remaining issues. Keep shared settings, all retained screens, and working interactions. Do not edit saved screens that this draft did not change.".to_owned()
+        } else {
+            String::new()
+        };
         let mut attempt = 0;
         let mut previous_missing = None;
         let mut last_navigation_error = None;
@@ -352,8 +404,10 @@ impl GenerationEngine {
                 serde_json::json!({ "role": "system", "content": system_prompt() }),
                 self.user_message(&edit_prompt(&context.request, &input), &attachments),
             ];
-            let edited = self
-                .request_edit(
+            let edited = if use_review_draft {
+                self.request_valid(client, messages, &request, log).await?
+            } else {
+                self.request_edit(
                     client,
                     EditExecution {
                         original: &draft,
@@ -365,12 +419,16 @@ impl GenerationEngine {
                     },
                     log,
                 )
-                .await?;
+                .await?
+            };
             plan.check_structure(&design, &edited)
                 .map_err(GenerationStop::Failed)?;
+            if let Some(retained) = &retained {
+                require_repair_scope(&design, retained, &edited)?;
+            }
             if edited != design {
                 self.designs
-                    .keep_review_draft(design_id, &edited)
+                    .keep_review_draft(design_id, &edited, Some(&design))
                     .await
                     .map_err(|error| {
                         GenerationStop::Failed(format!("Cannot checkpoint the edit draft: {error}"))
@@ -420,7 +478,7 @@ impl GenerationEngine {
                     plan.check_structure(&design, &fallback)
                         .map_err(GenerationStop::Failed)?;
                     let notice = self
-                        .save_review_draft(design_id, &fallback, &error, false)
+                        .review_draft_notice(design_id, &error, false)
                         .await
                         .map_err(GenerationStop::Failed)?;
                     return Err(GenerationStop::Failed(notice));
@@ -428,9 +486,12 @@ impl GenerationEngine {
             };
             plan.check_structure(&design, &final_design)
                 .map_err(GenerationStop::Failed)?;
+            if let Some(retained) = &retained {
+                require_repair_scope(&design, retained, &final_design)?;
+            }
             if final_design != design && final_design != fallback {
                 self.designs
-                    .keep_review_draft(design_id, &final_design)
+                    .keep_review_draft(design_id, &final_design, Some(&design))
                     .await
                     .map_err(|error| {
                         GenerationStop::Failed(format!(
@@ -440,7 +501,7 @@ impl GenerationEngine {
             }
             if let Err(error) = audit.require_layout_clean_on(Some(&fix.indexes)) {
                 let notice = self
-                    .save_review_draft(design_id, &final_design, &error, false)
+                    .review_draft_notice(design_id, &error, false)
                     .await
                     .map_err(GenerationStop::Failed)?;
                 return Err(GenerationStop::Failed(notice));
@@ -459,6 +520,7 @@ impl GenerationEngine {
                         before: &design,
                         after: &final_design,
                         attachments: &attachments,
+                        browser_evidence: &audit.prototype_evidence(),
                     },
                     context.effort(),
                 )
@@ -506,7 +568,7 @@ impl GenerationEngine {
             report.push_str(&format!("\nRendered layout verified on screen(s) {}. Untouched screens are not claimed as verified.", verified.join(", ")));
         }
         self.designs
-            .save(design_id, &final_design)
+            .save_if_current(design_id, &final_design, Some(&design))
             .await
             .map_err(|error| GenerationStop::Failed(error.to_string()))?;
         if let Err(error) = self.designs.clear_review_draft(design_id).await {
