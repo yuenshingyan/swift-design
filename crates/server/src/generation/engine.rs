@@ -426,6 +426,46 @@ impl GenerationEngine {
             .messages_for_run(&context.session_id)
             .await
             .map_err(|error| error.to_string())?;
+        let mut user_turns = messages
+            .iter()
+            .rev()
+            .filter(|message| message.role == "user");
+        if context.request.kind == design_model::ArtifactKind::Demo
+            && let Some(message) = user_turns.next()
+            && message.is_review_draft
+            && let Some(design) = &message.design
+        {
+            let previous = user_turns.next();
+            let prior = previous.into_iter().chain(user_turns).find(|message| {
+                !message.is_review_draft
+                    && (message.design.as_ref() == Some(design) || message.pinned.contains(design))
+            });
+            let runs = self
+                .sessions
+                .runs(&context.session_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            let issues = previous
+                .filter(|turn| turn.design.as_ref() == Some(design) && turn.pinned.is_empty())
+                .and_then(|turn| turn.at.as_deref())
+                .and_then(|at| {
+                    runs.iter()
+                        .rev()
+                        .find(|run| run.finished_at.is_some() && run.started_at.as_str() >= at)
+                })
+                .and_then(|run| run.error.as_deref())
+                .unwrap_or_default();
+            return Ok(Some(GenerationTask::Edit {
+                is_review_draft: true,
+                designs: vec![design.clone()],
+                instruction: format!(
+                    "{}\nRepair the retained draft in place and preserve finished work.\nPrior request for this candidate:\n{}\nLast recorded review findings for this candidate:\n{issues}",
+                    message.content,
+                    prior.map_or("", |turn| turn.content.as_str())
+                ),
+                conversation: conversation_note(recent_conversation(&messages)),
+            }));
+        }
         if let Some((design, instruction)) = trailing_regenerate(&messages) {
             let conversation = conversation_note(recent_conversation(&messages));
             return Ok(Some(GenerationTask::Regenerate {
@@ -626,6 +666,7 @@ impl GenerationEngine {
             // so the planner's own reply stays out of its edit context.
             let conversation = conversation_note(recent_conversation(&messages));
             return Ok(PlanStep::Task(GenerationTask::Edit {
+                is_review_draft: false,
                 designs: targets,
                 instruction,
                 conversation,

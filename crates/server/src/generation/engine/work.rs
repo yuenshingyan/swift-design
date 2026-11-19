@@ -33,6 +33,7 @@ impl GenerationEngine {
         match task {
             GenerationTask::Candidates => self.generate_candidates(client, context, log).await,
             GenerationTask::Edit {
+                is_review_draft,
                 designs,
                 instruction,
                 conversation,
@@ -43,7 +44,9 @@ impl GenerationEngine {
                     is_fresh: false,
                     conversation: &conversation,
                 };
-                let edits = self.edit_designs(client, context, &order, log).await?;
+                let edits = self
+                    .edit_designs(client, context, (&order, is_review_draft), log)
+                    .await?;
                 Ok(GenerationOutcome::edited(edits))
             }
             GenerationTask::Regenerate {
@@ -57,7 +60,9 @@ impl GenerationEngine {
                     is_fresh: true,
                     conversation: &conversation,
                 };
-                let edits = self.edit_designs(client, context, &order, log).await?;
+                let edits = self
+                    .edit_designs(client, context, (&order, false), log)
+                    .await?;
                 Ok(GenerationOutcome::edited(edits))
             }
             GenerationTask::Merge {

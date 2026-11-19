@@ -107,6 +107,7 @@ fn LoadedEditor(
         })
     });
     let mut show_recovery = use_signal(|| true);
+    let mut is_repair_submitting = use_signal(|| false);
     let mut selected = use_signal(|| 0usize);
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
     let mut selection = use_signal(Vec::<SelectionEntry>::new);
@@ -503,7 +504,16 @@ fn LoadedEditor(
                                 span { class: "tab-name", "{candidate.label()}" }
                             }
                         }
-                        if is_dirty() || !has_saved() {
+                        if is_read_only() && live_draft.read().as_ref().is_some_and(|preview| preview.is_recovery) {
+                            a {
+                                class: "canvas-tab",
+                                href: "{view_href(&design_id)}?preview=true",
+                                target: "_blank",
+                                rel: "noopener noreferrer",
+                                title: "Play the full unverified draft in a new tab",
+                                "Play review draft"
+                            }
+                        } else if is_dirty() || !has_saved() {
                             button {
                                 class: "canvas-tab",
                                 disabled: true,
@@ -524,6 +534,28 @@ fn LoadedEditor(
                     if live_draft.read().as_ref().is_some_and(|preview| preview.is_recovery) {
                         if is_read_only() {
                             span { class: "badge", "Needs review · unverified draft" }
+                            if has_saved() {
+                                button {
+                                    class: "canvas-tab",
+                                    disabled: is_dirty() || is_repair_submitting(),
+                                    onclick: {
+                                        let design_id = design_id.clone();
+                                        move |_| {
+                                            let design_id = design_id.clone();
+                                            is_repair_submitting.set(true);
+                                            spawn(async move {
+                                                let session_id = artifact_project(&design_id);
+                                                match api::repair_review_draft(&session_id, &design_id).await {
+                                                    Ok(()) => messages.write().push("Draft repair requested.".to_owned()),
+                                                    Err(message) => messages.write().push(message),
+                                                }
+                                                is_repair_submitting.set(false);
+                                            });
+                                        }
+                                    },
+                                    if is_repair_submitting() { "Requesting repair…" } else { "Repair draft" }
+                                }
+                            }
                         }
                         if has_saved() {
                             button {

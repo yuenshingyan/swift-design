@@ -48,6 +48,7 @@ pub fn is_pending_screen(screen: &Screen) -> bool {
 #[derive(Clone)]
 pub struct DesignStore {
     directory: PathBuf,
+    write_lock: Arc<tokio::sync::Mutex<()>>,
     /// Where each save keeps the previous file. `None` keeps no history.
     history: Option<HistoryStore>,
     /// Active run previews, separate from saved designs and durable review drafts.
@@ -84,6 +85,7 @@ impl DesignStore {
     pub fn new(directory: PathBuf) -> Self {
         Self {
             directory,
+            write_lock: Arc::default(),
             history: None,
             previews: PreviewStore::default(),
             reported_malformed: Arc::new(Mutex::new(HashSet::new())),
@@ -247,6 +249,23 @@ impl DesignStore {
     /// Writes one design as pretty-printed JSON, creating the directory
     /// when needed. The previous file goes to the history store first.
     pub async fn save(&self, id: &str, design: &Design) -> anyhow::Result<()> {
+        self.save_if_current(id, design, None).await
+    }
+
+    /// Saves while holding the same lock as ordinary writes and deletions.
+    pub(crate) async fn save_if_current(
+        &self,
+        id: &str,
+        design: &Design,
+        before: Option<&Design>,
+    ) -> anyhow::Result<()> {
+        let _writer = self.write_lock.lock().await;
+        if let Some(before) = before {
+            anyhow::ensure!(
+                self.load(id).await?.as_ref() == Some(before),
+                "The saved version changed during the edit. It was not overwritten."
+            );
+        }
         tokio::fs::create_dir_all(&self.directory).await?;
         self.snapshot_current(id).await;
         let json = serde_json::to_string_pretty(design)?;
@@ -324,6 +343,7 @@ impl DesignStore {
     /// Deletes one design, its authorship sidecar, and its history.
     /// Returns false when no file with that id exists.
     pub async fn delete(&self, id: &str) -> anyhow::Result<bool> {
+        let _writer = self.write_lock.lock().await;
         self.clear_user_paths(id).await?;
         if is_valid_design_id(id) {
             self.clear_review_draft(id).await?;

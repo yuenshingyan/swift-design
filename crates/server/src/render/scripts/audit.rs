@@ -34,6 +34,10 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
   if (window.swiftDesignFit) { window.swiftDesignFit(); }
   const findings = [];
   const auditedScreens = [];
+  if (window.swiftDesignCheckPrototypes) {
+    const checks = window.swiftDesignCheckPrototypes();
+    document.documentElement.setAttribute('data-swift-design-prototype-checks', JSON.stringify(checks));
+  }
   const hasOwnText = (element) => Array.from(element.childNodes).some((node) => node.nodeType === 3 && node.textContent.trim());
   const isClosedDetailsDescendant = (element) => {
     const details = element.closest('details:not([open])');

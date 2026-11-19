@@ -62,6 +62,7 @@ impl GenerationEngine {
                 designs,
                 instruction,
                 conversation,
+                ..
             } => {
                 let order = EditOrder {
                     artifact_ids: &designs,

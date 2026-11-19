@@ -1,6 +1,74 @@
 use super::*;
 
 #[tokio::test]
+async fn repair_starts_from_the_retained_draft_and_saves_after_verification() {
+    let original = sample_design();
+    let fake = ParallelFakeModel::start(None).await;
+    let candidate = ReviewingCandidate::new(&fake);
+    candidate.seed(&original, "Add a timeline screen.").await;
+    let id = "talk-candidate-1";
+    let mut draft = original.clone();
+    let mut added = draft.screens[0].clone();
+    added.name = "Timeline".into();
+    added.html = "<h1>Unique added timeline draft</h1>".into();
+    draft.screens.push(added.clone());
+    candidate
+        .designs
+        .keep_review_draft(id, &draft, Some(&original))
+        .await
+        .expect("draft should checkpoint");
+    let mut repair = ChatMessage::user("Fix the remaining issues in this review draft.", Some(id));
+    repair.is_review_draft = true;
+    candidate
+        .sessions
+        .append_message("talk", repair)
+        .await
+        .expect("repair turn should be recorded");
+    fake.push_text(r#"{"unsupported_requirements":[]}"#.into());
+    fake.push_text(r#"{"instruction":"Fix the timeline", "screens":[], "minimum_new_screens":1, "requirements":["One timeline screen"]}"#.into());
+    added.html = "<h1>Verified timeline content</h1>".into();
+    fake.push_text(
+        json!({"screens":[{"index":original.screens.len(),"screen":added}]}).to_string(),
+    );
+    fake.push_text(r#"{"coverage":[{"complete":true,"reason":"The timeline is present"}]}"#.into());
+    candidate
+        .engine
+        .clone()
+        .run("talk", log_sink())
+        .await
+        .expect("the verified draft repair should save");
+    let saved = candidate
+        .designs
+        .load(id)
+        .await
+        .expect("candidate lookup should succeed")
+        .expect("the same candidate should still exist");
+    assert_eq!(
+        &saved.screens[..original.screens.len()],
+        original.screens.as_slice()
+    );
+    assert_eq!(saved.screens.last(), Some(&added));
+    assert!(
+        candidate
+            .designs
+            .load_review_draft(id)
+            .await
+            .expect("draft lookup should succeed")
+            .is_none()
+    );
+    assert!(
+        fake.requests()[2]
+            .to_string()
+            .contains("Unique added timeline draft")
+    );
+    assert!(
+        fake.requests()[3]
+            .to_string()
+            .contains("Browser prototype results")
+    );
+}
+
+#[tokio::test]
 async fn an_unavailable_layout_audit_preserves_an_unverified_draft_not_a_success() {
     let original = sample_design();
     let fake = ParallelFakeModel::start(None).await;

@@ -410,6 +410,9 @@ pub struct ChatMessage {
     /// planner and rewrites them without their old markup.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_regenerate: bool,
+    /// True for an explicit repair of this candidate's retained draft.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_review_draft: bool,
     /// True while this prompt waits for its own turn. Running engines ignore it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_queued: bool,
@@ -439,6 +442,7 @@ impl ChatMessage {
             question_set: None,
             is_continue: false,
             is_regenerate: false,
+            is_review_draft: false,
             at: None,
             artifacts: Vec::new(),
             pinned: Vec::new(),
@@ -474,6 +478,7 @@ impl ChatMessage {
             question_set: None,
             is_continue: false,
             is_regenerate: false,
+            is_review_draft: false,
             at: None,
             artifacts: Vec::new(),
             pinned: Vec::new(),
@@ -504,6 +509,7 @@ impl ChatMessage {
             question_set: Some(number),
             is_continue: false,
             is_regenerate: false,
+            is_review_draft: false,
             at: None,
             artifacts: Vec::new(),
             pinned: Vec::new(),

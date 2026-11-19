@@ -77,6 +77,9 @@ pub fn render_design_with(design: &Design, options: RenderOptions) -> String {
         })
     });
     let mut main_attributes = String::new();
+    if options.is_auditing {
+        main_attributes.push_str(" data-swift-design-prototype-audit");
+    }
     if let Some(app_window) = &design.app_window {
         main_attributes.push_str(&format!(
             " data-swift-design-window-left=\"{left}\" data-swift-design-window-top=\"{top}\" \

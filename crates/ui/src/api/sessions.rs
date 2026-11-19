@@ -472,6 +472,21 @@ pub async fn continue_artifact(session_id: &str, artifact_id: &str) -> Result<()
         .map(|_| ())
 }
 
+/// Asks Swift Design to repair this candidate's retained demo draft.
+pub async fn repair_review_draft(session_id: &str, design_id: &str) -> Result<(), String> {
+    let builder = Request::post(&format!("/sessions/{session_id}/messages"))
+        .json(&MessageRequest {
+            content: "Fix the remaining issues in this review draft.",
+            design: Some(design_id),
+            action: Some("repair_draft"),
+            pinned: &[],
+        })
+        .map_err(|error| error.to_string())?;
+    send_checked(builder, "POST /sessions/messages repair_draft")
+        .await
+        .map(|_| ())
+}
+
 /// Asks the app to write one unit of an artifact anew: `unit` is
 /// `screen` or `slide`, `number` is one-based. The server starts the
 /// run itself, without a planner turn.
