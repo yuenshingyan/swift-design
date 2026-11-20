@@ -5,8 +5,14 @@ async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
     for (missing, expected_error) in [
         ((0..=8).rev().collect::<Vec<_>>(), None),
         ((1..=11).rev().collect(), Some("10-correction-round limit")),
-        (vec![2, 2], Some("coverage did not improve")),
-        (vec![1, 2], Some("coverage did not improve")),
+        (
+            vec![2, 2],
+            Some("reviewed defects did not decrease without regression"),
+        ),
+        (
+            vec![1, 2],
+            Some("reviewed defects did not decrease without regression"),
+        ),
     ] {
         let fake = ParallelFakeModel::start(None).await;
         let original = sample_design();
@@ -19,13 +25,10 @@ async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
             .await;
         fake.watch_baseline(&candidate.path()).await;
         fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
-        let requirements: Vec<_> = (0..11)
-            .map(|index| format!("Checklist item {index}"))
-            .collect();
         fake.push_text(json!({
             "instruction": "Redesign screen 1 with visible controls and concrete state specifications.",
             "screens": [0], "minimum_new_screens": 0,
-            "requirements": requirements
+            "requirements": ["Screen 1 interaction and state designs"]
         }).to_string());
         for (round, count) in missing.iter().enumerate() {
             let mut screen = original.screens[0].clone();
@@ -37,15 +40,18 @@ async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
                 patch["theme"] = theme;
             }
             fake.push_text(patch.to_string());
-            let coverage: Vec<_> = (0..requirements.len())
+            let findings: Vec<_> = (0..*count)
                 .map(|index| {
                     json!({
-                        "complete": index >= *count,
-                        "reason": format!("Complete checklist item {index}; review round {round}")
+                        "id": format!("state-{index}"), "screens": [0],
+                        "reason": format!("Fix state {index}; review round {round}")
                     })
                 })
                 .collect();
-            fake.push_text(json!({"coverage": coverage, "reference_error": null}).to_string());
+            fake.push_text(
+                json!({"coverage": [{"complete": findings.is_empty(), "findings": findings}]})
+                    .to_string(),
+            );
         }
         let before = tokio::fs::read(candidate.path())
             .await
@@ -76,7 +82,7 @@ async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
                 .await
                 .expect("draft should load")
                 .expect("a failed edit should retain a draft");
-            let best_round = if expected.contains("did not improve") {
+            let best_round = if expected.contains("did not decrease") {
                 0
             } else {
                 missing.len() - 1
@@ -118,10 +124,13 @@ async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
             let edit = request_text(&requests[2 + round * 2]);
             assert!(edit.contains(&format!("Draft {}", round - 1)));
             assert!(edit.contains("Repair the supplied latest draft"));
-            assert!(edit.contains("Complete checklist item"));
+            assert!(edit.contains("Fix state 0"));
+            assert!(!edit.contains(&format!("Fix state {};", missing[round - 1])));
             let review = requests[3 + round * 2]["messages"][1]["content"]
                 .as_str()
                 .expect("test JSON value should be a string");
+            assert!(review.contains("Previous individual findings"));
+            assert!(review.contains("\"id\":\"state-0\""));
             let baseline = review
                 .split_once("Before artifact:\n")
                 .expect("test value should contain the expected separator")
@@ -160,7 +169,7 @@ async fn focused_correction_repairs_a_new_screen_without_changing_a_completed_sc
     fake.push_text(
         json!({"coverage":[
             {"complete":true,"reason":"Launch link works"},
-            {"complete":false,"reason":"Detail is missing its Back link","screens":[new_index]}
+            {"complete":false,"findings":[{"id":"missing-back-link","reason":"Detail is missing its Back link","screens":[new_index]}]}
         ]})
         .to_string(),
     );
@@ -185,6 +194,8 @@ async fn focused_correction_repairs_a_new_screen_without_changing_a_completed_sc
     assert_eq!(saved.screens[0], completed);
     assert_eq!(saved.screens.last(), Some(&detail));
     let requests = fake.requests();
+    let planning = request_text(&requests[1]);
+    assert!(planning.contains("visible screen numbers and #screen-N links are one-based"));
     let correction = request_text(&requests[4]);
     assert!(correction.contains("Incomplete detail"));
     assert!(!correction.contains("Finished launch view"));
@@ -193,6 +204,11 @@ async fn focused_correction_repairs_a_new_screen_without_changing_a_completed_sc
             .contains("A focused correction may replace only the specified screens")
     );
     let final_review = request_text(&requests[6]);
+    assert!(
+        final_review.contains(
+            "A number or literal target introduced only by the plan is not a requirement"
+        )
+    );
     assert!(
         final_review.contains("Finished launch view") && final_review.contains("Complete detail")
     );
@@ -222,7 +238,7 @@ async fn requested_hidden_views_are_repaired_as_linked_separate_screens() {
     fake.push_text(json!({"screens":[{"index":0,"screen":packed}]}).to_string());
     fake.push_text(json!({"coverage":[
         {"complete":true,"reason":"Connected view visible"},
-        {"complete":false,"reason":"Disconnected is hidden behind a checkbox; append a separate screen with content visible by default and link both directions."}
+        {"complete":false,"findings":[{"id":"missing-disconnected-screen","screens":[],"reason":"Disconnected is hidden behind a checkbox; append a separate screen with content visible by default and link both directions."}]}
     ]}).to_string());
     let mut connected = original.screens[0].clone();
     connected.name = "Connected".into();
@@ -290,7 +306,7 @@ async fn correction_cannot_change_an_unselected_original_screen() {
     );
     fake.push_text(json!({"screens":[{"index":0,"screen":original.screens[0]}]}).to_string());
     fake.push_text(
-        json!({"coverage":[{"complete":false,"reason":"Draw the retry action"}]}).to_string(),
+        json!({"coverage":[{"complete":false,"findings":[{"id":"missing-retry","reason":"Draw the retry action","screens":[]}]}]}).to_string(),
     );
     let mut unrelated = original.screens[1].clone();
     unrelated.html = "<h1>Unrequested change</h1>".into();
@@ -349,7 +365,7 @@ async fn unsupported_executable_requirements_stop_without_correction_or_save() {
     );
     fake.push_text(json!({"screens":[{"index":0,"screen":original.screens[0]}]}).to_string());
     fake.push_text(
-        json!({"coverage":[{"complete":false,"reason":"Renderer forbids editable date inputs"}],
+        json!({"coverage":[{"complete":false,"findings":[{"id":"missing-date-input","reason":"Renderer forbids editable date inputs","screens":[]}]}],
         "unsupported_requirements":["Executable date validation"], "reference_error":null})
         .to_string(),
     );
