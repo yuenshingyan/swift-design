@@ -50,6 +50,7 @@ async fn theme_review_has_comparison_evidence_and_failure_reaches_follow_up_chat
             .as_str()
             .expect("test JSON value should be a string");
         assert!(text.contains("Pending save target (server-enforced): talk-candidate-1"));
+        assert!(!text.contains("\nRetained draft before repair:\n"));
         let (before, after) = text
             .split_once("Before artifact:\n")
             .expect("test value should contain the expected separator")

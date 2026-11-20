@@ -1,3 +1,5 @@
+use design_model::Design;
+
 use super::*;
 
 #[tokio::test]
@@ -76,10 +78,31 @@ async fn repair_retries_a_protected_patch_and_preserves_other_draft_work() {
     )));
     let retry = fake.requests()[3].to_string();
     assert!(retry.contains("Repair draft cannot replace protected screen 2"));
-    assert!(
-        fake.requests()[4]
-            .to_string()
-            .contains("Browser prototype results")
+    let requests = fake.requests();
+    let review = requests[4]["messages"][1]["content"]
+        .as_str()
+        .expect("review should receive artifact evidence");
+    let (browser, baselines) = review
+        .split_once("\nRetained draft before repair:\n")
+        .expect("review must receive the draft that the repair started from");
+    let (retained, baselines) = baselines
+        .split_once("\nBefore artifact:\n")
+        .expect("review must also receive the saved version");
+    let (accepted, proposed) = baselines
+        .split_once("\nAfter artifact:\n")
+        .expect("review must receive the proposed repair");
+    assert!(browser.contains("Browser prototype results"));
+    assert_eq!(
+        serde_json::from_str::<Design>(retained).expect("valid retained artifact"),
+        draft
+    );
+    assert_eq!(
+        serde_json::from_str::<Design>(accepted).expect("valid saved artifact"),
+        original
+    );
+    assert_eq!(
+        serde_json::from_str::<Design>(proposed).expect("valid proposed artifact"),
+        saved
     );
 }
 

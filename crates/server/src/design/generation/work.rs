@@ -665,7 +665,8 @@ impl GenerationEngine {
                     &plan,
                     DemoEditEvidence {
                         candidate_id: design_id,
-                        before: &design,
+                        saved_baseline: &design,
+                        retained_baseline: retained.as_ref(),
                         after: &final_design,
                         attachments: &attachments,
                         browser_evidence: &audit.prototype_evidence(),

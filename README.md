@@ -144,7 +144,8 @@ full unverified prototype; **Repair draft** starts from that draft on the same
 candidate. It identifies editable screens before writing and reports a protected
 screen conflict if the repair needs to change an untouched saved screen. If a
 model patch crosses that boundary, Swift Design reports the specific change to
-the model and retries the patch. It refuses to overwrite a saved version that
+the model and retries the patch. Review compares against both the saved version
+and the draft as it was before the repair. It refuses to overwrite a saved version that
 changed after the checkpoint. No new candidate is allocated.
 Exports, history and ordinary render URLs use saved
 data; `GET /designs/{id}/previews` and `render?preview=true` explicitly opt into drafts.
