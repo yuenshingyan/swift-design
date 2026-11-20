@@ -235,10 +235,8 @@ impl GenerationEngine {
     ) -> Result<Design, String> {
         let label = &context.label;
         let limit = polish_round_limit(&context.effort);
-        // Hard layout errors outrank cosmetic warnings when choosing a fallback.
         let mut best = design.clone();
-        let mut best_score = (usize::MAX, usize::MAX);
-        let mut previous_score: Option<(usize, usize)> = None;
+        let mut best_audit = None;
         let mut stop = PolishStop::OutOfRounds;
         let mut rounds_taken = 0usize;
         // The extra measurement evaluates the last allowed repair, not its predecessor.
@@ -249,28 +247,22 @@ impl GenerationEngine {
             ));
             let audit = self.audit_demo(&design).await?;
             let findings = audit.instructions(None);
-            let score = audit.score(None);
-            if score < best_score {
-                best_score = score;
-                best = design.clone();
-            }
-            // Nothing measures wrong: another round would spend a model
-            // call to change a page that is already good.
-            if findings.is_empty() {
-                stop = PolishStop::Clean;
+            if best_audit
+                .as_ref()
+                .is_some_and(|previous| !audit.improves_on(previous, None))
+            {
+                stop = PolishStop::NoImprovement;
                 break;
             }
-            // The last round did not reduce the findings, so the next
-            // will not either. This also breaks a fix-one-break-one
-            // loop that would otherwise run to the limit.
-            if previous_score.is_some_and(|before| score >= before) {
-                stop = PolishStop::NoImprovement;
+            best = design.clone();
+            best_audit = Some(audit);
+            if findings.is_empty() {
+                stop = PolishStop::Clean;
                 break;
             }
             if round == limit {
                 break;
             }
-            previous_score = Some(score);
             let round = round + 1;
             rounds_taken = round;
             let images = self.screen_images(&design, label, log).await;
@@ -318,7 +310,10 @@ impl GenerationEngine {
         }
         log(&format!(
             "{label}: {}",
-            stop.describe(rounds_taken, best_score.1)
+            stop.describe(
+                rounds_taken,
+                best_audit.as_ref().map_or(0, |audit| audit.score(None).1)
+            )
         ));
         let final_audit = self.audit_demo(&best).await?;
         final_audit.require_layout_clean()?;
@@ -353,8 +348,7 @@ impl GenerationEngine {
         let label = &fix.context.label;
         let limit = polish_round_limit(&fix.context.effort);
         let mut best = design.clone();
-        let mut best_score = (usize::MAX, usize::MAX);
-        let mut previous_score: Option<(usize, usize)> = None;
+        let mut best_audit = None;
         let mut stop = PolishStop::OutOfRounds;
         let mut rounds_taken = 0usize;
         for round in 0..=limit {
@@ -364,23 +358,23 @@ impl GenerationEngine {
             ));
             let audit = self.audit_demo(&design).await?;
             let findings = audit.layout_instructions(&fix.indexes);
-            let score = audit.score(Some(&fix.indexes));
-            if score < best_score {
-                best_score = score;
-                best = design.clone();
-            }
-            if findings.is_empty() {
-                stop = PolishStop::Clean;
-                break;
-            }
-            if previous_score.is_some_and(|before| score >= before) {
+            if best_audit
+                .as_ref()
+                .is_some_and(|previous| !audit.improves_on(previous, Some(&fix.indexes)))
+            {
                 stop = PolishStop::NoImprovement;
                 break;
             }
-            if round == limit {
+            best = design.clone();
+            if findings.is_empty() {
+                stop = PolishStop::Clean;
+                best_audit = Some(audit);
                 break;
             }
-            previous_score = Some(score);
+            if round == limit {
+                best_audit = Some(audit);
+                break;
+            }
             let round = round + 1;
             rounds_taken = round;
             log(&format!(
@@ -397,13 +391,19 @@ impl GenerationEngine {
                         findings.join("; ")
                     )
                 })?;
+            best_audit = Some(audit);
             fix.context.report(
                 (DRAFT_SHARE + (1.0 - DRAFT_SHARE) * round as f32 / limit as f32).min(0.98),
             );
         }
         log(&format!(
             "{label}: {}",
-            stop.describe(rounds_taken, best_score.0)
+            stop.describe(
+                rounds_taken,
+                best_audit
+                    .as_ref()
+                    .map_or(0, |audit| audit.score(Some(&fix.indexes)).0)
+            )
         ));
         let final_audit = self.audit_demo(&best).await?;
         let unedited_errors = final_audit.score(None).0;

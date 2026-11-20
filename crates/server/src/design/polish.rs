@@ -203,6 +203,54 @@ impl DemoAudit {
         )
     }
 
+    /// Tests progress without trading an existing blocker for a new one.
+    pub(crate) fn improves_on(&self, previous: &Self, indexes: Option<&[usize]>) -> bool {
+        let is_in_scope = |screen| indexes.is_none_or(|indexes| indexes.contains(&screen));
+        let mut overflow_improved = false;
+        for finding in self
+            .findings
+            .iter()
+            .filter(|finding| is_in_scope(finding.screen) && is_blocking(&finding.kind))
+        {
+            let Some(before) = previous.findings.iter().find(|before| {
+                before.screen == finding.screen
+                    && before.node == finding.node
+                    && before.kind == finding.kind
+            }) else {
+                return false;
+            };
+            if let Some([old_x, old_y]) = before.overflow_px {
+                let Some([x, y]) = finding.overflow_px else {
+                    return false;
+                };
+                if x > old_x || y > old_y {
+                    return false;
+                }
+                overflow_improved |= x < old_x || y < old_y;
+            }
+        }
+        for check in self
+            .prototype_checks
+            .iter()
+            .filter(|check| check.failures > 0 && is_in_scope(check.screen))
+        {
+            if !previous.prototype_checks.iter().any(|before| {
+                before.screen == check.screen
+                    && before.group == check.group
+                    && before.failures >= check.failures
+                    && check
+                        .issues
+                        .iter()
+                        .all(|issue| before.issues.contains(issue))
+            }) {
+                return false;
+            }
+        }
+        let score = self.score(indexes);
+        let previous_score = previous.score(indexes);
+        score < previous_score || (score == previous_score && overflow_improved)
+    }
+
     /// Blocks completion while any measured layout error remains on any screen.
     pub(crate) fn require_layout_clean(&self) -> Result<(), String> {
         self.require_layout_clean_on(None)
@@ -305,12 +353,14 @@ fn is_blocking(kind: &str) -> bool {
 
 /// One finding as a fix instruction for the model.
 fn format_finding(finding: &Finding) -> String {
+    let advice = if finding.kind == "overflow" {
+        "Fit the content inside the existing viewport. For a dialog, keep its actions reachable and let the body scroll inside the dialog if needed. Do not enlarge the viewport or clip content."
+    } else {
+        finding_advice(&finding.kind)
+    };
     format!(
         "screens[{}] {}: {}: {}",
-        finding.screen,
-        finding.node,
-        finding.detail,
-        finding_advice(&finding.kind)
+        finding.screen, finding.node, finding.detail, advice
     )
 }
 
@@ -464,6 +514,31 @@ mod tests {
     }
 
     #[test]
+    fn smaller_overflow_counts_only_when_no_blocker_is_new_or_worse() {
+        let overflow = |screen, x, y| Finding {
+            screen,
+            node: "div.scrim (0)".into(),
+            kind: "overflow".into(),
+            detail: String::new(),
+            overflow_px: Some([x, y]),
+        };
+        let audit = |findings| DemoAudit {
+            findings,
+            prototype_checks: vec![],
+        };
+        let previous = audit(vec![overflow(61, 0, 43), overflow(62, 0, 28)]);
+        let smaller = audit(vec![overflow(61, 0, 20), overflow(62, 0, 28)]);
+        assert!(smaller.improves_on(&previous, None));
+        assert!(!smaller.improves_on(&smaller, None));
+        assert!(!audit(vec![overflow(61, 5, 20)]).improves_on(&previous, None));
+        assert!(!audit(vec![overflow(61, 0, 46)]).improves_on(&previous, None));
+        let new = audit(vec![overflow(63, 0, 10)]);
+        assert!(!new.improves_on(&previous, None));
+        assert!(new.improves_on(&previous, Some(&[61, 62])));
+        assert!(smaller.require_layout_clean().is_err());
+    }
+
+    #[test]
     fn focused_verification_does_not_claim_untouched_legacy_errors_are_clean() {
         let audit = DemoAudit {
             prototype_checks: Vec::new(),
@@ -472,6 +547,7 @@ mod tests {
                 node: String::new(),
                 kind: "overflow".to_owned(),
                 detail: "legacy clipping".to_owned(),
+                overflow_px: None,
             }],
         };
         assert!(audit.require_layout_clean_on(Some(&[0])).is_ok());
@@ -498,6 +574,7 @@ mod tests {
                     node: String::new(),
                     kind: kind.to_owned(),
                     detail: "Review this measurement".to_owned(),
+                    overflow_px: None,
                 }],
             };
             assert!(is_known_finding(kind));
@@ -513,10 +590,10 @@ mod tests {
         let dom = "<html lang=\"en\" data-swift-design-findings=\"[{&quot;screen&quot;:2,&quot;node&quot;:&quot;h2.title (0/1)&quot;,&quot;kind&quot;:&quot;overflow&quot;,&quot;detail&quot;:&quot;content needs 410px but the box is 376px tall&quot;}]\"><head>";
         let findings = parse_findings(dom);
         assert_eq!(findings.len(), 1);
-        assert_eq!(
-            findings[0],
-            "screens[2] h2.title (0/1): content needs 410px but the box is 376px tall: shorten the text, enlarge the box, or reduce the font size"
-        );
+        assert!(findings[0].starts_with(
+            "screens[2] h2.title (0/1): content needs 410px but the box is 376px tall:"
+        ));
+        assert!(findings[0].contains("Do not enlarge the viewport or clip content."));
         assert!(parse_findings("<html><head></head></html>").is_empty());
         assert!(parse_findings("<html data-swift-design-findings=\"not json\">").is_empty());
     }
@@ -529,6 +606,7 @@ mod tests {
                 node: format!("p ({index})"),
                 kind: "tiny_text".to_owned(),
                 detail: "font-size 11px is too small".to_owned(),
+                overflow_px: None,
             })
             .collect();
         raw.push(Finding {
@@ -536,12 +614,14 @@ mod tests {
             node: "h2 (0/1)".to_owned(),
             kind: "overflow".to_owned(),
             detail: "content needs 59px but the box is 30px tall".to_owned(),
+            overflow_px: Some([0, 29]),
         });
         raw.push(Finding {
             screen: 0,
             node: "p (0/2)".to_owned(),
             kind: "contrast".to_owned(),
             detail: "contrast 2.1:1".to_owned(),
+            overflow_px: None,
         });
         let ordered = prioritized(raw);
         let kinds: Vec<&str> = ordered
@@ -620,6 +700,7 @@ mod tests {
             node: "h2 (0)".to_owned(),
             kind: "contrast".to_owned(),
             detail: "contrast 1.50:1 is below the 3.0:1 limit".to_owned(),
+            overflow_px: None,
         });
         assert!(contrast.starts_with("screens[3] h2 (0): contrast 1.50:1"));
         assert!(contrast.ends_with("change the background"));
@@ -628,6 +709,7 @@ mod tests {
             node: "p (1)".to_owned(),
             kind: "long_lines".to_owned(),
             detail: "about 120 characters per line over 1 line".to_owned(),
+            overflow_px: None,
         });
         assert!(lines.starts_with("screens[4] p (1): about 120 characters per line"));
         assert!(lines.ends_with("use a larger font size"));
@@ -642,7 +724,7 @@ mod tests {
         // A page left with findings must say so, not read as finished.
         let stalled = PolishStop::NoImprovement.describe(3, 4);
         assert!(stalled.contains("4 finding(s) left"));
-        assert!(stalled.contains("fixed none"));
+        assert!(stalled.contains("did not improve the layout"));
         let spent = PolishStop::OutOfRounds.describe(5, 2);
         assert!(spent.contains("all 5 round(s)"));
         assert!(spent.contains("2 finding(s) left"));

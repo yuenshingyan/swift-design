@@ -353,6 +353,67 @@ async fn a_failed_layout_repair_preserves_the_provider_cause_and_element() {
 }
 
 #[tokio::test]
+async fn layout_repair_continues_when_the_same_overflow_gets_smaller() {
+    let directory = TempDir::new().expect("temporary test directory should be created");
+    let fake = FakeModelServer::start().await;
+    fake.push_text(r#"{"screens":[{"index":2,"screen":{"html":"<h1>Closer</h1>"}}]}"#);
+    fake.push_text(r#"{"screens":[{"index":2,"screen":{"html":"<h1>Fits</h1>"}}]}"#);
+    let mut original = design();
+    original.screens[2].html = "<h1>Overflow</h1>".into();
+    let runner: DemoDomRunner = Arc::new(|design, _| {
+        let excess = match design.screens[2].html.as_str() {
+            "<h1>Overflow</h1>" => 43,
+            "<h1>Closer</h1>" => 28,
+            _ => 0,
+        };
+        let findings = if excess == 0 {
+            serde_json::json!([])
+        } else {
+            serde_json::json!([{"screen":2,"node":"div.scrim (0/3)","kind":"overflow","overflow_px":[0,excess],
+                "detail":format!("content needs {}px tall but the box is 806px tall",806+excess)}])
+        };
+        let dom = report(&design, findings);
+        Box::pin(async move { Ok(dom) })
+    });
+    let engine = engine(&fake, &directory, runner);
+    let request = SessionRequest {
+        request: "Make the dialog fit".into(),
+        conversation: String::new(),
+        kind: ArtifactKind::Demo,
+        answers: Vec::new(),
+        options: RunOptions::default(),
+    };
+    let context = ArtifactRequest {
+        effort: "medium".into(),
+        ..context()
+    };
+    let fix = EditFix {
+        request: &request,
+        context: &context,
+        indexes: vec![2],
+    };
+    let (fixed, audit) = engine
+        .fix_edited_design(&reqwest::Client::new(), original.clone(), &fix, &log())
+        .await
+        .expect("a smaller overflow should get another repair round");
+    assert_eq!(fixed.screens[2].html, "<h1>Fits</h1>");
+    assert_eq!(fixed.screens[..2], original.screens[..2]);
+    assert!(audit.require_layout_clean().is_ok());
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0]
+            .to_string()
+            .contains("let the body scroll inside the dialog")
+    );
+    assert!(
+        requests[1]
+            .to_string()
+            .contains("834px tall but the box is 806px tall")
+    );
+}
+
+#[tokio::test]
 async fn a_temporary_failure_retries_the_repair_without_restarting_the_edit() {
     let directory = TempDir::new().expect("temporary test directory should be created");
     let fake = FakeModelServer::start().await;
@@ -422,6 +483,7 @@ async fn real_chrome_distinguishes_padding_only_scroll_extents_from_three_pixel_
         "{warnings}"
     );
     assert!(warnings.contains("div.clip"));
+    assert!(dom.contains("&quot;overflow_px&quot;:[0,3]"));
     assert_eq!(audit.score(Some(&[1])).0, 0);
 }
 
