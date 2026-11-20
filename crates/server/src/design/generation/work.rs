@@ -565,6 +565,9 @@ impl GenerationEngine {
                         after: &final_design,
                         attachments: &attachments,
                         browser_evidence: &audit.prototype_evidence(),
+                        previous_failures: previous_failures
+                            .as_ref()
+                            .map_or(&[], |(_, failures)| failures.as_slice()),
                     },
                     context.effort(),
                 )
@@ -580,7 +583,15 @@ impl GenerationEngine {
                 let reason = if improved {
                     format!("the {MAX_DEMO_CORRECTIONS}-correction-round limit was reached")
                 } else {
-                    "requirement coverage did not improve".to_owned()
+                    let defect_ids: Vec<_> = failures
+                        .iter()
+                        .map(|failure| format!("{}:{}", failure.requirement, failure.id))
+                        .collect();
+                    log(&format!(
+                        "{label}: discarded correction round {attempt}; unresolved defect IDs: {}",
+                        defect_ids.join(", ")
+                    ));
+                    "reviewed defects did not decrease without regression".to_owned()
                 };
                 let remaining = if !improved
                     && let Some((best, previous)) = &previous_failures
@@ -627,14 +638,14 @@ impl GenerationEngine {
                 " Replace only the specified screens. Do not change shared settings or insert or delete screens."
             };
             correction = format!(
-                "Repair the supplied latest draft rather than starting over. Preserve completed work and satisfy the entire acceptance contract.{scope_note} The last review found {} incomplete checklist items:\n{}",
+                "Repair the supplied latest draft rather than starting over. Preserve completed work and satisfy the entire acceptance contract.{scope_note} The last review found {} unresolved defects:\n{}",
                 failures.len(),
                 details.join("\n")
             );
             draft = final_design;
             attempt += 1;
             log(&format!(
-                "{label}: correction round {attempt}/{MAX_DEMO_CORRECTIONS}; {} incomplete checklist items",
+                "{label}: correction round {attempt}/{MAX_DEMO_CORRECTIONS}; {} unresolved defects",
                 failures.len()
             ));
             previous_failures = Some((draft.clone(), failures));

@@ -11,10 +11,17 @@ async fn theme_review_has_comparison_evidence_and_failure_reaches_follow_up_chat
         let mut theme = json!(original.theme);
         theme["colors"]["background"] = json!("#ffffff");
         fake.push_text(json!({"theme": theme}).to_string());
+        let findings = if accepted {
+            vec![]
+        } else {
+            vec![json!({
+                "id": "missing-navigation-link", "reason": "Restore the missing navigation link", "screens": []
+            })]
+        };
         let review = json!({"coverage": [
-            {"complete": true, "reason": "Light background applied"},
-            {"complete": accepted, "reason": "Restore the missing navigation link"},
-            {"complete": true, "reason": "Server-enforced isolation"}
+            {"complete": true},
+            {"complete": accepted, "findings": findings},
+            {"complete": true}
         ], "reference_error": null})
         .to_string();
         fake.push_text(review.clone());
@@ -133,7 +140,7 @@ async fn theme_review_has_comparison_evidence_and_failure_reaches_follow_up_chat
 #[tokio::test]
 async fn extension_requires_additions_and_feature_coverage_before_saving() {
     const PASS: &str = r#"{"coverage":[{"complete":true,"reason":"Connected page present"}],"reference_error":null}"#;
-    const FAIL: &str = r#"{"coverage":[{"complete":false,"reason":"Add the notification control"}],"reference_error":null}"#;
+    const FAIL: &str = r#"{"coverage":[{"complete":false,"findings":[{"id":"missing-notification-control","reason":"Add the notification control","screens":[]}]}],"reference_error":null}"#;
     for (adds_page, coverage, retry_coverage, should_save) in [
         (false, PASS, None, false),
         (true, FAIL, Some(FAIL), false),
