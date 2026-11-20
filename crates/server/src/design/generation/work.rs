@@ -325,16 +325,24 @@ impl GenerationEngine {
             design.clone()
         };
         let retained = use_review_draft.then(|| draft.clone());
+        // A repair can name pages that exist only in the retained draft.
+        let scope_baseline = retained.as_ref().unwrap_or(&design);
         log(&format!("{label}: resolving edit requirements and scope"));
         let attachments = self.load_attachments(&context.session_id, log).await;
         let plan = self
-            .plan_demo_edit(client, &design, order, (&attachments, context.effort()))
+            .plan_demo_edit(
+                client,
+                scope_baseline,
+                order,
+                (&attachments, context.effort()),
+            )
             .await
             .map_err(GenerationStop::Failed)?;
         let instruction = plan.instruction.as_str();
         // Structural edits need the full artifact in coordination. Workers remain
         // isolated; the requirements check protects unselected existing screens.
-        let indexes = if use_review_draft || plan.minimum_new_screens > 0 {
+        let additions_already_in_draft = draft.screens.len().saturating_sub(design.screens.len());
+        let indexes = if plan.minimum_new_screens > additions_already_in_draft {
             Vec::new()
         } else {
             plan.screens.clone()
@@ -391,6 +399,8 @@ impl GenerationEngine {
             let design_json =
                 design_json.map_err(|error| GenerationStop::Failed(error.to_string()))?;
             let correction_instruction = format!("{instruction}\n{correction}");
+            let is_focused_patch =
+                is_focused_correction || (use_review_draft && !write_indexes.is_empty());
             let findings = findings_for(&measured, "screens", write_indexes);
             let input = EditInput {
                 instruction: &correction_instruction,
@@ -400,7 +410,11 @@ impl GenerationEngine {
                 conversation: order.conversation,
             };
             let original = draft.clone();
-            let repair_screens = correction_screens.clone();
+            let repair_screens = if is_focused_patch {
+                write_indexes.clone()
+            } else {
+                Vec::new()
+            };
             let request = ArtifactRequest {
                 effort: context.effort().to_owned(),
                 label: if attempt == 0 {
@@ -425,7 +439,7 @@ impl GenerationEngine {
                     apply_patch(&original, patch)
                 }),
                 progress: progress.clone(),
-                live: (!is_focused_correction).then(|| preview.edit_sink(&draft)),
+                live: (!is_focused_patch).then(|| preview.edit_sink(&draft)),
             };
             let messages = vec![
                 serde_json::json!({ "role": "system", "content": system_prompt() }),
@@ -448,7 +462,7 @@ impl GenerationEngine {
                 )
                 .await?
             };
-            plan.check_structure(&design, &edited)
+            plan.check_structure(&design, scope_baseline, &edited)
                 .map_err(GenerationStop::Failed)?;
             if let Some(retained) = &retained {
                 require_repair_scope(&design, retained, &edited)?;
@@ -494,8 +508,8 @@ impl GenerationEngine {
             let fix = EditFix {
                 request: &context.request,
                 context: &request,
-                indexes: if is_focused_correction {
-                    correction_screens.clone()
+                indexes: if is_focused_patch {
+                    write_indexes.clone()
                 } else {
                     touched.clone()
                 },
@@ -505,7 +519,7 @@ impl GenerationEngine {
             let (final_design, audit) = match polished {
                 Ok(result) => result,
                 Err(error) => {
-                    plan.check_structure(&design, &fallback)
+                    plan.check_structure(&design, scope_baseline, &fallback)
                         .map_err(GenerationStop::Failed)?;
                     let notice = self
                         .review_draft_notice(design_id, &error, false)
@@ -514,7 +528,7 @@ impl GenerationEngine {
                     return Err(GenerationStop::Failed(notice));
                 }
             };
-            plan.check_structure(&design, &final_design)
+            plan.check_structure(&design, scope_baseline, &final_design)
                 .map_err(GenerationStop::Failed)?;
             if let Some(retained) = &retained {
                 require_repair_scope(&design, retained, &final_design)?;

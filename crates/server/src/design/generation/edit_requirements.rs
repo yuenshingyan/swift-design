@@ -97,17 +97,26 @@ impl DemoEditRequirements {
         Ok(())
     }
 
-    pub(super) fn check_structure(&self, before: &Design, after: &Design) -> Result<(), String> {
-        if after.screens.len().saturating_sub(before.screens.len()) < self.minimum_new_screens {
+    pub(super) fn check_structure(
+        &self,
+        accepted: &Design,
+        scope_baseline: &Design,
+        after: &Design,
+    ) -> Result<(), String> {
+        if after.screens.len().saturating_sub(accepted.screens.len()) < self.minimum_new_screens {
             return Err(format!(
                 "Cannot save demo edit: at least {} new screens were required; the edit did not add them.",
                 self.minimum_new_screens
             ));
         }
         if !self.screens.is_empty()
-            && before.screens.iter().enumerate().any(|(index, screen)| {
-                !self.screens.contains(&index) && after.screens.get(index) != Some(screen)
-            })
+            && scope_baseline
+                .screens
+                .iter()
+                .enumerate()
+                .any(|(index, screen)| {
+                    !self.screens.contains(&index) && after.screens.get(index) != Some(screen)
+                })
         {
             return Err("Cannot save demo edit: an unselected screen changed.".into());
         }
@@ -300,12 +309,12 @@ mod tests {
             requirements: vec!["Comments".into(), "Notification page".into()],
         };
         assert!(plan.validate(&before).is_ok());
-        assert!(plan.check_structure(&before, &before).is_err());
+        assert!(plan.check_structure(&before, &before, &before).is_err());
         let mut after = before.clone();
         after.screens.push(before.screens[0].clone());
-        assert!(plan.check_structure(&before, &after).is_ok());
+        assert!(plan.check_structure(&before, &before, &after).is_ok());
         after.screens[1].notes = Some("Unrelated change".into());
-        assert!(plan.check_structure(&before, &after).is_err());
+        assert!(plan.check_structure(&before, &before, &after).is_err());
         let mut review: DemoEditReview = serde_json::from_value(json!({
             "coverage": [
                 {"complete": true, "reason": "Comments present"},
