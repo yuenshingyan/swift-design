@@ -205,10 +205,13 @@ Independent visual deliverables still get their own screen. Images and PDFs show
 the default state. Local actions do not execute model code, access a backend, or
 persist state.
 
-Review returns specific reasons for unmet requirements. Up to three correction
+Review returns specific reasons for unmet requirements. Up to ten correction
 rounds repair the latest draft while preservation checks still use the saved
-original. Corrections stop early if the number of incomplete checklist items does
-not decrease. Only a passing draft replaces the selected candidate; stopping or
+original. A correction continues only when review finds fewer affected screens
+or fewer unmet requirements, with no regressions. If a correction makes no
+progress, Swift Design keeps the better reviewed draft. When all findings name
+existing screens, the repair can only replace those screens. Only a passing
+draft replaces the selected candidate; stopping or
 cancellation leaves that saved candidate intact. Missing or unreadable required references produce a
 reference-verification error instead of an incomplete-edit verdict.
 Safety, valid markup, protected-screen scope and core requested deliverables are

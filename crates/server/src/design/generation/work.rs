@@ -1,5 +1,9 @@
-use super::edit_requirements::DemoEditEvidence;
+use std::collections::HashSet;
+
+use super::edit_requirements::{DemoEditEvidence, DemoEditFailure, review_improved};
 use super::*;
+
+const MAX_DEMO_CORRECTIONS: usize = 10;
 
 fn require_repair_scope(
     before: &Design,
@@ -337,7 +341,6 @@ impl GenerationEngine {
         };
         log(&format!("{label}: checking layout before editing"));
         let measured = self.audit_demo(&draft).await?.instructions(None);
-        let findings = findings_for(&measured, "screens", &indexes);
         let preview_scope = if use_review_draft {
             touched_indexes(&design.screens, &draft.screens, &[])
         } else {
@@ -357,30 +360,38 @@ impl GenerationEngine {
             String::new()
         };
         let mut attempt = 0;
-        let mut previous_missing = None;
-        let mut last_navigation_error = None;
+        let mut previous_failures: Option<(Design, Vec<DemoEditFailure>)> = None;
+        let mut navigation_errors = HashSet::new();
+        let mut correction_screens = Vec::new();
         let progress = self.shared_progress(&[design_id.to_owned()], 5, 95).pop();
         let (final_design, verified_indexes, layout_warnings) = loop {
             // Fresh regeneration drops old markup only once; corrections must
             // see and repair the latest draft, including newly added screens.
             let is_fresh = order.is_fresh && attempt == 0;
             let total = draft.screens.len();
-            let (design_json, note) = if indexes.is_empty() {
+            let is_focused_correction = !correction_screens.is_empty();
+            let write_indexes = if is_focused_correction {
+                &correction_screens
+            } else {
+                &indexes
+            };
+            let (design_json, note) = if write_indexes.is_empty() {
                 (serde_json::to_string(&draft), String::new())
             } else if is_fresh {
                 (
-                    focused_design_json(&draft, &indexes, true),
-                    fresh_note("screen", "screens", &indexes, total),
+                    focused_design_json(&draft, write_indexes, true),
+                    fresh_note("screen", "screens", write_indexes, total),
                 )
             } else {
                 (
-                    focused_design_json(&draft, &indexes, false),
-                    focus_note("screen", "screens", &indexes, total),
+                    focused_design_json(&draft, write_indexes, false),
+                    focus_note("screen", "screens", write_indexes, total),
                 )
             };
             let design_json =
                 design_json.map_err(|error| GenerationStop::Failed(error.to_string()))?;
             let correction_instruction = format!("{instruction}\n{correction}");
+            let findings = findings_for(&measured, "screens", write_indexes);
             let input = EditInput {
                 instruction: &correction_instruction,
                 artifact_json: &design_json,
@@ -389,22 +400,38 @@ impl GenerationEngine {
                 conversation: order.conversation,
             };
             let original = draft.clone();
+            let repair_screens = correction_screens.clone();
             let request = ArtifactRequest {
                 effort: context.effort().to_owned(),
                 label: if attempt == 0 {
                     label.clone()
                 } else {
-                    format!("{label}: correction round {attempt}/3")
+                    format!("{label}: correction round {attempt}/{MAX_DEMO_CORRECTIONS}")
                 },
-                parse: Box::new(move |content| apply_patch(&original, parse_patch(content)?)),
+                parse: Box::new(move |content| {
+                    let patch = parse_patch(content)?;
+                    if !repair_screens.is_empty()
+                        && (patch.title.is_some()
+                            || patch.theme.is_some()
+                            || patch.app_window.is_some()
+                            || patch.screens.iter().any(|operation| {
+                                operation.insert
+                                    || operation.screen.is_none()
+                                    || !repair_screens.contains(&operation.index)
+                            }))
+                    {
+                        return Err("A focused correction may replace only the specified screens. Do not insert screens, delete screens, or change shared settings.".into());
+                    }
+                    apply_patch(&original, patch)
+                }),
                 progress: progress.clone(),
-                live: Some(preview.edit_sink(&draft)),
+                live: (!is_focused_correction).then(|| preview.edit_sink(&draft)),
             };
             let messages = vec![
                 serde_json::json!({ "role": "system", "content": system_prompt() }),
                 self.user_message(&edit_prompt(&context.request, &input), &attachments),
             ];
-            let edited = if use_review_draft {
+            let edited = if use_review_draft || is_focused_correction {
                 self.request_valid(client, messages, &request, log).await?
             } else {
                 self.request_edit(
@@ -437,7 +464,7 @@ impl GenerationEngine {
             if let Err(error) =
                 design_model::markup::validate_demo_navigation(&edited, Some(&design))
             {
-                if attempt == 3 || last_navigation_error.as_ref() == Some(&error) {
+                if attempt == MAX_DEMO_CORRECTIONS || !navigation_errors.insert(error.clone()) {
                     return Err(GenerationStop::Failed(format!(
                         "Cannot save demo edit: {error}"
                     )));
@@ -448,7 +475,6 @@ impl GenerationEngine {
                 correction = format!(
                     "Repair this navigation issue in the latest draft. Preserve other completed work. {error}"
                 );
-                last_navigation_error = Some(error);
                 draft = edited;
                 attempt += 1;
                 continue;
@@ -468,7 +494,11 @@ impl GenerationEngine {
             let fix = EditFix {
                 request: &context.request,
                 context: &request,
-                indexes: touched,
+                indexes: if is_focused_correction {
+                    correction_screens.clone()
+                } else {
+                    touched.clone()
+                },
             };
             let fallback = edited.clone();
             let polished = self.fix_edited_design(client, edited, &fix, log).await;
@@ -499,14 +529,14 @@ impl GenerationEngine {
                         ))
                     })?;
             }
-            if let Err(error) = audit.require_layout_clean_on(Some(&fix.indexes)) {
+            if let Err(error) = audit.require_layout_clean_on(Some(&touched)) {
                 let notice = self
                     .review_draft_notice(design_id, &error, false)
                     .await
                     .map_err(GenerationStop::Failed)?;
                 return Err(GenerationStop::Failed(notice));
             }
-            let layout_warnings = audit.instructions(Some(&fix.indexes));
+            let layout_warnings = audit.instructions(Some(&touched));
             log(&format!(
                 "{}: reviewing requested feature coverage before saving",
                 request.label
@@ -527,34 +557,73 @@ impl GenerationEngine {
                 .await
                 .map_err(GenerationStop::Failed)?;
             if failures.is_empty() {
-                break (final_design, fix.indexes, layout_warnings);
+                break (final_design, touched, layout_warnings);
             }
-            let stop_reason = if attempt == 3 {
-                Some("the three-correction-round limit was reached")
-            } else if previous_missing.is_some_and(|count| failures.len() >= count) {
-                Some("requirement coverage did not improve")
-            } else {
-                None
-            };
-            if let Some(reason) = stop_reason {
+            let improved = previous_failures
+                .as_ref()
+                .is_none_or(|(_, previous)| review_improved(previous, &failures));
+            if !improved || attempt == MAX_DEMO_CORRECTIONS {
+                let reason = if improved {
+                    format!("the {MAX_DEMO_CORRECTIONS}-correction-round limit was reached")
+                } else {
+                    "requirement coverage did not improve".to_owned()
+                };
+                let remaining = if !improved
+                    && let Some((best, previous)) = &previous_failures
+                    && best != &design
+                {
+                    self.designs
+                        .keep_review_draft(design_id, best, Some(&design))
+                        .await
+                        .map_err(|error| {
+                            GenerationStop::Failed(format!(
+                                "Cannot restore the better review draft: {error}"
+                            ))
+                        })?;
+                    previous.as_slice()
+                } else {
+                    failures.as_slice()
+                };
+                let details: Vec<_> = remaining
+                    .iter()
+                    .map(|failure| failure.detail.as_str())
+                    .collect();
                 return Err(GenerationStop::Failed(format!(
                     "Cannot save incomplete demo edit after {attempt} correction round(s): {reason}; remaining issues: {}",
-                    failures.join("; ")
+                    details.join("; ")
                 )));
             }
-            previous_missing = Some(failures.len());
+            correction_screens.clear();
+            if failures.iter().all(|failure| !failure.screens.is_empty()) {
+                correction_screens.extend(
+                    failures
+                        .iter()
+                        .flat_map(|failure| failure.screens.iter().copied()),
+                );
+                correction_screens.sort_unstable();
+                correction_screens.dedup();
+            }
+            let details: Vec<_> = failures
+                .iter()
+                .map(|failure| failure.detail.as_str())
+                .collect();
+            let scope_note = if correction_screens.is_empty() {
+                ""
+            } else {
+                " Replace only the specified screens. Do not change shared settings or insert or delete screens."
+            };
             correction = format!(
-                "Repair the supplied latest draft rather than starting over. Preserve completed work and satisfy the entire acceptance contract. The last review found {} incomplete checklist items:\n{}",
+                "Repair the supplied latest draft rather than starting over. Preserve completed work and satisfy the entire acceptance contract.{scope_note} The last review found {} incomplete checklist items:\n{}",
                 failures.len(),
-                failures.join("\n")
+                details.join("\n")
             );
             draft = final_design;
             attempt += 1;
             log(&format!(
-                "{}: correction round {attempt}/3; {} incomplete checklist items",
-                request.label,
+                "{label}: correction round {attempt}/{MAX_DEMO_CORRECTIONS}; {} incomplete checklist items",
                 failures.len()
             ));
+            previous_failures = Some((draft.clone(), failures));
         };
         let mut report = saved_edit_report(design_id, context.request.kind, &design, &final_design)
             .map_err(GenerationStop::Failed)?;

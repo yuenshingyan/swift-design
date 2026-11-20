@@ -3,8 +3,8 @@ use super::*;
 #[tokio::test]
 async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
     for (missing, expected_error) in [
-        (vec![3, 2, 1, 0], None),
-        (vec![4, 3, 2, 1], Some("three-correction-round limit")),
+        ((0..=8).rev().collect::<Vec<_>>(), None),
+        ((1..=11).rev().collect(), Some("10-correction-round limit")),
         (vec![2, 2], Some("coverage did not improve")),
         (vec![1, 2], Some("coverage did not improve")),
     ] {
@@ -19,10 +19,13 @@ async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
             .await;
         fake.watch_baseline(&candidate.path()).await;
         fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
+        let requirements: Vec<_> = (0..11)
+            .map(|index| format!("Checklist item {index}"))
+            .collect();
         fake.push_text(json!({
             "instruction": "Redesign screen 1 with visible controls and concrete state specifications.",
             "screens": [0], "minimum_new_screens": 0,
-            "requirements": ["Rendered controls", "Responsive layouts", "State specifications", "Preserve navigation"]
+            "requirements": requirements
         }).to_string());
         for (round, count) in missing.iter().enumerate() {
             let mut screen = original.screens[0].clone();
@@ -34,7 +37,7 @@ async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
                 patch["theme"] = theme;
             }
             fake.push_text(patch.to_string());
-            let coverage: Vec<_> = (0..4)
+            let coverage: Vec<_> = (0..requirements.len())
                 .map(|index| {
                     json!({
                         "complete": index >= *count,
@@ -67,6 +70,22 @@ async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
                     .expect("test history should be listed")
                     .is_empty()
             );
+            let kept = candidate
+                .designs
+                .load_review_draft("talk-candidate-1")
+                .await
+                .expect("draft should load")
+                .expect("a failed edit should retain a draft");
+            let best_round = if expected.contains("did not improve") {
+                0
+            } else {
+                missing.len() - 1
+            };
+            assert!(
+                kept.screens[0]
+                    .html
+                    .contains(&format!("Draft {best_round}"))
+            );
         } else {
             assert!(result.is_ok(), "{result:?}");
             let saved = candidate
@@ -75,7 +94,7 @@ async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
                 .await
                 .expect("test record should load successfully")
                 .expect("saved test record should exist");
-            assert!(saved.screens[0].html.contains("Draft 3"));
+            assert!(saved.screens[0].html.contains("Draft 8"));
             assert_eq!(json!(saved.theme)["colors"]["accent"], "#8dd8bc");
             assert_eq!(saved.screens[1..], original.screens[1..]);
         }
@@ -116,6 +135,67 @@ async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn focused_correction_repairs_a_new_screen_without_changing_a_completed_screen() {
+    let fake = ParallelFakeModel::start(None).await;
+    let original = sample_design();
+    let candidate = ReviewingCandidate::new(&fake);
+    candidate
+        .seed(&original, "Add a detail view linked from screen 1.")
+        .await;
+    let new_index = original.screens.len();
+    let mut completed = original.screens[0].clone();
+    completed.html = format!(
+        "<h1>Finished launch view</h1><a href='#screen-{}'>Open detail</a>",
+        new_index + 1
+    );
+    let mut detail = completed.clone();
+    detail.name = "Detail".into();
+    detail.html = "<h1>Incomplete detail</h1>".into();
+    fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
+    fake.push_text(r#"{"instruction":"Add the linked detail view and a Back link.","screens":[0],"minimum_new_screens":0,"requirements":["Launch link","Detail return link"]}"#.into());
+    fake.push_text(json!({"screens":[{"index":0,"screen":completed},{"index":new_index,"insert":true,"screen":detail}]}).to_string());
+    fake.push_text(
+        json!({"coverage":[
+            {"complete":true,"reason":"Launch link works"},
+            {"complete":false,"reason":"Detail is missing its Back link","screens":[new_index]}
+        ]})
+        .to_string(),
+    );
+    let mut unrelated = completed.clone();
+    unrelated.html = "<h1>Do not replace this launch view</h1>".into();
+    fake.push_text(json!({"screens":[{"index":0,"screen":unrelated}]}).to_string());
+    detail.html = "<h1>Complete detail</h1><a href='#screen-1'>Back</a>".into();
+    fake.push_text(json!({"screens":[{"index":new_index,"screen":detail}]}).to_string());
+    fake.push_text(r#"{"coverage":[{"complete":true,"reason":"Launch link works"},{"complete":true,"reason":"Return link works"}]}"#.into());
+    candidate
+        .engine
+        .clone()
+        .run("talk", log_sink())
+        .await
+        .expect("verified focused repair should save");
+    let saved = candidate
+        .designs
+        .load("talk-candidate-1")
+        .await
+        .expect("saved candidate should load")
+        .expect("same candidate should exist");
+    assert_eq!(saved.screens[0], completed);
+    assert_eq!(saved.screens.last(), Some(&detail));
+    let requests = fake.requests();
+    let correction = request_text(&requests[4]);
+    assert!(correction.contains("Incomplete detail"));
+    assert!(!correction.contains("Finished launch view"));
+    assert!(
+        request_text(&requests[5])
+            .contains("A focused correction may replace only the specified screens")
+    );
+    let final_review = request_text(&requests[6]);
+    assert!(
+        final_review.contains("Finished launch view") && final_review.contains("Complete detail")
+    );
 }
 
 #[tokio::test]
