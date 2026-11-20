@@ -141,8 +141,11 @@ saved as a recovery copy under the same candidate before review. If review fails
 or the run stops after that checkpoint, the editor shows **Needs review**. Use
 **Saved version** or **Review draft** to switch. **Play review draft** opens the
 full unverified prototype; **Repair draft** starts from that draft on the same
-candidate. It preserves untouched saved screens and refuses to overwrite a saved
-version that changed after the checkpoint. No new candidate is allocated.
+candidate. It identifies editable screens before writing and reports a protected
+screen conflict if the repair needs to change an untouched saved screen. If a
+model patch crosses that boundary, Swift Design reports the specific change to
+the model and retries the patch. It refuses to overwrite a saved version that
+changed after the checkpoint. No new candidate is allocated.
 Exports, history and ordinary render URLs use saved
 data; `GET /designs/{id}/previews` and `render?preview=true` explicitly opt into drafts.
 Chrome checks how built-in controls respond to programmatic clicks, Space, arrow
