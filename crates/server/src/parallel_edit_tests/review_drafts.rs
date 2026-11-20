@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn repair_starts_from_the_retained_draft_and_saves_after_verification() {
+async fn repair_can_target_a_draft_only_screen_and_preserves_other_draft_work() {
     let original = sample_design();
     let fake = ParallelFakeModel::start(None).await;
     let candidate = ReviewingCandidate::new(&fake);
@@ -9,6 +9,7 @@ async fn repair_starts_from_the_retained_draft_and_saves_after_verification() {
     let id = "talk-candidate-1";
     let mut draft = original.clone();
     let mut added = draft.screens[0].clone();
+    draft.screens[0].notes = Some("Completed launch changes in the retained draft".into());
     added.name = "Timeline".into();
     added.html = "<h1>Unique added timeline draft</h1>".into();
     draft.screens.push(added.clone());
@@ -25,7 +26,13 @@ async fn repair_starts_from_the_retained_draft_and_saves_after_verification() {
         .await
         .expect("repair turn should be recorded");
     fake.push_text(r#"{"unsupported_requirements":[]}"#.into());
-    fake.push_text(r#"{"instruction":"Fix the timeline", "screens":[], "minimum_new_screens":1, "requirements":["One timeline screen"]}"#.into());
+    fake.push_text(
+        json!({
+            "instruction":"Fix the timeline", "screens":[original.screens.len()],
+            "minimum_new_screens":1, "requirements":["One timeline screen"]
+        })
+        .to_string(),
+    );
     added.html = "<h1>Verified timeline content</h1>".into();
     fake.push_text(
         json!({"screens":[{"index":original.screens.len(),"screen":added}]}).to_string(),
@@ -45,7 +52,7 @@ async fn repair_starts_from_the_retained_draft_and_saves_after_verification() {
         .expect("the same candidate should still exist");
     assert_eq!(
         &saved.screens[..original.screens.len()],
-        original.screens.as_slice()
+        &draft.screens[..original.screens.len()]
     );
     assert_eq!(saved.screens.last(), Some(&added));
     assert!(
@@ -56,11 +63,10 @@ async fn repair_starts_from_the_retained_draft_and_saves_after_verification() {
             .expect("draft lookup should succeed")
             .is_none()
     );
-    assert!(
-        fake.requests()[2]
-            .to_string()
-            .contains("Unique added timeline draft")
-    );
+    assert!(fake.requests()[1].to_string().contains("Timeline"));
+    let repair_request = fake.requests()[2].to_string();
+    assert!(repair_request.contains("Unique added timeline draft"));
+    assert!(!repair_request.contains("Completed launch changes in the retained draft"));
     assert!(
         fake.requests()[3]
             .to_string()
