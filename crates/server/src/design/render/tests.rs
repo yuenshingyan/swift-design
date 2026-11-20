@@ -19,10 +19,46 @@ fn a_screen_link_opens_the_screen_in_play_mode_and_only_selects_in_edit_mode() {
     assert!(NAVIGATION_SCRIPT.contains("/^#screen-(\\d+)$/"));
     assert!(NAVIGATION_SCRIPT.contains("type: 'swift-design-navigate', target"));
     assert!(EDITING_SCRIPT.contains("closest('a[href]')) { event.preventDefault(); }"));
-    // The frame ids are the link targets, so a full page scrolls to
-    // them by itself.
+    // Links and standalone View URLs use the same frame IDs.
     let html = render_design(&sample_design(), false);
     assert!(html.contains("id=\"screen-2\""));
+}
+
+#[tokio::test]
+async fn view_starts_on_the_linked_screen_and_keeps_full_demo_navigation() {
+    if crate::screenshots::find_chrome().is_none() {
+        return;
+    }
+    let mut design = sample_design();
+    design.theme.fonts.heading = "Arial".into();
+    design.theme.fonts.body = "Arial".into();
+    design.theme.fonts.mono = "Courier New".into();
+    design.transition = None;
+    design.screens[0].html = "<a href='#screen-2'>Continue</a>".into();
+    let html = render_design(&design, false);
+    let script = super::page_script(&RenderOptions::default());
+    let (original_hash, original_element) = crate::render::script_markup(&script);
+    let probe = r#"
+const startsOnSecond = frames[1].getAttribute('data-swift-design-state') === 'current' &&
+    !frames[0].hasAttribute('data-swift-design-state');
+document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
+const canGoBack = frames[0].getAttribute('data-swift-design-state') === 'current';
+frames[0].querySelector('a').click();
+setTimeout(() => {
+    const canFollowLink = frames[1].getAttribute('data-swift-design-state') === 'current';
+    document.documentElement.setAttribute('data-start-screen-test', String(startsOnSecond && canGoBack && canFollowLink));
+}, 20);
+"#;
+    let (test_hash, test_element) =
+        crate::render::script_markup(&format!("location.hash = '#screen-2';\n{script}\n{probe}"));
+    let html = html
+        .replace(&original_hash, &test_hash)
+        .replace(&original_element, &test_element);
+    let dom =
+        crate::screenshots::dump_rendered_dom(&html, "http://127.0.0.1:3000", design.viewport)
+            .await
+            .expect("Chrome should open and navigate the full demo");
+    assert!(dom.contains("data-start-screen-test=\"true\""));
 }
 
 #[tokio::test]

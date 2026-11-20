@@ -884,6 +884,7 @@ div.brief-attachments:has(+ ul.brief-attachments) { padding-bottom: 0.4rem; }
   pointer-events: none; }
 .thumbnail.current { border-color: var(--teal); box-shadow: 0 0 0 3px var(--teal-tint); }
 .thumbnail.dragging { opacity: 0.6; cursor: grabbing; }
+.demo-thumbnails .thumbnail.read-only { cursor: pointer; }
 .thumbnail.export-selected { box-shadow: 0 0 0 2px var(--teal-line); }
 .thumbnail-export-checkbox { position: absolute; top: 0.25rem; left: 0.25rem; z-index: 3;
   width: 1.125rem; height: 1.125rem; margin: 0; cursor: pointer; accent-color: var(--teal);

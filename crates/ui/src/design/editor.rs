@@ -507,23 +507,23 @@ fn LoadedEditor(
                         if is_read_only() && live_draft.read().as_ref().is_some_and(|preview| preview.is_recovery) {
                             a {
                                 class: "canvas-tab",
-                                href: "{view_href(&design_id)}?preview=true",
+                                href: view_href(&design_id, selected(), true),
                                 target: "_blank",
                                 rel: "noopener noreferrer",
                                 title: "Play the full unverified draft in a new tab",
                                 "Play review draft"
                             }
-                        } else if is_dirty() || !has_saved() {
+                        } else if is_dirty() || selected() >= saved_screen_count {
                             button {
                                 class: "canvas-tab",
                                 disabled: true,
-                                title: "Wait for changes to save before viewing the demo",
+                                title: "View is available once this screen is saved",
                                 "View"
                             }
                         } else {
                             a {
                                 class: "canvas-tab",
-                                href: view_href(&design_id),
+                                href: view_href(&design_id, selected(), false),
                                 target: "_blank",
                                 rel: "noopener noreferrer",
                                 title: "View the full demo in a new tab",
@@ -766,14 +766,20 @@ fn LoadedEditor(
                                     is_deleting,
                                     is_pinned: pinned().contains(&index),
                                 });
-                                if !is_read_only() && export_screens.read().contains(&(index + 1)) {
-                                    class.push_str(" export-selected");
-                                }
+                                let title = if is_read_only() {
+                                    class.push_str(" read-only");
+                                    format!("{label} · click to view")
+                                } else {
+                                    if export_screens.read().contains(&(index + 1)) {
+                                        class.push_str(" export-selected");
+                                    }
+                                    format!("{label} · drag to reorder · ⌘-click to pin for the chat")
+                                };
                                 rsx! {
                                     div {
                                         key: "{index}",
                                         class: "{class}",
-                                        title: "{label} · drag to reorder · ⌘-click to pin for the chat",
+                                        title: "{title}",
                                         style: "--tile-width: {tile_width}rem",
                                         "data-index": "{index}",
                                         onclick: move |event: MouseEvent| {

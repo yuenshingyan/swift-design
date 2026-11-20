@@ -339,12 +339,14 @@ The ZIP contains only the selected saved screens, in
 screen order, keeping original filenames such as `candidate-screen-23.png`.
 `GET /designs/{id}/export.zip?screens=23-35` exposes the same selection; omitting
 `screens` preserves the all-screen export. Selection never renumbers navigation
-or mutates the design, and live drafts remain excluded from exports.
+or mutates the design. Live and review drafts do not show export checkboxes;
+export from the saved version.
 
 The design editor has two modes on a tab pair: **Play** (the default) and **Edit**. In
 Edit a click selects a node. In Play a click acts as it would for a user:
 a link to `#screen-3` opens screen 3, a `<details>` menu opens, and a
-checkbox or radio toggle flips. Full-demo View and exported HTML switch screens
+checkbox or radio toggle flips. **View** and **Play review draft** open the full
+demo at the selected screen. Full-demo View and exported HTML switch screens
 instantly by default; wheel scrolling stays within the current screen. Explicit
 page animations remain available in the transition picker. Deck defaults are unchanged.
 A demo carries no script. Flows are links
