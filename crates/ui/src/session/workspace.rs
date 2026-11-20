@@ -2,7 +2,8 @@ use crate::chat::{FailedEditCard, failed_edit_index};
 use crate::uploads::{AttachButton, AttachmentChips, PasteUploads, pending_uploads};
 
 use super::helpers::{
-    chat_placeholder, is_chat_open, is_start_offered, pinned_reference, set_answers,
+    chat_placeholder, is_chat_open, is_start_offered, is_waiting_for_reply, pinned_reference,
+    set_answers,
 };
 use super::*;
 
@@ -418,7 +419,9 @@ pub(crate) fn SessionWorkspace(
         move |_| {
             let session_id = session_id.clone();
             spawn(async move {
-                let _ = api::start_agent_run(&session_id).await;
+                if let Err(message) = api::start_agent_run(&session_id).await {
+                    error.set(Some(message));
+                }
             });
         }
     };
@@ -432,7 +435,15 @@ pub(crate) fn SessionWorkspace(
         .messages
         .iter()
         .any(|message| message.is_queued);
-    let can_start = is_start_offered(state, is_running, open_set.is_some())
+    let session_run = run_value
+        .as_ref()
+        .filter(|run| run.session_id.as_deref() == Some(session_id.as_str()));
+    let awaiting_reply = is_waiting_for_reply(
+        &session_view,
+        session_run.is_some_and(|run| run.is_running),
+        has_queued,
+    );
+    let can_start = is_start_offered(state, is_running, open_set.is_some(), awaiting_reply)
         || (has_queued && !is_running && state == WorkflowState::Reviewing);
 
     rsx! {
@@ -599,7 +610,14 @@ pub(crate) fn SessionWorkspace(
                             }
                         }
                     }
-                    if let Some(run) = &run_value {
+                    if awaiting_reply {
+                        div { class: "status-card", role: "status",
+                            div { class: "status-line",
+                                span { class: "status-dot waiting", aria_hidden: "true" }
+                                span { "Waiting for your reply" }
+                            }
+                        }
+                    } else if let Some(run) = session_run {
                         div { class: "status-card",
                             p { class: "progress-step", "{progress_label(state, Some(run))}" }
                             RunStatusCard { run: run.clone() }

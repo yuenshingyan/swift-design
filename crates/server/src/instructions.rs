@@ -43,9 +43,13 @@ pub(crate) const DEMO_SCREEN_RULE: &str = "Separate deliverable views: Every req
 /// The app-owned interaction vocabulary for controls within a demo screen.
 pub(crate) const DEMO_PROTOTYPE_RULE: &str = "Use built-in prototype actions for local selections and state changes. Do not create a separate screen for each local state. Put data-demo-panel='group:state' on each state panel. Use a div, section, or article. Use lowercase letters, digits, and hyphens for each name. Put hidden on all panels except the default. Put an action on an anchor with href='#demo-panel' and data-demo-action='group:state'. Give it a clear label and role='button'. For ordered states use group:@previous, group:@next, group:@first, or group:@last. Panel order sets the sequence. Keep controls reachable from the states they operate on. The viewer handles clicks, Enter, Space, arrow keys, Home, and End on those controls. These actions change only local presentation state. They do not fetch data or run custom code. Use numbered screen links for page navigation. Use a separate initial screen for any state the user explicitly requests as an independent export.";
 
+/// The default fidelity for planning, writing, and reviewing a clickable demo.
+pub(crate) const DEMO_FIDELITY_RULE: &str = "Build a clickable prototype, not the production system it represents. Use sample records and simulated outcomes by default. Demonstrate each requested workflow with built-in controls and linked screens. Treat descriptions of backend behavior as product requirements to illustrate, not as requests to execute that backend. Do not claim real integration, persistence, permissions, or document processing.";
+
 /// Design (demo) content rules, shared by the agent instructions and the
 /// built-in generation engine. Simplified Technical English.
 pub const DEMO_RULES: &[&str] = &[
+    DEMO_FIDELITY_RULE,
     "A screen is one HTML fragment in `html` and one CSS block in `css`.",
     "Design each screen for the px canvas in the design's `viewport`. The default is 1440 by 900 px (desktop web). Use 390 by 844 for a phone and 1024 by 768 for a tablet. Use px units. Do not use vw, vh, vmin, vmax, or container units.",
     "Lay out with flex, grid, or absolute positioning. The screen root is position: relative, the viewport size, overflow: hidden. Do not add an outer box of your own with a fixed height and overflow: hidden. Such a box hides overflow from the fit.",

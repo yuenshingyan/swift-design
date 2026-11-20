@@ -324,8 +324,8 @@ pub(crate) fn capability_rejection(content: &str) -> Result<Option<String>, Stri
 /// The actual artifact restrictions used to judge requests before dispatch.
 pub(crate) fn capability_prompt(kind: ArtifactKind) -> String {
     use crate::instructions::{
-        ARTWORK_RULES, CAMPAIGN_RULES, DECK_RULES, DEMO_RULES, DOCUMENT_RULES, MAILING_RULES,
-        PRINT_RULES, SOCIAL_RULES,
+        ARTWORK_RULES, CAMPAIGN_RULES, DECK_RULES, DEMO_FIDELITY_RULE, DEMO_RULES, DOCUMENT_RULES,
+        MAILING_RULES, PRINT_RULES, SOCIAL_RULES,
     };
 
     let rules = match kind {
@@ -338,6 +338,23 @@ pub(crate) fn capability_prompt(kind: ArtifactKind) -> String {
         ArtifactKind::Campaign => CAMPAIGN_RULES,
         ArtifactKind::Artwork => ARTWORK_RULES,
     };
+    if kind == ArtifactKind::Demo {
+        return format!(
+            "Demo capability check:\n{DEMO_FIDELITY_RULE}\n\n\
+             Proceed when the prototype can demonstrate the requested workflows. Do not ask for permission to simulate them.\n\
+             Use visible sample states for search, data entry, evidence review, permissions, and changes to records. Connect those states with working prototype actions.\n\
+             Show desktop and narrow layouts as separate visual deliverables. Put the narrow layout on a named, exportable screen inside the candidate canvas.\n\
+             Do not infer separate candidate viewports or live resizing. Request a source file only if the brief requires that exact file. Label any sample evidence.\n\n\
+             Example: A clickable review desk demonstrates searching, jumping to evidence, and publishing a sample revision. It does not need live document processing or storage.\n\
+             Counterexample: A request that the prototype itself must publish to the live system requires an unsupported operation.\n\n\
+             Report a blocker only if the user explicitly requires the prototype or export itself to do something it cannot do. Cite the exact requirement in your explanation.\n\
+             Do not use a prior assistant's assumption as a requirement. Honor a user's clarification that a simulation is enough. Do not revive resolved blockers.\n\
+             Put only remaining blockers in unsupported_requirements. Give one concrete option per blocker in supported_alternatives. State what the option will not do.\n\
+             Do not start work with unresolved explicit blockers. Apply approvals only to the alternatives the user accepts.\n\
+             If no blockers remain, return empty arrays and continue planning, generating, or editing.\n\nActual artifact rules:\n{}",
+            rules.join("\n")
+        );
+    }
     format!(
         "Capability check: Before promising or starting work, compare the current mandatory deliverables with the actual artifact rules below. Return unsupported_requirements as an array of specific unmet execution or output capabilities, empty when supported. Also return supported_alternatives: one concrete, feasible scope revision for each unsupported requirement, in the same order, or [] when supported. Each proposal must say what can actually be delivered, what must change or be omitted, and which behavior or guarantee will not be provided; generic 'approve an alternative' advice is insufficient. A nonempty array blocks generation, editing and merging even when other flags or questions suggest proceeding. Explain each limitation; never promise an unsupported deliverable. Do not silently drop requirements or substitute notes, source code, screenshots or specifications for required working behavior. Automatically propose supported alternatives, but never execute or accept a changed scope without explicit user approval. Approval applies only to the clearly described changes the user accepts; partial approval leaves other mandatory requirements intact. Asking for suggestions is not approval. Base each proposal on the actual artifact rules and preserve unaffected requirements. When demo rules permit it, use built-in prototype actions for local state changes and supported keyboard controls. Do not classify a supported built-in interaction as unsupported merely because ordinary implementations use JavaScript. For behavior outside the built-in actions, propose an honest local simulation or visual walkthrough with concrete controller and accessibility notes. Say which behavior will not run. Do not promise renderer-managed font requests can be disabled: for a strict network-free requirement, propose explicitly relaxing that guarantee where necessary. For unsupported HTML semantics, propose permitted markup and disclose the semantic gap. For multiple viewport sizes, where applicable propose narrower component specimens inside the unchanged canvas, explicitly not independently sized full-workspace layouts; separate viewport candidates require explicit approval to expand candidate scope. Never suggest a nonexistent export mode, runtime, font setting or other feature. If there is no equivalent supported substitute, identify the deliverable that must be omitted and propose the remaining supported work honestly. A rejected request remains rejected if the user insists or merely says retry; only an explicit revised scope or approval changes it. Read the current request with its clarifications; do not resurrect earlier completed work or let assistant promises authorize an alternative. Distinguish source code for review, quoted examples and concrete permitted implementation specifications from code that must execute in the preview or exported artifact. Mentioning JavaScript, Python or another language alone is not unsupported. HTML/CSS renderers do not execute user scripts, custom keyboard handlers, asynchronous controllers, backend operations or other language runtimes. Screen links and CSS interactions are supported where the selected artifact rules permit them. Static visual states and explicitly permitted behavior specifications remain supported. Do not claim a separate executable file, runtime or integration can be delivered when this artifact format cannot carry it. Do not ask ordinary setup questions to work around a capability conflict.\nActual artifact rules:\n{}",
         rules.join("\n")
@@ -579,6 +596,9 @@ mod tests {
             let prompt = planner_prompt(kind);
             assert!(prompt.contains(&capability_prompt(kind)));
             assert!(prompt.contains("Do not write `<script>`"));
+            if kind == ArtifactKind::Demo {
+                continue;
+            }
             assert!(prompt.contains("source code for review"));
             assert!(prompt.contains("explicit user approval"));
             assert!(prompt.contains("Automatically propose supported alternatives"));
@@ -602,6 +622,21 @@ mod tests {
         );
         assert!(capability_prompt(ArtifactKind::Deck).contains("1920 by 1080"));
         assert!(capability_prompt(ArtifactKind::Mailing).contains("600"));
+    }
+
+    #[test]
+    fn demo_capability_check_does_not_infer_live_systems_or_separate_viewports() {
+        let demo = capability_prompt(ArtifactKind::Demo);
+        assert!(demo.contains(crate::instructions::DEMO_FIDELITY_RULE));
+        assert!(demo.contains("Do not ask for permission to simulate them"));
+        assert!(demo.contains("Do not infer separate candidate viewports or live resizing"));
+        assert!(demo.contains("a named, exportable screen inside the candidate canvas"));
+        assert!(demo.contains("Do not use a prior assistant's assumption as a requirement"));
+        assert!(
+            demo.contains("only if the user explicitly requires the prototype or export itself")
+        );
+        assert!(demo.contains("Apply approvals only to the alternatives the user accepts"));
+        assert!(!capability_prompt(ArtifactKind::Deck).contains("Demo capability check:"));
     }
 
     #[test]
