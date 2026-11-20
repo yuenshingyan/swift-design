@@ -182,7 +182,9 @@ const isFollowing = !!(design && design.dataset.swiftDesignChannel);
 function scrollIndex() {
   return Math.round(design.scrollTop / (design.clientHeight || 1));
 }
-let shown = 0;
+// View links use the same screen IDs as in-demo navigation.
+const startIndex = frames.findIndex(frame => '#' + frame.id === window.location.hash && /^screen-\d+$/.test(frame.id));
+let shown = Math.max(startIndex, 0);
 let isBusy = false;
 let queued = null;
 function stack(next, sign) {
@@ -218,7 +220,7 @@ function step(amount) {
   const target = Math.min(Math.max(current + amount, 0), frames.length - 1);
   show(target, amount >= 0 ? 1 : -1);
 }
-if (effect && frames.length) { frames[0].setAttribute('data-swift-design-state', 'current'); }
+if (effect && frames.length) { frames[shown].setAttribute('data-swift-design-state', 'current'); }
 document.addEventListener('keydown', (event) => {
   if (event.defaultPrevented || isFollowing || (event.target && event.target.isContentEditable)) { return; }
   const isNext = event.key === 'ArrowRight' || event.key === 'PageDown';

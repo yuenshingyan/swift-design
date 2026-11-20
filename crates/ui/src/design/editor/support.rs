@@ -255,9 +255,10 @@ pub(super) fn DesignExportGroup(
     }
 }
 
-/// Opens the full saved demo without editor panels or editing scripts.
-pub(super) fn view_href(design_id: &str) -> String {
-    format!("/designs/{design_id}/render")
+/// Opens the full demo at a screen without editor panels or editing scripts.
+pub(super) fn view_href(design_id: &str, index: usize, is_preview: bool) -> String {
+    let query = if is_preview { "?preview=true" } else { "" };
+    format!("/designs/{design_id}/render{query}#screen-{}", index + 1)
 }
 
 /// The label of the menu that downloads the screen on display.
@@ -510,6 +511,9 @@ mod tests {
         assert!(mutations.contains("Live draft — unverified"));
         assert!(mutations.contains("preview=true"));
         assert!(mutations.contains("readonly"));
+        assert!(mutations.contains("click to view"));
+        assert!(!mutations.contains("drag to reorder"));
+        assert!(!mutations.contains("thumbnail-export-checkbox"));
         assert!(!mutations.contains("editable=true"));
         assert!(!mutations.contains("export.html"));
         assert!(!mutations.contains("Selected screens"));
@@ -579,10 +583,14 @@ mod tests {
     }
 
     #[test]
-    fn view_opens_the_full_demo_without_scoping_or_editing() {
+    fn view_opens_the_full_demo_at_the_selected_screen_without_scoping_or_editing() {
         assert_eq!(
-            view_href("demo-candidate-2"),
-            "/designs/demo-candidate-2/render"
+            view_href("demo-candidate-2", 2, false),
+            "/designs/demo-candidate-2/render#screen-3"
+        );
+        assert_eq!(
+            view_href("demo-candidate-2", 0, true),
+            "/designs/demo-candidate-2/render?preview=true#screen-1"
         );
     }
 
