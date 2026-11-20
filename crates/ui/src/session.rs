@@ -31,7 +31,8 @@ use design_model::{
 pub(crate) fn progress_label(state: WorkflowState, run: Option<&api::AgentRun>) -> String {
     let running = run.is_some_and(|run| run.is_running);
     match state {
-        WorkflowState::Intake => "Reading your request…".to_owned(),
+        WorkflowState::Intake if running => "Reading your request…".to_owned(),
+        WorkflowState::Intake => "Waiting to start".to_owned(),
         WorkflowState::Clarifying if running => "Preparing questions…".to_owned(),
         WorkflowState::Clarifying => "Waiting for your answers".to_owned(),
         WorkflowState::Generating => run

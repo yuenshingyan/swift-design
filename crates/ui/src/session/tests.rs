@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use design_model::WorkflowState;
 
-use crate::api::AgentRun;
+use crate::api::{AgentRun, ChatMessage, RunRecord, Session, SessionView};
 
+use super::helpers::is_waiting_for_reply;
 use super::{
     candidate_mentions, chat_placeholder, generation_step, is_canvas_shown, is_chat_open,
     is_start_offered, pin_candidates, pinned_reference, progress_label,
@@ -80,14 +81,82 @@ fn the_chat_stays_open_while_a_run_works_and_queues_prompts() {
 
 #[test]
 fn start_is_offered_only_when_a_run_should_be_active_and_none_is() {
-    assert!(is_start_offered(WorkflowState::Intake, false, false));
-    assert!(is_start_offered(WorkflowState::Generating, false, false));
-    assert!(is_start_offered(WorkflowState::Clarifying, false, false));
-    assert!(!is_start_offered(WorkflowState::Clarifying, false, true));
-    assert!(!is_start_offered(WorkflowState::Clarifying, true, false));
-    assert!(!is_start_offered(WorkflowState::Error, false, false));
-    assert!(!is_start_offered(WorkflowState::Stopped, false, false));
-    assert!(!is_start_offered(WorkflowState::Reviewing, false, false));
+    for state in [
+        WorkflowState::Intake,
+        WorkflowState::Generating,
+        WorkflowState::Clarifying,
+    ] {
+        assert!(is_start_offered(state, false, false, false));
+        assert!(!is_start_offered(state, true, false, false));
+    }
+    for state in [WorkflowState::Intake, WorkflowState::Clarifying] {
+        assert!(!is_start_offered(state, false, false, true));
+    }
+    assert!(!is_start_offered(
+        WorkflowState::Clarifying,
+        false,
+        true,
+        false
+    ));
+    for state in [
+        WorkflowState::Error,
+        WorkflowState::Stopped,
+        WorkflowState::Reviewing,
+    ] {
+        assert!(!is_start_offered(state, false, false, false));
+    }
+}
+
+#[test]
+fn a_completed_intake_reply_waits_for_chat_without_offering_another_start() {
+    let mut session = SessionView {
+        session: Session {
+            id: "desk".into(),
+            title: "Review desk".into(),
+            request: "Design the review desk.".into(),
+            artifact_kind: design_model::ArtifactKind::Demo,
+            state: WorkflowState::Intake,
+            error: None,
+            chosen_design: None,
+            options: Default::default(),
+        },
+        messages: vec![ChatMessage {
+            role: "assistant".into(),
+            content: "Can you confirm the scope?".into(),
+            design: None,
+            pinned: Vec::new(),
+            question_set: None,
+            is_continue: false,
+            is_queued: false,
+            at: None,
+            artifacts: Vec::new(),
+            snapshot_stamps: None,
+        }],
+        runs: vec![RunRecord {
+            run_id: "1-1".into(),
+            mode: "generation".into(),
+            result: Some("replied".into()),
+        }],
+        open_question_set: None,
+        question_sets: Vec::new(),
+        answers: Vec::new(),
+        designs: Vec::new(),
+        decks: Vec::new(),
+        documents: Vec::new(),
+        socials: Vec::new(),
+        prints: Vec::new(),
+        mailings: Vec::new(),
+        campaigns: Vec::new(),
+        artworks: Vec::new(),
+    };
+    assert!(is_waiting_for_reply(&session, false, false));
+    assert!(!is_waiting_for_reply(&session, false, true));
+    assert!(!is_waiting_for_reply(&session, true, false));
+    session.open_question_set = Some(1);
+    assert!(!is_waiting_for_reply(&session, false, false));
+    session.open_question_set = None;
+    session.runs.clear();
+    assert!(!is_waiting_for_reply(&session, false, false));
 }
 
 fn run(log: &str) -> AgentRun {
@@ -110,7 +179,19 @@ fn run(log: &str) -> AgentRun {
 fn progress_labels_follow_the_state() {
     assert_eq!(
         progress_label(WorkflowState::Intake, None),
+        "Waiting to start"
+    );
+    assert_eq!(
+        progress_label(WorkflowState::Intake, Some(&run("planning the turn"))),
         "Reading your request…"
+    );
+    let completed = AgentRun {
+        is_running: false,
+        ..run("replied; waiting for the user")
+    };
+    assert_eq!(
+        progress_label(WorkflowState::Intake, Some(&completed)),
+        "Waiting to start"
     );
     assert_eq!(
         progress_label(WorkflowState::Clarifying, Some(&run(""))),

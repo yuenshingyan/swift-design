@@ -3,8 +3,13 @@ use super::*;
 /// True when a run should be active and none is, so the studio offers
 /// `Start the agent`: reading the request, drafting after the answers,
 /// or generating. Not while a question set waits for the user.
-pub(crate) fn is_start_offered(state: WorkflowState, is_running: bool, has_open_set: bool) -> bool {
-    if is_running {
+pub(crate) fn is_start_offered(
+    state: WorkflowState,
+    is_running: bool,
+    has_open_set: bool,
+    is_waiting_for_reply: bool,
+) -> bool {
+    if is_running || is_waiting_for_reply {
         return false;
     }
     match state {
@@ -12,6 +17,28 @@ pub(crate) fn is_start_offered(state: WorkflowState, is_running: bool, has_open_
         WorkflowState::Clarifying => !has_open_set,
         _ => false,
     }
+}
+
+/// True when a completed reply is waiting for the user, rather than another run.
+pub(crate) fn is_waiting_for_reply(
+    view: &api::SessionView,
+    is_running: bool,
+    has_queued: bool,
+) -> bool {
+    matches!(
+        view.session.state,
+        WorkflowState::Intake | WorkflowState::Clarifying
+    ) && !is_running
+        && !has_queued
+        && view.open_question_set.is_none()
+        && view
+            .runs
+            .last()
+            .is_some_and(|run| run.result.as_deref() == Some("replied"))
+        && view
+            .messages
+            .last()
+            .is_some_and(|message| message.role == "assistant")
 }
 
 /// Keeps chat open in every state. Busy runs queue prompts; halted runs resume on send.

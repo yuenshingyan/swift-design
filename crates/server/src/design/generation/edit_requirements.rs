@@ -4,7 +4,7 @@ use design_model::Design;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::instructions::{DEMO_PROTOTYPE_RULE, DEMO_SCREEN_RULE};
+use crate::instructions::{DEMO_FIDELITY_RULE, DEMO_PROTOTYPE_RULE, DEMO_SCREEN_RULE};
 
 use crate::edit_focus::EditOrder;
 use crate::generation::{Attachments, GenerationEngine};
@@ -138,7 +138,7 @@ impl GenerationEngine {
         ];
         let mut messages = messages;
         messages[0]["content"] = json!(format!(
-            "{}\n{DEMO_ACCEPTANCE_CONTRACT}\n{DEMO_SCREEN_RULE}\n{DEMO_PROTOTYPE_RULE}",
+            "{}\n{DEMO_FIDELITY_RULE}\n{DEMO_ACCEPTANCE_CONTRACT}\n{DEMO_SCREEN_RULE}\n{DEMO_PROTOTYPE_RULE}",
             messages[0]["content"].as_str().unwrap_or_default()
         ));
         let reply = self.model.chat(client, &messages, effort).await?;
@@ -152,7 +152,7 @@ impl GenerationEngine {
         }
         plan.validate(design)?;
         plan.instruction = format!(
-            "{}\n{DEMO_ACCEPTANCE_CONTRACT}\n{DEMO_SCREEN_RULE}\n{DEMO_PROTOTYPE_RULE}",
+            "{}\n{DEMO_FIDELITY_RULE}\n{DEMO_ACCEPTANCE_CONTRACT}\n{DEMO_SCREEN_RULE}\n{DEMO_PROTOTYPE_RULE}",
             plan.instruction
         );
         plan.source = format!(
@@ -180,7 +180,7 @@ impl GenerationEngine {
         ];
         let mut messages = messages;
         messages[0]["content"] = json!(format!(
-            "{}\n{DEMO_ACCEPTANCE_CONTRACT}\n{DEMO_SCREEN_RULE}\n{DEMO_PROTOTYPE_RULE}",
+            "{}\n{DEMO_FIDELITY_RULE}\n{DEMO_ACCEPTANCE_CONTRACT}\n{DEMO_SCREEN_RULE}\n{DEMO_PROTOTYPE_RULE}",
             messages[0]["content"].as_str().unwrap_or_default()
         ));
         let reply = self.model.chat(client, &messages, effort).await?;
