@@ -157,9 +157,10 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
       // A few clipped pixels are a review warning, not a reason to discard a design.
       const axes = overflowAxes.get(element);
       const severe = (excess, size) => excess > 8 || excess > size * 0.15;
-      const isSevere = (axes.x && severe(element.scrollWidth - element.clientWidth, element.clientWidth))
-        || (axes.y && severe(element.scrollHeight - element.clientHeight, element.clientHeight));
-      findings.push({ screen, node: name(element), kind: isSevere ? 'overflow' : 'minor_overflow', detail: 'content needs ' + needs.join(' and ') });
+      const overflow_px = [axes.x ? element.scrollWidth - element.clientWidth : 0,
+        axes.y ? element.scrollHeight - element.clientHeight : 0];
+      const isSevere = severe(overflow_px[0], element.clientWidth) || severe(overflow_px[1], element.clientHeight);
+      findings.push({ screen, node: name(element), kind: isSevere ? 'overflow' : 'minor_overflow', detail: 'content needs ' + needs.join(' and '), overflow_px });
     });
     if (root.scrollHeight > root.clientHeight + 2 || root.scrollWidth > root.clientWidth + 2) {
       findings.push({ screen, node: 'root', kind: 'off_screen', detail: 'content runs past the ' + canvasWidth + ' by ' + canvasHeight + ' canvas (' + Math.round(root.scrollWidth) + ' by ' + Math.round(root.scrollHeight) + 'px)' });

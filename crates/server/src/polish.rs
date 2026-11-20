@@ -20,6 +20,9 @@ pub(crate) struct Finding {
     /// What was measured.
     #[serde(default)]
     pub(crate) detail: String,
+    /// Measured overflow beyond the box, in horizontal and vertical CSS pixels.
+    #[serde(default)]
+    pub(crate) overflow_px: Option<[u32; 2]>,
 }
 
 /// The most polish rounds one candidate may take, by effort level.
@@ -43,7 +46,7 @@ pub enum PolishStop {
     /// No Chrome, so nothing was measured. The candidate is unchecked,
     /// not clean.
     NotMeasured,
-    /// The last round did not reduce the findings, so another will not.
+    /// The last round made no qualifying layout improvement.
     NoImprovement,
     /// The effort's round limit ran out with findings left.
     OutOfRounds,
@@ -58,7 +61,7 @@ impl PolishStop {
                 "not polished: no Chrome, so the layout was never measured".to_owned()
             }
             PolishStop::NoImprovement => format!(
-                "polish stopped after {rounds} round(s): {findings} finding(s) left and the last round fixed none"
+                "polish stopped after {rounds} round(s): {findings} finding(s) left and the last round did not improve the layout"
             ),
             PolishStop::OutOfRounds => {
                 format!("polish used all {rounds} round(s) with {findings} finding(s) left")
