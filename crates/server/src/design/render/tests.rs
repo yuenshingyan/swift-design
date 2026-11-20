@@ -25,7 +25,7 @@ fn a_screen_link_opens_the_screen_in_play_mode_and_only_selects_in_edit_mode() {
 }
 
 #[tokio::test]
-async fn view_starts_on_the_linked_screen_and_keeps_full_demo_navigation() {
+async fn view_starts_on_the_requested_screen_and_keeps_full_demo_navigation() {
     if crate::screenshots::find_chrome().is_none() {
         return;
     }
@@ -35,8 +35,12 @@ async fn view_starts_on_the_linked_screen_and_keeps_full_demo_navigation() {
     design.theme.fonts.mono = "Courier New".into();
     design.transition = None;
     design.screens[0].html = "<a href='#screen-2'>Continue</a>".into();
-    let html = render_design(&design, false);
-    let script = super::page_script(&RenderOptions::default());
+    let options = RenderOptions {
+        start_screen: Some(1),
+        ..RenderOptions::default()
+    };
+    let html = render_design_with(&design, options.clone());
+    let script = super::page_script(&options);
     let (original_hash, original_element) = crate::render::script_markup(&script);
     let probe = r#"
 const startsOnSecond = frames[1].getAttribute('data-swift-design-state') === 'current' &&
@@ -50,7 +54,7 @@ setTimeout(() => {
 }, 20);
 "#;
     let (test_hash, test_element) =
-        crate::render::script_markup(&format!("location.hash = '#screen-2';\n{script}\n{probe}"));
+        crate::render::script_markup(&format!("location.hash = '#screen-1';\n{script}\n{probe}"));
     let html = html
         .replace(&original_hash, &test_hash)
         .replace(&original_element, &test_element);
@@ -121,11 +125,21 @@ async fn browser_audit_reports_working_controls_and_a_control_missing_from_keybo
     design.theme.fonts.body = "Arial".into();
     design.theme.fonts.mono = "Courier New".into();
     let controls = "<section data-demo-panel='filter:first'>First</section><section hidden data-demo-panel='filter:second'>Second</section><a href='#demo-panel' data-demo-action='filter:@next'>Next</a>";
-    design.screens[0].html = controls.into();
-    design.screens[1].html = controls.replace("<a href", "<a tabindex='-1' href");
+    // Closed and nested disclosures must be opened for the focus probe, then restored.
+    design.screens[0].html = format!(
+        "<details name='filter-menu' open><summary>Open peer</summary><p>Other choices</p></details><details name='filter-menu'><summary>Filters</summary><details><summary>More</summary>{controls}</details></details>"
+    );
+    design.screens[1].html = format!(
+        "<details><summary>Filters</summary>{}</details>",
+        controls.replace("<a href", "<a tabindex='-1' href")
+    );
     let dom = crate::screenshots::dump_design_dom(&design, "http://127.0.0.1:3000")
         .await
         .expect("Chrome should return a prototype audit");
+    assert!(dom.contains("<details name=\"filter-menu\" open=\"\"><summary>Open peer</summary>"));
+    assert!(dom.contains(
+        "<details name=\"filter-menu\"><summary>Filters</summary><details><summary>More</summary>"
+    ));
     let audit = crate::design::polish::DemoAudit::from_dom(&dom, design.screens.len())
         .expect("the complete audit should parse");
     let evidence = audit.prototype_evidence();

@@ -695,6 +695,9 @@ struct RenderQuery {
     /// editor preview.
     #[serde(default)]
     screen: Option<usize>,
+    /// Open the full demo at this one-based screen. Out-of-range values use screen 1.
+    #[serde(default)]
+    start_screen: Option<usize>,
 }
 
 /// Renders one stored design to HTML, or reports every validation error.
@@ -744,6 +747,7 @@ async fn render_stored_design(
             let options = crate::design::render::RenderOptions {
                 is_editable: query.editable && !is_preview,
                 only_screen,
+                start_screen: query.start_screen.and_then(|number| number.checked_sub(1)),
                 ..crate::design::render::RenderOptions::default()
             };
             let mut html = crate::design::render::render_design_with(&design, options);
@@ -787,6 +791,47 @@ mod tests {
     fn store_with_history(directory: &std::path::Path) -> DesignStore {
         DesignStore::new(directory.join("designs"))
             .with_history(HistoryStore::new(directory.join("history")))
+    }
+
+    #[tokio::test]
+    async fn view_start_screen_keeps_all_frames_and_does_not_change_single_screen_renders() {
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
+        store_with_history(directory.path())
+            .save("demo", &sample_design())
+            .await
+            .expect("sample demo should save");
+        let application = test_application(&directory);
+        let (status, html) = send(
+            application.clone(),
+            "GET",
+            "/designs/demo/render?start_screen=2",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("id=\"screen-1\" data-swift-design-frame>"));
+        assert!(html.contains(
+            "id=\"screen-2\" data-swift-design-frame data-swift-design-state=\"current\">"
+        ));
+        for query in [
+            "start_screen=999",
+            "start_screen=0",
+            "screen=2&start_screen=1",
+        ] {
+            let (status, html) = send(
+                application.clone(),
+                "GET",
+                &format!("/designs/demo/render?{query}"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(html.contains("id=\"screen-2\" data-swift-design-frame>"));
+            assert_eq!(
+                html.contains("id=\"screen-1\""),
+                !query.starts_with("screen=")
+            );
+        }
     }
 
     #[tokio::test]

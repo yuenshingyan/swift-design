@@ -129,6 +129,7 @@ async fn live_preview_never_changes_saved_design_history_or_default_render() {
                 editable: false,
                 preview: false,
                 screen: None,
+                start_screen: None,
             }),
         )
         .await,
@@ -143,6 +144,7 @@ async fn live_preview_never_changes_saved_design_history_or_default_render() {
             editable: true,
             preview: true,
             screen: Some(1),
+            start_screen: None,
         }),
     )
     .await;
@@ -208,13 +210,19 @@ async fn recovery_stays_read_only_on_the_same_candidate_after_reopening_the_stor
             Query(RenderQuery {
                 editable: true,
                 preview: true,
-                screen: Some(1),
+                screen: None,
+                start_screen: Some(2),
             }),
         )
         .await,
     )
     .await;
     assert!(rendered.contains("Needs review — unverified draft"));
+    assert!(
+        rendered.contains(
+            "id=\"screen-2\" data-swift-design-frame data-swift-design-state=\"current\">"
+        )
+    );
     assert!(!rendered.contains("swift-design-html"));
     assert_eq!(
         store

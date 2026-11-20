@@ -182,9 +182,10 @@ const isFollowing = !!(design && design.dataset.swiftDesignChannel);
 function scrollIndex() {
   return Math.round(design.scrollTop / (design.clientHeight || 1));
 }
-// View links use the same screen IDs as in-demo navigation.
-const startIndex = frames.findIndex(frame => '#' + frame.id === window.location.hash && /^screen-\d+$/.test(frame.id));
-let shown = Math.max(startIndex, 0);
+// A full demo can start on a frame marked by the renderer. Older View links use the frame hash.
+const initialFrame = frames.findIndex(frame => frame.getAttribute('data-swift-design-state') === 'current');
+const linkedFrame = frames.findIndex(frame => '#' + frame.id === window.location.hash && /^screen-\d+$/.test(frame.id));
+let shown = initialFrame >= 0 ? initialFrame : Math.max(linkedFrame, 0);
 let isBusy = false;
 let queued = null;
 function stack(next, sign) {

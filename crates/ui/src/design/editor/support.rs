@@ -257,8 +257,11 @@ pub(super) fn DesignExportGroup(
 
 /// Opens the full demo at a screen without editor panels or editing scripts.
 pub(super) fn view_href(design_id: &str, index: usize, is_preview: bool) -> String {
-    let query = if is_preview { "?preview=true" } else { "" };
-    format!("/designs/{design_id}/render{query}#screen-{}", index + 1)
+    let preview = if is_preview { "&preview=true" } else { "" };
+    format!(
+        "/designs/{design_id}/render?start_screen={}{preview}",
+        index + 1
+    )
 }
 
 /// The label of the menu that downloads the screen on display.
@@ -586,11 +589,11 @@ mod tests {
     fn view_opens_the_full_demo_at_the_selected_screen_without_scoping_or_editing() {
         assert_eq!(
             view_href("demo-candidate-2", 2, false),
-            "/designs/demo-candidate-2/render#screen-3"
+            "/designs/demo-candidate-2/render?start_screen=3"
         );
         assert_eq!(
             view_href("demo-candidate-2", 0, true),
-            "/designs/demo-candidate-2/render?preview=true#screen-1"
+            "/designs/demo-candidate-2/render?start_screen=1&preview=true"
         );
     }
 
