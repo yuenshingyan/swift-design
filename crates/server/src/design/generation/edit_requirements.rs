@@ -25,6 +25,41 @@ struct DemoEditReview {
 struct RequirementReview {
     complete: bool,
     reason: String,
+    #[serde(default)]
+    screens: Vec<usize>,
+}
+
+#[derive(Debug)]
+pub(super) struct DemoEditFailure {
+    pub requirement: usize,
+    pub detail: String,
+    pub screens: Vec<usize>,
+}
+
+// Review wording can change between rounds. Compare only checklist positions
+// and known affected screens, and do not trade previously passing work for fixes.
+pub(super) fn review_improved(previous: &[DemoEditFailure], next: &[DemoEditFailure]) -> bool {
+    let mut improved = next.len() < previous.len();
+    for current in next {
+        let Some(before) = previous
+            .iter()
+            .find(|old| old.requirement == current.requirement)
+        else {
+            return false;
+        };
+        if !before.screens.is_empty() {
+            if current.screens.is_empty()
+                || !current
+                    .screens
+                    .iter()
+                    .all(|screen| before.screens.contains(screen))
+            {
+                return false;
+            }
+            improved |= current.screens.len() < before.screens.len();
+        }
+    }
+    improved
 }
 
 #[derive(Deserialize)]
@@ -79,7 +114,11 @@ impl DemoEditRequirements {
         Ok(())
     }
 
-    fn review_failures(&self, review: &DemoEditReview) -> Result<Vec<String>, String> {
+    fn review_failures(
+        &self,
+        review: &DemoEditReview,
+        screen_count: usize,
+    ) -> Result<Vec<DemoEditFailure>, String> {
         if let Some(reason) = &review.reference_error {
             if reason.trim().is_empty() {
                 return Err(
@@ -98,7 +137,9 @@ impl DemoEditRequirements {
             return Err("Cannot verify demo edit: the review omitted requirements.".into());
         }
         let mut missing = Vec::new();
-        for (item, result) in self.requirements.iter().zip(&review.coverage) {
+        for (requirement, (item, result)) in
+            self.requirements.iter().zip(&review.coverage).enumerate()
+        {
             if !result.complete {
                 if result.reason.trim().is_empty() {
                     return Err(
@@ -106,7 +147,17 @@ impl DemoEditRequirements {
                             .into(),
                     );
                 }
-                missing.push(format!("{item}: {}", result.reason));
+                let mut screens = result.screens.clone();
+                if screens.iter().any(|&screen| screen >= screen_count) {
+                    return Err("Cannot verify demo edit: a review finding names a screen outside the draft.".into());
+                }
+                screens.sort_unstable();
+                screens.dedup();
+                missing.push(DemoEditFailure {
+                    requirement,
+                    detail: format!("{item}: {}", result.reason),
+                    screens,
+                });
             }
         }
         Ok(missing)
@@ -168,10 +219,10 @@ impl GenerationEngine {
         plan: &DemoEditRequirements,
         evidence: DemoEditEvidence<'_>,
         effort: &str,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<DemoEditFailure>, String> {
         let messages = vec![
             json!({"role": "system", "content":
-            "Review demo requirement coverage before saving. Return only a JSON object with coverage (one object per checklist item in order, each with complete: boolean and reason: string) and reference_error (null unless a required reference cannot be inspected, then a specific explanation and recovery action), plus unsupported_requirements (an array of explicitly requested executable capabilities the renderer cannot support, empty otherwise). Explain each incomplete item with concrete evidence and an actionable correction. Use the attached references when judging theme matching; do not invent reference colors or fonts. If a required reference is missing or unreadable, report reference_error rather than treating it as an incomplete edit. Judge rendered visual requirements from HTML/CSS and navigation; judge specification-based requirements from complete concrete component/state specifications when the user permits them, not promises of future work. For a styling-only request, theme/CSS-only changes are valid. Require new features or screens only when requested by the current task; a layout-only patch is insufficient only when feature work was requested. Mark missing, partial, disconnected, or unverifiable requirements false. For each requested page or independent visual deliverable, identify its separate screen by number/name and check its default content. Check that page links lead to the correct screens. Local selections, tabs, and overlays may use built-in prototype actions on one screen. Check that each action points to the correct local state. Do not require a separate screen for each local state unless the user requests separate screens or independent exports. Hidden panels cannot replace separate requested pages. Give an actionable correction to append the missing independent screens and connect them, preserving unselected existing screens. Ordinary local menu expansion and incidental toggles are allowed; do not reject unrelated legacy patterns or invent extra states during a restyle. Compare the checklist with the original conversation and latest request; if the plan omitted requested work, mark all items false rather than accepting a narrowed brief. Evaluate only the current task and its clarifications, not earlier completed tasks or assistant-invented restrictions; the latest user requirements resolve conflicts. Requested supported demo interactions must be present in the artifact; renderer-forbidden behavior may instead have a concrete implementation specification when the task permits it. For preservation requirements, compare the before and after artifacts; do not demand identical markup for a styling change, new backend functionality, or responsive behavior absent from the baseline. Candidate isolation is a server-enforced fact: the pending write can only save the identified candidate, not other candidates. Do not reject a candidate-scope checklist item because other candidates are not supplied. Use the supplied browser results for supported prototype actions. Do not claim a physical Tab or Enter key test from a programmatic probe. Do not reject an otherwise complete requirement only because you cannot rerun the browser yourself. Missing evidence is not a measured failure. Report concrete defects from the artifact or a reported failed check. Do not require a save receipt: this review runs before saving. The server owns browser verification and saving. This review does not test a backend."}),
+            "Review demo requirement coverage before saving. Return only a JSON object with coverage (one object per checklist item in order, each with complete: boolean, reason: string, and screens: array of zero-based draft indexes) and reference_error (null unless a required reference cannot be inspected, then a specific explanation and recovery action), plus unsupported_requirements (an array of explicitly requested executable capabilities the renderer cannot support, empty otherwise). Explain each incomplete item with concrete evidence and an actionable correction. List every existing screen that still needs a change for that item. Use an empty screens array when the repair needs a new screen, shared settings, or has no reliable screen scope. Do not list unaffected screens. Use the attached references when judging theme matching; do not invent reference colors or fonts. If a required reference is missing or unreadable, report reference_error rather than treating it as an incomplete edit. Judge rendered visual requirements from HTML/CSS and navigation; judge specification-based requirements from complete concrete component/state specifications when the user permits them, not promises of future work. For a styling-only request, theme/CSS-only changes are valid. Require new features or screens only when requested by the current task; a layout-only patch is insufficient only when feature work was requested. Mark missing, partial, disconnected, or unverifiable requirements false. For each requested page or independent visual deliverable, identify its separate screen by number/name and check its default content. Check that page links lead to the correct screens. Local selections, tabs, and overlays may use built-in prototype actions on one screen. Check that each action points to the correct local state. Do not require a separate screen for each local state unless the user requests separate screens or independent exports. Hidden panels cannot replace separate requested pages. Give an actionable correction to append the missing independent screens and connect them, preserving unselected existing screens. Ordinary local menu expansion and incidental toggles are allowed; do not reject unrelated legacy patterns or invent extra states during a restyle. Compare the checklist with the original conversation and latest request; if the plan omitted requested work, mark all items false rather than accepting a narrowed brief. Evaluate only the current task and its clarifications, not earlier completed tasks or assistant-invented restrictions; the latest user requirements resolve conflicts. Requested supported demo interactions must be present in the artifact; renderer-forbidden behavior may instead have a concrete implementation specification when the task permits it. For preservation requirements, compare the before and after artifacts; do not demand identical markup for a styling change, new backend functionality, or responsive behavior absent from the baseline. Candidate isolation is a server-enforced fact: the pending write can only save the identified candidate, not other candidates. Do not reject a candidate-scope checklist item because other candidates are not supplied. Use the supplied browser results for supported prototype actions. Do not claim a physical Tab or Enter key test from a programmatic probe. Do not reject an otherwise complete requirement only because you cannot rerun the browser yourself. Missing evidence is not a measured failure. Report concrete defects from the artifact or a reported failed check. Do not require a save receipt: this review runs before saving. The server owns browser verification and saving. This review does not test a backend."}),
             self.user_message(&format!(
                 "Pending save target (server-enforced): {}\nOriginal request:\n{}\nEdit brief:\n{}\nChecklist:\n{}\nBrowser prototype results (empty means no probes recorded):\n{}\nBefore artifact:\n{}\nAfter artifact:\n{}",
                 evidence.candidate_id, plan.source, plan.instruction, json!(plan.requirements),
@@ -186,13 +237,56 @@ impl GenerationEngine {
         let reply = self.model.chat(client, &messages, effort).await?;
         let review: DemoEditReview = serde_json::from_str(&reply)
             .map_err(|_| "Cannot verify demo edit: expected a JSON coverage review.".to_owned())?;
-        plan.review_failures(&review)
+        plan.review_failures(&review, evidence.after.screens.len())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_tracks_unresolved_requirements_and_affected_screens_not_wording() {
+        let finding = |requirement, screens: &[usize], detail: &str| DemoEditFailure {
+            requirement,
+            screens: screens.to_vec(),
+            detail: detail.into(),
+        };
+        let before = [
+            finding(0, &[1, 2], "Two affected screens"),
+            finding(1, &[], "Missing view"),
+        ];
+        assert!(review_improved(
+            &before,
+            &[
+                finding(0, &[1], "One screen left"),
+                finding(1, &[], "Still missing")
+            ]
+        ));
+        assert!(review_improved(
+            &before,
+            &[finding(0, &[1, 2], "Two affected screens")]
+        ));
+        assert!(!review_improved(
+            &before,
+            &[
+                finding(0, &[1, 2], "Same defect, new wording"),
+                finding(1, &[], "Still missing")
+            ]
+        ));
+        assert!(!review_improved(
+            &before,
+            &[finding(2, &[1], "Previously passing requirement failed")]
+        ));
+        assert!(!review_improved(
+            &before,
+            &[finding(0, &[3], "New affected screen")]
+        ));
+        assert!(!review_improved(
+            &before,
+            &[finding(0, &[], "Scope became unknown")]
+        ));
+    }
 
     #[test]
     fn incomplete_or_out_of_scope_edits_fail_closed() {
@@ -221,21 +315,36 @@ mod tests {
         }))
         .expect("valid review");
         assert!(
-            plan.review_failures(&review)
+            plan.review_failures(&review, after.screens.len())
                 .expect("valid coverage")
                 .is_empty()
         );
         review.coverage[1].complete = false;
         review.coverage[1].reason = "Add the missing notification page".into();
-        let failures = plan.review_failures(&review).expect("actionable coverage");
-        assert!(failures[0].contains("Notification page: Add the missing"));
+        review.coverage[1].screens = vec![2, 0, 2];
+        let failures = plan
+            .review_failures(&review, after.screens.len())
+            .expect("actionable coverage");
+        assert!(
+            failures[0]
+                .detail
+                .contains("Notification page: Add the missing")
+        );
+        assert_eq!(failures[0].screens, [0, 2]);
+        review.coverage[1].screens = vec![after.screens.len()];
+        assert!(
+            plan.review_failures(&review, after.screens.len())
+                .expect_err("invalid review index should fail")
+                .contains("outside the draft")
+        );
+        review.coverage[1].screens.clear();
         review.coverage[1].reason.clear();
-        assert!(plan.review_failures(&review).is_err());
+        assert!(plan.review_failures(&review, after.screens.len()).is_err());
         review.coverage.pop();
-        assert!(plan.review_failures(&review).is_err());
+        assert!(plan.review_failures(&review, after.screens.len()).is_err());
         review.reference_error = Some("Upload the missing theme screenshot".into());
         assert!(
-            plan.review_failures(&review)
+            plan.review_failures(&review, after.screens.len())
                 .expect_err("missing reference must fail")
                 .contains("reference: Upload")
         );
