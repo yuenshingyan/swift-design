@@ -87,6 +87,45 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
     if (mode === 'height') { return rect.height; }
     return null;
   };
+  const modalSelector = '[role="dialog"][aria-modal="true"], dialog:modal';
+  const coveredByModal = (foreground, background, overlap) => {
+    const modal = foreground.closest(modalSelector);
+    if (!modal || modal.contains(background) || background.closest(modalSelector)) return false;
+    const style = getComputedStyle(modal);
+    if (!/^rgb\(\d+, \d+, \d+\)$/.test(style.backgroundColor) ||
+        !/^(border|padding)-box$/.test(style.backgroundClip)) return false;
+    // Only skip the intersection when the dialog paints an opaque, axis-aligned box.
+    for (let node = modal; node; node = node.parentElement) {
+      const current = getComputedStyle(node);
+      if (Number(current.opacity) !== 1 || current.filter !== 'none' || current.mixBlendMode !== 'normal' ||
+          current.clipPath !== 'none' || current.clip !== 'auto' || current.maskImage !== 'none' ||
+          current.perspective !== 'none' || current.rotate !== 'none' || current.scale !== 'none' ||
+          current.offsetPath !== 'none') return false;
+      if (current.transform !== 'none') {
+        const matrix = new DOMMatrixReadOnly(current.transform);
+        if (!matrix.is2D || matrix.b !== 0 || matrix.c !== 0 || matrix.a <= 0 || matrix.d <= 0) return false;
+      }
+    }
+    const radii = [style.borderTopLeftRadius, style.borderTopRightRadius,
+      style.borderBottomLeftRadius, style.borderBottomRightRadius].flatMap((value) => value.split(' '));
+    if (radii.some((value) => !value.endsWith('px'))) return false;
+    const radius = Math.max(...radii.map(parseFloat));
+    const box = modal.getBoundingClientRect();
+    if (!modal.offsetWidth || !modal.offsetHeight) return false;
+    const sx = box.width / modal.offsetWidth, sy = box.height / modal.offsetHeight;
+    if (overlap.left < box.left + (radius + parseFloat(style.borderLeftWidth)) * sx ||
+        overlap.right > box.right - (radius + parseFloat(style.borderRightWidth)) * sx ||
+        overlap.top < box.top + (radius + parseFloat(style.borderTopWidth)) * sy ||
+        overlap.bottom > box.bottom - (radius + parseFloat(style.borderBottomWidth)) * sy) return false;
+    // Inset the probes slightly to hit the interior rather than the shared edges of two boxes.
+    const xs = [0.05, 0.5, 0.95].map((t) => overlap.left + (overlap.right - overlap.left) * t);
+    const ys = [0.05, 0.5, 0.95].map((t) => overlap.top + (overlap.bottom - overlap.top) * t);
+    return xs.every((x) => ys.every((y) => {
+      const stack = document.elementsFromPoint(x, y);
+      const dialogIndex = stack.indexOf(modal), backgroundIndex = stack.indexOf(background);
+      return dialogIndex >= 0 && backgroundIndex > dialogIndex;
+    }));
+  };
   const alignmentModes = new Set(['left', 'right', 'top', 'bottom', 'center-x', 'center-y', 'width', 'height']);
   const gapModes = new Set(['x', 'y']);
   document.querySelectorAll('[data-swift-design-root]').forEach((root) => {
@@ -315,19 +354,28 @@ pub(crate) const AUDIT_SCRIPT: &str = r##"(async () => {
       }
     });
     let overlaps = 0;
+    const modalFrame = isDemo && root.querySelector(modalSelector) ? root.closest('[data-swift-design-frame]') : null;
+    const frameLayer = modalFrame?.style.getPropertyValue('z-index');
+    const frameLayerPriority = modalFrame?.style.getPropertyPriority('z-index');
+    // Other frames are revealed for measurement; hit-test this screen above those frames.
+    modalFrame?.style.setProperty('z-index', '2147483647', 'important');
     for (let first = 0; first < textBlocks.length && overlaps < 6; first += 1) {
       for (let second = first + 1; second < textBlocks.length && overlaps < 6; second += 1) {
         const a = textBlocks[first], b = textBlocks[second];
         if (a.element.contains(b.element) || b.element.contains(a.element)) { continue; }
         if (isInsideScrollport(a.element, root) || isInsideScrollport(b.element, root)) { continue; }
-        const width = Math.min(a.rect.right, b.rect.right) - Math.max(a.rect.left, b.rect.left);
-        const height = Math.min(a.rect.bottom, b.rect.bottom) - Math.max(a.rect.top, b.rect.top);
-        if (width > 4 * scale && height > 4 * scale) {
+        const overlap = {
+          left: Math.max(a.rect.left, b.rect.left), right: Math.min(a.rect.right, b.rect.right),
+          top: Math.max(a.rect.top, b.rect.top), bottom: Math.min(a.rect.bottom, b.rect.bottom),
+        };
+        if (overlap.right - overlap.left > 4 * scale && overlap.bottom - overlap.top > 4 * scale) {
+          if (modalFrame && (coveredByModal(a.element, b.element, overlap) || coveredByModal(b.element, a.element, overlap))) continue;
           overlaps += 1;
           findings.push({ screen, node: name(a.element) + ' and ' + name(b.element), kind: 'overlap', detail: 'the text blocks overlap: move or resize one' });
         }
       }
     }
+    if (modalFrame) modalFrame.style.setProperty('z-index', frameLayer, frameLayerPriority);
   });
   document.documentElement.setAttribute('data-swift-design-findings', JSON.stringify(findings));
   document.documentElement.setAttribute('data-swift-design-audited-screens', JSON.stringify(auditedScreens));

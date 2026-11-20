@@ -116,6 +116,68 @@ document.documentElement.setAttribute('data-prototype-test', String(startTest &&
 }
 
 #[tokio::test]
+async fn browser_overlap_checks_only_exempt_text_covered_by_an_opaque_dialog() {
+    if crate::screenshots::find_chrome().is_none() {
+        return;
+    }
+    let mut design = sample_design();
+    design.theme.fonts.heading = "Arial".into();
+    design.theme.fonts.body = "Arial".into();
+    design.theme.fonts.mono = "Courier New".into();
+    let html = "<p class='page-label'>Page text behind dialog</p><section class='modal' role='dialog' aria-modal='true'><h2 class='modal-label'>Dialog title</h2></section>";
+    let css = ".page-label{position:absolute;left:130px;top:130px;width:240px;margin:0}.modal{position:absolute;left:100px;top:100px;width:400px;height:200px;background:rgb(255,255,255);border-radius:12px}.modal-label,.second-label{position:absolute;left:30px;top:30px;width:200px;margin:0;font-size:20px}";
+    design.screens[0].html = html.into();
+    design.screens[0].css = Some(css.into());
+    design.screens[1].html = html.into();
+    design.screens[1].css = Some(format!("{css}.modal{{background:rgba(255,255,255,.5)}}"));
+    design.screens[2].html = html.replace(
+        "</section>",
+        "<p class='second-label'>Visible overlapping text</p></section>",
+    );
+    design.screens[2].css = Some(css.into());
+    let mut front_label = design.screens[0].clone();
+    front_label.css = Some(format!("{css}.page-label{{z-index:1}}"));
+    design.screens.push(front_label);
+    let dom = crate::screenshots::dump_design_dom(&design, "http://127.0.0.1:3000")
+        .await
+        .expect("Chrome should audit all dialog variants");
+    let audit = crate::design::polish::DemoAudit::from_dom(&dom, design.screens.len())
+        .expect("capture should report every screen");
+    let opaque = audit.layout_instructions(&[0]);
+    assert!(
+        !opaque
+            .iter()
+            .any(|finding| finding.contains("text blocks overlap")),
+        "{opaque:?}"
+    );
+    let translucent = audit.layout_instructions(&[1]);
+    assert!(
+        translucent
+            .iter()
+            .any(|finding| finding.contains("page-label") && finding.contains("modal-label")),
+        "{translucent:?}"
+    );
+    let inside = audit.layout_instructions(&[2]);
+    assert!(
+        inside
+            .iter()
+            .any(|finding| finding.contains("modal-label") && finding.contains("second-label")),
+        "{inside:?}"
+    );
+    assert!(
+        !inside.iter().any(|finding| finding.contains("page-label")),
+        "{inside:?}"
+    );
+    let in_front = audit.layout_instructions(&[3]);
+    assert!(
+        in_front
+            .iter()
+            .any(|finding| finding.contains("page-label") && finding.contains("modal-label")),
+        "{in_front:?}"
+    );
+}
+
+#[tokio::test]
 async fn browser_audit_reports_working_controls_and_a_control_missing_from_keyboard_order() {
     if crate::screenshots::find_chrome().is_none() {
         return;
