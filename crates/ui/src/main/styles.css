@@ -528,9 +528,9 @@ button.canvas-tab.open { background: var(--raised); color: var(--ink); border-co
 .card-select input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0;
   opacity: 0; cursor: pointer; }
 .card-select-mark { display: flex; align-items: center; justify-content: center;
-  width: 16px; height: 16px; border: 1px solid var(--line); border-radius: 3px;
+  width: 14px; height: 14px; border: 1px solid var(--line); border-radius: 3px;
   background: var(--raised); color: var(--raised); pointer-events: none; }
-.card-select-mark svg { width: 12px; height: 12px; opacity: 0; }
+.card-select-mark svg { width: 10px; height: 10px; opacity: 0; }
 .card-select input:checked + .card-select-mark { background: var(--teal); border-color: var(--teal); }
 .card-select input:checked + .card-select-mark svg { opacity: 1; }
 .card-select input:focus-visible + .card-select-mark { outline: 2px solid var(--teal); outline-offset: 2px; }
@@ -886,7 +886,7 @@ div.brief-attachments:has(+ ul.brief-attachments) { padding-bottom: 0.4rem; }
 .thumbnail.dragging { opacity: 0.6; cursor: grabbing; }
 .thumbnail.export-selected { box-shadow: 0 0 0 2px var(--teal-line); }
 .thumbnail-export-checkbox { position: absolute; top: 0.25rem; left: 0.25rem; z-index: 3;
-  width: 1.25rem; height: 1.25rem; margin: 0; cursor: pointer; accent-color: var(--teal);
+  width: 1.125rem; height: 1.125rem; margin: 0; cursor: pointer; accent-color: var(--teal);
   opacity: 0; filter: drop-shadow(0 1px 2px rgba(0,0,0,.45)); }
 .thumbnail:hover .thumbnail-export-checkbox,
 .thumbnail:focus-within .thumbnail-export-checkbox,
@@ -936,7 +936,8 @@ div.brief-attachments:has(+ ul.brief-attachments) { padding-bottom: 0.4rem; }
 .demo-thumbnails .thumbnail.portrait .thumbnail-export-checkbox {
   top: 0.125rem; width: min(1rem, calc(50% - 0.125rem)); height: 1rem; }
 .demo-thumbnails .thumbnail.portrait .thumbnail-redo:not(.confirm) { right: 0.125rem; }
-.demo-thumbnails .thumbnail.portrait .thumbnail-export-checkbox { left: 0.125rem; }
+.demo-thumbnails .thumbnail.portrait .thumbnail-export-checkbox {
+  left: 0.125rem; width: min(0.9375rem, calc(50% - 0.125rem)); height: 0.9375rem; }
 .demo-thumbnails .thumbnail:focus-within .thumbnail-redo:not(:disabled),
 .demo-thumbnails .thumbnail:focus-within .thumbnail-delete { display: inline-flex; }
 @media (hover: none) {

@@ -160,6 +160,8 @@ pub(super) fn DesignExportGroup(
                         move |_| {
                             if preparing.peek().is_some() { return; }
                             preparing.set(Some(selected_count));
+                            // The request uses the URL captured before the selection clears.
+                            export_screens.set(Vec::new());
                             export_message.set(String::new());
                             export_failed.set(false);
                             let href = href.clone();
