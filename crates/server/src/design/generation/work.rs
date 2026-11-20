@@ -10,18 +10,30 @@ fn require_repair_scope(
     retained: &Design,
     edited: &Design,
 ) -> Result<(), GenerationStop> {
-    if edited.title != retained.title
-        || edited.theme != retained.theme
-        || edited.app_window != retained.app_window
-        || edited.screens.len() < retained.screens.len()
-        || before
+    let problem = if edited.title != retained.title {
+        Some("the title changed".to_owned())
+    } else if edited.theme != retained.theme {
+        Some("the theme changed".to_owned())
+    } else if edited.app_window != retained.app_window {
+        Some("the shared app window changed".to_owned())
+    } else if edited.screens.len() < retained.screens.len() {
+        Some("a retained screen was removed".to_owned())
+    } else {
+        before
             .screens
             .iter()
             .zip(&retained.screens)
             .zip(&edited.screens)
-            .any(|((saved, retained), edited)| saved == retained && edited != saved)
-    {
-        return Err(GenerationStop::Failed("Cannot repair draft: shared settings or protected screens changed, or a retained screen was removed.".into()));
+            .enumerate()
+            .find(|(_, ((saved, retained), edited))| saved == retained && edited != saved)
+            .map(|(index, ((_, screen), _))| {
+                format!("protected screen {} ({}) changed", index + 1, screen.name)
+            })
+    };
+    if let Some(problem) = problem {
+        return Err(GenerationStop::Failed(format!(
+            "Cannot repair draft: {problem}."
+        )));
     }
     Ok(())
 }
@@ -327,6 +339,16 @@ impl GenerationEngine {
         let retained = use_review_draft.then(|| draft.clone());
         // A repair can name pages that exist only in the retained draft.
         let scope_baseline = retained.as_ref().unwrap_or(&design);
+        let repair_indexes: Option<Vec<_>> = retained.as_ref().map(|retained| {
+            retained
+                .screens
+                .iter()
+                .enumerate()
+                .filter_map(|(index, screen)| {
+                    (design.screens.get(index) != Some(screen)).then_some(index)
+                })
+                .collect()
+        });
         log(&format!("{label}: resolving edit requirements and scope"));
         let attachments = self.load_attachments(&context.session_id, log).await;
         let plan = self
@@ -334,7 +356,7 @@ impl GenerationEngine {
                 client,
                 scope_baseline,
                 order,
-                (&attachments, context.effort()),
+                (&attachments, context.effort(), repair_indexes.as_deref()),
             )
             .await
             .map_err(GenerationStop::Failed)?;
@@ -342,18 +364,36 @@ impl GenerationEngine {
         // Structural edits need the full artifact in coordination. Workers remain
         // isolated; the requirements check protects unselected existing screens.
         let additions_already_in_draft = draft.screens.len().saturating_sub(design.screens.len());
-        let indexes = if plan.minimum_new_screens > additions_already_in_draft {
+        let needs_new_screens = plan.minimum_new_screens > additions_already_in_draft;
+        if let Some(allowed) = &repair_indexes {
+            if let Some(&index) = plan.screens.iter().find(|index| !allowed.contains(index)) {
+                return Err(GenerationStop::Failed(format!(
+                    "Cannot repair draft: screen {} ({}) is unchanged in this draft. To change it, start a separate edit from the saved version.",
+                    index + 1,
+                    scope_baseline.screens[index].name
+                )));
+            }
+            if allowed.is_empty() && !needs_new_screens {
+                return Err(GenerationStop::Failed(
+                    "Cannot repair draft: no existing screens differ from the saved version."
+                        .into(),
+                ));
+            }
+        }
+        let indexes = if needs_new_screens {
             Vec::new()
+        } else if let Some(allowed) = &repair_indexes
+            && plan.screens.is_empty()
+        {
+            allowed.clone()
         } else {
             plan.screens.clone()
         };
         log(&format!("{label}: checking layout before editing"));
         let measured = self.audit_demo(&draft).await?.instructions(None);
-        let preview_scope = if use_review_draft {
-            touched_indexes(&design.screens, &draft.screens, &[])
-        } else {
-            plan.screens.clone()
-        };
+        let preview_scope = repair_indexes
+            .clone()
+            .unwrap_or_else(|| plan.screens.clone());
         let preview = self.designs.start_preview(
             design_id,
             &self.notifier,
@@ -362,8 +402,10 @@ impl GenerationEngine {
         if use_review_draft {
             preview.show(&draft);
         }
-        let mut correction = if use_review_draft {
-            "The supplied design is the retained draft, not the accepted baseline. Repair only the remaining issues. Keep shared settings, all retained screens, and working interactions. Do not edit saved screens that this draft did not change.".to_owned()
+        let mut correction = if let Some(allowed) = &repair_indexes {
+            format!(
+                "The supplied design is the retained draft, not the accepted baseline. Repair only the remaining issues. Editable existing screen indexes (zero-based): {allowed:?}. Keep shared settings, all retained screen positions, and working interactions. Append new screens only if the plan requires missing screens."
+            )
         } else {
             String::new()
         };
@@ -401,6 +443,18 @@ impl GenerationEngine {
             let correction_instruction = format!("{instruction}\n{correction}");
             let is_focused_patch =
                 is_focused_correction || (use_review_draft && !write_indexes.is_empty());
+            let allowed_replacements = repair_indexes.as_ref().map(|allowed| {
+                let mut allowed: Vec<_> = allowed
+                    .iter()
+                    .copied()
+                    .filter(|index| plan.screens.is_empty() || plan.screens.contains(index))
+                    .collect();
+                allowed.extend(scope_baseline.screens.len()..total);
+                allowed
+            });
+            let can_append = use_review_draft
+                && write_indexes.is_empty()
+                && plan.minimum_new_screens > total.saturating_sub(design.screens.len());
             let findings = findings_for(&measured, "screens", write_indexes);
             let input = EditInput {
                 instruction: &correction_instruction,
@@ -424,6 +478,50 @@ impl GenerationEngine {
                 },
                 parse: Box::new(move |content| {
                     let patch = parse_patch(content)?;
+                    if let Some(allowed) = &allowed_replacements {
+                        if let Some((_, setting)) = [
+                            (patch.title.is_some(), "title"),
+                            (patch.theme.is_some(), "theme"),
+                            (patch.app_window.is_some(), "app window"),
+                        ]
+                        .into_iter()
+                        .find(|(changed, _)| *changed)
+                        {
+                            return Err(format!(
+                                "Repair draft cannot change the shared {setting}; omit that field."
+                            ));
+                        }
+                        for operation in &patch.screens {
+                            let index = operation.index;
+                            if operation.insert
+                                && can_append
+                                && index == total
+                                && operation.screen.is_some()
+                            {
+                                continue;
+                            }
+                            if operation.insert || operation.screen.is_none() {
+                                return Err(format!(
+                                    "Repair draft cannot insert or remove a screen at index {index}; keep retained screen positions."
+                                ));
+                            }
+                            if !allowed.contains(&index) {
+                                let target = original.screens.get(index).map_or_else(
+                                    || format!("unknown screen index {index}"),
+                                    |screen| {
+                                        format!(
+                                            "protected screen {} ({}, index {index})",
+                                            index + 1,
+                                            screen.name
+                                        )
+                                    },
+                                );
+                                return Err(format!(
+                                    "Repair draft cannot replace {target}; omit it. Editable indexes: {allowed:?}."
+                                ));
+                            }
+                        }
+                    }
                     if !repair_screens.is_empty()
                         && (patch.title.is_some()
                             || patch.theme.is_some()
@@ -439,7 +537,7 @@ impl GenerationEngine {
                     apply_patch(&original, patch)
                 }),
                 progress: progress.clone(),
-                live: (!is_focused_patch).then(|| preview.edit_sink(&draft)),
+                live: (!is_focused_patch && !use_review_draft).then(|| preview.edit_sink(&draft)),
             };
             let messages = vec![
                 serde_json::json!({ "role": "system", "content": system_prompt() }),
@@ -497,7 +595,13 @@ impl GenerationEngine {
             // A fix can make a new problem. The touched screens are measured
             // again, and the model tweaks them until they measure clean or
             // the effort's rounds run out.
-            let touched = if design.theme != edited.theme
+            let touched = if let Some(allowed) = &repair_indexes {
+                allowed
+                    .iter()
+                    .copied()
+                    .chain(scope_baseline.screens.len()..edited.screens.len())
+                    .collect()
+            } else if design.theme != edited.theme
                 || design.viewport != edited.viewport
                 || design.app_window != edited.app_window
             {
@@ -627,6 +731,20 @@ impl GenerationEngine {
                 );
                 correction_screens.sort_unstable();
                 correction_screens.dedup();
+            }
+            if let Some(allowed) = &repair_indexes
+                && let Some(index) = failures
+                    .iter()
+                    .flat_map(|failure| failure.screens.iter().copied())
+                    .find(|&index| {
+                        index < scope_baseline.screens.len() && !allowed.contains(&index)
+                    })
+            {
+                return Err(GenerationStop::Failed(format!(
+                    "Cannot finish draft repair: review requires a change to protected screen {} ({}). Edit this screen separately from the saved version.",
+                    index + 1,
+                    scope_baseline.screens[index].name
+                )));
             }
             let details: Vec<_> = failures
                 .iter()

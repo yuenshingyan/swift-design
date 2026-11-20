@@ -198,9 +198,12 @@ impl GenerationEngine {
         client: &reqwest::Client,
         design: &Design,
         order: &EditOrder<'_>,
-        review_input: (&Attachments, &str),
+        review_input: (&Attachments, &str, Option<&[usize]>),
     ) -> Result<DemoEditRequirements, String> {
-        let (attachments, effort) = review_input;
+        let (attachments, effort, repair_indexes) = review_input;
+        let repair_scope = repair_indexes.map_or_else(String::new, |indexes| format!(
+            "\nRepair draft: only these existing zero-based screen indexes are editable: {indexes:?}. Keep shared settings and retained screen positions. Include in screens every existing screen the user's repair actually requires changing, even if protected, so the server can report a scope conflict before writing. Do not infer edits to other screens."
+        ));
         let inventory: Vec<_> = design
             .screens
             .iter()
@@ -213,7 +216,7 @@ impl GenerationEngine {
             json!({"role": "system", "content":
             "Resolve the current demo edit requirements. Return JSON only with instruction (a self-contained actionable brief), screens (zero-based existing screen indexes explicitly restricted by the user, or [] for candidate-wide work), minimum_new_screens (minimum additions needed to give requested visual views their own screens, 0 if existing screens suffice), and requirements (a nonempty checklist of independently verifiable deliverables). Read the latest instruction together with the conversation: a clarification such as 'only candidate 4' retains the preceding feature request. Candidate numbers are NOT screen numbers. Ignore prior completed tasks and assistant-invented restrictions. Extending a demo can require BOTH modifying existing screens and adding connected screens; preserve both in the checklist. Include every requested feature, responsive variant, and relevant interaction/state requirement; do not substitute layout repairs. Give each separate requested page or independent visual deliverable its own checklist item, naming its intended screen, default content and navigation. Count only those views in minimum_new_screens. Require built-in actions for supported local interaction. Local states can share a screen. Hidden panels cannot replace separate requested pages. Do not turn permitted specification-only behavior into extra visual requirements. Distinguish proposed concepts from implemented features. A reference to an existing screen does not forbid requested additions. When additions are required, append them to preserve existing indexes. Name new pages by title. Do not assign a required screen number or literal link target unless the user explicitly fixed it; use links to the actual appended page. Inventory indexes are zero-based; visible screen numbers and #screen-N links are one-based. Treat an explicit destination that conflicts with preservation as a conflict, not permission to reassign an existing screen. Do not invent restrictions from worker assignments. Candidate write isolation is enforced by the server, not a visual deliverable; do not put it in the checklist. For restyling, preservation means retaining the existing content and behavior, not requiring identical HTML/CSS or implementing missing backend features. This is planning, not evidence of completion."}),
             self.user_message(&format!(
-                "Conversation:\n{}\nLatest instruction:\n{}\nRegenerate selected screens: {}\nExisting screens:\n{}",
+                "Conversation:\n{}\nLatest instruction:\n{}\nRegenerate selected screens: {}\nExisting screens:\n{}{repair_scope}",
                 order.conversation, order.instruction, order.is_fresh, json!(inventory)
             ), attachments),
         ];

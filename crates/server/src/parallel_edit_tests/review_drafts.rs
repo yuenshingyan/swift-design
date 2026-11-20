@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn repair_can_target_a_draft_only_screen_and_preserves_other_draft_work() {
+async fn repair_retries_a_protected_patch_and_preserves_other_draft_work() {
     let original = sample_design();
     let fake = ParallelFakeModel::start(None).await;
     let candidate = ReviewingCandidate::new(&fake);
@@ -33,6 +33,9 @@ async fn repair_can_target_a_draft_only_screen_and_preserves_other_draft_work() 
         })
         .to_string(),
     );
+    let mut protected = original.screens[1].clone();
+    protected.html = "<h1>Unrequested change to saved screen</h1>".into();
+    fake.push_text(json!({"screens":[{"index":1,"screen":protected}]}).to_string());
     added.html = "<h1>Verified timeline content</h1>".into();
     fake.push_text(
         json!({"screens":[{"index":original.screens.len(),"screen":added}]}).to_string(),
@@ -67,11 +70,62 @@ async fn repair_can_target_a_draft_only_screen_and_preserves_other_draft_work() 
     let repair_request = fake.requests()[2].to_string();
     assert!(repair_request.contains("Unique added timeline draft"));
     assert!(!repair_request.contains("Completed launch changes in the retained draft"));
+    assert!(repair_request.contains(&format!(
+        "Editable existing screen indexes (zero-based): [0, {}]",
+        original.screens.len()
+    )));
+    let retry = fake.requests()[3].to_string();
+    assert!(retry.contains("Repair draft cannot replace protected screen 2"));
     assert!(
-        fake.requests()[3]
+        fake.requests()[4]
             .to_string()
             .contains("Browser prototype results")
     );
+}
+
+#[tokio::test]
+async fn repair_reports_a_protected_target_before_requesting_a_patch() {
+    let original = sample_design();
+    let fake = ParallelFakeModel::start(None).await;
+    let candidate = ReviewingCandidate::new(&fake);
+    candidate.seed(&original, "Improve screen 1.").await;
+    let id = "talk-candidate-1";
+    let mut draft = original.clone();
+    draft.screens[0].notes = Some("Unverified change".into());
+    candidate
+        .designs
+        .keep_review_draft(id, &draft, Some(&original))
+        .await
+        .expect("draft should checkpoint");
+    let mut repair = ChatMessage::user("Repair screen 2 in this draft.", Some(id));
+    repair.is_review_draft = true;
+    candidate
+        .sessions
+        .append_message("talk", repair)
+        .await
+        .expect("repair turn should be recorded");
+    fake.push_text(r#"{"unsupported_requirements":[]}"#.into());
+    fake.push_text(r#"{"instruction":"Repair screen 2","screens":[1],"minimum_new_screens":0,"requirements":["Repair screen 2"]}"#.into());
+    let error = candidate
+        .engine
+        .clone()
+        .run("talk", log_sink())
+        .await
+        .expect_err("protected target must stop before writing");
+    assert!(error.contains("screen 2") && error.contains("unchanged in this draft"));
+    assert_eq!(fake.requests().len(), 2);
+    let kept = candidate
+        .designs
+        .load_review_draft(id)
+        .await
+        .expect("draft lookup should succeed");
+    assert_eq!(kept, Some(draft));
+    let saved = candidate
+        .designs
+        .load(id)
+        .await
+        .expect("saved lookup should succeed");
+    assert_eq!(saved, Some(original));
 }
 
 #[tokio::test]
