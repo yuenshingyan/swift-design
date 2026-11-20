@@ -69,6 +69,8 @@ pub(crate) fn CandidateCanvas(
     let delete_selected = use_callback(move |_: ()| {
         let ids: Vec<String> = selected().iter().cloned().collect();
         let kinds = kinds.clone();
+        selected.write().clear();
+        is_confirming_delete.set(false);
         spawn(async move {
             for id in ids {
                 let deleted = match kinds.get(&id).copied().unwrap_or(kind) {
@@ -85,8 +87,6 @@ pub(crate) fn CandidateCanvas(
                     on_error.call(message);
                 }
             }
-            selected.write().clear();
-            is_confirming_delete.set(false);
         });
     });
     rsx! {

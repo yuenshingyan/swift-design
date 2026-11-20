@@ -327,8 +327,9 @@ Hover over a screen thumbnail to reveal its top-left checkbox, then check the
 screens to export. Checked boxes remain visible; keyboard focus reveals them too,
 and touch devices show them without hovering. Use **Export selected (N)** in the
 toolbar to download the PNG ZIP, or **Clear** to clear export selection without
-changing chat pins. Empty selections cannot export. While rendering, the button
-shows **Preparing N screens…** and blocks duplicate clicks; failures appear next
+changing chat pins. **Export selected (N)** clears the checks when the request
+starts. Empty selections cannot export. While rendering, the button shows
+**Preparing N screens…** and blocks duplicate clicks; failures appear next
 to it instead of silently navigating to an error response. The download starts
 when the ZIP is ready. Demo ZIPs render at most three screens concurrently.
 The ZIP contains only the selected saved screens, in
