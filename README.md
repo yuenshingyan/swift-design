@@ -353,7 +353,8 @@ The design editor has two modes on a tab pair: **Play** (the default) and **Edit
 Edit a click selects a node. In Play a click acts as it would for a user:
 a link to `#screen-3` opens screen 3, a `<details>` menu opens, and a
 checkbox or radio toggle flips. **View** and **Play review draft** open the full
-demo at the selected screen. Full-demo View and exported HTML switch screens
+demo at the selected screen. The render URL uses the one-based `start_screen`
+parameter; unlike `screen`, it keeps the whole demo navigable. Full-demo View and exported HTML switch screens
 instantly by default; wheel scrolling stays within the current screen. Explicit
 page animations remain available in the transition picker. Deck defaults are unchanged.
 A demo carries no script. Flows are links

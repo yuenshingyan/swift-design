@@ -84,6 +84,13 @@
     const active = document.activeElement;
     probing = true;
     const reports = [];
+    const openedDisclosures = [];
+    const restoreDisclosures = () => {
+      for (const { disclosure, name } of openedDisclosures.splice(0)) {
+        disclosure.open = false;
+        if (name !== null) disclosure.setAttribute('name', name);
+      }
+    };
     try {
       for (const { name, group, destination, update, root } of audits) {
         const screen = Number(root.closest('[data-swift-design-screen]').dataset.swiftDesignScreen);
@@ -110,6 +117,16 @@
           update(group);
           const target = destination(group, action);
           const expected = target >= 0 && target <= last ? target : group.current;
+          // Closed details may give their content layout rectangles even though it cannot receive focus.
+          for (let ancestor = anchor.parentElement; ancestor && ancestor !== root; ancestor = ancestor.parentElement) {
+            if (!(ancestor instanceof HTMLDetailsElement) || ancestor.open ||
+                ancestor.querySelector(':scope > summary')?.contains(anchor)) continue;
+            const name = ancestor.getAttribute('name');
+            // Opening a named disclosure must not close an already-open peer during the probe.
+            if (name !== null) ancestor.removeAttribute('name');
+            openedDisclosures.push({ disclosure: ancestor, name });
+            ancestor.open = true;
+          }
           if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
           const visible = anchor.getClientRects().length && !anchor.closest('[inert], [hidden]') && getComputedStyle(anchor).visibility === 'visible';
           if (visible) {
@@ -131,6 +148,7 @@
           if (!event.defaultPrevented) fail(`Space on ${action}: key was not handled`);
           report.keys++;
           check(expected, `Space on ${action}`);
+          restoreDisclosures();
         }
         const anchor = group.actions[0].anchor;
         for (const [key, from, expected] of [['Home', last, 0], ['End', 0, last], ['ArrowRight', 0, 1], ['ArrowLeft', last, last - 1], ['ArrowLeft', 0, 0], ['ArrowRight', last, last]]) {
@@ -148,6 +166,7 @@
       }
       return reports;
     } finally {
+      restoreDisclosures();
       probing = false;
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
       if (active instanceof HTMLElement) active.focus({ preventScroll: true });

@@ -26,6 +26,8 @@ pub struct RenderOptions {
     /// Render only this zero-based screen. Used by thumbnails and the
     /// editor preview, so the page never scrolls.
     pub only_screen: Option<usize>,
+    /// Initial zero-based screen in the full interactive demo.
+    pub start_screen: Option<usize>,
     /// Adds the layout audit script; the polish pass reads its result
     /// from a DOM dump.
     pub is_auditing: bool,
@@ -52,11 +54,14 @@ pub fn render_design(design: &Design, is_editable: bool) -> String {
 pub fn render_design_with(design: &Design, options: RenderOptions) -> String {
     let mut sections = String::new();
     let mut screen_styles = String::new();
+    let start_screen = options.start_screen.filter(|&index| {
+        options.only_screen.is_none() && !options.is_print && index < design.screens.len()
+    });
     for (index, screen) in design.screens.iter().enumerate() {
         if options.only_screen.is_some_and(|only| only != index) {
             continue;
         }
-        sections.push_str(&render_screen(screen, index));
+        sections.push_str(&render_screen(screen, index, start_screen == Some(index)));
         if let Some(css) = &screen.css {
             screen_styles.push_str(&scope_css(
                 css,
@@ -154,9 +159,14 @@ fn page_script(options: &RenderOptions) -> String {
 /// Renders one screen: a full-window frame that centers the viewport
 /// box, and the viewport-sized root that holds the screen's HTML as
 /// written.
-fn render_screen(screen: &Screen, index: usize) -> String {
+fn render_screen(screen: &Screen, index: usize, is_initial: bool) -> String {
+    let state = if is_initial {
+        " data-swift-design-state=\"current\""
+    } else {
+        ""
+    };
     format!(
-        "<div class=\"screen-frame\" id=\"screen-{number}\" data-swift-design-frame>\n\
+        "<div class=\"screen-frame\" id=\"screen-{number}\" data-swift-design-frame{state}>\n\
          <section class=\"screen\" data-swift-design-screen=\"{index}\">\n\
          <div class=\"screen-root\" data-swift-design-root>{html}</div>\n\
          </section>\n</div>\n",
