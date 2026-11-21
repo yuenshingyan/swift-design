@@ -260,7 +260,48 @@ try {
   assert.deepEqual(saved, { ...original, screens: [...replacements.map(r => r.screen), original.screens[2]] });
   await wait(`${badges}.join(',') === 'Edited,Edited,'`);
 
-  stage = 'View, selected PNG export, and reload';
+  stage = 'background PNG export, progress, and reconnect';
+  const downloads = join(scratch, 'downloads');
+  mkdirSync(downloads);
+  await cdp('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads });
+  await api(`${designRoute}/exports`, 'POST', { screens: '99' }, 400);
+  await evaluate(`(() => {
+    const fetchOriginal = window.fetch.bind(window);
+    window.fetch = async (url, options) => {
+      if (typeof url === 'string' && url.startsWith('${designRoute}/exports/') && !window.pollInterrupted) {
+        window.pollInterrupted = true;
+        throw new TypeError('Simulated connection interruption');
+      }
+      const response = await fetchOriginal(url, options);
+      if (url === '${designRoute}/exports' && options?.method === 'POST') {
+        window.exportJob = await response.clone().json();
+      }
+      return response;
+    };
+  })()`);
+  await evaluate(`${membersCheckbox}.click()`);
+  await wait(`${button('Export selected (1)')}?.classList.contains('primary')`);
+  await evaluate(`${button('Export selected (1)')}.click()`);
+  await wait("document.querySelector('.selected-screen-export [role=status]')?.textContent.includes('0 of 1')");
+  const job = await wait('window.exportJob');
+  assert.deepEqual([job.state, job.completed, job.total], ['preparing', 0, 1]);
+  const jobRoute = `${designRoute}/exports/${job.job_id}`;
+  await api(`${jobRoute}/download`, 'GET', undefined, 409);
+  await api(`${groupedRoute}/exports/${job.job_id}`, 'GET', undefined, 404);
+  await api(`${designRoute}/exports`, 'POST', { screens: '1' }, 429);
+  assert.equal(await evaluate(`${membersCheckbox}.checked`), false);
+  await evaluate(`${homeCheckbox}.click()`);
+  const zipLink = await until(() => evaluate("document.querySelector('.export-feedback a')?.getAttribute('href')"), 60_000);
+  assert.equal(zipLink, `${jobRoute}/download`);
+  assert(await evaluate(`window.pollInterrupted && ${homeCheckbox}.checked`));
+  assert.deepEqual(await api(jobRoute), { job_id: job.job_id, state: 'ready', completed: 1, total: 1 });
+  const zipFile = join(downloads, `${id}.zip`);
+  await until(() => existsSync(zipFile));
+  const zip = readFileSync(zipFile);
+  assert.equal(zip.readUInt32LE(0), 0x04034b50);
+  assert(zip.includes(`${id}-screen-2.png`) && !zip.includes(`${id}-screen-1.png`));
+
+  stage = 'View and reload';
   await editor();
   await wait(`${badges}.join(',') === 'Edited,Edited,'`);
   await selectScreen(1);
@@ -268,9 +309,6 @@ try {
   await cdp('Page.navigate', { url: href });
   await wait("document.querySelector('[data-swift-design-state=current]')?.id==='screen-2'");
   assert.equal(await evaluate("document.querySelectorAll('[data-swift-design-frame]').length"), 3);
-  const zip = await api(`${designRoute}/export.zip?screens=2`);
-  assert.equal(zip.readUInt32LE(0), 0x04034b50);
-  assert(zip.includes(`${id}-screen-2.png`) && !zip.includes(`${id}-screen-1.png`));
 
   stage = 'reopen earlier snapshot';
   await editor();
