@@ -89,6 +89,20 @@ pub(super) struct DemoEditEvidence<'a> {
 }
 
 impl DemoEditRequirements {
+    pub(super) fn from_annotations(batch: &crate::design::annotations::AnnotationBatch) -> Self {
+        let requirements = batch.requirements();
+        let source = requirements.join("\n");
+        Self {
+            instruction: format!(
+                "Update only the commented regions. Preserve every other element, screen order, link, and shared setting. Use the exact screen markup and the numbered boxes in the reference PNGs (not assets to embed). Coordinates use the rendered canvas with its top left as the origin.\n{source}\n{DEMO_ACCEPTANCE_CONTRACT}\n{DEMO_SCREEN_RULE}\n{DEMO_PROTOTYPE_RULE}"
+            ),
+            screens: batch.indexes(),
+            minimum_new_screens: 0,
+            requirements,
+            source,
+        }
+    }
+
     fn validate(&self, design: &Design) -> Result<(), String> {
         if self.instruction.trim().is_empty()
             || self.requirements.is_empty()

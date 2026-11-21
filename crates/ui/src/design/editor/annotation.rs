@@ -1,7 +1,13 @@
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use design_model::Design;
+use design_model::{AppWindow, Design, Screen, Theme, Viewport};
 use dioxus::prelude::*;
+use gloo_net::http::Request;
+use serde::Serialize;
+
+use crate::api::send_checked;
+use crate::settings::artifact_project;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Region {
@@ -106,22 +112,56 @@ pub(super) fn AnnotationSurface(
     }
 }
 
+#[derive(Serialize)]
+struct Mark<'a> {
+    screen: usize,
+    bounds: [u32; 4],
+    comment: &'a str,
+}
+
+#[derive(Serialize)]
+struct Submission<'a> {
+    expected: BTreeMap<usize, &'a Screen>,
+    viewport: Viewport,
+    theme: &'a Theme,
+    app_window: &'a Option<AppWindow>,
+    marks: Vec<Mark<'a>>,
+}
+
+#[derive(Serialize)]
+struct AnnotationTurn<'a> {
+    content: &'static str,
+    design: &'a str,
+    action: &'static str,
+    annotations: Submission<'a>,
+}
+
 #[component]
 pub(super) fn AnnotationComments(
+    design_id: String,
     screen: usize,
     snapshot: Rc<Design>,
     mut annotations: Signal<Vec<ScreenAnnotation>>,
 ) -> Element {
+    let mut status = use_signal(String::new);
+    let mut is_submitting = use_signal(|| false);
     let boxes = annotations.read();
+    let has_stale = boxes.iter().any(|entry| !entry.matches(&snapshot));
+    let can_submit = !boxes.is_empty()
+        && !has_stale
+        && boxes.iter().all(|entry| !entry.comment.trim().is_empty());
     rsx! {
         section { class: "annotation-comments", aria_label: "Screen annotations",
             p { "Drag a box around the area you want to change, then add a comment. {boxes.len()} total." }
-            for (index, entry) in boxes.iter().enumerate().filter(|(_, entry)| entry.screen == screen) {
+            if has_stale {
+                p { "Some marked screens changed. Remove those boxes and mark the current version before submitting." }
+            }
+            for (index, entry) in boxes.iter().enumerate().filter(|(_, entry)| entry.screen == screen || !entry.matches(&snapshot)) {
                 div { class: "annotation-comment", key: "{index}",
                     label {
                         span { "Box {index + 1}" }
                         if !entry.matches(&snapshot) {
-                            span { class: "badge", "Earlier snapshot" }
+                            span { class: "badge", "Earlier snapshot · Screen {entry.screen + 1}" }
                         }
                         textarea {
                             aria_label: "Comment for box {index + 1}",
@@ -142,6 +182,47 @@ pub(super) fn AnnotationComments(
                         "Remove box {index + 1}"
                     }
                 }
+            }
+            if !boxes.is_empty() {
+                button {
+                    class: "primary",
+                    disabled: !can_submit || is_submitting(),
+                    onclick: move |_| {
+                        if is_submitting() { return; }
+                        let entries = annotations.read();
+                        let mut expected = BTreeMap::new();
+                        let mut marks = Vec::new();
+                        for entry in entries.iter() {
+                            let Some(screen) = entry.snapshot.screens.get(entry.screen) else { return };
+                            expected.insert(entry.screen, screen);
+                            let Region { x, y, width, height } = entry.region;
+                            let bounds = [x, y, x + width, y + height].map(|part| (part * 10_000.0).round() as u32);
+                            marks.push(Mark { screen: entry.screen, bounds, comment: entry.comment.trim() });
+                        }
+                        let session = artifact_project(&design_id);
+                        let request = Request::post(&format!("/sessions/{session}/messages")).json(&AnnotationTurn {
+                            content: "Update the marked regions.", design: &design_id, action: "annotate",
+                            annotations: Submission { expected, viewport: snapshot.viewport, theme: &snapshot.theme, app_window: &snapshot.app_window, marks },
+                        });
+                        is_submitting.set(true);
+                        status.set(String::new());
+                        spawn(async move {
+                            let result = match request {
+                                Ok(request) => send_checked(request, "Submit annotations").await.map(|_| ()),
+                                Err(error) => Err(error.to_string()),
+                            };
+                            is_submitting.set(false);
+                            status.set(match result {
+                                Ok(()) => "Annotations submitted. Follow the edit in chat.".into(),
+                                Err(error) => error,
+                            });
+                        });
+                    },
+                    if is_submitting() { "Submitting…" } else { "Submit annotations" }
+                }
+            }
+            if !status.read().is_empty() {
+                p { role: "status", "{status}" }
             }
         }
     }

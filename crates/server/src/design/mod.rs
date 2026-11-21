@@ -1,5 +1,6 @@
 //! Design storage, generation, editing, review, and rendering.
 
+pub(crate) mod annotations;
 pub(crate) mod core;
 pub(crate) mod generation;
 pub(crate) mod patch;

@@ -11,6 +11,8 @@ pub(super) struct MessageRequest {
     pinned: Vec<String>,
     #[serde(default)]
     action: Option<String>,
+    #[serde(default)]
+    annotations: Option<crate::design::annotations::AnnotationSubmission>,
 }
 
 /// Why the pinned candidates of a message are refused: an id that is
@@ -91,15 +93,17 @@ pub(super) async fn post_message(
     let is_continue = request.action.as_deref() == Some("continue");
     let is_regenerate = request.action.as_deref() == Some("regenerate");
     let is_review_draft = request.action.as_deref() == Some("repair_draft");
+    let is_annotation_edit = request.action.as_deref() == Some("annotate");
     if let Some(action) = &request.action
         && !is_continue
         && !is_regenerate
         && !is_review_draft
+        && !is_annotation_edit
     {
         return api_error::error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             &format!(
-                "action `{action}` is unknown: use continue, regenerate, repair_draft, or omit it"
+                "action `{action}` is unknown: use continue, regenerate, repair_draft, annotate, or omit it"
             ),
             Vec::new(),
         );
@@ -147,6 +151,45 @@ pub(super) async fn post_message(
     } else {
         None
     };
+    let annotations = if is_annotation_edit {
+        let Some(candidate) = request.design.as_deref().filter(|candidate| {
+            session_id_of_artifact(candidate) == id
+                && request.pinned.is_empty()
+                && session.artifact_kind == design_model::ArtifactKind::Demo
+        }) else {
+            return conflict("Submitting annotations requires one demo candidate in this session.");
+        };
+        let Some(submission) = request.annotations else {
+            return conflict("Draw at least one box and add a comment before submitting.");
+        };
+        if !matches!(
+            session.state,
+            WorkflowState::Reviewing | WorkflowState::Generating
+        ) && !session.state.is_halted()
+        {
+            return conflict("Annotations can only be submitted for an existing demo.");
+        }
+        let design = match app.designs.load(candidate).await {
+            Ok(Some(design)) => design,
+            Ok(None) => return api_error::design_not_found(candidate),
+            Err(error) => return api_error::internal_error(&error),
+        };
+        let batch = match submission.bind(&design) {
+            Ok(batch) => batch,
+            Err(error) => return conflict(&error),
+        };
+        if !runner.annotation_edit_available().await {
+            return conflict(
+                "Annotation edits need the built-in runner and a model that accepts images.",
+            );
+        }
+        Some(batch)
+    } else {
+        if request.annotations.is_some() {
+            return conflict("Use the annotate action to submit boxes.");
+        }
+        None
+    };
     // A message after a halted run is the resume: the session returns to
     // the state the run halted in, then takes the turn.
     if session.state.is_halted() {
@@ -170,6 +213,10 @@ pub(super) async fn post_message(
                     .with_pinned(request.pinned),
             },
         );
+    if let Some(batch) = &annotations {
+        message.content = format!("{content}\n{}", batch.requirements().join("\n"));
+    }
+    message.annotations = annotations;
     // Each ordinary prompt gets its own turn. Defer link captures until that
     // turn starts, so they cannot affect the run already in flight.
     message.is_queued = !is_continue;

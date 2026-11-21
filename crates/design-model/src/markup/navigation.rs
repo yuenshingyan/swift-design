@@ -128,6 +128,23 @@ pub fn validate_demo_navigation(design: &Design, before: Option<&Design>) -> Res
     Ok(())
 }
 
+/// Checks that anchor destinations and their local actions are unchanged.
+pub fn preserves_demo_links(before: &str, after: &str) -> bool {
+    let links = |html: &str| {
+        let mut checker = HtmlChecker::new(html);
+        checker.demo = Some(DemoMarkup::default());
+        checker.run();
+        checker.demo.map(|demo| {
+            demo.tags
+                .into_iter()
+                .filter(|(tag, _)| tag == "a")
+                .map(|(_, tag)| (tag.href, tag.action))
+                .collect::<Vec<_>>()
+        })
+    };
+    links(before) == links(after)
+}
+
 fn local_target(value: &str) -> Option<(&str, &str)> {
     let (group, state) = value.split_once(':')?;
     key(group).then_some((group, state))
@@ -143,6 +160,20 @@ fn key(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn annotation_preservation_compares_destinations_and_not_link_styling() {
+        let original = "<a href='#screen-2'>Open</a>";
+        assert!(preserves_demo_links(
+            original,
+            "<a class='link' href=\"#screen-2\">Open details</a>"
+        ));
+        assert!(!preserves_demo_links(
+            original,
+            "<a href='#screen-3'>Open</a>"
+        ));
+        assert!(!preserves_demo_links(original, "<p>Open</p>"));
+    }
 
     #[test]
     fn safely_links_local_panels_without_accepting_missing_states_or_page_links() {

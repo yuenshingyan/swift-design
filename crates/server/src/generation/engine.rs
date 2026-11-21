@@ -430,8 +430,21 @@ impl GenerationEngine {
             .iter()
             .rev()
             .filter(|message| message.role == "user");
+        let latest = user_turns.next();
         if context.request.kind == design_model::ArtifactKind::Demo
-            && let Some(message) = user_turns.next()
+            && let Some(message) = latest
+            && let (Some(batch), Some(design)) = (&message.annotations, &message.design)
+        {
+            return Ok(Some(GenerationTask::Edit {
+                is_review_draft: false,
+                annotations: Some(batch.clone()),
+                designs: vec![design.clone()],
+                instruction: message.content.clone(),
+                conversation: String::new(),
+            }));
+        }
+        if context.request.kind == design_model::ArtifactKind::Demo
+            && let Some(message) = latest
             && message.is_review_draft
             && let Some(design) = &message.design
         {
@@ -457,6 +470,7 @@ impl GenerationEngine {
                 .unwrap_or_default();
             return Ok(Some(GenerationTask::Edit {
                 is_review_draft: true,
+                annotations: None,
                 designs: vec![design.clone()],
                 instruction: format!(
                     "{}\nRepair the retained draft in place and preserve finished work.\nPrior request for this candidate:\n{}\nLast recorded review findings for this candidate:\n{issues}",
@@ -667,6 +681,7 @@ impl GenerationEngine {
             let conversation = conversation_note(recent_conversation(&messages));
             return Ok(PlanStep::Task(GenerationTask::Edit {
                 is_review_draft: false,
+                annotations: None,
                 designs: targets,
                 instruction,
                 conversation,

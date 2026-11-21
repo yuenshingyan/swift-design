@@ -34,6 +34,7 @@ impl GenerationEngine {
             GenerationTask::Candidates => self.generate_candidates(client, context, log).await,
             GenerationTask::Edit {
                 is_review_draft,
+                annotations,
                 designs,
                 instruction,
                 conversation,
@@ -45,7 +46,12 @@ impl GenerationEngine {
                     conversation: &conversation,
                 };
                 let edits = self
-                    .edit_designs(client, context, (&order, is_review_draft), log)
+                    .edit_designs(
+                        client,
+                        context,
+                        (&order, is_review_draft, annotations.as_ref()),
+                        log,
+                    )
                     .await?;
                 Ok(GenerationOutcome::edited(edits))
             }
@@ -61,7 +67,7 @@ impl GenerationEngine {
                     conversation: &conversation,
                 };
                 let edits = self
-                    .edit_designs(client, context, (&order, false), log)
+                    .edit_designs(client, context, (&order, false, None), log)
                     .await?;
                 Ok(GenerationOutcome::edited(edits))
             }

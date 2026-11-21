@@ -413,6 +413,9 @@ pub struct ChatMessage {
     /// True for an explicit repair of this candidate's retained draft.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_review_draft: bool,
+    /// Marks bound to the snapshot targeted by an annotation edit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) annotations: Option<crate::design::annotations::AnnotationBatch>,
     /// True while this prompt waits for its own turn. Running engines ignore it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_queued: bool,
@@ -439,6 +442,7 @@ impl ChatMessage {
             role: "user".to_owned(),
             content: content.to_owned(),
             design: design.map(str::to_owned),
+            annotations: None,
             question_set: None,
             is_continue: false,
             is_regenerate: false,
@@ -475,6 +479,7 @@ impl ChatMessage {
             role: "assistant".to_owned(),
             content: content.to_owned(),
             design: None,
+            annotations: None,
             question_set: None,
             is_continue: false,
             is_regenerate: false,
@@ -506,6 +511,7 @@ impl ChatMessage {
             role: "assistant".to_owned(),
             content: content.to_owned(),
             design: None,
+            annotations: None,
             question_set: Some(number),
             is_continue: false,
             is_regenerate: false,
