@@ -57,6 +57,24 @@ pub async fn fetch_design(id: &str) -> Result<Design, String> {
     get_json(&format!("/designs/{id}")).await
 }
 
+/// One-based screen numbers for changes in the current snapshot.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub(crate) struct ScreenChanges {
+    pub(crate) new: Vec<usize>,
+    pub(crate) edited: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub(crate) struct DesignSnapshot {
+    pub(crate) design: Design,
+    pub(crate) screen_changes: ScreenChanges,
+}
+
+/// Fetches the current snapshot and its screen badges together.
+pub(crate) async fn fetch_current_snapshot(id: &str) -> Result<DesignSnapshot, String> {
+    get_json(&format!("/designs/{id}/snapshots/current")).await
+}
+
 /// The separate, read-only preview of a demo.
 #[derive(Clone, Deserialize, PartialEq)]
 pub(crate) struct DesignPreview {

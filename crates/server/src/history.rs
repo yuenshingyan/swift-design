@@ -99,7 +99,7 @@ impl HistoryStore {
 
     /// Every stamp stored for `id`, newest first. Empty when the design
     /// has no history directory.
-    async fn stamps(&self, id: &str) -> anyhow::Result<Vec<String>> {
+    pub(crate) async fn stamps(&self, id: &str) -> anyhow::Result<Vec<String>> {
         let mut entries = match tokio::fs::read_dir(self.design_directory(id)).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

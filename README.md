@@ -140,7 +140,9 @@ Existing recovery copies stay on disk; opening the editor neither publishes nor
 deletes them. Recovery copies are not included in exports or snapshot history.
 The existing `GET /designs/{id}/previews` and `render?preview=true` endpoints can
 still retrieve them explicitly. **View**, exports and ordinary render URLs use
-the current snapshot.
+the current snapshot. Thumbnails mark screens **New** or **Edited** based on
+what changed since the previous distinct snapshot. The marks survive reloads;
+unchanged screens and live previews are not marked.
 Chrome checks how built-in controls respond to programmatic clicks, Space, arrow
 keys, Home and End, and checks focus and ARIA state. These results inform
 requirement review. The probes do not verify native Tab order, hit-testing or
