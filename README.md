@@ -143,6 +143,10 @@ still retrieve them explicitly. **View**, exports and ordinary render URLs use
 the current snapshot. Thumbnails mark screens **New** or **Edited** based on
 what changed since the previous distinct snapshot. The marks survive reloads;
 unchanged screens and live previews are not marked.
+Use **Annotate** to draw numbered boxes on a saved demo screen and write a
+comment for each box. You can move between screens, edit comments, and remove
+boxes without triggering prototype controls. Annotations stay in the open editor;
+drawing and commenting do not start a model run.
 Chrome checks how built-in controls respond to programmatic clicks, Space, arrow
 keys, Home and End, and checks focus and ARIA state. These results inform
 requirement review. The probes do not verify native Tab order, hit-testing or

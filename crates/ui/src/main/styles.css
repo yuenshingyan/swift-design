@@ -856,6 +856,20 @@ div.brief-attachments:has(+ ul.brief-attachments) { padding-bottom: 0.4rem; }
 .preview-stage.narrow .preview-swap { width: auto; }
 .preview-swap iframe { grid-area: 1 / 1; }
 .preview-swap iframe.preview-loading { opacity: 0; pointer-events: none; }
+.preview-swap.annotating { position: relative; }
+.preview-swap.annotating iframe { pointer-events: none; }
+.annotation-layer { position: absolute; inset: 0; z-index: 1; display: grid; place-items: center; container-type: size; }
+.annotation-canvas { position: relative; }
+.annotation-surface { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; user-select: none; }
+.annotation-box { fill: rgb(9 114 105 / 12%); stroke: var(--teal); stroke-width: 2px; pointer-events: none; }
+.annotation-drag { stroke-dasharray: 5 3; }
+.annotation-number { position: absolute; padding: 0.1rem 0.35rem; background: var(--teal); color: white;
+  font: 0.7rem var(--mono); pointer-events: none; }
+.annotation-comments { display: grid; gap: 0.5rem; }
+.annotation-comments > p { margin: 0; color: var(--muted); font-size: 0.8rem; }
+.annotation-comment { display: flex; align-items: end; gap: 0.5rem; }
+.annotation-comment label { display: grid; gap: 0.25rem; flex: 1; min-width: 0; font-size: 0.8rem; }
+.annotation-comment textarea { width: 100%; min-height: 3rem; resize: vertical; box-sizing: border-box; }
 .preview-stage.phone { padding: 1.75rem; border-radius: var(--r-card); background-color: var(--sunken);
   background-image: radial-gradient(circle, var(--line-soft) 1px, transparent 1.5px);
   background-size: 1rem 1rem; }
