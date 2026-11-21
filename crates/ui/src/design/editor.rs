@@ -828,7 +828,7 @@ fn LoadedEditor(
                                                 aria_expanded: if is_open { "true" } else { "false" },
                                                 disabled: is_searching,
                                                 onclick: move |_| { group_overrides.write().insert(name.clone(), !is_open); },
-                                                span { class: "screen-group-arrow", aria_hidden: "true", if is_open { "▾" } else { "▸" } }
+                                                span { class: "screen-group-arrow", aria_hidden: "true" }
                                                 span { class: "screen-group-name", "{label}" }
                                                 span { class: "screen-group-count", "{count_label}" }
                                                 if has_new { span { class: "screen-group-change", "New" } }
