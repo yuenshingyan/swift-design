@@ -41,6 +41,56 @@ pub(super) fn ScreenExportCheckbox(
     }
 }
 
+/// Toggles a whole group for PNG export, including screens hidden by search.
+#[component]
+pub(super) fn GroupExportCheckbox(
+    label: String,
+    screens: Vec<usize>,
+    mut selection: Signal<Vec<usize>>,
+) -> Element {
+    let count = screens.len();
+    let selected = selection.read();
+    let selected_count = screens
+        .iter()
+        .filter(|screen| selected.contains(screen))
+        .count();
+    let (state, mark) = if selected_count == 0 {
+        ("false", "")
+    } else if selected_count == count {
+        ("true", "✓")
+    } else {
+        ("mixed", "−")
+    };
+    let unit = if count == 1 { "screen" } else { "screens" };
+    let action = if state == "true" {
+        "Deselect"
+    } else {
+        "Select"
+    };
+    let description = format!("{action} all {count} {label} {unit} for export");
+    rsx! {
+        button {
+            class: "group-export-checkbox",
+            r#type: "button",
+            role: "checkbox",
+            aria_checked: "{state}",
+            aria_label: "Select all {count} {label} {unit} for export",
+            title: "{description}",
+            onclick: move |_| toggle_export_group(&mut selection.write(), &screens),
+            span { aria_hidden: "true", "{mark}" }
+        }
+    }
+}
+
+fn toggle_export_group(selection: &mut Vec<usize>, screens: &[usize]) {
+    let all_selected = screens.iter().all(|screen| selection.contains(screen));
+    selection.retain(|screen| !screens.contains(screen));
+    if !all_selected {
+        selection.extend_from_slice(screens);
+        selection.sort_unstable();
+    }
+}
+
 /// No href is generated for an empty or out-of-range selection.
 fn selected_export_href(design_id: &str, screens: &[usize], count: usize) -> Option<String> {
     if screens.is_empty() || screens.iter().any(|&screen| screen == 0 || screen > count) {
@@ -310,6 +360,17 @@ mod tests {
     use super::*;
     use crate::design::api::DesignPreview;
     use crate::design::editor::{active_preview, preview_design};
+
+    #[test]
+    fn toggle_export_group_selects_all_then_clears_only_that_group() {
+        let mut selection = vec![2, 4];
+        toggle_export_group(&mut selection, &[1, 2, 3]);
+        assert_eq!(selection, [1, 2, 3, 4]);
+        toggle_export_group(&mut selection, &[1, 2, 3]);
+        assert_eq!(selection, [4]);
+        toggle_export_group(&mut selection, &[]);
+        assert_eq!(selection, [4]);
+    }
 
     #[test]
     fn selected_export_href_requires_nonempty_saved_screen_selection() {
