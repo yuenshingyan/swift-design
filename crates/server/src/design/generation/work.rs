@@ -294,7 +294,7 @@ impl GenerationEngine {
         let preservation = if is_new {
             "This is a draft, not a completed candidate."
         } else {
-            "The saved version is unchanged. Open the same candidate to see the review draft."
+            "The current snapshot is unchanged. The incomplete result was kept separately."
         };
         let message = format!(
             "Needs review: preserved draft for `{source_id}`. {preservation} Layout and requirement completion are not verified."

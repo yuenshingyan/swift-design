@@ -256,12 +256,8 @@ pub(super) fn DesignExportGroup(
 }
 
 /// Opens the full demo at a screen without editor panels or editing scripts.
-pub(super) fn view_href(design_id: &str, index: usize, is_preview: bool) -> String {
-    let preview = if is_preview { "&preview=true" } else { "" };
-    format!(
-        "/designs/{design_id}/render?start_screen={}{preview}",
-        index + 1
-    )
+pub(super) fn view_href(design_id: &str, index: usize) -> String {
+    format!("/designs/{design_id}/render?start_screen={}", index + 1)
 }
 
 /// The label of the menu that downloads the screen on display.
@@ -313,7 +309,7 @@ pub(super) fn field_count(design: &Design) -> usize {
 mod tests {
     use super::*;
     use crate::design::api::DesignPreview;
-    use crate::design::editor::{preview_design, visible_preview};
+    use crate::design::editor::{active_preview, preview_design};
 
     #[test]
     fn selected_export_href_requires_nonempty_saved_screen_selection() {
@@ -465,18 +461,15 @@ mod tests {
     }
 
     #[test]
-    fn saved_version_can_hide_recovery_without_hiding_an_active_run() {
+    fn retained_checkpoints_cannot_replace_current_or_active_editor_content() {
         let mut preview = DesignPreview {
             design: design(),
             is_recovery: true,
         };
-        assert!(visible_preview(Some(&preview), false).is_none());
-        assert_eq!(visible_preview(Some(&preview), true), Some(&preview.design));
+        assert!(active_preview(Some(preview.clone())).is_none());
+        assert!(active_preview(None).is_none());
         preview.is_recovery = false;
-        assert_eq!(
-            visible_preview(Some(&preview), false),
-            Some(&preview.design)
-        );
+        assert_eq!(active_preview(Some(preview.clone())), Some(preview.design));
     }
 
     #[test]
@@ -493,10 +486,10 @@ mod tests {
     }
 
     #[test]
-    fn draft_only_editor_renders_read_only_preview_without_exports() {
+    fn live_only_editor_renders_read_only_preview_without_exports() {
         use dioxus::prelude::*;
 
-        fn draft_editor() -> Element {
+        fn live_editor() -> Element {
             super::super::LoadedEditor(super::super::LoadedEditorProps {
                 design_id: "test-candidate-1".into(),
                 initial: design(),
@@ -505,22 +498,54 @@ mod tests {
             })
         }
 
-        let mut dom = VirtualDom::new(draft_editor);
+        let mut dom = VirtualDom::new(live_editor);
         let changes = dom.rebuild_to_vec();
         let mutations = format!(
             "{changes:?} {:?}",
             dom.get_scope(ScopeId::APP).expect("app").root_node()
         );
-        assert!(mutations.contains("Live draft — unverified"));
+        assert!(mutations.contains("Live preview · read-only"));
         assert!(mutations.contains("preview=true"));
         assert!(mutations.contains("readonly"));
         assert!(mutations.contains("click to view"));
         assert!(!mutations.contains("drag to reorder"));
-        assert!(!mutations.contains("thumbnail-export-checkbox"));
+        assert!(!mutations.contains(" for export"));
         assert!(!mutations.contains("editable=true"));
         assert!(!mutations.contains("export.html"));
         assert!(!mutations.contains("Selected screens"));
         assert!(!mutations.contains("/history"));
+    }
+
+    #[test]
+    fn current_snapshot_editor_offers_view_and_exports_without_draft_controls() {
+        use dioxus::prelude::*;
+
+        fn current_editor() -> Element {
+            super::super::LoadedEditor(super::super::LoadedEditorProps {
+                design_id: "test-candidate-1".into(),
+                initial: design(),
+                initially_saved: true,
+                on_back: EventHandler::new(|_| {}),
+            })
+        }
+
+        let mut dom = VirtualDom::new(current_editor);
+        let changes = dom.rebuild_to_vec();
+        let mutations = format!("{changes:?}");
+        assert!(mutations.contains("/designs/test-candidate-1/render?start_screen=1"));
+        assert!(mutations.contains(" for export"));
+        assert!(!mutations.contains("preview=true"));
+        for removed in [
+            "Saved version",
+            "Review draft",
+            "Play review draft",
+            "Repair draft",
+        ] {
+            assert!(
+                !mutations.contains(removed),
+                "unexpected control: {removed}"
+            );
+        }
     }
 
     fn design() -> design_model::Design {
@@ -588,12 +613,8 @@ mod tests {
     #[test]
     fn view_opens_the_full_demo_at_the_selected_screen_without_scoping_or_editing() {
         assert_eq!(
-            view_href("demo-candidate-2", 2, false),
+            view_href("demo-candidate-2", 2),
             "/designs/demo-candidate-2/render?start_screen=3"
-        );
-        assert_eq!(
-            view_href("demo-candidate-2", 0, true),
-            "/designs/demo-candidate-2/render?start_screen=1&preview=true"
         );
     }
 
