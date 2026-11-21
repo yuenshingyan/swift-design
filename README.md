@@ -346,10 +346,15 @@ screens to export. Checked boxes remain visible; keyboard focus reveals them too
 and touch devices show them without hovering. Use **Export selected (N)** in the
 toolbar to download the PNG ZIP, or **Clear** to clear export selection without
 changing chat pins. **Export selected (N)** clears the checks when the request
-starts. Empty selections cannot export. While rendering, the button shows
-**Preparing N screens…** and blocks duplicate clicks; failures appear next
-to it instead of silently navigating to an error response. The download starts
-when the ZIP is ready. Demo ZIPs render at most three screens concurrently.
+starts. Empty selections cannot export. Both **Export selected** and **All →
+Download as PNG zip** prepare the ZIP in the background. The editor shows how
+many screens have rendered, then starts the download and offers a **Download
+ZIP** link. The link lasts 10 minutes after the ZIP is ready, or until the
+server restarts. The server runs one background demo ZIP at a time and renders
+up to three screens in parallel. If the PNGs exceed 64 MiB, export fewer screens.
+The direct ZIP API remains available; clients can use `POST /designs/{id}/exports`
+with `{"screens":"1,3-5"}` (or `{}` for all), poll `GET /designs/{id}/exports/{job_id}`,
+and append `/download` when the job is ready.
 The ZIP contains only the selected saved screens, in
 screen order, keeping original filenames such as `candidate-screen-23.png`.
 `GET /designs/{id}/export.zip?screens=23-35` exposes the same selection; omitting

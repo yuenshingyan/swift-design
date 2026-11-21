@@ -101,6 +101,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/designs/{id}/export", get(export_design))
         .route("/designs/{id}/export.zip", get(export_design_zip))
+        .merge(jobs::routes())
         .route("/decks/{id}/export", get(export_deck))
         .route("/decks/{id}/export.pdf", get(export_deck_pdf))
         .route("/decks/{id}/export.zip", get(export_deck_zip))
@@ -334,6 +335,7 @@ async fn fetch_as_browser(url: String) -> anyhow::Result<Vec<u8>> {
 }
 
 mod core;
+mod jobs;
 use core::*;
 
 mod multi;

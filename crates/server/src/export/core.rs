@@ -8,7 +8,7 @@ use super::*;
 /// Optional one-based screen selection for a demo PNG ZIP.
 #[derive(Default, Deserialize)]
 pub(super) struct DesignZipQuery {
-    screens: Option<String>,
+    pub(super) screens: Option<String>,
 }
 
 /// Parses a bounded selection before any screenshots are taken.
@@ -154,7 +154,28 @@ pub(super) async fn build_design_zip_response(
     let indexes = indexes
         .map(Vec::from)
         .unwrap_or_else(|| (0..design.screens.len()).collect());
+    let images = match capture_design_images(design, base_url, indexes, None, |_| {}).await {
+        Ok(images) => images,
+        Err(error) => return api_error::internal_error(&error),
+    };
+    match pack_design_images(id, &images) {
+        Ok(bytes) => {
+            tracing::info!(%id, size_bytes = bytes.len(), screen_count = images.len(), "design exported as png zip");
+            file_download(id, "zip", "application/zip", bytes)
+        }
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+pub(super) async fn capture_design_images(
+    design: &Design,
+    base_url: &str,
+    indexes: Vec<usize>,
+    byte_limit: Option<usize>,
+    mut report: impl FnMut(usize),
+) -> anyhow::Result<Vec<(usize, Vec<u8>)>> {
     let mut images = Vec::with_capacity(indexes.len());
+    let mut bytes = 0usize;
     let mut remaining = indexes.into_iter();
     let design = Arc::new(design.clone());
     let base_url: Arc<str> = Arc::from(base_url);
@@ -173,20 +194,22 @@ pub(super) async fn build_design_zip_response(
             });
         }
         match captures.join_next().await {
-            Some(Ok((index, Ok(bytes)))) => images.push((index, bytes)),
-            Some(Ok((_, Err(error)))) => return api_error::internal_error(&error),
-            Some(Err(error)) => return api_error::internal_error(&error.into()),
+            Some(capture) => {
+                let (index, image) = capture?;
+                let image = image?;
+                bytes += image.len();
+                anyhow::ensure!(
+                    byte_limit.is_none_or(|limit| bytes <= limit),
+                    "PNG export size limit exceeded"
+                );
+                images.push((index, image));
+                report(images.len());
+            }
             None => break,
         }
     }
     images.sort_by_key(|(index, _)| *index);
-    match pack_design_images(id, &images) {
-        Ok(bytes) => {
-            tracing::info!(%id, size_bytes = bytes.len(), screen_count = images.len(), "design exported as png zip");
-            file_download(id, "zip", "application/zip", bytes)
-        }
-        Err(error) => api_error::internal_error(&error),
-    }
+    Ok(images)
 }
 
 /// Loads a stored deck for an export: 400, 404, or 422 as a response

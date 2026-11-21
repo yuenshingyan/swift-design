@@ -1,12 +1,8 @@
 use super::*;
 
-/// The href of the PNG export: one screen's image when scoped, the zip
-/// of every screen otherwise.
-pub(super) fn png_export_href(design_id: &str, only: Option<usize>) -> String {
-    match only {
-        Some(index) => format!("/designs/{design_id}/screens/{}.png", index + 1),
-        None => format!("/designs/{design_id}/export.zip"),
-    }
+/// The download URL for the current screen's PNG.
+fn png_export_href(design_id: &str, index: usize) -> String {
+    format!("/designs/{design_id}/screens/{}.png", index + 1)
 }
 
 /// The download name of a scoped screen image, matching the zip entry.
@@ -91,8 +87,8 @@ fn toggle_export_group(selection: &mut Vec<usize>, screens: &[usize]) {
     }
 }
 
-/// No href is generated for an empty or out-of-range selection.
-fn selected_export_href(design_id: &str, screens: &[usize], count: usize) -> Option<String> {
+/// An empty or out-of-range selection cannot start a selected export.
+fn selected_export_query(screens: &[usize], count: usize) -> Option<String> {
     if screens.is_empty() || screens.iter().any(|&screen| screen == 0 || screen > count) {
         return None;
     }
@@ -101,40 +97,16 @@ fn selected_export_href(design_id: &str, screens: &[usize], count: usize) -> Opt
         .map(usize::to_string)
         .collect::<Vec<_>>()
         .join(",");
-    Some(format!("/designs/{design_id}/export.zip?screens={query}"))
+    Some(query)
 }
 
-/// Fetches the completed ZIP before triggering a browser download, reporting failures.
-const DOWNLOAD_SELECTED_SCREENS: &str = r#"
-const [href, filename] = await dioxus.recv();
-try {
-  const response = await fetch(href);
-  if (!response.ok) {
-    let message = `Cannot export selected screens: HTTP ${response.status}; try again.`;
-    try {
-      const body = await response.json();
-      message = body.error?.message || message;
-    } catch (_) {}
-    throw new Error(message);
-  }
-  if (!response.headers.get('content-type')?.includes('application/zip')) {
-    throw new Error('Cannot export selected screens: the server did not return a ZIP; try again.');
-  }
-  const blob = await response.blob();
-  if (!blob.size) throw new Error('Cannot export selected screens: the ZIP is empty; try again.');
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 60000);
-  dioxus.send('');
-} catch (error) {
-  dioxus.send(error.message || 'Cannot export selected screens: the connection failed; try again.');
+#[derive(serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum ExportUpdate {
+    Progress { completed: usize, total: usize },
+    Ready { href: String },
+    Failed { message: String },
 }
-"#;
 
 /// The design toolbar's exports of all, current, or selected saved screens.
 #[component]
@@ -150,15 +122,62 @@ pub(super) fn DesignExportGroup(
         .into_iter()
         .filter(|&screen| screen <= count)
         .collect();
-    let export_href = if can_export_with_chrome {
-        selected_export_href(&design_id, &screens, count)
+    let export_query = if can_export_with_chrome {
+        selected_export_query(&screens, count)
     } else {
         None
     };
     let selected_count = screens.len();
-    let mut preparing = use_signal(|| None::<usize>);
-    let mut export_message = use_signal(String::new);
-    let mut export_failed = use_signal(|| false);
+    let mut progress = use_signal(|| None::<(usize, usize)>);
+    let mut download_href = use_signal(|| None::<String>);
+    let mut export_error = use_signal(|| None::<String>);
+    let start_export = use_callback({
+        let url = format!("/designs/{design_id}/exports");
+        move |query: Option<String>| {
+            if progress.peek().is_some() {
+                return;
+            }
+            let total = if query.is_some() {
+                selected_count
+            } else {
+                count
+            };
+            progress.set(Some((0, total)));
+            download_href.set(None);
+            export_error.set(None);
+            if query.is_some() {
+                // Clear only at dispatch so later selections survive the export.
+                export_screens.set(Vec::new());
+            }
+            let url = url.clone();
+            spawn(async move {
+                let mut channel = document::eval(include_str!("export_job.js"));
+                if channel.send((url, query)).is_ok() {
+                    while let Ok(update) = channel.recv::<ExportUpdate>().await {
+                        match update {
+                            ExportUpdate::Progress { completed, total } => {
+                                progress.set(Some((completed, total)))
+                            }
+                            ExportUpdate::Ready { href } => {
+                                progress.set(None);
+                                download_href.set(Some(href));
+                                return;
+                            }
+                            ExportUpdate::Failed { message } => {
+                                progress.set(None);
+                                export_error.set(Some(message));
+                                return;
+                            }
+                        }
+                    }
+                }
+                progress.set(None);
+                export_error.set(Some(
+                    "Could not start the PNG export. Check your connection and try again.".into(),
+                ));
+            });
+        }
+    });
     let mut is_all_menu_open = use_signal(|| false);
     let mut is_unit_menu_open = use_signal(|| false);
     let unit_label = screen_export_label(selected);
@@ -182,9 +201,12 @@ pub(super) fn DesignExportGroup(
                         "Download as HTML"
                     }
                     if can_export_with_chrome {
-                        a {
-                            href: png_export_href(&design_id, None),
-                            onclick: move |_| is_all_menu_open.set(false),
+                        button {
+                            disabled: progress().is_some() || count == 0,
+                            onclick: move |_| {
+                                is_all_menu_open.set(false);
+                                start_export.call(None);
+                            },
                             "Download as PNG zip"
                         }
                     } else {
@@ -198,47 +220,13 @@ pub(super) fn DesignExportGroup(
             }
         }
         div { class: "selected-screen-export",
-            if let Some(count) = preparing() {
-                button { disabled: true, "Preparing {count} screens…" }
-            } else if let Some(href) = export_href {
+            if let Some((completed, total)) = progress() {
+                button { disabled: true, role: "status", "Preparing ZIP: {completed} of {total}" }
+            } else if let Some(query) = export_query {
                 button {
                     class: "primary",
-                    "data-export-href": href.clone(),
                     title: "Download only the screens checked on the thumbnails",
-                    onclick: {
-                        let filename = format!("{design_id}.zip");
-                        move |_| {
-                            if preparing.peek().is_some() { return; }
-                            preparing.set(Some(selected_count));
-                            // The request uses the URL captured before the selection clears.
-                            export_screens.set(Vec::new());
-                            export_message.set(String::new());
-                            export_failed.set(false);
-                            let href = href.clone();
-                            let filename = filename.clone();
-                            spawn(async move {
-                                let mut channel = document::eval(DOWNLOAD_SELECTED_SCREENS);
-                                let result = match channel.send((href, filename)) {
-                                    Ok(()) => channel.recv::<String>().await.map_err(|error| error.to_string()),
-                                    Err(error) => Err(error.to_string()),
-                                };
-                                preparing.set(None);
-                                match result {
-                                    Ok(message) if message.is_empty() => {
-                                        export_message.set(format!("Download ready: {selected_count} screens."));
-                                    }
-                                    Ok(message) => {
-                                        export_failed.set(true);
-                                        export_message.set(message);
-                                    }
-                                    Err(_) => {
-                                        export_failed.set(true);
-                                        export_message.set("Cannot export selected screens: the download could not start; try again.".into());
-                                    }
-                                }
-                            });
-                        }
-                    },
+                    onclick: move |_| start_export.call(Some(query.clone())),
                     "Export selected ({selected_count})"
                 }
             } else {
@@ -252,20 +240,17 @@ pub(super) fn DesignExportGroup(
                     "Export selected ({selected_count})"
                 }
             }
-            if preparing().is_some() {
+            if let Some(href) = download_href() {
                 span { class: "export-feedback", role: "status",
-                    "Preparing the PNG ZIP. Rendering multiple screens may take a few minutes."
+                    "ZIP ready. "
+                    a { href, download: "{design_id}.zip", "Download ZIP" }
                 }
-            } else if !export_message().is_empty() {
-                span {
-                    class: if export_failed() { "export-feedback error" } else { "export-feedback" },
-                    role: if export_failed() { "alert" } else { "status" },
-                    "{export_message}"
-                }
+            } else if let Some(message) = export_error() {
+                span { class: "export-feedback error", role: "alert", "{message}" }
             }
             if selected_count > 0 {
                 button {
-                    disabled: preparing().is_some(),
+                    disabled: progress().is_some(),
                     title: "Clear export selection without changing chat pins",
                     onclick: move |_| export_screens.set(Vec::new()),
                     "Clear"
@@ -287,7 +272,7 @@ pub(super) fn DesignExportGroup(
                 div { class: "toolbar-menu unit-export-menu",
                     if can_export_with_chrome {
                         a {
-                            href: png_export_href(&design_id, Some(selected)),
+                            href: png_export_href(&design_id, selected),
                             download: screen_download_name(&design_id, selected),
                             onclick: move |_| is_unit_menu_open.set(false),
                             "Download as PNG"
@@ -373,19 +358,14 @@ mod tests {
     }
 
     #[test]
-    fn selected_export_href_requires_nonempty_saved_screen_selection() {
+    fn selected_export_query_requires_nonempty_saved_screen_selection() {
         assert_eq!(
-            selected_export_href("demo", &[23, 24, 25], 25).as_deref(),
-            Some("/designs/demo/export.zip?screens=23,24,25")
+            selected_export_query(&[23, 24, 25], 25).as_deref(),
+            Some("23,24,25")
         );
-        assert_eq!(selected_export_href("demo", &[], 25), None);
-        assert_eq!(selected_export_href("demo", &[0], 25), None);
-        assert_eq!(selected_export_href("demo", &[23, 24, 25], 24), None);
-        assert_eq!(png_export_href("demo", None), "/designs/demo/export.zip");
-        assert_eq!(
-            png_export_href("demo", Some(23)),
-            "/designs/demo/screens/24.png"
-        );
+        assert_eq!(selected_export_query(&[], 25), None);
+        assert_eq!(selected_export_query(&[0], 25), None);
+        assert_eq!(selected_export_query(&[23, 24, 25], 24), None);
     }
 
     #[test]
@@ -411,7 +391,7 @@ mod tests {
         );
         assert!(rendered.contains("Export selected ("));
         assert!(rendered.contains("disabled"));
-        assert!(!rendered.contains("export.zip?screens="));
+        assert!(!rendered.contains("\"primary\""));
     }
 
     #[test]
@@ -436,30 +416,9 @@ mod tests {
                 .expect("root component scope should exist after rendering")
                 .root_node()
         );
-        assert!(rendered.contains("export.zip?screens=2,4"));
+        assert!(rendered.contains("primary"));
         assert!(rendered.contains("Clear"));
         assert!(!rendered.contains("Screen numbers or ranges"));
-    }
-
-    #[test]
-    fn selected_download_checks_the_response_and_blob_before_clicking() {
-        let script = super::DOWNLOAD_SELECTED_SCREENS;
-        let check_status = script
-            .find("if (!response.ok)")
-            .expect("fixture should contain the expected match");
-        let check_type = script
-            .find("application/zip")
-            .expect("fixture should contain the expected match");
-        let read_blob = script
-            .find("await response.blob()")
-            .expect("fixture should contain the expected match");
-        let click = script
-            .find("link.click()")
-            .expect("fixture should contain the expected match");
-        assert!(check_status < check_type && check_type < read_blob && read_blob < click);
-        assert!(script.contains("body.error?.message"));
-        assert!(script.contains("dioxus.send(error.message"));
-        assert!(script.contains("URL.revokeObjectURL(url)"));
     }
 
     #[test]
@@ -499,11 +458,7 @@ mod tests {
     #[test]
     fn png_exports_name_the_screen_in_href_and_filename() {
         assert_eq!(
-            png_export_href("launch", None),
-            "/designs/launch/export.zip"
-        );
-        assert_eq!(
-            png_export_href("launch", Some(1)),
+            png_export_href("launch", 1),
             "/designs/launch/screens/2.png"
         );
         assert_eq!(screen_download_name("launch", 1), "launch-screen-2.png");
