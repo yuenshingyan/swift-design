@@ -358,10 +358,15 @@ impl GenerationEngine {
             ));
             let audit = self.audit_demo(&design).await?;
             let findings = audit.layout_instructions(&fix.indexes);
-            if best_audit
-                .as_ref()
-                .is_some_and(|previous| !audit.improves_on(previous, Some(&fix.indexes)))
-            {
+            if best_audit.as_ref().is_some_and(|previous: &DemoAudit| {
+                let was_usable = previous.require_usable_edit_on(&fix.indexes).is_ok();
+                let is_usable = audit.require_usable_edit_on(&fix.indexes).is_ok();
+                if was_usable != is_usable {
+                    was_usable
+                } else {
+                    !audit.improves_on(previous, Some(&fix.indexes))
+                }
+            }) {
                 stop = PolishStop::NoImprovement;
                 break;
             }
@@ -381,16 +386,24 @@ impl GenerationEngine {
                 "{label}: tweak round {round} of at most {limit} ({} findings, up to {PARALLEL_EDIT_LIMIT} concurrent screen repairs)",
                 findings.len()
             ));
-            design = self
-                .repair_demo_screens(client, &design, fix, &audit)
-                .await
-                .map_err(|error| {
+            match self.repair_demo_screens(client, &design, fix, &audit).await {
+                Ok(repaired) => design = repaired,
+                Err(error) => {
                     log(&format!("{label}: fix round {round} failed: {error}"));
-                    format!(
-                        "The layout repair could not finish: {error}. No verified final version was saved. Remaining layout findings: {}",
-                        findings.join("; ")
-                    )
-                })?;
+                    if audit.require_usable_edit_on(&fix.indexes).is_err() {
+                        return Err(format!(
+                            "The layout repair could not finish: {error}. No verified final version was saved. Remaining layout findings: {}",
+                            findings.join("; ")
+                        ));
+                    }
+                    log(&format!(
+                        "{label}: keeping the usable edit with layout warnings"
+                    ));
+                    stop = PolishStop::NoImprovement;
+                    best_audit = Some(audit);
+                    break;
+                }
+            }
             best_audit = Some(audit);
             fix.context.report(
                 (DRAFT_SHARE + (1.0 - DRAFT_SHARE) * round as f32 / limit as f32).min(0.98),

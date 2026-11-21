@@ -310,46 +310,57 @@ async fn one_tweak_round_repairs_blocked_screens_concurrently_and_audits_the_mer
 }
 
 #[tokio::test]
-async fn a_failed_layout_repair_preserves_the_provider_cause_and_element() {
-    let directory = TempDir::new().expect("temporary test directory should be created");
-    let fake = FakeModelServer::start().await;
-    for _ in 0..4 {
-        fake.push_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Our servers are currently overloaded. Please try again later.",
-        );
+async fn a_failed_repair_keeps_usable_edits_but_blocks_unusable_edits() {
+    for kind in ["overflow", "empty"] {
+        let directory = TempDir::new().expect("temporary test directory should be created");
+        let fake = FakeModelServer::start().await;
+        for _ in 0..4 {
+            fake.push_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Our servers are currently overloaded. Please try again later.",
+            );
+        }
+        let runner: DemoDomRunner = Arc::new(move |design, _| {
+            let dom = report(
+                &design,
+                serde_json::json!([{"screen":2,"node":"a.control (0/2)","kind":kind,"detail":"content needs 41px tall but the box is 38px tall"}]),
+            );
+            Box::pin(async move { Ok(dom) })
+        });
+        let engine = engine(&fake, &directory, runner);
+        let request = SessionRequest {
+            request: "Page 3 is still overflowed.".to_owned(),
+            conversation: String::new(),
+            kind: ArtifactKind::Demo,
+            answers: Vec::new(),
+            options: RunOptions::default(),
+        };
+        let context = context();
+        let fix = EditFix {
+            request: &request,
+            context: &context,
+            indexes: vec![2],
+        };
+        let original = design();
+        let result = engine
+            .fix_edited_design(&reqwest::Client::new(), original.clone(), &fix, &log())
+            .await;
+        if kind == "empty" {
+            let error = result
+                .expect_err("failed repair of an unusable edit should report the provider error");
+            assert!(error.contains("The layout repair could not finish"));
+            assert!(error.contains("servers are currently overloaded"));
+            assert!(error.contains("a.control (0/2)"));
+            assert!(error.contains("automatic retry budget exhausted"));
+        } else {
+            let (kept, audit) = result.expect("failed optional polish should keep the usable edit");
+            assert_eq!(kept, original);
+            assert!(
+                audit.instructions(Some(&[2]))[0].contains("41px tall but the box is 38px tall")
+            );
+        }
+        assert_eq!(fake.requests().len(), 4);
     }
-    let runner: DemoDomRunner = Arc::new(|design, _| {
-        let dom = report(
-            &design,
-            serde_json::json!([{"screen":2,"node":"a.control (0/2)","kind":"overflow","detail":"content needs 41px tall but the box is 38px tall"}]),
-        );
-        Box::pin(async move { Ok(dom) })
-    });
-    let engine = engine(&fake, &directory, runner);
-    let request = SessionRequest {
-        request: "Page 3 is still overflowed.".to_owned(),
-        conversation: String::new(),
-        kind: ArtifactKind::Demo,
-        answers: Vec::new(),
-        options: RunOptions::default(),
-    };
-    let context = context();
-    let fix = EditFix {
-        request: &request,
-        context: &context,
-        indexes: vec![2],
-    };
-    let error = engine
-        .fix_edited_design(&reqwest::Client::new(), design(), &fix, &log())
-        .await
-        .expect_err("failed layout repair should return its provider error");
-    assert!(error.contains("The layout repair could not finish"));
-    assert!(error.contains("servers are currently overloaded"));
-    assert!(error.contains("a.control (0/2)"));
-    assert!(error.contains("41px tall but the box is 38px tall"));
-    assert_eq!(fake.requests().len(), 4);
-    assert!(error.contains("automatic retry budget exhausted"));
 }
 
 #[tokio::test]

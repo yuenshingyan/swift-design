@@ -251,6 +251,30 @@ impl DemoAudit {
         score < previous_score || (score == previous_score && overflow_improved)
     }
 
+    /// Rejects unusable edited screens without treating uncertain geometry as a failed edit.
+    pub(crate) fn require_usable_edit_on(&self, indexes: &[usize]) -> Result<(), String> {
+        let blockers: Vec<_> = self
+            .prototype_failures(Some(indexes))
+            .chain(
+                self.findings
+                    .iter()
+                    .filter(|finding| {
+                        indexes.contains(&finding.screen)
+                            && matches!(finding.kind.as_str(), "empty" | "window_geometry")
+                    })
+                    .map(format_finding),
+            )
+            .take(8)
+            .collect();
+        if blockers.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "Cannot save an unusable demo edit: {}",
+            blockers.join("; ")
+        ))
+    }
+
     /// Blocks completion while any measured layout error remains on any screen.
     pub(crate) fn require_layout_clean(&self) -> Result<(), String> {
         self.require_layout_clean_on(None)

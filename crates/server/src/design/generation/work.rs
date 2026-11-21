@@ -647,7 +647,7 @@ impl GenerationEngine {
                         ))
                     })?;
             }
-            if let Err(error) = audit.require_layout_clean_on(Some(&touched)) {
+            if let Err(error) = audit.require_usable_edit_on(&touched) {
                 let notice = self
                     .review_draft_notice(design_id, &error, false)
                     .await
@@ -776,7 +776,10 @@ impl GenerationEngine {
             .map(|index| (index + 1).to_string())
             .collect();
         if !layout_warnings.is_empty() {
-            report.push_str(&format!("\nNeeds review — advisory layout findings on the edited screens:\n{}\nNo blocking layout defects were measured; this is not a claim that all polish is verified.", layout_warnings.join("\n")));
+            report.push_str(&format!(
+                "\nLayout warnings on the edited screens:\n{}",
+                layout_warnings.join("\n")
+            ));
         } else if !verified.is_empty() {
             report.push_str(&format!("\nRendered layout verified on screen(s) {}. Untouched screens are not claimed as verified.", verified.join(", ")));
         }
