@@ -87,17 +87,24 @@ pub(crate) fn preview_panes(loaded_address: &str, address: &str) -> Vec<String> 
 /// keyed by address: a swap only retargets attributes and never moves
 /// or reloads an iframe.
 #[component]
-pub(crate) fn PreviewFrame(title: String, ratio: String, src: String) -> Element {
+pub(crate) fn PreviewFrame(
+    title: String,
+    ratio: String,
+    src: String,
+    #[props(default)] overlay: Option<Element>,
+) -> Element {
     let mut loaded_src = use_signal(|| src.clone());
+    let has_overlay = overlay.is_some();
     rsx! {
-        div { class: "preview-swap",
+        div { class: if has_overlay { "preview-swap annotating" } else { "preview-swap" },
             for pane_src in preview_panes(&loaded_src(), &src) {
                 iframe {
                     key: "{pane_src}",
                     title: "{title}",
                     class: if pane_src == loaded_src() { "" } else { "preview-loading" },
                     "data-preview": if pane_src == loaded_src() { "true" } else { "false" },
-                    tabindex: if pane_src == loaded_src() { "0" } else { "-1" },
+                    tabindex: if !has_overlay && pane_src == loaded_src() { "0" } else { "-1" },
+                    inert: has_overlay.then_some(""),
                     style: "aspect-ratio: {ratio}",
                     src: "{pane_src}",
                     onload: {
@@ -105,6 +112,9 @@ pub(crate) fn PreviewFrame(title: String, ratio: String, src: String) -> Element
                         move |_| loaded_src.set(pane_src.clone())
                     },
                 }
+            }
+            if loaded_src() == src {
+                {overlay}
             }
         }
     }

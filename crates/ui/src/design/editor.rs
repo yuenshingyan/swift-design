@@ -21,9 +21,14 @@ use crate::design::api::{DesignPreview, ScreenChanges, fetch_current_snapshot};
 use crate::icons;
 use crate::settings::artifact_project;
 
+mod annotation;
 mod support;
 
+use std::rc::Rc;
+
 use crate::editor::*;
+
+use annotation::{AnnotationComments, AnnotationSurface, ScreenAnnotation};
 use support::{
     DesignExportGroup, ScreenExportCheckbox, field_count, outline_title, screen_label, view_href,
 };
@@ -130,6 +135,9 @@ fn LoadedEditor(
     // its save prompt is open.
     let mut is_menu_open = use_signal(|| false);
     let mut mode = use_signal(|| PreviewMode::Play);
+    let mut annotation_mode = use_signal(|| false);
+    let annotations = use_signal(Vec::<ScreenAnnotation>::new);
+    let annotation_snapshot = use_memo(move || Rc::new(design()));
     let mut template_name = use_signal(|| Option::<String>::None);
     // The node reference the chat prepends to the next message.
     let mut chat_context = use_signal(|| Option::<String>::None);
@@ -424,12 +432,22 @@ fn LoadedEditor(
     } else {
         ""
     };
-    let preview_mode = if is_read_only() {
+    let is_annotating = annotation_mode() && !is_read_only() && !is_dirty();
+    let preview_mode = if is_read_only() || is_annotating {
         PreviewMode::Play
     } else {
         mode()
     };
     let is_available = has_saved() || live_preview.read().is_some();
+    let preview_src = format!(
+        "/designs/{design_id}/render?version={}{live_query}{}&screen={}",
+        preview_version(),
+        preview_mode.render_query(),
+        selected() + 1
+    );
+    let overlay = is_annotating.then(|| rsx! {
+        AnnotationSurface { key: "{preview_src}", screen: selected(), snapshot: annotation_snapshot(), annotations }
+    });
     let can_export_with_chrome = settings().flatten().is_none_or(|view| view.has_chrome);
     // The render page fits the screen to its frame, so a frame with the
     // canvas ratio shows the screen edge to edge. Every thumbnail is
@@ -494,15 +512,27 @@ fn LoadedEditor(
                             button {
                                 key: "{candidate.label()}",
                                 disabled: is_read_only(),
-                                aria_pressed: "{preview_mode == candidate}",
-                                class: if preview_mode == candidate { "canvas-tab open" } else { "canvas-tab" },
+                                aria_pressed: "{!is_annotating && preview_mode == candidate}",
+                                class: if !is_annotating && preview_mode == candidate { "canvas-tab open" } else { "canvas-tab" },
                                 title: "{candidate.title()}",
                                 onclick: move |_| {
                                     mode.set(candidate);
+                                    annotation_mode.set(false);
                                     selected_node.set(None);
                                 },
                                 span { class: "tab-name", "{candidate.label()}" }
                             }
+                        }
+                        button {
+                            disabled: is_read_only() || is_dirty(),
+                            aria_pressed: "{is_annotating}",
+                            class: if is_annotating { "canvas-tab open" } else { "canvas-tab" },
+                            title: "Draw boxes and add comments on this screen",
+                            onclick: move |_| {
+                                annotation_mode.toggle();
+                                selected_node.set(None);
+                            },
+                            "Annotate"
                         }
                         if is_read_only() || is_dirty() || selected() >= saved_screen_count {
                             button {
@@ -628,9 +658,13 @@ fn LoadedEditor(
                         PreviewFrame {
                             title: "Design preview",
                             ratio: "{ratio}",
-                            src: "/designs/{design_id}/render?version={preview_version()}{live_query}{preview_mode.render_query()}&screen={selected() + 1}",
+                            src: preview_src,
+                            overlay,
                         }
                     }
+                    if is_annotating {
+                        AnnotationComments { screen: selected(), snapshot: annotation_snapshot(), annotations }
+                    } else {
                     p { class: "preview-hint",
                         if preview_mode == PreviewMode::Play {
                             span {
@@ -650,6 +684,7 @@ fn LoadedEditor(
                             kbd { "→" }
                             " change screens"
                         }
+                    }
                     }
                     label { class: "notes-box",
                         span { class: "notes-heading",
