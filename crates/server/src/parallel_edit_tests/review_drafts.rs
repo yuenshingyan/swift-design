@@ -1,5 +1,3 @@
-use design_model::Design;
-
 use super::*;
 
 #[tokio::test]
@@ -42,7 +40,6 @@ async fn repair_retries_a_protected_patch_and_preserves_other_draft_work() {
     fake.push_text(
         json!({"screens":[{"index":original.screens.len(),"screen":added}]}).to_string(),
     );
-    fake.push_text(r#"{"coverage":[{"complete":true,"reason":"The timeline is present"}]}"#.into());
     candidate
         .engine
         .clone()
@@ -78,31 +75,10 @@ async fn repair_retries_a_protected_patch_and_preserves_other_draft_work() {
     )));
     let retry = fake.requests()[3].to_string();
     assert!(retry.contains("Repair draft cannot replace protected screen 2"));
-    let requests = fake.requests();
-    let review = requests[4]["messages"][1]["content"]
-        .as_str()
-        .expect("review should receive artifact evidence");
-    let (browser, baselines) = review
-        .split_once("\nRetained draft before repair:\n")
-        .expect("review must receive the draft that the repair started from");
-    let (retained, baselines) = baselines
-        .split_once("\nBefore artifact:\n")
-        .expect("review must also receive the saved version");
-    let (accepted, proposed) = baselines
-        .split_once("\nAfter artifact:\n")
-        .expect("review must receive the proposed repair");
-    assert!(browser.contains("Browser prototype results"));
     assert_eq!(
-        serde_json::from_str::<Design>(retained).expect("valid retained artifact"),
-        draft
-    );
-    assert_eq!(
-        serde_json::from_str::<Design>(accepted).expect("valid saved artifact"),
-        original
-    );
-    assert_eq!(
-        serde_json::from_str::<Design>(proposed).expect("valid proposed artifact"),
-        saved
+        fake.requests().len(),
+        4,
+        "verified drafts do not need a separate model review"
     );
 }
 
@@ -335,7 +311,6 @@ async fn annotation_edit_sends_two_marked_images_and_rejects_an_out_of_scope_pat
     fake.push_text(
         json!({"screens":[{"index":0,"screen":first},{"index":2,"screen":third}]}).to_string(),
     );
-    fake.push_text(r#"{"coverage":[{"complete":true},{"complete":true}]}"#.into());
     candidate
         .engine
         .run("talk", log_sink())
@@ -350,7 +325,7 @@ async fn annotation_edit_sends_two_marked_images_and_rejects_an_out_of_scope_pat
     assert_eq!(saved.screens, [first, original.screens[1].clone(), third]);
     assert_eq!(saved.theme, original.theme);
     let requests = fake.requests();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 3);
     let parts = requests[1]["messages"][1]["content"]
         .as_array()
         .expect("writer should receive text and two rendered PNGs");
@@ -434,15 +409,10 @@ async fn usable_edits_replace_the_current_snapshot_but_unusable_edits_do_not() {
         screen.html = "<h1>Useful updated design</h1>".into();
         fake.push_text(json!({"screens":[{"index":0,"screen":screen}]}).to_string());
         let is_unusable = matches!(kind, "empty" | "broken_interaction");
-        let runs_polish = is_unusable || matches!(kind, "overlap" | "overflow");
-        if runs_polish {
-            fake.push_text(r#"{"screens":[]}"#.into());
-        }
-        if !is_unusable {
-            fake.push_text(
-                json!({"coverage":[{"complete":true,"reason":"Requested design present"}]})
-                    .to_string(),
-            );
+        if is_unusable {
+            for _ in 0..10 {
+                fake.push_text(r#"{"screens":[]}"#.into());
+            }
         }
         let result = candidate.engine.clone().run("talk", log_sink()).await;
         let messages = candidate
@@ -452,10 +422,7 @@ async fn usable_edits_replace_the_current_snapshot_but_unusable_edits_do_not() {
             .expect("test chat messages should be readable");
         if is_unusable {
             let error = result.expect_err("unusable edits should not replace the current snapshot");
-            assert!(
-                error.contains("Cannot save an unusable demo edit"),
-                "{error}"
-            );
+            assert!(error.contains("10-correction-round limit"), "{error}");
             assert!(error.contains("Needs review"), "{error}");
             assert!(error.contains("talk-candidate-1"));
             assert!(
@@ -519,6 +486,10 @@ async fn usable_edits_replace_the_current_snapshot_but_unusable_edits_do_not() {
             assert!(!report.contains("Screen 2 ("), "{report}");
             assert!(!report.contains("screens[0]"), "{report}");
             assert!(!report.contains("Retry edit"), "{report}");
+            assert!(
+                report.contains("were not independently verified"),
+                "{report}"
+            );
             if kind == "overlap" {
                 assert!(report.contains("text may overlap"), "{report}");
             }
@@ -555,7 +526,7 @@ async fn usable_edits_replace_the_current_snapshot_but_unusable_edits_do_not() {
         }
         assert_eq!(
             fake.requests().len(),
-            3 + usize::from(runs_polish) + usize::from(!is_unusable),
+            if is_unusable { 13 } else { 3 },
             "{kind}"
         );
     }

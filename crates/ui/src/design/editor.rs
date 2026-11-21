@@ -119,7 +119,9 @@ fn LoadedEditor(
     let mut live_preview = use_signal(|| (!initially_saved).then(|| initial.clone()));
     let mut selected = use_signal(|| 0usize);
     let mut screen_search = use_signal(String::new);
-    let mut group_overrides = use_signal(std::collections::HashMap::<Option<String>, bool>::new);
+    let mut group_overrides = use_signal(|| {
+        std::array::from_fn::<_, 2, _>(|_| std::collections::HashMap::<Option<String>, bool>::new())
+    });
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
     let mut selection = use_signal(Vec::<SelectionEntry>::new);
     // The screens pinned for the chat with a command-click on a tile.
@@ -134,18 +136,19 @@ fn LoadedEditor(
         preview_design(&design.read(), live_preview.read().as_ref(), is_dirty()).clone()
     });
     let current_group = use_memo(move || {
-        displayed
-            .read()
-            .screens
-            .get(selected())
+        let demo = displayed.read();
+        let screen = demo.screens.get(selected());
+        let tab = usize::from(screen.is_some_and(|screen| screen.is_mobile(demo.viewport)));
+        let group = screen
             .and_then(|screen| screen_group_name(&screen.name))
-            .map(str::to_owned)
+            .map(str::to_owned);
+        (tab, group)
     });
     use_effect(move || {
-        let current = current_group();
+        let (tab, group) = current_group();
         // Entering a group opens it even if it was previously closed by hand.
-        if group_overrides.peek().contains_key(&current) {
-            group_overrides.write().remove(&current);
+        if group_overrides.peek()[tab].contains_key(&group) {
+            group_overrides.write()[tab].remove(&group);
         }
     });
     // Autosave: the newest change wins the delay.
@@ -498,11 +501,17 @@ fn LoadedEditor(
         .zip(&thumbnail_labels)
         .map(|(screen, label)| (screen.name.as_str(), label.as_str()))
         .collect();
+    let mut tabs = [Vec::new(), Vec::new()];
+    for (index, screen) in visible_design.screens.iter().enumerate() {
+        tabs[usize::from(screen.is_mobile(viewport))].push(index);
+    }
+    let (tab, group) = current_group();
     let items = strip_items(
         &names,
+        tabs[tab].iter().copied(),
         &query,
-        &current_group.read(),
-        &group_overrides.read(),
+        &group,
+        &group_overrides.read()[tab],
     );
     let show_changes = !is_read_only() && !is_dirty();
     let changes = screen_changes.read();
@@ -787,6 +796,32 @@ fn LoadedEditor(
                             }
                         }
                     }
+                    if tabs.iter().all(|indexes| !indexes.is_empty()) {
+                        div { class: "screen-viewport-tabs", role: "group", aria_label: "Screen viewport",
+                            for (index, title) in ["Desktop", "Mobile"].into_iter().enumerate() {
+                                {
+                                    let first = tabs[index][0];
+                                    let count = tabs[index].len();
+                                    rsx! {
+                                        button {
+                                            aria_pressed: if tab == index { "true" } else { "false" },
+                                            onclick: move |_| {
+                                                if tab != index {
+                                                    selected.set(first);
+                                                    selected_node.set(None);
+                                                    pending_screen_delete.set(None);
+                                                    pending_redo.set(None);
+                                                    screen_search.set(String::new());
+                                                }
+                                            },
+                                            "{title} "
+                                            span { "{count}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if screen_count > 0 {
                         input {
                             class: "screen-search",
@@ -827,7 +862,7 @@ fn LoadedEditor(
                                                 class: "screen-group-toggle",
                                                 aria_expanded: if is_open { "true" } else { "false" },
                                                 disabled: is_searching,
-                                                onclick: move |_| { group_overrides.write().insert(name.clone(), !is_open); },
+                                                onclick: move |_| { group_overrides.write()[tab].insert(name.clone(), !is_open); },
                                                 span { class: "screen-group-arrow", aria_hidden: "true" }
                                                 span { class: "screen-group-name", "{label}" }
                                                 span { class: "screen-group-count", "{count_label}" }

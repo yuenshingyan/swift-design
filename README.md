@@ -142,10 +142,13 @@ The existing `GET /designs/{id}/previews` and `render?preview=true` endpoints ca
 still retrieve them explicitly. **View**, exports and ordinary render URLs use
 the current snapshot. Thumbnails mark screens **New** or **Edited** based on
 what changed since the previous distinct snapshot. The marks survive reloads;
-unchanged screens and live previews are not marked. The thumbnail strip groups
-screens by the prefix in names such as `Project Access · Save rejected`. Names
-without a prefix appear under **Ungrouped**. The current screen’s group opens
-by default; use **Search screens** to find names across collapsed groups.
+unchanged screens and live previews are not marked. When a candidate contains
+both desktop and phone screens, the thumbnail strip has **Desktop** and
+**Mobile** tabs. Named phone specimens such as `Project Access · 390px mobile`
+appear under **Mobile** even when rendered on a desktop canvas. Workflow groups
+and search operate within the selected tab. Groups use the name prefix before
+`·`; screens without a prefix appear under **Ungrouped**. Following a prototype
+link switches to the destination's tab and opens its group.
 Use the checkbox beside a group name to select or clear every saved screen in
 that group for PNG export, even when the group is collapsed or search hides
 some of its screens. A dash means only some screens are selected. Collapsing a
@@ -191,17 +194,11 @@ without publishing a promise or writing candidates. Existing candidates remain i
 Demo edits first resolve the current request and its clarifications into a screen
 scope and deliverable checklist. Candidate selection does not prohibit adding
 screens. Existing-screen workers still run in parallel (up to four); a serial
-coordination pass connects their changes and adds requested screens. Within each
-layout tweak round, touched screens with blocking findings are repaired in parallel
-(up to four); each worker can change only its own screen. Chrome measures the
-merged draft before the next round or acceptance. Before saving, structural checks
-enforce required additions and protect unselected screens, then
-a model compares the original and proposed markup against the checklist and
-request. Preservation checks use that baseline; they do not require identical
-markup or new functionality for a restyle. Candidate isolation is enforced by
-the server's save target, not inferred by the reviewer from other candidates.
-Planning, editing, and review receive the same session reference attachments.
-Planning, writing, correction, and review share an acceptance contract that separates
+coordination pass connects their changes and adds requested screens. Before saving,
+structural checks enforce the planned number of additions and protect unselected
+screens. The editing model uses the request checklist and reference attachments;
+there is no separate model verdict. Candidate isolation is enforced by the server.
+Planning, writing, and correction share an acceptance contract that separates
 rendered designs from implementation specifications. Complete component/state
 specifications are accepted when the request permits them; missing visual controls
 or responsive layouts cannot be replaced by promises. The renderer still prohibits
@@ -217,40 +214,25 @@ Independent visual deliverables still get their own screen. Images and PDFs show
 the default state. Local actions do not execute model code, access a backend, or
 persist state.
 
-Review reports each independently fixable defect, even when several affect the
-same requirement and screen. Up to ten correction rounds repair the latest draft
-while preservation checks still use the saved original. A correction continues
-only when review confirms that at least one defect was fixed or affects fewer
-screens, with no regressions. If a correction makes no progress, Swift Design
-keeps the better reviewed draft. New pages keep their actual appended positions
-unless the user explicitly requests a specific position that does not conflict
-with preservation. When all findings name
-existing screens, the repair can only replace those screens. Only a passing
-draft replaces the selected candidate; stopping or
-cancellation leaves that saved candidate intact. Missing or unreadable required references produce a
-reference-verification error instead of an incomplete-edit verdict.
-A usable demo edit becomes the current design automatically after review. The
-previous design remains available through the existing snapshots. Layout findings
-such as overflow and overlap are warnings for edits, not reasons to fail a run.
-The completion message names the affected screens and describes what the checker
-flagged without asking for a retry. The starting layout check is optional; the
-edited result still needs a complete browser audit. An unsuccessful optional
-polish pass keeps the usable edit and its warnings.
-Unsafe markup, out-of-scope changes, incomplete requirements, empty edited
-screens, invalid window geometry, and failed prototype interaction probes still
-prevent replacement. If an edit cannot be verified as usable, its valid,
-scope-preserving checkpoint remains attached as **Needs review**. It does not
-replace the current snapshot. Initial generation still requires a clean layout.
-Failed continuation polish also keeps its draft under the source candidate.
-Fresh generation keeps its validated
-draft under its already reserved candidate id, labelled **Needs review**; mere
-presence on disk never counts as a successfully completed generation. Invalid or
-out-of-scope drafts are never preserved.
-Incomplete or unreviewable requirements still block replacing the saved demo. Both the
-editor chat and session workspace show **Retry edit** beside the failed candidate
-request while the session is in error. It retries that request without adding a new
-prompt and is disabled while a run is active. This review is separate from browser
-layout checks and is not proof of backend behavior.
+The server allows up to ten correction rounds for verified blockers. It works on
+one affected screen at a time when the blocker has a known screen, keeps fixes
+that reduce the blockers without introducing new ones, and retries from the best
+draft after a stalled patch. Reaching the limit or hitting a blocker outside the
+permitted scope keeps the checkpoint and reports what prevented the save.
+
+A usable demo edit becomes the current snapshot automatically when validation,
+scope, required screen count, navigation, and browser checks pass. Invalid markup,
+new broken links, empty edited screens, invalid window geometry, and failed
+prototype probes still prevent a save. Uncertain layout findings such as overflow
+and overlap are warnings and do not trigger corrections. The completion message
+states that requirements not covered by those checks were not independently
+verified. Initial generation still requires a clean layout.
+
+A failure or cancellation does not overwrite the saved snapshot. Checkpoints are
+not successful generations. **Retry edit** can retry a failed candidate request
+without adding a new prompt. For a same-candidate `repair_draft` request headed
+`Desktop-only draft repair.`, the server keeps saved mobile screens unchanged,
+excludes newly drafted mobile screens, and remaps retained desktop destinations.
 Follow-up chat receives the five most recent completed run outcomes, including
 recorded failures, so it can explain a rejected edit without asking you to diagnose it.
 

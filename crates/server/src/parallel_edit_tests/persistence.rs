@@ -1,289 +1,5 @@
 use super::*;
 
-#[tokio::test]
-async fn theme_review_has_comparison_evidence_and_failure_reaches_follow_up_chat() {
-    for accepted in [true, false] {
-        let original = sample_design();
-        let fake = ParallelFakeModel::start(None).await;
-        fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
-        fake.push_text(r#"{"instruction":"Use a light theme without changing content or navigation.","screens":[],"minimum_new_screens":0,"requirements":["Light theme","Preserve existing content and navigation","Leave other candidates unchanged"]}"#.into());
-        fake.auto_worker_patches(ArtifactKind::Demo, &json!(original), "worker");
-        let mut theme = json!(original.theme);
-        theme["colors"]["background"] = json!("#ffffff");
-        fake.push_text(json!({"theme": theme}).to_string());
-        let findings = if accepted {
-            vec![]
-        } else {
-            vec![json!({
-                "id": "missing-navigation-link", "reason": "Restore the missing navigation link", "screens": []
-            })]
-        };
-        let review = json!({"coverage": [
-            {"complete": true},
-            {"complete": accepted, "findings": findings},
-            {"complete": true}
-        ], "reference_error": null})
-        .to_string();
-        fake.push_text(review.clone());
-        if !accepted {
-            fake.push_text(json!({"theme": theme}).to_string());
-            fake.push_text(review);
-        }
-        let candidate = ReviewingCandidate::new(&fake);
-        candidate.seed(&original, "I want a light-theme.").await;
-        candidate
-            .designs
-            .save("talk-candidate-2", &original)
-            .await
-            .expect("test data should be saved successfully");
-        let result = candidate.engine.clone().run("talk", log_sink()).await;
-        assert_eq!(result.is_ok(), accepted, "{result:?}");
-        assert_eq!(
-            fake.state.worker_count.load(Ordering::SeqCst),
-            original.screens.len() * if accepted { 1 } else { 2 }
-        );
-        let requests = fake.requests();
-        let review = requests
-            .last()
-            .expect("test collection should contain a last item");
-        let text = review["messages"][1]["content"]
-            .as_str()
-            .expect("test JSON value should be a string");
-        assert!(text.contains("Pending save target (server-enforced): talk-candidate-1"));
-        assert!(!text.contains("\nRetained draft before repair:\n"));
-        let (before, after) = text
-            .split_once("Before artifact:\n")
-            .expect("test value should contain the expected separator")
-            .1
-            .split_once("\nAfter artifact:\n")
-            .expect("test value should contain the expected separator");
-        assert_eq!(
-            serde_json::from_str::<Value>(before).expect("test JSON should deserialize"),
-            json!(original)
-        );
-        let proposed: design_model::Design =
-            serde_json::from_str(after).expect("test JSON should deserialize");
-        assert_eq!(json!(proposed.theme), theme);
-        assert_eq!(proposed.screens[0].html, original.screens[0].html);
-        let saved = candidate
-            .designs
-            .load("talk-candidate-1")
-            .await
-            .expect("test record should load successfully")
-            .expect("saved test record should exist");
-        assert_eq!(saved, if accepted { proposed } else { original.clone() });
-        assert_eq!(
-            candidate
-                .designs
-                .load("talk-candidate-2")
-                .await
-                .expect("test record should load successfully")
-                .expect("saved test record should exist"),
-            original
-        );
-        assert!(
-            candidate
-                .designs
-                .history("talk-candidate-2")
-                .await
-                .expect("test history should be listed")
-                .is_empty()
-        );
-        if !accepted {
-            let error = result.expect_err("failed theme review should reject the edit");
-            assert!(error.contains("Preserve existing content and navigation"));
-            assert!(
-                candidate
-                    .designs
-                    .history("talk-candidate-1")
-                    .await
-                    .expect("test history should be listed")
-                    .is_empty()
-            );
-            for event in [
-                design_model::WorkflowEvent::RunFailed,
-                design_model::WorkflowEvent::Recovered {
-                    to: design_model::WorkflowState::Reviewing,
-                },
-            ] {
-                candidate
-                    .sessions
-                    .apply("talk", event)
-                    .await
-                    .expect("test workflow transition should apply");
-            }
-            candidate
-                .sessions
-                .append_message("talk", ChatMessage::user("WTF?", Some("talk-candidate-1")))
-                .await
-                .expect("test chat message should be appended");
-            fake.push_text(
-                r#"{"reply":"The recorded preservation check rejected the edit.","unsupported_requirements":[]}"#.into(),
-            );
-            candidate
-                .engine
-                .clone()
-                .run("talk", log_sink())
-                .await
-                .expect("test generation run should complete successfully");
-            let requests = fake.requests();
-            let follow_up = request_text(
-                requests
-                    .last()
-                    .expect("test collection should contain a last item"),
-            );
-            assert!(follow_up.contains(&error));
-            assert!(follow_up.contains("Recorded session run outcomes"));
-        }
-    }
-}
-
-#[tokio::test]
-async fn extension_requires_additions_and_feature_coverage_before_saving() {
-    const PASS: &str = r#"{"coverage":[{"complete":true,"reason":"Connected page present"}],"reference_error":null}"#;
-    const FAIL: &str = r#"{"coverage":[{"complete":false,"findings":[{"id":"missing-notification-control","reason":"Add the notification control","screens":[]}]}],"reference_error":null}"#;
-    for (adds_page, coverage, retry_coverage, should_save) in [
-        (false, PASS, None, false),
-        (true, FAIL, Some(FAIL), false),
-        (true, FAIL, Some(PASS), true),
-        (true, r#"{"coverage":[]}"#, None, false),
-        (true, "not JSON", None, false),
-        (
-            true,
-            r#"{"coverage":[],"reference_error":"Upload the missing screenshot"}"#,
-            None,
-            false,
-        ),
-        (true, PASS, None, true),
-    ] {
-        let original = sample_design();
-        let fake = ParallelFakeModel::start(None).await;
-        fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
-        fake.push_text(r#"{"instruction":"Extend candidate 4: modify Task details and add connected Notifications.","screens":[],"minimum_new_screens":1,"requirements":["Task discussion and connected Notifications"]}"#.into());
-        fake.auto_worker_patches(
-            ArtifactKind::Demo,
-            &serde_json::to_value(&original).expect("test value should convert to JSON"),
-            "worker",
-        );
-        let mut screen = original.screens[0].clone();
-        screen.html = format!(
-            "<a href='#screen-{}'>Notifications</a><p>Discussion</p>",
-            original.screens.len() + 1
-        );
-        let mut operations = vec![json!({"index": 0, "screen": screen})];
-        if adds_page {
-            screen.name = "Notifications".into();
-            screen.html = "<a href='#screen-1'>Task</a>".into();
-            operations
-                .push(json!({"index": original.screens.len(), "insert": true, "screen": screen}));
-        }
-        let mut worker_design = original.clone();
-        if adds_page {
-            worker_design.screens.push(
-                serde_json::from_value(operations[1]["screen"].clone())
-                    .expect("test JSON value should deserialize"),
-            );
-        }
-        fake.auto_worker_patches(ArtifactKind::Demo, &json!(worker_design), "worker");
-        fake.push_text(json!({"screens": operations}).to_string());
-        fake.push_text(coverage.into());
-        if let Some(retry) = retry_coverage {
-            fake.push_text(json!({"screens": [operations[0].clone()]}).to_string());
-            fake.push_text(retry.into());
-        }
-        let candidate = ReviewingCandidate::new(&fake);
-        candidate
-            .seed(
-                &original,
-                "Extend the demo with discussions and Notifications.",
-            )
-            .await;
-        candidate
-            .sessions
-            .append_message(
-                "talk",
-                ChatMessage::user("Only do this in candidate 4.", Some("talk-candidate-1")),
-            )
-            .await
-            .expect("test chat message should be appended");
-        let before = tokio::fs::read(candidate.path())
-            .await
-            .expect("test data should be readable");
-        let result = candidate.engine.clone().run("talk", log_sink()).await;
-        assert_eq!(result.is_ok(), should_save, "{result:?}");
-        let planning = request_text(&fake.requests()[1]);
-        assert!(planning.contains("discussions and Notifications"));
-        assert!(planning.contains("Only do this in candidate 4"));
-        assert_eq!(
-            fake.state.worker_count.load(Ordering::SeqCst),
-            original.screens.len()
-                + if retry_coverage.is_some() {
-                    worker_design.screens.len()
-                } else {
-                    0
-                }
-        );
-        assert_eq!(
-            fake.state.coordinator_count.load(Ordering::SeqCst),
-            if retry_coverage.is_some() { 2 } else { 1 }
-        );
-        if retry_coverage.is_some() {
-            assert!(
-                fake.requests()
-                    .iter()
-                    .any(|request| request_text(request).contains("Add the notification control"))
-            );
-        }
-        if should_save {
-            let saved = candidate
-                .designs
-                .load("talk-candidate-1")
-                .await
-                .expect("test record should load successfully")
-                .expect("saved test record should exist");
-            assert_eq!(saved.screens.len(), original.screens.len() + 1);
-            assert!(saved.screens[0].html.contains("Discussion"));
-        } else {
-            let draft = candidate
-                .designs
-                .load_review_draft("talk-candidate-1")
-                .await
-                .expect("draft lookup should succeed");
-            assert_eq!(
-                draft.is_some(),
-                adds_page,
-                "only a scope-valid changed draft should survive an unsuccessful review"
-            );
-            if let Some(draft) = draft {
-                assert_eq!(draft.screens.len(), original.screens.len() + 1);
-            }
-            assert_eq!(
-                tokio::fs::read(candidate.path())
-                    .await
-                    .expect("test data should be readable"),
-                before
-            );
-            assert!(
-                candidate
-                    .designs
-                    .history("talk-candidate-1")
-                    .await
-                    .expect("test history should be listed")
-                    .is_empty()
-            );
-            assert!(
-                !candidate
-                    .sessions
-                    .messages("talk")
-                    .await
-                    .expect("test chat messages should be readable")
-                    .iter()
-                    .any(|message| message.content.starts_with(EDIT_REPORT_PREFIX))
-            );
-        }
-    }
-}
-
 pub(super) async fn verify_queued_edit_baseline(
     candidate: &ReviewingCandidate,
     fake: &ParallelFakeModel,
@@ -312,10 +28,6 @@ pub(super) async fn verify_queued_edit_baseline(
         "queued worker",
     );
     fake.push_text(r#"{"title":"Queued workspace","screens":[]}"#.to_owned());
-    fake.push_text(
-        r#"{"coverage":[{"complete":true,"reason":"Screens updated"}],"reference_error":null}"#
-            .to_owned(),
-    );
     candidate
         .engine
         .clone()
@@ -365,12 +77,14 @@ pub(super) async fn an_unrepaired_layout_after_parallel_editing_does_not_replace
         "worker",
     );
     fake.push_text(r#"{"title":"Unverified layout","screens":[]}"#.to_owned());
-    fake.push_text("{}".to_owned());
+    for _ in 0..10 {
+        fake.push_text(r#"{"screens":[]}"#.into());
+    }
     let mut candidate = ReviewingCandidate::new(&fake);
     let runner: DemoDomRunner = Arc::new(|design, _| {
         let coverage: Vec<usize> = (0..design.screens.len()).collect();
         let findings = if design.title == "Unverified layout" {
-            "[{&quot;screen&quot;:0,&quot;kind&quot;:&quot;overflow&quot;,&quot;detail&quot;:&quot;clipped text&quot;}]"
+            "[{&quot;screen&quot;:0,&quot;kind&quot;:&quot;empty&quot;,&quot;detail&quot;:&quot;no visible content&quot;}]"
         } else {
             "[]"
         };
@@ -432,7 +146,9 @@ pub(super) async fn coordination_failure_leaves_the_real_saved_candidate_and_his
         &serde_json::to_value(&original).expect("test value should convert to JSON"),
         "worker",
     );
-    fake.push_text(r#"{"theme":null,"screens":[]}"#.to_owned());
+    for _ in 0..5 {
+        fake.push_text(r#"{"theme":[],"screens":[]}"#.into());
+    }
     let candidate = ReviewingCandidate::new(&fake);
     candidate
         .seed(&original, "[screen 1] [screen 2] Update these screens.")

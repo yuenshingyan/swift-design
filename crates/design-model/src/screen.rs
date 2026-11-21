@@ -36,6 +36,33 @@ pub struct Screen {
     pub notes: Option<String>,
 }
 
+impl Screen {
+    /// Whether this screen is on a phone canvas or is named as a standalone
+    /// phone specimen inside a larger canvas. Combined desktop/mobile views stay together.
+    pub fn is_mobile(&self, viewport: crate::Viewport) -> bool {
+        if viewport.width <= 480 && viewport.height > viewport.width {
+            return true;
+        }
+        let mut mobile = false;
+        for word in self.name.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+            if word.eq_ignore_ascii_case("desktop") {
+                return false;
+            }
+            mobile |= word.eq_ignore_ascii_case("mobile")
+                || word.eq_ignore_ascii_case("phone")
+                || word
+                    .to_ascii_lowercase()
+                    .strip_suffix("px")
+                    .is_some_and(|width| {
+                        width
+                            .parse::<u16>()
+                            .is_ok_and(|width| (320..=480).contains(&width))
+                    });
+        }
+        mobile
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::Screen;
@@ -74,6 +101,32 @@ mod tests {
         screen.name = "Home".to_owned();
         let json = serde_json::to_value(&screen).expect("test value should convert to JSON");
         assert_eq!(json["name"], "Home");
+    }
+
+    #[test]
+    fn named_phone_specimens_and_phone_canvases_are_mobile() {
+        let mut screen = sample_design().screens[0].clone();
+        for name in [
+            "Project Access · 390px mobile",
+            "Activity · 320px containment host",
+            "Task Details · Phone",
+        ] {
+            screen.name = name.into();
+            assert!(screen.is_mobile(crate::Viewport::default()), "{name}");
+        }
+        for name in [
+            "Statistics · desktop and mobile",
+            "Desktop · 390px notes",
+            "Activity · 768px host",
+            "Project Access",
+        ] {
+            screen.name = name.into();
+            assert!(!screen.is_mobile(crate::Viewport::default()), "{name}");
+        }
+        assert!(screen.is_mobile(crate::Viewport {
+            width: 390,
+            height: 844
+        }));
     }
 
     #[test]

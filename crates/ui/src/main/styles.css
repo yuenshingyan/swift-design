@@ -891,6 +891,12 @@ div.brief-attachments:has(+ ul.brief-attachments) { padding-bottom: 0.4rem; }
 .strip-head .strip-counts { letter-spacing: 0; text-transform: none; color: var(--faint); }
 .strip-head::after { content: ''; flex: 1; height: 1px; background: var(--hairline); }
 .thumbnails { display: flex; flex-wrap: wrap; align-items: stretch; gap: 0.625rem; }
+.screen-viewport-tabs { display: flex; gap: 0.25rem; margin-bottom: 0.5rem;
+  border-bottom: 1px solid var(--hairline); }
+.screen-viewport-tabs button { padding: 0.3rem 0.5rem; border: 0; border-bottom: 2px solid transparent;
+  background: transparent; color: var(--muted); font-size: 0.75rem; cursor: pointer; }
+.screen-viewport-tabs button[aria-pressed="true"] { color: var(--ink); border-bottom-color: var(--teal); }
+.screen-viewport-tabs span { margin-inline-start: 0.2rem; font: 0.625rem var(--mono); }
 .screen-search { box-sizing: border-box; width: min(100%, 16rem); margin-bottom: 0.5rem;
   padding: 0.3rem 0.5rem; border: 1px solid var(--hairline); border-radius: var(--r-control);
   background: var(--raised); color: var(--ink); font-size: 0.75rem; }

@@ -105,27 +105,42 @@ impl DemoMarkup {
 /// Checks demo page destinations and prototype controls before built-in generation saves.
 /// Draft outlines may contain planned destinations. Unchanged legacy page links may remain.
 pub fn validate_demo_navigation(design: &Design, before: Option<&Design>) -> Result<(), String> {
-    let last = design.screens.len().max(design.outline.len());
-    for (index, screen) in design.screens.iter().enumerate() {
-        let old_last = before
-            .filter(|old| {
-                old.screens
-                    .get(index)
-                    .is_some_and(|page| page.html == screen.html)
-            })
-            .map(|old| old.screens.len().max(old.outline.len()));
-        let mut checker = HtmlChecker::new(&screen.html);
-        checker.demo = Some(DemoMarkup::default());
-        checker.run();
-        if let Some(problem) = checker.problems.first() {
-            return Err(format!("Screen {}: {problem}.", index + 1));
-        }
-        if let Some(demo) = checker.demo {
-            demo.validate(last, old_last)
-                .map_err(|error| format!("Screen {}: {error}.", index + 1))?;
-        }
+    match demo_navigation_issues(design, before).next() {
+        Some((_, detail)) => Err(detail),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// Lists the first invalid navigation or markup issue on each affected screen.
+pub fn demo_navigation_issues<'a>(
+    design: &'a Design,
+    before: Option<&'a Design>,
+) -> impl Iterator<Item = (usize, String)> + 'a {
+    let last = design.screens.len().max(design.outline.len());
+    design
+        .screens
+        .iter()
+        .enumerate()
+        .filter_map(move |(index, screen)| {
+            let old_last = before
+                .filter(|old| {
+                    old.screens
+                        .get(index)
+                        .is_some_and(|page| page.html == screen.html)
+                })
+                .map(|old| old.screens.len().max(old.outline.len()));
+            let mut checker = HtmlChecker::new(&screen.html);
+            checker.demo = Some(DemoMarkup::default());
+            checker.run();
+            if let Some(problem) = checker.problems.first() {
+                return Some((index, format!("Screen {}: {problem}.", index + 1)));
+            }
+            checker
+                .demo?
+                .validate(last, old_last)
+                .err()
+                .map(|error| (index, format!("Screen {}: {error}.", index + 1)))
+        })
 }
 
 /// Checks that anchor destinations and their local actions are unchanged.
