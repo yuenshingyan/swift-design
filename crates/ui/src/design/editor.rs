@@ -663,7 +663,7 @@ fn LoadedEditor(
                         }
                     }
                     if is_annotating {
-                        AnnotationComments { screen: selected(), snapshot: annotation_snapshot(), annotations }
+                        AnnotationComments { design_id: design_id.clone(), screen: selected(), snapshot: annotation_snapshot(), annotations }
                     } else {
                     p { class: "preview-hint",
                         if preview_mode == PreviewMode::Play {

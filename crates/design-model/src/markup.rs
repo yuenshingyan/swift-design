@@ -168,7 +168,7 @@ pub fn window_marker_summary(html: &str) -> WindowMarkerSummary {
 
 mod navigation;
 
-pub use navigation::validate_demo_navigation;
+pub use navigation::{preserves_demo_links, validate_demo_navigation};
 
 /// Remaps local screen links in valid HTML with a zero-based old-to-new index map.
 /// Leaves text, styles, external URLs, invalid targets, and malformed HTML unchanged.

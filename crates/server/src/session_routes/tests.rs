@@ -47,6 +47,51 @@ async fn a_message_pins_candidates_of_its_own_session_only() {
 }
 
 #[tokio::test]
+async fn stale_annotation_submission_does_not_add_a_chat_turn() {
+    let directory = TempDir::new().expect("temporary test directory should be created");
+    let application = test_application(&directory);
+    create(&application, "finance-app").await;
+    let sessions = SessionStore::new(directory.path().join("data/sessions"));
+    for event in [
+        WorkflowEvent::QuestionsAsked,
+        WorkflowEvent::GenerationStarted,
+        WorkflowEvent::GenerationSucceeded,
+    ] {
+        sessions
+            .apply("finance-app", event)
+            .await
+            .expect("the fixture should reach review");
+    }
+    let design: design_model::Design =
+        serde_json::from_str(include_str!("../../../../fixtures/sample-design.json"))
+            .expect("the sample demo should parse");
+    let mut current = design.clone();
+    current.screens[0].notes = Some("Already revised".into());
+    DesignStore::new(directory.path().join("designs"))
+        .save("finance-app-candidate-1", &current)
+        .await
+        .expect("the current demo should save");
+    let payload = serde_json::json!({
+        "content":"Update the marked regions.","design":"finance-app-candidate-1","action":"annotate",
+        "annotations": {"expected":{"0":design.screens[0]}, "viewport":design.viewport, "theme":design.theme,
+        "app_window":design.app_window,"marks":[{"screen":0,"bounds":[100,100,500,500],"comment":"Move this"}]}
+    }).to_string();
+    let (status, body) = send(
+        application.clone(),
+        "POST",
+        "/sessions/finance-app/messages",
+        Some(&payload),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.contains("mark it again"), "{body}");
+    assert_eq!(
+        view(&application, "finance-app").await["messages"],
+        serde_json::json!([])
+    );
+}
+
+#[tokio::test]
 async fn a_repair_request_rejects_another_sessions_candidate_and_a_missing_draft() {
     let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);

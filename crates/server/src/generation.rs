@@ -102,6 +102,7 @@ pub(crate) enum GenerationTask {
     Edit {
         /// Demo-only: start from the retained draft, not accepted data.
         is_review_draft: bool,
+        annotations: Option<crate::design::annotations::AnnotationBatch>,
         /// The artifact ids to edit: the candidates the user pinned,
         /// the artifact open in the editor, or the chosen one.
         designs: Vec<String>,
@@ -401,7 +402,9 @@ pub(crate) mod streaming;
 pub(crate) use artifacts::{
     ArtifactRequest, Validated, candidate_template, failure_message, stop_to_string, template_note,
 };
-pub(crate) use attachments::{ATTACHMENT_TEXT_LIMIT_BYTES, Attachments, user_content_with_images};
+pub(crate) use attachments::{
+    ATTACHMENT_TEXT_LIMIT_BYTES, Attachments, UploadAttachment, user_content_with_images,
+};
 pub(crate) use streaming::{ContinueChunk, complete_array_items, continue_chunks, writing_effort};
 
 #[cfg(test)]

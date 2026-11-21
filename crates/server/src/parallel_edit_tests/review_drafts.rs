@@ -283,6 +283,101 @@ async fn stopping_during_layout_review_keeps_the_completed_edit_on_its_candidate
 }
 
 #[tokio::test]
+async fn annotation_edit_sends_two_marked_images_and_rejects_an_out_of_scope_patch() {
+    if crate::screenshots::find_chrome().is_none() {
+        return;
+    }
+    use crate::design::annotations::AnnotationSubmission;
+    let mut original = sample_design();
+    original.theme.fonts.heading = "Arial".into();
+    original.theme.fonts.body = "Arial".into();
+    original.theme.fonts.mono = "Courier New".into();
+    let fake = ParallelFakeModel::start(None).await;
+    let mut candidate = ReviewingCandidate::new(&fake);
+    candidate.engine = GenerationEngine::new(
+        ModelConfiguration {
+            model: "gpt-6-test".into(),
+            ..fake.configuration()
+        },
+        candidate.designs.clone(),
+        candidate.sessions.clone(),
+        None,
+        "http://127.0.0.1:3000".into(),
+        ChangeNotifier::new(),
+    )
+    .with_demo_dom_runner(clean_demo_dom_runner());
+    candidate.seed(&original, "Update the prototype.").await;
+    let input: AnnotationSubmission = serde_json::from_value(json!({
+        "viewport":original.viewport,"theme":original.theme,"app_window":original.app_window,
+        "expected":{"0":original.screens[0],"2":original.screens[2]},
+        "marks":[{"screen":0,"bounds":[1000,2000,3000,4000],"comment":"Raise the title"},
+                 {"screen":2,"bounds":[5000,6000,7000,8000],"comment":"Tighten the summary"}]
+    }))
+    .expect("the editor payload should deserialize");
+    let batch = input
+        .bind(&original)
+        .expect("valid marked screens should bind");
+    let mut message = ChatMessage::user("Update the marked regions.", Some("talk-candidate-1"));
+    message.annotations = Some(batch);
+    candidate
+        .sessions
+        .append_message("talk", message)
+        .await
+        .expect("annotation turn should be recorded");
+    fake.push_text(r#"{"unsupported_requirements":[]}"#.into());
+    let mut protected = original.screens[1].clone();
+    protected.notes = Some("Must never be saved".into());
+    fake.push_text(json!({"screens":[{"index":1,"screen":protected}]}).to_string());
+    let mut first = original.screens[0].clone();
+    first.css = Some("h1 { margin-top: 0; }".into());
+    let mut third = original.screens[2].clone();
+    third.css = Some("p { line-height: 1.2; }".into());
+    fake.push_text(
+        json!({"screens":[{"index":0,"screen":first},{"index":2,"screen":third}]}).to_string(),
+    );
+    fake.push_text(r#"{"coverage":[{"complete":true},{"complete":true}]}"#.into());
+    candidate
+        .engine
+        .run("talk", log_sink())
+        .await
+        .expect("scoped annotation edit should save");
+    let saved = candidate
+        .designs
+        .load("talk-candidate-1")
+        .await
+        .expect("saved demo should load")
+        .expect("candidate should exist");
+    assert_eq!(saved.screens, [first, original.screens[1].clone(), third]);
+    assert_eq!(saved.theme, original.theme);
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 4);
+    let parts = requests[1]["messages"][1]["content"]
+        .as_array()
+        .expect("writer should receive text and two rendered PNGs");
+    assert_eq!(
+        parts
+            .iter()
+            .filter(|part| part["image_url"]["url"]
+                .as_str()
+                .is_some_and(|url| url.starts_with("data:image/png;base64,iVBORw0KGgo")))
+            .count(),
+        2
+    );
+    let text = parts[0]["text"]
+        .as_str()
+        .expect("writer should receive the exact screen data and notes");
+    assert!(text.contains(
+        "Box 1 on screen 1 (left 10.00%, top 20.00%, right 30.00%, bottom 40.00%): Raise the title"
+    ));
+    assert!(text.contains("Box 2 on screen 3") && text.contains("Tighten the summary"));
+    assert!(
+        requests[2]
+            .to_string()
+            .contains("replace only the specified screens")
+    );
+}
+
+#[tokio::test]
 async fn usable_edits_replace_the_current_snapshot_but_unusable_edits_do_not() {
     for kind in [
         "alignment",

@@ -176,12 +176,22 @@ pub async fn screenshot_screen(
     index: usize,
     base_url: &str,
 ) -> anyhow::Result<Vec<u8>> {
+    screenshot_marked_screen(design, index, base_url, &[]).await
+}
+
+/// Captures the exact rendered screen with numbered boxes painted above the demo.
+pub(crate) async fn screenshot_marked_screen(
+    design: &Design,
+    index: usize,
+    base_url: &str,
+    marks: &[crate::design::annotations::Annotation],
+) -> anyhow::Result<Vec<u8>> {
     let chrome = find_chrome().ok_or_else(|| {
         anyhow::anyhow!(
             "no Chrome or Chromium found: install one or set {CHROME_ENVIRONMENT_VARIABLE}"
         )
     })?;
-    let html = render_design_with(
+    let mut html = render_design_with(
         design,
         RenderOptions {
             only_screen: Some(index),
@@ -189,6 +199,25 @@ pub async fn screenshot_screen(
             ..RenderOptions::default()
         },
     );
+    if !marks.is_empty() {
+        use std::fmt::Write as _;
+        let mut overlay = String::new();
+        for (number, mark) in marks
+            .iter()
+            .enumerate()
+            .filter(|(_, mark)| mark.screen == index)
+        {
+            let [l, t, r, b] = mark.bounds.map(|value| value as f64 / 100.0);
+            write!(
+                overlay,
+                "<div style='position:fixed;z-index:2147483647;box-sizing:border-box;left:{l}%;top:{t}%;width:{w}%;height:{h}%;border:3px solid #007a70;pointer-events:none'><span style='background:#007a70;color:white;padding:2px 6px;font:16px system-ui'>{}</span></div>",
+                number + 1,
+                w = r - l,
+                h = b - t
+            )?;
+        }
+        html = html.replace("</body>", &(overlay + "</body>"));
+    }
     screenshot_html(&chrome, &with_base_href(&html, base_url), design.viewport).await
 }
 

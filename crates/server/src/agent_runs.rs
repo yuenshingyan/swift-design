@@ -274,6 +274,17 @@ impl AgentRunner {
         .or_else(model_client::configured_model)
     }
 
+    /// Checks whether this runner can apply a scoped edit with marked screenshots.
+    pub(crate) async fn annotation_edit_available(&self) -> bool {
+        self.custom_command.is_none()
+            && self
+                .model_configuration()
+                .await
+                .is_some_and(|configuration| {
+                    crate::screenshots::supports_vision(&configuration.model)
+                })
+    }
+
     /// Picks how to run for `session_id`: the custom command, or the
     /// built-in engine for the session's mode.
     async fn resolve(

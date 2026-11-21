@@ -1,6 +1,12 @@
 use std::collections::HashSet;
 
-use super::edit_requirements::{DemoEditEvidence, DemoEditFailure, review_improved};
+use crate::design::annotations::AnnotationBatch;
+use crate::generation::UploadAttachment;
+use crate::screenshots::screenshot_marked_screen;
+
+use super::edit_requirements::{
+    DemoEditEvidence, DemoEditFailure, DemoEditRequirements, review_improved,
+};
 use super::*;
 
 const MAX_DEMO_CORRECTIONS: usize = 10;
@@ -229,10 +235,10 @@ impl GenerationEngine {
         &self,
         client: &reqwest::Client,
         context: &GenerationContext,
-        edit: (&EditOrder<'_>, bool),
+        edit: (&EditOrder<'_>, bool, Option<&AnnotationBatch>),
         log: &LogSink,
     ) -> Result<Vec<(String, String)>, GenerationStop> {
-        let (order, _) = edit;
+        let (order, _, _) = edit;
         let mut saved = Vec::new();
         let mut last_error = None;
         for design_id in order.artifact_ids {
@@ -314,10 +320,10 @@ impl GenerationEngine {
         client: &reqwest::Client,
         context: &GenerationContext,
         design_id: &str,
-        edit: (&EditOrder<'_>, bool),
+        edit: (&EditOrder<'_>, bool, Option<&AnnotationBatch>),
         log: &LogSink,
     ) -> Result<String, GenerationStop> {
-        let (order, use_review_draft) = edit;
+        let (order, use_review_draft, annotations) = edit;
         let design = self
             .designs
             .load(design_id)
@@ -350,16 +356,47 @@ impl GenerationEngine {
                 .collect()
         });
         log(&format!("{label}: resolving edit requirements and scope"));
-        let attachments = self.load_attachments(&context.session_id, log).await;
-        let plan = self
-            .plan_demo_edit(
-                client,
-                scope_baseline,
-                order,
-                (&attachments, context.effort(), repair_indexes.as_deref()),
-            )
-            .await
-            .map_err(GenerationStop::Failed)?;
+        let (attachments, plan) = if let Some(batch) = annotations {
+            batch
+                .check_revision(&design)
+                .map_err(GenerationStop::Failed)?;
+            if !design.validate().is_empty() || !supports_vision(self.model.model()) {
+                return Err(GenerationStop::Failed(
+                    "Annotation edits need a valid demo and a model that accepts images.".into(),
+                ));
+            }
+            let mut attachments = Attachments::default();
+            for index in batch.indexes() {
+                log(&format!("{label}: capturing marked screen {}", index + 1));
+                let bytes =
+                    screenshot_marked_screen(&design, index, &self.base_url(), &batch.marks)
+                        .await
+                        .map_err(|error| {
+                            GenerationStop::Failed(format!(
+                                "Cannot capture marked screen {}: {error}",
+                                index + 1
+                            ))
+                        })?;
+                attachments.files.push(UploadAttachment {
+                    name: format!("annotation-screen-{}.png", index + 1),
+                    content_type: "image/png".into(),
+                    bytes,
+                });
+            }
+            (attachments, DemoEditRequirements::from_annotations(batch))
+        } else {
+            let attachments = self.load_attachments(&context.session_id, log).await;
+            let plan = self
+                .plan_demo_edit(
+                    client,
+                    scope_baseline,
+                    order,
+                    (&attachments, context.effort(), repair_indexes.as_deref()),
+                )
+                .await
+                .map_err(GenerationStop::Failed)?;
+            (attachments, plan)
+        };
         let instruction = plan.instruction.as_str();
         // Structural edits need the full artifact in coordination. Workers remain
         // isolated; the requirements check protects unselected existing screens.
@@ -449,8 +486,10 @@ impl GenerationEngine {
             let design_json =
                 design_json.map_err(|error| GenerationStop::Failed(error.to_string()))?;
             let correction_instruction = format!("{instruction}\n{correction}");
-            let is_focused_patch =
-                is_focused_correction || (use_review_draft && !write_indexes.is_empty());
+            let is_annotated = annotations.is_some();
+            let is_focused_patch = is_annotated
+                || is_focused_correction
+                || (use_review_draft && !write_indexes.is_empty());
             let allowed_replacements = repair_indexes.as_ref().map(|allowed| {
                 let mut allowed: Vec<_> = allowed
                     .iter()
@@ -542,7 +581,21 @@ impl GenerationEngine {
                     {
                         return Err("A focused correction may replace only the specified screens. Do not insert screens, delete screens, or change shared settings.".into());
                     }
-                    apply_patch(&original, patch)
+                    let edited = apply_patch(&original, patch)?;
+                    if is_annotated
+                        && repair_screens.iter().any(|&index| {
+                            let before = &original.screens[index];
+                            let after = &edited.screens[index];
+                            before.name != after.name
+                                || !design_model::markup::preserves_demo_links(
+                                    &before.html,
+                                    &after.html,
+                                )
+                        })
+                    {
+                        return Err("Annotation edits must preserve screen names, link destinations, and prototype actions.".into());
+                    }
+                    Ok(edited)
                 }),
                 progress: progress.clone(),
                 live: (!is_focused_patch && !use_review_draft).then(|| preview.edit_sink(&draft)),
@@ -551,7 +604,7 @@ impl GenerationEngine {
                 serde_json::json!({ "role": "system", "content": system_prompt() }),
                 self.user_message(&edit_prompt(&context.request, &input), &attachments),
             ];
-            let edited = if use_review_draft || is_focused_correction {
+            let edited = if is_focused_patch || use_review_draft {
                 self.request_valid(client, messages, &request, log).await?
             } else {
                 self.request_edit(
@@ -627,7 +680,11 @@ impl GenerationEngine {
                 },
             };
             let fallback = edited.clone();
-            let polished = self.fix_edited_design(client, edited, &fix, log).await;
+            let polished = if is_annotated {
+                self.audit_demo(&edited).await.map(|audit| (edited, audit))
+            } else {
+                self.fix_edited_design(client, edited, &fix, log).await
+            };
             let (final_design, audit) = match polished {
                 Ok(result) => result,
                 Err(error) => {
@@ -740,6 +797,15 @@ impl GenerationEngine {
                 );
                 correction_screens.sort_unstable();
                 correction_screens.dedup();
+            }
+            if is_annotated
+                && correction_screens
+                    .iter()
+                    .any(|index| !indexes.contains(index))
+            {
+                return Err(GenerationStop::Failed(
+                    "An annotation cannot require changes on unmarked screens.".into(),
+                ));
             }
             if let Some(allowed) = &repair_indexes
                 && let Some(index) = failures
