@@ -198,6 +198,10 @@ coordination pass connects their changes and adds requested screens. Before savi
 structural checks enforce the planned number of additions and protect unselected
 screens. The editing model uses the request checklist and reference attachments;
 there is no separate model verdict. Candidate isolation is enforced by the server.
+For an edit to one workflow, the planner assigns the same `Workflow · Screen title`
+prefix to its related screens, including retained draft screens and new additions.
+If a writer misses an assigned prefix, the server asks the model to correct names
+only. That correction cannot change layouts, links, screen order, or viewport tabs.
 Planning, writing, and correction share an acceptance contract that separates
 rendered designs from implementation specifications. Complete component/state
 specifications are accepted when the request permits them; missing visual controls

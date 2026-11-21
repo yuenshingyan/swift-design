@@ -210,7 +210,11 @@ async fn desktop_repair_reuses_retained_work_without_publishing_new_mobile_scree
         .await
         .expect("queue repair");
     fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
-    fake.push_text(r#"{"instruction":"Keep the completed desktop details","screens":[],"minimum_new_screens":1,"requirements":["Desktop details"]}"#.into());
+    fake.push_text(json!({
+        "instruction": "Keep the completed desktop details", "screens": [],
+        "minimum_new_screens": 1, "requirements": ["Desktop details"],
+        "workflow_groups": [{"name": "Task Details", "screens": [0, mobile_index], "include_new_screens": true}]
+    }).to_string());
     fake.push_text(r#"{"screens":[]}"#.into());
     let mut corrected = retained.screens[0].clone();
     corrected.html = format!(
@@ -218,6 +222,20 @@ async fn desktop_repair_reuses_retained_work_without_publishing_new_mobile_scree
         mobile_index + 1
     );
     fake.push_text(json!({"screens":[{"index":0,"screen":corrected}]}).to_string());
+    fake.push_text(
+        json!([
+            {"index": 0, "name": "Task Details · Overview", "html": "<h1>Rejected</h1>"},
+            {"index": mobile_index, "name": "Task Details · Attachment dialog"}
+        ])
+        .to_string(),
+    );
+    fake.push_text(
+        json!([
+            {"index": 0, "name": "Task Details · Overview"},
+            {"index": mobile_index, "name": "Task Details · Attachment dialog"}
+        ])
+        .to_string(),
+    );
     candidate
         .engine
         .clone()
@@ -232,9 +250,16 @@ async fn desktop_repair_reuses_retained_work_without_publishing_new_mobile_scree
         .expect("snapshot exists");
     assert_eq!(saved.screens.len(), original.screens.len() + 1);
     assert_eq!(saved.screens[1], original.screens[1]);
-    assert_eq!(saved.screens.last(), retained.screens.last());
+    let mut companion = retained.screens[desktop_index].clone();
+    companion.name = "Task Details · Attachment dialog".into();
+    assert_eq!(saved.screens.last(), Some(&companion));
+    corrected.name = "Task Details · Overview".into();
     assert_eq!(saved.screens[0], corrected);
-    let repair = request_text(&fake.requests()[3]);
+    let requests = fake.requests();
+    assert!(request_text(&requests[2]).contains("Use these exact workflow group assignments"));
+    assert!(request_text(&requests[4]).contains("Rename only these screens"));
+    assert!(request_text(&requests[5]).contains("Previous naming patch rejected"));
+    let repair = request_text(&requests[3]);
     assert!(repair.contains("internal link has no destination"));
     assert!(repair.contains(&format!("#screen-{}", desktop_index + 1)));
 }

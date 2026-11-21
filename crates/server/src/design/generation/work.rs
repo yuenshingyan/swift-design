@@ -664,7 +664,7 @@ impl GenerationEngine {
                 serde_json::json!({ "role": "system", "content": system_prompt() }),
                 self.user_message(&edit_prompt(&context.request, &input), &attachments),
             ];
-            let edited = if is_focused_patch || use_review_draft || attempt > 0 {
+            let mut edited = if is_focused_patch || use_review_draft || attempt > 0 {
                 self.request_valid(client, messages, &request, log).await?
             } else {
                 self.request_edit(
@@ -786,6 +786,22 @@ impl GenerationEngine {
                 layout_warnings = audit.edit_warnings(&edited, &touched);
             }
             if blockers.is_empty() {
+                if let Err(error) = self
+                    .correct_workflow_names(
+                        &plan,
+                        &mut edited,
+                        (client, context.effort(), scope_baseline.screens.len()),
+                        MAX_DEMO_CORRECTIONS - attempt,
+                    )
+                    .await
+                {
+                    let message = format!("Cannot save the demo: {error}");
+                    let notice = self
+                        .review_draft_notice(design_id, &message, false)
+                        .await
+                        .map_err(GenerationStop::Failed)?;
+                    return Err(GenerationStop::Failed(notice));
+                }
                 preview.show(&edited);
                 request.report(1.0);
                 break (edited, touched, layout_warnings);
