@@ -298,6 +298,9 @@ async fn usable_edits_replace_the_current_snapshot_but_unusable_edits_do_not() {
         let fake = ParallelFakeModel::start(None).await;
         let mut candidate = ReviewingCandidate::new(&fake);
         let runner: DemoDomRunner = Arc::new(move |design, _| {
+            if kind == "overlap" && !design.screens[0].html.contains("Useful updated design") {
+                return Box::pin(async { Err("Starting layout could not be measured".into()) });
+            }
             let coverage: Vec<_> = (0..design.screens.len()).collect();
             let (findings, probes) = if kind == "broken_interaction" {
                 (
@@ -306,7 +309,10 @@ async fn usable_edits_replace_the_current_snapshot_but_unusable_edits_do_not() {
                 )
             } else {
                 (
-                    json!([{"screen":0,"kind":kind,"node":"div.metrics","detail":"Review the measured group"}]),
+                    json!([
+                        {"screen":0,"kind":kind,"node":"div.metrics","detail":"Review the measured group"},
+                        {"screen":1,"kind":"contrast","node":"p","detail":"Existing low contrast"}
+                    ]),
                     json!([]),
                 )
             };
@@ -407,7 +413,20 @@ async fn usable_edits_replace_the_current_snapshot_but_unusable_edits_do_not() {
                 .last()
                 .expect("test collection should contain a last item")
                 .content;
-            assert!(report.contains("Layout warnings on the edited screens"));
+            assert!(
+                report
+                    .contains("Layout warnings on the edited screens (the preview may look fine)")
+            );
+            assert!(
+                report.contains(&format!("Screen 1 ({}):", screen.name)),
+                "{report}"
+            );
+            assert!(!report.contains("Screen 2 ("), "{report}");
+            assert!(!report.contains("screens[0]"), "{report}");
+            assert!(!report.contains("Retry edit"), "{report}");
+            if kind == "overlap" {
+                assert!(report.contains("text may overlap"), "{report}");
+            }
             let snapshots = candidate
                 .designs
                 .history("talk-candidate-1")
