@@ -22,6 +22,7 @@ use crate::icons;
 use crate::settings::artifact_project;
 
 mod annotation;
+mod screen_groups;
 mod support;
 
 use std::rc::Rc;
@@ -29,6 +30,7 @@ use std::rc::Rc;
 use crate::editor::*;
 
 use annotation::{AnnotationComments, AnnotationSurface, ScreenAnnotation};
+use screen_groups::{StripItem, screen_group_name, strip_items};
 use support::{
     DesignExportGroup, ScreenExportCheckbox, field_count, outline_title, screen_label, view_href,
 };
@@ -115,6 +117,8 @@ fn LoadedEditor(
     }));
     let mut live_preview = use_signal(|| (!initially_saved).then(|| initial.clone()));
     let mut selected = use_signal(|| 0usize);
+    let mut screen_search = use_signal(String::new);
+    let mut group_overrides = use_signal(std::collections::HashMap::<Option<String>, bool>::new);
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
     let mut selection = use_signal(Vec::<SelectionEntry>::new);
     // The screens pinned for the chat with a command-click on a tile.
@@ -127,6 +131,21 @@ fn LoadedEditor(
         use_memo(move || !has_saved() || (live_preview.read().is_some() && !is_dirty()));
     let displayed = use_memo(move || {
         preview_design(&design.read(), live_preview.read().as_ref(), is_dirty()).clone()
+    });
+    let current_group = use_memo(move || {
+        displayed
+            .read()
+            .screens
+            .get(selected())
+            .and_then(|screen| screen_group_name(&screen.name))
+            .map(str::to_owned)
+    });
+    use_effect(move || {
+        let current = current_group();
+        // Entering a group opens it even if it was previously closed by hand.
+        if group_overrides.peek().contains_key(&current) {
+            group_overrides.write().remove(&current);
+        }
     });
     // Autosave: the newest change wins the delay.
     let save_generation = use_signal(|| 0u64);
@@ -468,6 +487,35 @@ fn LoadedEditor(
         .enumerate()
         .map(|(index, screen)| screen_label(index, screen))
         .collect();
+    let search = screen_search();
+    let query = search.trim().to_lowercase();
+    let is_searching = !query.is_empty();
+    let visible_design = displayed.read();
+    let names: Vec<_> = visible_design
+        .screens
+        .iter()
+        .zip(&thumbnail_labels)
+        .map(|(screen, label)| (screen.name.as_str(), label.as_str()))
+        .collect();
+    let items = strip_items(
+        &names,
+        &query,
+        &current_group.read(),
+        &group_overrides.read(),
+    );
+    let show_changes = !is_read_only() && !is_dirty();
+    let changes = screen_changes.read();
+    let change_at = |index: usize| {
+        if !show_changes {
+            None
+        } else if changes.new.contains(&(index + 1)) {
+            Some("New")
+        } else if changes.edited.contains(&(index + 1)) {
+            Some("Edited")
+        } else {
+            None
+        }
+    };
     let page_labels = thumbnail_labels.clone();
     let current_notes = displayed()
         .screens
@@ -738,9 +786,53 @@ fn LoadedEditor(
                             }
                         }
                     }
+                    if screen_count > 0 {
+                        input {
+                            class: "screen-search",
+                            r#type: "search",
+                            aria_label: "Search screens",
+                            placeholder: "Search screens…",
+                            value: "{search}",
+                            oninput: move |event| screen_search.set(event.value()),
+                        }
+                    }
                     div { class: "thumbnails demo-thumbnails",
-                        for (index, label) in thumbnail_labels.into_iter().enumerate() {
-                            {
+                        if is_searching && items.is_empty() {
+                            p { class: "inspector-hint", "No screens match your search." }
+                        }
+                        for item in items {
+                            match item {
+                                StripItem::Group { name, indexes, matches, is_open } => {
+                                    let label = name.as_deref().unwrap_or("Ungrouped");
+                                    let key = format!("group-{name:?}");
+                                    let count = indexes.len();
+                                    let count_label = if count != matches {
+                                        format!("{matches} of {count}")
+                                    } else if count == 1 {
+                                        "1 screen".to_owned()
+                                    } else {
+                                        format!("{count} screens")
+                                    };
+                                    let has_new = indexes.iter().any(|&index| change_at(index) == Some("New"));
+                                    let has_edited = indexes.iter().any(|&index| change_at(index) == Some("Edited"));
+                                    rsx! {
+                                        button {
+                                            key: "{key}",
+                                            class: "screen-group-toggle",
+                                            aria_expanded: if is_open { "true" } else { "false" },
+                                            disabled: is_searching,
+                                            onclick: move |_| { group_overrides.write().insert(name.clone(), !is_open); },
+                                            span { class: "screen-group-arrow", aria_hidden: "true", if is_open { "▾" } else { "▸" } }
+                                            span { class: "screen-group-name", "{label}" }
+                                            span { class: "screen-group-count", "{count_label}" }
+                                            if has_new { span { class: "screen-group-change", "New" } }
+                                            if has_edited { span { class: "screen-group-change", "Edited" } }
+                                        }
+                                    }
+                                }
+                                StripItem::Screen(index) => {
+                                let (name, fallback) = names[index];
+                                let label = if name.trim().is_empty() { fallback } else { name };
                                 let is_deleting = pending_screen_delete() == Some(index);
                                 let is_redoing = pending_redo() == Some(index);
                                 let mut class = thumbnail_class(ThumbnailState {
@@ -759,15 +851,7 @@ fn LoadedEditor(
                                     }
                                     format!("{label} · drag to reorder · ⌘-click to pin for the chat")
                                 };
-                                let change = if is_read_only() || is_dirty() {
-                                    None
-                                } else if screen_changes.read().new.contains(&(index + 1)) {
-                                    Some("New")
-                                } else if screen_changes.read().edited.contains(&(index + 1)) {
-                                    Some("Edited")
-                                } else {
-                                    None
-                                };
+                                let change = change_at(index);
                                 rsx! {
                                     div {
                                         key: "{index}",
@@ -799,7 +883,7 @@ fn LoadedEditor(
                                         if !is_read_only() && index < saved_screen_count {
                                             ScreenExportCheckbox {
                                                 screen: index + 1,
-                                                label: label.clone(),
+                                                label: label.to_owned(),
                                                 selection: export_screens,
                                             }
                                         }
@@ -875,12 +959,13 @@ fn LoadedEditor(
                                 }
                             }
                         }
-                        if outline_count > screen_count {
+                            }
+                        if !is_searching && outline_count > screen_count {
                             span { class: "strip-divider" }
                         }
                         // A planned tile is an outline entry nobody has
                         // written. The strip head writes them.
-                        for index in screen_count..outline_count {
+                        for index in (screen_count..outline_count).filter(|_| !is_searching) {
                             {
                                 let (number, title) = outline_entry(&displayed().outline, index, "Screen");
                                 rsx! {
