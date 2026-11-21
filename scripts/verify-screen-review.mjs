@@ -167,7 +167,37 @@ try {
   const resize = (width, height) => cdp('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
   await resize(1440, 1000);
 
+  stage = 'screen groups, search, navigation, and export selection';
+  const groupedRoute = '/designs/screen-review-candidate-2';
+  const grouped = original.screens.map((screen, index) => ({
+    ...screen, name: ['Overview · Home', 'Access · Members', 'Access · Settings'][index],
+  }));
+  await api(groupedRoute, 'PUT', { ...original, screens: grouped.slice(0, 2) }, 204);
+  await api(groupedRoute, 'PUT', { ...original, screens: grouped }, 204);
+  await cdp('Page.navigate', { url: `${app}/#${groupedRoute}` });
+  const access = `Array.from(document.querySelectorAll('.screen-group-toggle')).find(el=>el.querySelector('.screen-group-name').textContent==='Access')`;
+  await wait(`${access}?.getAttribute('aria-expanded')==='false'`);
+  assert.match(await evaluate(`${access}.textContent`), /2 screens.*New/);
+  assert.equal(await evaluate("document.querySelectorAll('.demo-thumbnails iframe').length"), 1);
+  const search = "document.querySelector('.screen-search')";
+  await evaluate(`${search}.focus()`);
+  await cdp('Input.insertText', { text: 'SETTINGS' });
+  const settingsTile = `document.querySelector('.thumbnail[data-index="2"]')`;
+  await wait(`${settingsTile}?.textContent.includes('New')`);
+  assert.equal(await evaluate("document.querySelectorAll('.demo-thumbnails iframe').length"), 1);
+  await evaluate(`${settingsTile}.querySelector('input').click()`);
+  await evaluate(`${search}.value=''; ${search}.dispatchEvent(new Event('input', {bubbles:true}))`);
+  await wait(`${access}?.getAttribute('aria-expanded')==='false'`);
+  await evaluate(`${access}.click()`);
+  await wait(`${settingsTile}?.querySelector('input').checked`);
+  await evaluate(`${access}.click()`);
+  await wait(`!!${pane}.contentDocument?.querySelector('a[href="#screen-2"]')`);
+  await evaluate(`${pane}.contentDocument.querySelector('a[href="#screen-2"]').click()`);
+  await wait(`${access}?.getAttribute('aria-expanded')==='true' && ${pane}.src.endsWith('screen=2')`);
+  assert(await evaluate(`${settingsTile}.querySelector('input').checked`));
+
   stage = 'initial badges and drawing';
+  await cdp('Page.navigate', { url: 'about:blank' });
   await editor();
   await wait(`${badges}.join(',') === ',,New'`);
   await wait(`!!${pane}.contentDocument?.querySelector('[data-swift-design-root] h1')`);

@@ -142,7 +142,12 @@ The existing `GET /designs/{id}/previews` and `render?preview=true` endpoints ca
 still retrieve them explicitly. **View**, exports and ordinary render URLs use
 the current snapshot. Thumbnails mark screens **New** or **Edited** based on
 what changed since the previous distinct snapshot. The marks survive reloads;
-unchanged screens and live previews are not marked.
+unchanged screens and live previews are not marked. The thumbnail strip groups
+screens by the prefix in names such as `Project Access · Save rejected`. Names
+without a prefix appear under **Ungrouped**. The current screen’s group opens
+by default; use **Search screens** to find names across collapsed groups.
+Collapsing a group does not clear PNG export selections or change the demo’s
+screen order.
 Use **Annotate** to draw numbered boxes on a saved demo screen and write a
 comment for each box. You can move between screens, edit comments, and remove
 boxes without triggering prototype controls. Annotations stay in the open editor.
