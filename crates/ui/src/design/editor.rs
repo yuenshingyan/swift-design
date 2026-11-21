@@ -17,7 +17,7 @@ use dioxus::prelude::*;
 use crate::api;
 use crate::canvas::{frame_width_rem, is_portrait_canvas};
 use crate::chat::DesignChat;
-use crate::design::api::DesignPreview;
+use crate::design::api::{DesignPreview, ScreenChanges, fetch_current_snapshot};
 use crate::icons;
 use crate::settings::artifact_project;
 
@@ -50,11 +50,11 @@ pub fn Editor(design_id: String, on_back: EventHandler<()>) -> Element {
     let loaded = use_resource(move || {
         let id = id_for_fetch.clone();
         async move {
-            match crate::design::api::fetch_design(&id).await {
-                Ok(saved) => Ok((saved, true)),
+            match fetch_current_snapshot(&id).await {
+                Ok(saved) => Ok((saved.design, saved.screen_changes, true)),
                 Err(error) => {
                     match active_preview(crate::design::api::fetch_design_preview(&id).await?) {
-                        Some(preview) => Ok((preview, false)),
+                        Some(preview) => Ok((preview, ScreenChanges::default(), false)),
                         None => Err(error),
                     }
                 }
@@ -63,8 +63,8 @@ pub fn Editor(design_id: String, on_back: EventHandler<()>) -> Element {
     });
     let current = loaded.read();
     match &*current {
-        Some(Ok((design, has_saved))) => rsx! {
-            LoadedEditor { design_id, initial: design.clone(), initially_saved: *has_saved, on_back }
+        Some(Ok((design, changes, has_saved))) => rsx! {
+            LoadedEditor { design_id, initial: design.clone(), initial_changes: changes.clone(), initially_saved: *has_saved, on_back }
         },
         Some(Err(message)) => rsx! {
             p { class: "error", "{message}" }
@@ -81,12 +81,14 @@ pub fn Editor(design_id: String, on_back: EventHandler<()>) -> Element {
 fn LoadedEditor(
     design_id: String,
     initial: Design,
+    initial_changes: ScreenChanges,
     initially_saved: bool,
     on_back: EventHandler<()>,
 ) -> Element {
     // `design` is the local saved-data buffer; live previews never enter its save path.
     let mut design = use_signal(|| initial.clone());
     let mut has_saved = use_signal(|| initially_saved);
+    let mut screen_changes = use_signal(|| initial_changes);
     let mut saved_screen_labels = use_signal(|| {
         if initially_saved {
             initial
@@ -172,6 +174,12 @@ fn LoadedEditor(
                         messages.set(Vec::new());
                         if design.peek().eq(&snapshot) {
                             is_dirty.set(false);
+                            if let Ok(saved) = fetch_current_snapshot(&id).await
+                                && !is_dirty()
+                                && design.peek().eq(&saved.design)
+                            {
+                                screen_changes.set(saved.screen_changes);
+                            }
                         }
                         if reload_preview {
                             preview_version += 1;
@@ -192,9 +200,11 @@ fn LoadedEditor(
         move |_: ()| {
             let id = design_id.clone();
             spawn(async move {
-                if let Ok(fetched) = crate::design::api::fetch_design(&id).await
+                if let Ok(snapshot) = fetch_current_snapshot(&id).await
                     && !is_dirty()
                 {
+                    let fetched = snapshot.design;
+                    screen_changes.set(snapshot.screen_changes);
                     saved_screen_labels.set(
                         fetched
                             .screens
@@ -229,7 +239,7 @@ fn LoadedEditor(
             let mut revision = 0;
             loop {
                 let preview = crate::design::api::fetch_design_preview(&id).await;
-                let saved = crate::design::api::fetch_design(&id).await;
+                let saved = fetch_current_snapshot(&id).await;
                 if let Ok(preview) = preview {
                     let before = displayed.peek().clone();
                     let preview = active_preview(preview);
@@ -237,7 +247,11 @@ fn LoadedEditor(
                         live_preview.set(preview);
                     }
                     if !is_dirty() {
-                        if let Ok(saved) = saved {
+                        if let Ok(snapshot) = saved {
+                            let saved = snapshot.design;
+                            if screen_changes.peek().ne(&snapshot.screen_changes) {
+                                screen_changes.set(snapshot.screen_changes);
+                            }
                             saved_screen_labels.set(
                                 saved
                                     .screens
@@ -710,6 +724,15 @@ fn LoadedEditor(
                                     }
                                     format!("{label} · drag to reorder · ⌘-click to pin for the chat")
                                 };
+                                let change = if is_read_only() || is_dirty() {
+                                    None
+                                } else if screen_changes.read().new.contains(&(index + 1)) {
+                                    Some("New")
+                                } else if screen_changes.read().edited.contains(&(index + 1)) {
+                                    Some("Edited")
+                                } else {
+                                    None
+                                };
                                 rsx! {
                                     div {
                                         key: "{index}",
@@ -735,6 +758,9 @@ fn LoadedEditor(
                                             src: "/designs/{design_id}/render?version={preview_version()}{live_query}&screen={index + 1}",
                                         }
                                         span { class: "thumbnail-number", {format!("{:02}", index + 1)} }
+                                        if let Some(change) = change {
+                                            span { class: "thumbnail-change", "{change}" }
+                                        }
                                         if !is_read_only() && index < saved_screen_count {
                                             ScreenExportCheckbox {
                                                 screen: index + 1,

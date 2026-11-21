@@ -493,6 +493,7 @@ mod tests {
             super::super::LoadedEditor(super::super::LoadedEditorProps {
                 design_id: "test-candidate-1".into(),
                 initial: design(),
+                initial_changes: Default::default(),
                 initially_saved: false,
                 on_back: EventHandler::new(|_| {}),
             })
@@ -521,9 +522,17 @@ mod tests {
         use dioxus::prelude::*;
 
         fn current_editor() -> Element {
+            let mut snapshot = design();
+            snapshot
+                .screens
+                .extend([default_screen(), default_screen()]);
             super::super::LoadedEditor(super::super::LoadedEditorProps {
                 design_id: "test-candidate-1".into(),
-                initial: design(),
+                initial: snapshot,
+                initial_changes: crate::design::api::ScreenChanges {
+                    new: vec![3],
+                    edited: vec![2],
+                },
                 initially_saved: true,
                 on_back: EventHandler::new(|_| {}),
             })
@@ -534,6 +543,16 @@ mod tests {
         let mutations = format!("{changes:?}");
         assert!(mutations.contains("/designs/test-candidate-1/render?start_screen=1"));
         assert!(mutations.contains(" for export"));
+        assert_eq!(
+            mutations.matches("CreateTextNode { value: \"New\"").count(),
+            1
+        );
+        assert_eq!(
+            mutations
+                .matches("CreateTextNode { value: \"Edited\"")
+                .count(),
+            1
+        );
         assert!(!mutations.contains("preview=true"));
         for removed in [
             "Saved version",

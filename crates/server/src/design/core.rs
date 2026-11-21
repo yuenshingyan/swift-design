@@ -58,6 +58,75 @@ pub struct DesignStore {
     reported_malformed: Arc<Mutex<HashSet<String>>>,
 }
 
+#[derive(Default, Debug, PartialEq, Eq, Serialize)]
+struct ScreenChanges {
+    new: Vec<usize>,
+    edited: Vec<usize>,
+}
+
+#[derive(Serialize)]
+struct CurrentSnapshot {
+    design: Design,
+    screen_changes: ScreenChanges,
+}
+
+// Match unchanged screens before matching names or positions, so inserting,
+// removing, or moving a screen does not mark its unchanged neighbors as edits.
+fn screen_changes(before: &[Screen], after: &[Screen]) -> ScreenChanges {
+    let mut matched = vec![false; before.len()];
+    let mut changes = vec![None; after.len()];
+    for (index, screen) in after.iter().enumerate() {
+        if let Some(prior) = before
+            .iter()
+            .enumerate()
+            .position(|(i, old)| !matched[i] && old == screen)
+        {
+            matched[prior] = true;
+        } else if !is_pending_screen(screen) {
+            changes[index] = Some(true);
+        }
+    }
+    // A distinct name identifies an edited screen even when it changed position.
+    for (index, screen) in after.iter().enumerate() {
+        if changes[index] != Some(true) || screen.name.is_empty() {
+            continue;
+        }
+        let mut candidates = before
+            .iter()
+            .enumerate()
+            .filter(|(_, old)| old.name == screen.name);
+        if let Some((prior, old)) = candidates.next()
+            && candidates.next().is_none()
+            && !matched[prior]
+            && !is_pending_screen(old)
+            && after
+                .iter()
+                .filter(|other| other.name == screen.name)
+                .count()
+                == 1
+        {
+            matched[prior] = true;
+            changes[index] = Some(false);
+        }
+    }
+    // Renamed or unnamed screens without a match can only be paired by position.
+    let mut result = ScreenChanges::default();
+    for (index, change) in changes.into_iter().enumerate() {
+        match change {
+            Some(true)
+                if before
+                    .get(index)
+                    .is_none_or(|old| matched[index] || is_pending_screen(old)) =>
+            {
+                result.new.push(index + 1)
+            }
+            Some(_) => result.edited.push(index + 1),
+            None => {}
+        }
+    }
+    result
+}
+
 /// One row in the `GET /designs` listing.
 #[derive(Clone, Debug, Serialize)]
 pub struct DesignSummary {
@@ -305,6 +374,34 @@ impl DesignStore {
         }
     }
 
+    async fn current_snapshot(&self, id: &str) -> anyhow::Result<Option<CurrentSnapshot>> {
+        let _writer = self.write_lock.lock().await;
+        let Some(design) = self.load(id).await? else {
+            return Ok(None);
+        };
+        let mut changes = ScreenChanges::default();
+        if let Some(history) = &self.history {
+            for stamp in history.stamps(id).await? {
+                let Some(bytes) = history.read(id, &stamp).await? else {
+                    continue;
+                };
+                let Ok(previous) = serde_json::from_slice::<Design>(&bytes) else {
+                    continue;
+                };
+                // A no-op write (or a snapshot taken before an unsuccessful write)
+                // is not a new edit and should not clear the badges.
+                if design != previous {
+                    changes = screen_changes(&previous.screens, &design.screens);
+                    break;
+                }
+            }
+        }
+        Ok(Some(CurrentSnapshot {
+            design,
+            screen_changes: changes,
+        }))
+    }
+
     /// Writes the snapshot `stamp` back as the current design. `save`
     /// keeps the current design as a new snapshot first. `Ok(None)` means
     /// no snapshot with that stamp exists.
@@ -417,6 +514,7 @@ pub fn routes() -> Router<AppState> {
         .route("/designs/{id}/previews", get(get_preview))
         .route("/designs/{id}/authors", get(get_authors))
         .route("/designs/{id}/history", get(list_history))
+        .route("/designs/{id}/snapshots/current", get(get_current_snapshot))
         .route(
             "/designs/{id}/history/{stamp}/restore",
             post(restore_history),
@@ -470,6 +568,21 @@ async fn get_design(State(store): State<DesignStore>, Path(id): Path<String>) ->
     }
     match store.load(&id).await {
         Ok(Some(design)) => Json(design).into_response(),
+        Ok(None) => api_error::design_not_found(&id),
+        Err(error) => api_error::internal_error(&error),
+    }
+}
+
+/// Returns the current design and its screen badges from the same store read.
+async fn get_current_snapshot(
+    State(store): State<DesignStore>,
+    Path(id): Path<String>,
+) -> Response {
+    if !is_valid_design_id(&id) {
+        return api_error::invalid_design_id(&id);
+    }
+    match store.current_snapshot(&id).await {
+        Ok(Some(snapshot)) => Json(snapshot).into_response(),
         Ok(None) => api_error::design_not_found(&id),
         Err(error) => api_error::internal_error(&error),
     }
@@ -791,6 +904,68 @@ mod tests {
     fn store_with_history(directory: &std::path::Path) -> DesignStore {
         DesignStore::new(directory.join("designs"))
             .with_history(HistoryStore::new(directory.join("history")))
+    }
+
+    #[tokio::test]
+    async fn current_snapshot_reports_only_the_latest_saved_screen_changes() {
+        let directory = tempfile::tempdir().expect("temporary test directory should be created");
+        let store = store_with_history(directory.path());
+        let original = sample_design();
+        store
+            .save("demo", &original)
+            .await
+            .expect("initial snapshot should save");
+        let app = test_application(&directory);
+        let fetch = || async {
+            let (status, body) =
+                send(app.clone(), "GET", "/designs/demo/snapshots/current", None).await;
+            assert_eq!(status, StatusCode::OK);
+            serde_json::from_str::<serde_json::Value>(&body)
+                .expect("snapshot response should be JSON")
+        };
+        assert_eq!(
+            fetch().await["screen_changes"],
+            serde_json::json!({"new":[],"edited":[]})
+        );
+
+        let mut edited = original.clone();
+        edited.screens[1].notes = Some("Updated notes".into());
+        let mut added = original.screens[0].clone();
+        added.name = "New screen".into();
+        edited.screens.insert(0, added);
+        store
+            .save_if_current("demo", &edited, Some(&original))
+            .await
+            .expect("edit should save");
+        let saved = fetch().await;
+        assert_eq!(
+            saved["screen_changes"],
+            serde_json::json!({"new":[1],"edited":[3]})
+        );
+        assert_eq!(
+            saved["design"],
+            serde_json::to_value(&edited).expect("edit should serialize")
+        );
+        store
+            .save("demo", &edited)
+            .await
+            .expect("unchanged save should succeed");
+        store
+            .save_if_current("demo", &original, Some(&original))
+            .await
+            .expect_err("stale edit must not save");
+        assert_eq!(fetch().await, saved);
+
+        let mut later = edited.clone();
+        later.screens[1].name = "Renamed screen".into();
+        store
+            .save_if_current("demo", &later, Some(&edited))
+            .await
+            .expect("later edit should save");
+        assert_eq!(
+            fetch().await["screen_changes"],
+            serde_json::json!({"new":[],"edited":[2]})
+        );
     }
 
     #[tokio::test]
