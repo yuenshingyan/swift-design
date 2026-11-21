@@ -146,8 +146,10 @@ unchanged screens and live previews are not marked. The thumbnail strip groups
 screens by the prefix in names such as `Project Access · Save rejected`. Names
 without a prefix appear under **Ungrouped**. The current screen’s group opens
 by default; use **Search screens** to find names across collapsed groups.
-Collapsing a group does not clear PNG export selections or change the demo’s
-screen order.
+Use the checkbox beside a group name to select or clear every saved screen in
+that group for PNG export, even when the group is collapsed or search hides
+some of its screens. A dash means only some screens are selected. Collapsing a
+group does not clear selections or change the demo’s screen order.
 Use **Annotate** to draw numbered boxes on a saved demo screen and write a
 comment for each box. You can move between screens, edit comments, and remove
 boxes without triggering prototype controls. Annotations stay in the open editor.

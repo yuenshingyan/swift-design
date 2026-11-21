@@ -178,7 +178,13 @@ try {
   const access = `Array.from(document.querySelectorAll('.screen-group-toggle')).find(el=>el.querySelector('.screen-group-name').textContent==='Access')`;
   await wait(`${access}?.getAttribute('aria-expanded')==='false'`);
   assert.match(await evaluate(`${access}.textContent`), /2 screens.*New/);
+  const accessCheckbox = `${access}.parentElement.querySelector('[role=checkbox]')`;
+  const accessState = `${accessCheckbox}.getAttribute('aria-checked')`;
+  const homeCheckbox = `document.querySelector('.thumbnail[data-index="0"] input')`;
+  const membersCheckbox = `document.querySelector('.thumbnail[data-index="1"] input')`;
+  assert.equal(await evaluate(accessState), 'false');
   assert.equal(await evaluate("document.querySelectorAll('.demo-thumbnails iframe').length"), 1);
+  await evaluate(`${homeCheckbox}.click()`);
   const search = "document.querySelector('.screen-search')";
   await evaluate(`${search}.focus()`);
   await cdp('Input.insertText', { text: 'SETTINGS' });
@@ -186,11 +192,22 @@ try {
   await wait(`${settingsTile}?.textContent.includes('New')`);
   assert.equal(await evaluate("document.querySelectorAll('.demo-thumbnails iframe').length"), 1);
   await evaluate(`${settingsTile}.querySelector('input').click()`);
+  await wait(`${accessState}==='mixed'`);
+  await evaluate(`${accessCheckbox}.focus()`);
+  for (const type of ['keyDown', 'keyUp']) {
+    await cdp('Input.dispatchKeyEvent', { type, key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
+  }
+  await wait(`${accessState}==='true'`);
   await evaluate(`${search}.value=''; ${search}.dispatchEvent(new Event('input', {bubbles:true}))`);
   await wait(`${access}?.getAttribute('aria-expanded')==='false'`);
   await evaluate(`${access}.click()`);
-  await wait(`${settingsTile}?.querySelector('input').checked`);
+  await wait(`${settingsTile}?.querySelector('input').checked && ${membersCheckbox}.checked`);
   await evaluate(`${access}.click()`);
+  await evaluate(`${accessCheckbox}.click()`);
+  await wait(`${accessState}==='false' && ${access}.getAttribute('aria-expanded')==='false'`);
+  assert(await evaluate(`${homeCheckbox}.checked`), 'clearing Access must preserve the Overview selection');
+  await evaluate(`${accessCheckbox}.click()`);
+  await wait(`${accessState}==='true'`);
   await wait(`!!${pane}.contentDocument?.querySelector('a[href="#screen-2"]')`);
   await evaluate(`${pane}.contentDocument.querySelector('a[href="#screen-2"]').click()`);
   await wait(`${access}?.getAttribute('aria-expanded')==='true' && ${pane}.src.endsWith('screen=2')`);

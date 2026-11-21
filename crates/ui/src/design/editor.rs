@@ -32,7 +32,8 @@ use crate::editor::*;
 use annotation::{AnnotationComments, AnnotationSurface, ScreenAnnotation};
 use screen_groups::{StripItem, screen_group_name, strip_items};
 use support::{
-    DesignExportGroup, ScreenExportCheckbox, field_count, outline_title, screen_label, view_href,
+    DesignExportGroup, GroupExportCheckbox, ScreenExportCheckbox, field_count, outline_title,
+    screen_label, view_href,
 };
 
 // A dirty local buffer always wins; a live preview must never become editable.
@@ -815,18 +816,24 @@ fn LoadedEditor(
                                     };
                                     let has_new = indexes.iter().any(|&index| change_at(index) == Some("New"));
                                     let has_edited = indexes.iter().any(|&index| change_at(index) == Some("Edited"));
+                                    let saved_screens: Vec<_> = indexes.iter().map(|index| index + 1)
+                                        .filter(|&number| number <= saved_screen_count).collect();
                                     rsx! {
-                                        button {
-                                            key: "{key}",
-                                            class: "screen-group-toggle",
-                                            aria_expanded: if is_open { "true" } else { "false" },
-                                            disabled: is_searching,
-                                            onclick: move |_| { group_overrides.write().insert(name.clone(), !is_open); },
-                                            span { class: "screen-group-arrow", aria_hidden: "true", if is_open { "▾" } else { "▸" } }
-                                            span { class: "screen-group-name", "{label}" }
-                                            span { class: "screen-group-count", "{count_label}" }
-                                            if has_new { span { class: "screen-group-change", "New" } }
-                                            if has_edited { span { class: "screen-group-change", "Edited" } }
+                                        div { key: "{key}", class: "screen-group-header",
+                                            if !is_read_only() && !saved_screens.is_empty() {
+                                                GroupExportCheckbox { label: label.to_owned(), screens: saved_screens, selection: export_screens }
+                                            }
+                                            button {
+                                                class: "screen-group-toggle",
+                                                aria_expanded: if is_open { "true" } else { "false" },
+                                                disabled: is_searching,
+                                                onclick: move |_| { group_overrides.write().insert(name.clone(), !is_open); },
+                                                span { class: "screen-group-arrow", aria_hidden: "true", if is_open { "▾" } else { "▸" } }
+                                                span { class: "screen-group-name", "{label}" }
+                                                span { class: "screen-group-count", "{count_label}" }
+                                                if has_new { span { class: "screen-group-change", "New" } }
+                                                if has_edited { span { class: "screen-group-change", "Edited" } }
+                                            }
                                         }
                                     }
                                 }
