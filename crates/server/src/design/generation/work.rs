@@ -390,7 +390,15 @@ impl GenerationEngine {
             plan.screens.clone()
         };
         log(&format!("{label}: checking layout before editing"));
-        let measured = self.audit_demo(&draft).await?.instructions(None);
+        let measured = match self.audit_demo(&draft).await {
+            Ok(audit) => audit.instructions(None),
+            Err(error) => {
+                log(&format!(
+                    "{label}: could not measure the starting layout: {error}"
+                ));
+                Vec::new()
+            }
+        };
         let preview_scope = repair_indexes
             .clone()
             .unwrap_or_else(|| plan.screens.clone());
@@ -654,7 +662,7 @@ impl GenerationEngine {
                     .map_err(GenerationStop::Failed)?;
                 return Err(GenerationStop::Failed(notice));
             }
-            let layout_warnings = audit.instructions(Some(&touched));
+            let layout_warnings = audit.edit_warnings(&final_design, &touched);
             log(&format!(
                 "{}: reviewing requested feature coverage before saving",
                 request.label
@@ -777,7 +785,7 @@ impl GenerationEngine {
             .collect();
         if !layout_warnings.is_empty() {
             report.push_str(&format!(
-                "\nLayout warnings on the edited screens:\n{}",
+                "\nLayout warnings on the edited screens (the preview may look fine):\n{}",
                 layout_warnings.join("\n")
             ));
         } else if !verified.is_empty() {

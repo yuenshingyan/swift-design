@@ -224,7 +224,10 @@ reference-verification error instead of an incomplete-edit verdict.
 A usable demo edit becomes the current design automatically after review. The
 previous design remains available through the existing snapshots. Layout findings
 such as overflow and overlap are warnings for edits, not reasons to fail a run.
-An unsuccessful optional polish pass keeps the usable edit and its warnings.
+The completion message names the affected screens and describes what the checker
+flagged without asking for a retry. The starting layout check is optional; the
+edited result still needs a complete browser audit. An unsuccessful optional
+polish pass keeps the usable edit and its warnings.
 Unsafe markup, out-of-scope changes, incomplete requirements, empty edited
 screens, invalid window geometry, and failed prototype interaction probes still
 prevent replacement. If an edit cannot be verified as usable, its valid,

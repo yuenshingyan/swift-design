@@ -3,13 +3,15 @@
 //!
 //! Validation checks that a design is safe and well formed. Polish checks
 //! that it looks right. Demo completion requires a complete Chrome audit.
-//! Hard layout errors go through bounded tweaking rounds and block completion
-//! if they remain. The exact chosen version is measured again before saving.
+//! Layout findings go through bounded tweaking rounds. New candidates require
+//! clean layout; existing demo edits can save with warnings. The exact chosen
+//! version is measured again before saving.
 //! Cosmetic warnings remain best-effort. Rendered screenshots accompany the
 //! generation review when the model supports images. The audit script itself
 //! is `crate::render::AUDIT_SCRIPT`. Other artifact pipelines share the script and
 //! finding vocabulary but retain their existing completion policies.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -163,6 +165,44 @@ impl DemoAudit {
                 .iter()
                 .map(format_finding),
             )
+            .collect()
+    }
+
+    /// Summarizes uncertain findings in screen order without exposing model repair instructions.
+    pub(crate) fn edit_warnings(&self, design: &Design, indexes: &[usize]) -> Vec<String> {
+        let mut by_screen = BTreeMap::<usize, BTreeSet<&str>>::new();
+        for finding in &self.findings {
+            if !indexes.contains(&finding.screen) {
+                continue;
+            }
+            let warning = match finding.kind.as_str() {
+                "overflow" | "minor_overflow" => "content may be clipped",
+                "off_screen" => "content may extend beyond the screen",
+                "overfull" => "the preview was scaled down to fit",
+                "overlap" => "text may overlap",
+                "tiny_text" => "some text may be too small",
+                "contrast" => "some text may have low contrast",
+                "long_lines" => "some lines of text may be too long",
+                "static_control" => "some elements look clickable but have no detected action",
+                "alignment" => "some items may be unevenly aligned or spaced",
+                "alignment_unmeasured" => "some alignment or spacing could not be measured",
+                _ => continue,
+            };
+            by_screen.entry(finding.screen).or_default().insert(warning);
+        }
+        by_screen
+            .into_iter()
+            .filter_map(|(index, warnings)| {
+                design.screens.get(index).map(|screen| {
+                    let warnings: Vec<_> = warnings.into_iter().collect();
+                    format!(
+                        "Screen {} ({}): {}.",
+                        index + 1,
+                        screen.name,
+                        warnings.join("; ")
+                    )
+                })
+            })
             .collect()
     }
 
