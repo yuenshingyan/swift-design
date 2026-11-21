@@ -755,7 +755,7 @@ async fn render_stored_design(
                 let label = if is_recovery {
                     "Needs review — unverified draft"
                 } else {
-                    "Live draft — unverified"
+                    "Live preview"
                 };
                 html = html.replace("</body>", &format!("<aside style=\"position:fixed;top:8px;right:8px;z-index:2147483647;padding:5px 9px;border-radius:6px;background:#171b25;color:#fff;font:12px sans-serif;pointer-events:none\">{label}</aside></body>"));
             }

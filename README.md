@@ -132,23 +132,15 @@ Demo candidates show **Live draft — unverified** previews during writing,
 correction and layout tweaking, including safe prefixes before an HTML string
 finishes. Updates are limited to five per second; shared metadata and safe markup
 must be available before anything renders. Parallel screen updates are combined,
-not shown as competing versions. Drafts are read-only in the editor and kept
-separate from saved data; dirty local changes take priority. Edits and continuations
-leave the saved candidate unchanged until acceptance. Only complete model replies
-can pass acceptance: completing markup for display never approves an edit.
-Temporary previews clear when the run ends. A complete, valid edit draft is
-saved as a recovery copy under the same candidate before review. If review fails
-or the run stops after that checkpoint, the editor shows **Needs review**. Use
-**Saved version** or **Review draft** to switch. **Play review draft** opens the
-full unverified prototype; **Repair draft** starts from that draft on the same
-candidate. It identifies editable screens before writing and reports a protected
-screen conflict if the repair needs to change an untouched saved screen. If a
-model patch crosses that boundary, Swift Design reports the specific change to
-the model and retries the patch. Review compares against both the saved version
-and the draft as it was before the repair. It refuses to overwrite a saved version that
-changed after the checkpoint. No new candidate is allocated.
-Exports, history and ordinary render URLs use saved
-data; `GET /designs/{id}/previews` and `render?preview=true` explicitly opt into drafts.
+not shown as competing versions. Live previews are read-only and kept separate
+from saved data; dirty local changes take priority. Only complete model replies
+can save. A temporary preview clears when its run ends, and the editor shows
+only the current snapshot. There is no draft switch or separate play action.
+Existing recovery copies stay on disk; opening the editor neither publishes nor
+deletes them. Recovery copies are not included in exports or snapshot history.
+The existing `GET /designs/{id}/previews` and `render?preview=true` endpoints can
+still retrieve them explicitly. **View**, exports and ordinary render URLs use
+the current snapshot.
 Chrome checks how built-in controls respond to programmatic clicks, Space, arrow
 keys, Home and End, and checks focus and ARIA state. These results inform
 requirement review. The probes do not verify native Tab order, hit-testing or
@@ -352,7 +344,7 @@ export from the saved version.
 The design editor has two modes on a tab pair: **Play** (the default) and **Edit**. In
 Edit a click selects a node. In Play a click acts as it would for a user:
 a link to `#screen-3` opens screen 3, a `<details>` menu opens, and a
-checkbox or radio toggle flips. **View** and **Play review draft** open the full
+checkbox or radio toggle flips. **View** opens the full
 demo at the selected screen. The render URL uses the one-based `start_screen`
 parameter; unlike `screen`, it keeps the whole demo navigable. Full-demo View and exported HTML switch screens
 instantly by default; wheel scrolling stays within the current screen. Explicit

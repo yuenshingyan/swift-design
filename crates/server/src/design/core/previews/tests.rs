@@ -135,7 +135,7 @@ async fn live_preview_never_changes_saved_design_history_or_default_render() {
         .await,
     )
     .await;
-    assert!(!saved_render.contains("Live draft — unverified"));
+    assert!(!saved_render.contains("Live preview"));
     assert!(!saved_render.contains("Writing a temporary design"));
     let rendered = render_stored_design(
         State(store.clone()),
@@ -150,7 +150,7 @@ async fn live_preview_never_changes_saved_design_history_or_default_render() {
     .await;
     assert_eq!(rendered.headers()["cache-control"], "no-store");
     let rendered = body(rendered).await;
-    assert!(rendered.contains("Live draft — unverified"));
+    assert!(rendered.contains("Live preview"));
     assert!(!rendered.contains("swift-design-html"));
     let listed: Vec<serde_json::Value> =
         serde_json::from_str(&body(list_designs(State(store.clone())).await).await)

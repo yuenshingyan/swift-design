@@ -28,15 +28,19 @@ use support::{
     DesignExportGroup, ScreenExportCheckbox, field_count, outline_title, screen_label, view_href,
 };
 
-// A dirty local buffer always wins; a draft-only buffer must never become editable.
-fn preview_design<'a>(saved: &'a Design, draft: Option<&'a Design>, is_dirty: bool) -> &'a Design {
-    draft.filter(|_| !is_dirty).unwrap_or(saved)
+// A dirty local buffer always wins; a live preview must never become editable.
+fn preview_design<'a>(
+    saved: &'a Design,
+    preview: Option<&'a Design>,
+    is_dirty: bool,
+) -> &'a Design {
+    preview.filter(|_| !is_dirty).unwrap_or(saved)
 }
 
-fn visible_preview(preview: Option<&DesignPreview>, show_recovery: bool) -> Option<&Design> {
+fn active_preview(preview: Option<DesignPreview>) -> Option<Design> {
     preview
-        .filter(|preview| !preview.is_recovery || show_recovery)
-        .map(|preview| &preview.design)
+        .filter(|preview| !preview.is_recovery)
+        .map(|preview| preview.design)
 }
 
 /// Loads one design, then hands it to the editor.
@@ -48,10 +52,12 @@ pub fn Editor(design_id: String, on_back: EventHandler<()>) -> Element {
         async move {
             match crate::design::api::fetch_design(&id).await {
                 Ok(saved) => Ok((saved, true)),
-                Err(error) => match crate::design::api::fetch_design_preview(&id).await? {
-                    Some(draft) => Ok((draft.design, false)),
-                    None => Err(error),
-                },
+                Err(error) => {
+                    match active_preview(crate::design::api::fetch_design_preview(&id).await?) {
+                        Some(preview) => Ok((preview, false)),
+                        None => Err(error),
+                    }
+                }
             }
         }
     });
@@ -78,7 +84,7 @@ fn LoadedEditor(
     initially_saved: bool,
     on_back: EventHandler<()>,
 ) -> Element {
-    // `design` is the local saved-data buffer; live drafts never enter its save path.
+    // `design` is the local saved-data buffer; live previews never enter its save path.
     let mut design = use_signal(|| initial.clone());
     let mut has_saved = use_signal(|| initially_saved);
     let mut saved_screen_labels = use_signal(|| {
@@ -100,14 +106,7 @@ fn LoadedEditor(
             .write()
             .retain(|&screen| screen <= saved_screen_count);
     }));
-    let mut live_draft = use_signal(|| {
-        (!initially_saved).then(|| DesignPreview {
-            design: initial.clone(),
-            is_recovery: false,
-        })
-    });
-    let mut show_recovery = use_signal(|| true);
-    let mut is_repair_submitting = use_signal(|| false);
+    let mut live_preview = use_signal(|| (!initially_saved).then(|| initial.clone()));
     let mut selected = use_signal(|| 0usize);
     let mut selected_node = use_signal(|| Option::<SelectedNode>::None);
     let mut selection = use_signal(Vec::<SelectionEntry>::new);
@@ -117,18 +116,10 @@ fn LoadedEditor(
     let mut preview_version = use_signal(|| 0u32);
     let mut user_paths = use_signal(Vec::<String>::new);
     let mut is_dirty = use_signal(|| false);
-    let is_read_only = use_memo(move || {
-        !has_saved()
-            || (visible_preview(live_draft.read().as_ref(), show_recovery()).is_some()
-                && !is_dirty())
-    });
+    let is_read_only =
+        use_memo(move || !has_saved() || (live_preview.read().is_some() && !is_dirty()));
     let displayed = use_memo(move || {
-        preview_design(
-            &design.read(),
-            visible_preview(live_draft.read().as_ref(), show_recovery()),
-            is_dirty(),
-        )
-        .clone()
+        preview_design(&design.read(), live_preview.read().as_ref(), is_dirty()).clone()
     });
     // Autosave: the newest change wins the delay.
     let save_generation = use_signal(|| 0u64);
@@ -213,7 +204,7 @@ fn LoadedEditor(
                             .collect(),
                     );
                     if design.peek().ne(&fetched) {
-                        if visible_preview(live_draft.peek().as_ref(), show_recovery()).is_none() {
+                        if live_preview.peek().is_none() {
                             selected.set(selected().min(fetched.screens.len().saturating_sub(1)));
                         }
                         design.set(fetched);
@@ -241,11 +232,9 @@ fn LoadedEditor(
                 let saved = crate::design::api::fetch_design(&id).await;
                 if let Ok(preview) = preview {
                     let before = displayed.peek().clone();
-                    if live_draft.peek().ne(&preview) {
-                        if preview.is_none() {
-                            show_recovery.set(true);
-                        }
-                        live_draft.set(preview);
+                    let preview = active_preview(preview);
+                    if live_preview.peek().ne(&preview) {
+                        live_preview.set(preview);
                     }
                     if !is_dirty() {
                         if let Ok(saved) = saved {
@@ -262,12 +251,9 @@ fn LoadedEditor(
                             }
                             has_saved.set(true);
                         }
-                        let after = preview_design(
-                            &design.peek(),
-                            visible_preview(live_draft.peek().as_ref(), show_recovery()),
-                            false,
-                        )
-                        .clone();
+                        let after =
+                            preview_design(&design.peek(), live_preview.peek().as_ref(), false)
+                                .clone();
                         if before != after {
                             preview_version += 1;
                             selected.set(selected().min(after.screens.len().saturating_sub(1)));
@@ -419,7 +405,7 @@ fn LoadedEditor(
 
     let screen_count = displayed().screens.len();
     let outline_count = displayed().outline.len();
-    let live_query = if is_read_only() && live_draft().is_some() {
+    let live_query = if is_read_only() && live_preview.read().is_some() {
         "&preview=true"
     } else {
         ""
@@ -429,7 +415,7 @@ fn LoadedEditor(
     } else {
         mode()
     };
-    let is_available = has_saved() || live_draft().is_some();
+    let is_available = has_saved() || live_preview.read().is_some();
     let can_export_with_chrome = settings().flatten().is_none_or(|view| view.has_chrome);
     // The render page fits the screen to its frame, so a frame with the
     // canvas ratio shows the screen edge to edge. Every thumbnail is
@@ -504,16 +490,7 @@ fn LoadedEditor(
                                 span { class: "tab-name", "{candidate.label()}" }
                             }
                         }
-                        if is_read_only() && live_draft.read().as_ref().is_some_and(|preview| preview.is_recovery) {
-                            a {
-                                class: "canvas-tab",
-                                href: view_href(&design_id, selected(), true),
-                                target: "_blank",
-                                rel: "noopener noreferrer",
-                                title: "Play the full unverified draft in a new tab",
-                                "Play review draft"
-                            }
-                        } else if is_dirty() || selected() >= saved_screen_count {
+                        if is_read_only() || is_dirty() || selected() >= saved_screen_count {
                             button {
                                 class: "canvas-tab",
                                 disabled: true,
@@ -523,7 +500,7 @@ fn LoadedEditor(
                         } else {
                             a {
                                 class: "canvas-tab",
-                                href: view_href(&design_id, selected(), false),
+                                href: view_href(&design_id, selected()),
                                 target: "_blank",
                                 rel: "noopener noreferrer",
                                 title: "View the full demo in a new tab",
@@ -531,50 +508,8 @@ fn LoadedEditor(
                             }
                         }
                     }
-                    if live_draft.read().as_ref().is_some_and(|preview| preview.is_recovery) {
-                        if is_read_only() {
-                            span { class: "badge", "Needs review · unverified draft" }
-                            if has_saved() {
-                                button {
-                                    class: "canvas-tab",
-                                    disabled: is_dirty() || is_repair_submitting(),
-                                    onclick: {
-                                        let design_id = design_id.clone();
-                                        move |_| {
-                                            let design_id = design_id.clone();
-                                            is_repair_submitting.set(true);
-                                            spawn(async move {
-                                                let session_id = artifact_project(&design_id);
-                                                match api::repair_review_draft(&session_id, &design_id).await {
-                                                    Ok(()) => messages.write().push("Draft repair requested.".to_owned()),
-                                                    Err(message) => messages.write().push(message),
-                                                }
-                                                is_repair_submitting.set(false);
-                                            });
-                                        }
-                                    },
-                                    if is_repair_submitting() { "Requesting repair…" } else { "Repair draft" }
-                                }
-                            }
-                        }
-                        if has_saved() {
-                            button {
-                                class: "canvas-tab",
-                                disabled: is_dirty(),
-                                onclick: move |_| {
-                                    let show = !show_recovery();
-                                    show_recovery.set(show);
-                                    let count = preview_design(&design.peek(), visible_preview(live_draft.peek().as_ref(), show), false).screens.len();
-                                    selected.set(selected().min(count.saturating_sub(1)));
-                                    selected_node.set(None);
-                                    selection.set(Vec::new());
-                                    preview_version += 1;
-                                },
-                                if show_recovery() { "Saved version" } else { "Review draft" }
-                            }
-                        }
-                    } else if is_read_only() {
-                        span { class: "badge", "Live draft — unverified · read-only" }
+                    if is_read_only() && live_preview.read().is_some() {
+                        span { class: "badge", "Live preview · read-only" }
                     }
                     span { class: "badge", "agent {agent_count}" }
                     span { class: "badge you", "you {user_count}" }
@@ -672,7 +607,7 @@ fn LoadedEditor(
                         p { class: "error", "{message}" }
                     }
                     if !is_available {
-                        p { "The live draft was cleared; no saved design exists yet. Return to the project." }
+                        p { "The live preview ended without a saved result. Return to the project." }
                     }
                     if is_available {
                     div { class: stage_class,
