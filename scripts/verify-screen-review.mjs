@@ -40,8 +40,7 @@ const model = createServer(async (req, res) => {
     if (system.includes('This is a capability check')) {
       reply = { unsupported_requirements: [] };
     } else if (system.includes('Review demo requirement coverage')) {
-      assert(!unsafe, 'unsafe markup must never reach requirement review');
-      reply = { coverage: [{ complete: true }, { complete: true }] };
+      assert.fail('a demo edit must not call a separate model reviewer');
     } else {
       requests.push(body.messages[1].content);
       rejectedMarkup ||= unsafe && body.messages.some(message => message.role === 'user'
@@ -172,6 +171,8 @@ try {
   const grouped = original.screens.map((screen, index) => ({
     ...screen, name: ['Overview · Home', 'Access · Members', 'Access · Settings'][index],
   }));
+  grouped[1].html += `<a href='#screen-4'>Mobile specimen</a>`;
+  grouped.push({ name: 'Access · 390px', html: `<h1>Phone specimen</h1><a href='#screen-2'>Desktop members</a>` });
   await api(groupedRoute, 'PUT', { ...original, screens: grouped.slice(0, 2) }, 204);
   await api(groupedRoute, 'PUT', { ...original, screens: grouped }, 204);
   await cdp('Page.navigate', { url: `${app}/#${groupedRoute}` });
@@ -211,6 +212,19 @@ try {
   await wait(`!!${pane}.contentDocument?.querySelector('a[href="#screen-2"]')`);
   await evaluate(`${pane}.contentDocument.querySelector('a[href="#screen-2"]').click()`);
   await wait(`${access}?.getAttribute('aria-expanded')==='true' && ${pane}.src.endsWith('screen=2')`);
+  assert(await evaluate(`${settingsTile}.querySelector('input').checked`));
+  const desktopTab = `document.querySelector('.screen-viewport-tabs button:first-child')`;
+  const mobileTab = `document.querySelector('.screen-viewport-tabs button:last-child')`;
+  const mobileTile = `document.querySelector('.thumbnail[data-index="3"]')`;
+  await wait(`${desktopTab}?.getAttribute('aria-pressed') === 'true'`);
+  assert(!(await evaluate(`!!${mobileTile}`)), 'mobile thumbnails must not appear on Desktop');
+  await evaluate(`${mobileTab}.click()`);
+  await wait(`${mobileTile} && ${pane}.src.endsWith('screen=4')`);
+  assert(!(await evaluate(`${mobileTile}.querySelector('input').checked`)), 'selecting the Desktop group must not select the Mobile group');
+  assert.equal(await evaluate("document.querySelectorAll('.demo-thumbnails iframe').length"), 1);
+  await wait(`!!${pane}.contentDocument?.querySelector('a[href="#screen-2"]')`);
+  await evaluate(`${pane}.contentDocument.querySelector('a[href="#screen-2"]').click()`);
+  await wait(`${desktopTab}.getAttribute('aria-pressed') === 'true' && ${pane}.src.endsWith('screen=2')`);
   assert(await evaluate(`${settingsTile}.querySelector('input').checked`));
 
   stage = 'initial badges and drawing';

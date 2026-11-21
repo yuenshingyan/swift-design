@@ -1,108 +1,66 @@
 use super::*;
 
 #[tokio::test]
-async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
-    for (missing, expected_error) in [
-        ((0..=8).rev().collect::<Vec<_>>(), None),
-        ((1..=11).rev().collect(), Some("10-correction-round limit")),
-        (
-            vec![2, 2],
-            Some("reviewed defects did not decrease without regression"),
-        ),
-        (
-            vec![1, 2],
-            Some("reviewed defects did not decrease without regression"),
-        ),
-    ] {
+async fn navigation_repair_retries_from_the_best_draft_and_stops_at_ten() {
+    for finish in [true, false] {
         let fake = ParallelFakeModel::start(None).await;
         let original = sample_design();
         let candidate = ReviewingCandidate::new(&fake);
         candidate
-            .seed(
-                &original,
-                "Redesign only screen 1; provide designs or component specifications for states.",
-            )
+            .seed(&original, "Update screen 1 and keep navigation working.")
             .await;
         fake.watch_baseline(&candidate.path()).await;
         fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
-        fake.push_text(json!({
-            "instruction": "Redesign screen 1 with visible controls and concrete state specifications.",
-            "screens": [0], "minimum_new_screens": 0,
-            "requirements": ["Screen 1 interaction and state designs"]
-        }).to_string());
-        for (round, count) in missing.iter().enumerate() {
-            let mut screen = original.screens[0].clone();
-            screen.html = format!("<h1>Draft {round}</h1><p>Concrete state design</p>");
-            let mut patch = json!({"screens": [{"index": 0, "screen": screen}]});
-            if round == 0 {
-                let mut theme = json!(original.theme);
-                theme["colors"]["accent"] = json!("#8dd8bc");
-                patch["theme"] = theme;
-            }
-            fake.push_text(patch.to_string());
-            let findings: Vec<_> = (0..*count)
-                .map(|index| {
-                    json!({
-                        "id": format!("state-{index}"), "screens": [0],
-                        "reason": format!("Fix state {index}; review round {round}")
-                    })
-                })
-                .collect();
-            fake.push_text(
-                json!({"coverage": [{"complete": findings.is_empty(), "findings": findings}]})
-                    .to_string(),
-            );
+        fake.push_text(r#"{"instruction":"Update the launch link","screens":[0],"minimum_new_screens":0,"requirements":["Launch link"]}"#.into());
+        let mut screen = original.screens[0].clone();
+        screen.html = "<h1>Best draft</h1><a href='#screen-999'>Open</a>".into();
+        fake.push_text(json!({"screens":[{"index":0,"screen":screen}]}).to_string());
+        for _ in 0..if finish { 1 } else { 10 } {
+            screen.html = "<h1>Rejected draft</h1><a href='#screen-999'>Open</a>".into();
+            fake.push_text(json!({"screens":[{"index":0,"screen":screen}]}).to_string());
         }
-        let before = tokio::fs::read(candidate.path())
-            .await
-            .expect("test data should be readable");
+        if finish {
+            screen.html = "<h1>Repaired</h1><a href='#screen-2'>Open</a>".into();
+            fake.push_text(json!({"screens":[{"index":0,"screen":screen}]}).to_string());
+        }
         let result = candidate.engine.clone().run("talk", log_sink()).await;
-        if let Some(expected) = expected_error {
-            let error =
-                result.expect_err("stalled or exhausted corrections should fail acceptance");
-            assert!(error.contains(expected), "{error}");
-            assert!(error.contains("remaining issues"));
-            assert_eq!(
-                tokio::fs::read(candidate.path())
-                    .await
-                    .expect("test data should be readable"),
-                before
-            );
-            assert!(
-                candidate
-                    .designs
-                    .history("talk-candidate-1")
-                    .await
-                    .expect("test history should be listed")
-                    .is_empty()
-            );
-            let kept = candidate
-                .designs
-                .load_review_draft("talk-candidate-1")
-                .await
-                .expect("draft should load")
-                .expect("a failed edit should retain a draft");
-            let best_round = if expected.contains("did not decrease") {
-                0
-            } else {
-                missing.len() - 1
-            };
-            assert!(
-                kept.screens[0]
-                    .html
-                    .contains(&format!("Draft {best_round}"))
-            );
-        } else {
+        let id = "talk-candidate-1";
+        let saved = candidate
+            .designs
+            .load(id)
+            .await
+            .expect("read snapshot")
+            .expect("snapshot exists");
+        let recovery = candidate
+            .designs
+            .load_review_draft(id)
+            .await
+            .expect("read recovery");
+        let requests = fake.requests();
+        assert_eq!(requests.len(), if finish { 5 } else { 13 });
+        for request in &requests[3..] {
+            let prompt = request_text(request);
+            assert!(prompt.contains("Best draft"));
+            assert!(!prompt.contains("Rejected draft"));
+            assert!(prompt.contains("Repair only these verified issues"));
+        }
+        if finish {
             assert!(result.is_ok(), "{result:?}");
-            let saved = candidate
-                .designs
-                .load("talk-candidate-1")
-                .await
-                .expect("test record should load successfully")
-                .expect("saved test record should exist");
-            assert!(saved.screens[0].html.contains("Draft 8"));
-            assert_eq!(json!(saved.theme)["colors"]["accent"], "#8dd8bc");
+            assert_eq!(saved.screens[0], screen);
             assert_eq!(saved.screens[1..], original.screens[1..]);
+            assert!(recovery.is_none());
+        } else {
+            let error = result.expect_err("unresolved links must not save");
+            assert!(
+                error.contains("10-correction-round limit") && error.contains("Screen 1"),
+                "{error}"
+            );
+            assert_eq!(saved, original);
+            assert!(
+                recovery.expect("keep the best failed draft").screens[0]
+                    .html
+                    .contains("Best draft")
+            );
         }
         assert!(
             !fake
@@ -110,289 +68,173 @@ async fn corrections_repair_latest_drafts_until_pass_stall_or_budget() {
                 .baseline_changed_during_requests
                 .load(Ordering::SeqCst)
         );
-        let requests = fake.requests();
-        assert_eq!(requests.len(), 2 + missing.len() * 2);
-        // Planning, writing, corrections, and reviews use the same boundary.
-        for request in &requests[1..] {
-            let text = request_text(request);
-            assert!(text.contains("Demo acceptance contract"));
-            assert!(text.contains("designs or component specifications"));
-            assert!(text.contains("do not demand executable behavior"));
-            assert!(text.contains("Do not replace requested high-fidelity desktop/mobile layouts"));
-        }
-        for round in 1..missing.len() {
-            let edit = request_text(&requests[2 + round * 2]);
-            assert!(edit.contains(&format!("Draft {}", round - 1)));
-            assert!(edit.contains("Repair the supplied latest draft"));
-            assert!(edit.contains("Fix state 0"));
-            assert!(!edit.contains(&format!("Fix state {};", missing[round - 1])));
-            let review = requests[3 + round * 2]["messages"][1]["content"]
-                .as_str()
-                .expect("test JSON value should be a string");
-            assert!(review.contains("Previous individual findings"));
-            assert!(review.contains("\"id\":\"state-0\""));
-            let baseline = review
-                .split_once("Before artifact:\n")
-                .expect("test value should contain the expected separator")
-                .1
-                .split_once("\nAfter artifact:\n")
-                .expect("test value should contain the expected separator")
-                .0;
-            assert_eq!(
-                serde_json::from_str::<Value>(baseline).expect("test JSON should deserialize"),
-                json!(original)
-            );
-        }
     }
 }
 
 #[tokio::test]
-async fn focused_correction_repairs_a_new_screen_without_changing_a_completed_screen() {
+async fn browser_probe_failure_is_sent_to_the_writer_and_rechecked_before_saving() {
+    let fake = ParallelFakeModel::start(None).await;
+    let original = sample_design();
+    let mut candidate = ReviewingCandidate::new(&fake);
+    let runner: DemoDomRunner = Arc::new(|design, _| {
+        let coverage = json!((0..design.screens.len()).collect::<Vec<_>>());
+        let checks = if design.screens[0].html.contains("Broken menu") {
+            json!([{"screen":0,"group":"menu","clicks":1,"keys":1,"focus":1,"failures":1,"issues":["Action did not open panel"]}])
+        } else {
+            json!([])
+        };
+        let report = format!(
+            "<html data-swift-design-findings=\"[]\" data-swift-design-audited-screens=\"{coverage}\" data-swift-design-prototype-checks=\"{}\">",
+            checks.to_string().replace('"', "&quot;")
+        );
+        Box::pin(async move { Ok(report) })
+    });
+    candidate.engine = candidate.engine.with_demo_dom_runner(runner);
+    candidate
+        .seed(&original, "Update only the menu on screen 1.")
+        .await;
+    fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
+    fake.push_text(r#"{"instruction":"Update menu","screens":[0],"minimum_new_screens":0,"requirements":["Menu interaction"]}"#.into());
+    for html in ["<h1>Broken menu</h1>", "<h1>Repaired menu</h1>"] {
+        let mut screen = original.screens[0].clone();
+        screen.html = html.into();
+        fake.push_text(json!({"screens":[{"index":0,"screen":screen}]}).to_string());
+    }
+    candidate
+        .engine
+        .clone()
+        .run("talk", log_sink())
+        .await
+        .expect("repaired probe should pass");
+    let saved = candidate
+        .designs
+        .load("talk-candidate-1")
+        .await
+        .expect("read snapshot")
+        .expect("snapshot exists");
+    assert!(saved.screens[0].html.contains("Repaired menu"));
+    assert_eq!(saved.screens[1..], original.screens[1..]);
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 4);
+    assert!(request_text(&requests[3]).contains("Action did not open panel"));
+}
+
+#[tokio::test]
+async fn missing_required_screen_is_repaired_before_the_edit_can_save() {
     let fake = ParallelFakeModel::start(None).await;
     let original = sample_design();
     let candidate = ReviewingCandidate::new(&fake);
     candidate
-        .seed(&original, "Add a detail view linked from screen 1.")
+        .seed(&original, "Add a standalone detail screen.")
         .await;
-    let new_index = original.screens.len();
-    let mut completed = original.screens[0].clone();
-    completed.html = format!(
-        "<h1>Finished launch view</h1><a href='#screen-{}'>Open detail</a>",
-        new_index + 1
+    fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
+    fake.push_text(r#"{"instruction":"Append Detail","screens":[],"minimum_new_screens":1,"requirements":["A standalone detail screen"]}"#.into());
+    fake.auto_worker_patches(
+        ArtifactKind::Demo,
+        &json!(original),
+        "completed original screen",
     );
-    let mut detail = completed.clone();
+    fake.push_text(r#"{"screens":[]}"#.into());
+    let mut detail = original.screens[0].clone();
     detail.name = "Detail".into();
-    detail.html = "<h1>Incomplete detail</h1>".into();
-    fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
-    fake.push_text(r#"{"instruction":"Add the linked detail view and a Back link.","screens":[0],"minimum_new_screens":0,"requirements":["Launch link","Detail return link"]}"#.into());
-    fake.push_text(json!({"screens":[{"index":0,"screen":completed},{"index":new_index,"insert":true,"screen":detail}]}).to_string());
+    detail.html = "<h1>Detail</h1><a href='#screen-1'>Back</a>".into();
     fake.push_text(
-        json!({"coverage":[
-            {"complete":true,"reason":"Launch link works"},
-            {"complete":false,"findings":[{"id":"missing-back-link","reason":"Detail is missing its Back link","screens":[new_index]}]}
-        ]})
-        .to_string(),
+        json!({"screens":[{"index":original.screens.len(),"insert":true,"screen":detail}]})
+            .to_string(),
     );
-    let mut unrelated = completed.clone();
-    unrelated.html = "<h1>Do not replace this launch view</h1>".into();
-    fake.push_text(json!({"screens":[{"index":0,"screen":unrelated}]}).to_string());
-    detail.html = "<h1>Complete detail</h1><a href='#screen-1'>Back</a>".into();
-    fake.push_text(json!({"screens":[{"index":new_index,"screen":detail}]}).to_string());
-    fake.push_text(r#"{"coverage":[{"complete":true,"reason":"Launch link works"},{"complete":true,"reason":"Return link works"}]}"#.into());
     candidate
         .engine
         .clone()
         .run("talk", log_sink())
         .await
-        .expect("verified focused repair should save");
+        .expect("adding the required screen should save");
     let saved = candidate
         .designs
         .load("talk-candidate-1")
         .await
-        .expect("saved candidate should load")
-        .expect("same candidate should exist");
-    assert_eq!(saved.screens[0], completed);
+        .expect("read snapshot")
+        .expect("snapshot exists");
     assert_eq!(saved.screens.last(), Some(&detail));
+    for (screen, before) in saved.screens.iter().zip(&original.screens) {
+        assert_eq!(screen.html, before.html);
+        assert_eq!(screen.name, before.name);
+    }
     let requests = fake.requests();
-    let planning = request_text(&requests[1]);
-    assert!(planning.contains("visible screen numbers and #screen-N links are one-based"));
-    let correction = request_text(&requests[4]);
-    assert!(correction.contains("Incomplete detail"));
-    assert!(!correction.contains("Finished launch view"));
-    assert!(
-        request_text(&requests[5])
-            .contains("A focused correction may replace only the specified screens")
-    );
-    let final_review = request_text(&requests[6]);
-    assert!(
-        final_review.contains(
-            "A number or literal target introduced only by the plan is not a requirement"
-        )
-    );
-    assert!(
-        final_review.contains("Finished launch view") && final_review.contains("Complete detail")
-    );
+    let correction = request_text(requests.last().expect("correction was sent"));
+    assert!(correction.contains("still needs 1 required separate screen"));
+    assert!(correction.contains("completed original screen"));
 }
 
 #[tokio::test]
-async fn requested_hidden_views_are_repaired_as_linked_separate_screens() {
+async fn desktop_repair_reuses_retained_work_without_publishing_new_mobile_screens() {
     let fake = ParallelFakeModel::start(None).await;
-    let original = sample_design();
+    let mut original = sample_design();
+    original.screens[1].name = "Existing · 390px mobile".into();
     let candidate = ReviewingCandidate::new(&fake);
+    let id = "talk-candidate-1";
+    candidate.seed(&original, "Redesign Task Details.").await;
+    let mut retained = original.clone();
+    retained.screens[1].html = "<h1>Unapproved mobile change</h1>".into();
+    let mobile_index = original.screens.len();
+    let desktop_index = mobile_index + 1;
+    retained.screens[0].html = format!(
+        "<h1>Desktop Task</h1><a href='#screen-{}'>Details</a><a href='#screen-{}'>Mobile specimen</a>",
+        desktop_index + 1,
+        mobile_index + 1
+    );
+    retained.screens.push(design_model::Screen {
+        name: "Task · Mobile".into(),
+        html: "<h1>Unapproved mobile addition</h1>".into(),
+        css: None,
+        notes: None,
+    });
+    retained.screens.push(design_model::Screen {
+        name: "Task · Desktop details".into(),
+        html: "<h1>Desktop details</h1><a href='#screen-1'>Back</a>".into(),
+        css: None,
+        notes: None,
+    });
     candidate
-        .seed(
-            &original,
-            "Design connected and disconnected views, with clickable transitions.",
-        )
-        .await;
-    fake.watch_baseline(&candidate.path()).await;
+        .designs
+        .keep_review_draft(id, &retained, Some(&original))
+        .await
+        .expect("persist retained draft");
+    let mut message = ChatMessage::user(
+        "Desktop-only draft repair.\nPreserve existing mobile screens.",
+        Some(id),
+    );
+    message.is_review_draft = true;
+    candidate
+        .sessions
+        .append_message("talk", message)
+        .await
+        .expect("queue repair");
     fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
-    fake.push_text(json!({
-        "instruction": "Design connected and disconnected views as separate screens.",
-        "screens": [0], "minimum_new_screens": 0,
-        "requirements": ["Connected view with disconnect link", "Disconnected view with connect link"]
-    }).to_string());
-    let mut packed = original.screens[0].clone();
-    packed.html = "<input id='s1-state' type='checkbox'><label for='s1-state'>Change state</label><section class='on'><h1>Connected</h1></section><section class='off'><h1>Disconnected</h1></section>".into();
-    packed.css = Some(".off{display:none} #s1-state:checked ~ .off{display:block} #s1-state:checked ~ .on{display:none}".into());
-    fake.push_text(json!({"screens":[{"index":0,"screen":packed}]}).to_string());
-    fake.push_text(json!({"coverage":[
-        {"complete":true,"reason":"Connected view visible"},
-        {"complete":false,"findings":[{"id":"missing-disconnected-screen","screens":[],"reason":"Disconnected is hidden behind a checkbox; append a separate screen with content visible by default and link both directions."}]}
-    ]}).to_string());
-    let mut connected = original.screens[0].clone();
-    connected.name = "Connected".into();
-    connected.html = format!(
-        "<h1>Connected</h1><a href='#screen-{}'>Disconnect</a>",
-        original.screens.len() + 1
+    fake.push_text(r#"{"instruction":"Keep the completed desktop details","screens":[],"minimum_new_screens":1,"requirements":["Desktop details"]}"#.into());
+    fake.push_text(r#"{"screens":[]}"#.into());
+    let mut corrected = retained.screens[0].clone();
+    corrected.html = format!(
+        "<h1>Desktop Task</h1><a href='#screen-{}'>Details</a>",
+        mobile_index + 1
     );
-    connected.css = None;
-    let mut disconnected = connected.clone();
-    disconnected.name = "Disconnected".into();
-    disconnected.html = "<h1>Disconnected</h1><a href='#screen-1'>Connect</a>".into();
-    fake.push_text(
-        json!({"screens":[
-            {"index":0,"screen":connected},
-            {"index":original.screens.len(),"insert":true,"screen":disconnected}
-        ]})
-        .to_string(),
-    );
-    fake.push_text(json!({"coverage":[
-        {"complete":true,"reason":"Connected screen links to disconnected"},
-        {"complete":true,"reason":"Separate disconnected screen visible by default and links back"}
-    ]}).to_string());
-    let result = candidate.engine.clone().run("talk", log_sink()).await;
-    assert!(result.is_ok(), "{result:?}");
+    fake.push_text(json!({"screens":[{"index":0,"screen":corrected}]}).to_string());
+    candidate
+        .engine
+        .clone()
+        .run("talk", log_sink())
+        .await
+        .expect("desktop repair should save");
     let saved = candidate
         .designs
-        .load("talk-candidate-1")
+        .load(id)
         .await
-        .expect("test record should load successfully")
-        .expect("saved test record should exist");
+        .expect("read snapshot")
+        .expect("snapshot exists");
     assert_eq!(saved.screens.len(), original.screens.len() + 1);
-    assert_eq!(saved.screens[0], connected);
-    assert_eq!(saved.screens.last(), Some(&disconnected));
-    assert_eq!(
-        saved.screens[1..original.screens.len()],
-        original.screens[1..]
-    );
-    assert!(
-        !fake
-            .state
-            .baseline_changed_during_requests
-            .load(Ordering::SeqCst)
-    );
-    let requests = fake.requests();
-    assert_eq!(requests.len(), 6);
-    for request in &requests[1..] {
-        assert!(request_text(request).contains(crate::instructions::DEMO_SCREEN_RULE));
-    }
-    assert!(request_text(&requests[1]).contains("naming its intended screen"));
-    assert!(request_text(&requests[3]).contains("identify its separate screen by number/name"));
-    assert!(request_text(&requests[4]).contains("Disconnected is hidden behind a checkbox"));
-}
-
-#[tokio::test]
-async fn correction_cannot_change_an_unselected_original_screen() {
-    let fake = ParallelFakeModel::start(None).await;
-    let original = sample_design();
-    let candidate = ReviewingCandidate::new(&fake);
-    candidate.seed(&original, "Only edit screen 1.").await;
-    fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
-    fake.push_text(
-        json!({"instruction":"Only edit screen 1", "screens":[0],
-        "minimum_new_screens":0, "requirements":["Visible retry action"]})
-        .to_string(),
-    );
-    fake.push_text(json!({"screens":[{"index":0,"screen":original.screens[0]}]}).to_string());
-    fake.push_text(
-        json!({"coverage":[{"complete":false,"findings":[{"id":"missing-retry","reason":"Draw the retry action","screens":[]}]}]}).to_string(),
-    );
-    let mut unrelated = original.screens[1].clone();
-    unrelated.html = "<h1>Unrequested change</h1>".into();
-    fake.push_text(json!({"screens":[{"index":1,"screen":unrelated}]}).to_string());
-    let before = tokio::fs::read(candidate.path())
-        .await
-        .expect("test data should be readable");
-    let error = candidate
-        .engine
-        .clone()
-        .run("talk", log_sink())
-        .await
-        .expect_err("correction changing an unselected screen should be rejected");
-    assert!(error.contains("unselected screen changed"), "{error}");
-    assert_eq!(fake.requests().len(), 5);
-    assert_eq!(
-        tokio::fs::read(candidate.path())
-            .await
-            .expect("test data should be readable"),
-        before
-    );
-    assert!(
-        candidate
-            .designs
-            .load("talk-candidate-2")
-            .await
-            .expect("test record should load successfully")
-            .is_none()
-    );
-    assert!(
-        candidate
-            .designs
-            .history("talk-candidate-1")
-            .await
-            .expect("test history should be listed")
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn unsupported_executable_requirements_stop_without_correction_or_save() {
-    let fake = ParallelFakeModel::start(None).await;
-    let original = sample_design();
-    let candidate = ReviewingCandidate::new(&fake);
-    candidate
-        .seed(
-            &original,
-            "Require executable date validation, not a specification.",
-        )
-        .await;
-    fake.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#.into());
-    fake.push_text(
-        json!({"instruction":"Executable date validation", "screens":[0],
-        "minimum_new_screens":0, "requirements":["Executable date validation"]})
-        .to_string(),
-    );
-    fake.push_text(json!({"screens":[{"index":0,"screen":original.screens[0]}]}).to_string());
-    fake.push_text(
-        json!({"coverage":[{"complete":false,"findings":[{"id":"missing-date-input","reason":"Renderer forbids editable date inputs","screens":[]}]}],
-        "unsupported_requirements":["Executable date validation"], "reference_error":null})
-        .to_string(),
-    );
-    let before = tokio::fs::read(candidate.path())
-        .await
-        .expect("test data should be readable");
-    let error = candidate
-        .engine
-        .clone()
-        .run("talk", log_sink())
-        .await
-        .expect_err("unsupported executable requirements should block the edit");
-    assert!(error.contains("unsupported executable requirements"));
-    assert!(error.contains("approve a design/specification alternative"));
-    assert_eq!(fake.requests().len(), 4);
-    assert_eq!(
-        tokio::fs::read(candidate.path())
-            .await
-            .expect("test data should be readable"),
-        before
-    );
-    assert!(
-        candidate
-            .designs
-            .history("talk-candidate-1")
-            .await
-            .expect("test history should be listed")
-            .is_empty()
-    );
+    assert_eq!(saved.screens[1], original.screens[1]);
+    assert_eq!(saved.screens.last(), retained.screens.last());
+    assert_eq!(saved.screens[0], corrected);
+    let repair = request_text(&fake.requests()[3]);
+    assert!(repair.contains("internal link has no destination"));
+    assert!(repair.contains(&format!("#screen-{}", desktop_index + 1)));
 }

@@ -18,14 +18,15 @@ pub(super) fn screen_group_name(label: &str) -> Option<&str> {
 
 pub(super) fn strip_items(
     names: &[(&str, &str)],
+    indexes: impl IntoIterator<Item = usize>,
     query: &str,
     current_group: &Option<String>,
     overrides: &HashMap<Option<String>, bool>,
 ) -> Vec<StripItem> {
     let mut positions = HashMap::new();
     let mut groups: Vec<(Option<&str>, Vec<usize>)> = Vec::new();
-    for (index, &(name, _)) in names.iter().enumerate() {
-        let name = screen_group_name(name);
+    for index in indexes {
+        let name = screen_group_name(names[index].0);
         let position = *positions.entry(name).or_insert_with(|| {
             groups.push((name, Vec::new()));
             groups.len() - 1
@@ -102,7 +103,7 @@ mod tests {
 
     #[test]
     fn groups_follow_first_occurrence_and_retain_original_screen_indexes() {
-        let items = strip_items(&labels(), "", &Some("Access".into()), &HashMap::new());
+        let items = strip_items(&labels(), 0..5, "", &Some("Access".into()), &HashMap::new());
         assert_eq!(visible(&items), [0, 3]);
         let groups: Vec<_> = items
             .iter()
@@ -130,17 +131,18 @@ mod tests {
         let current = Some("Access".into());
         let labels = labels();
         assert_eq!(
-            visible(&strip_items(&labels, "", &current, &overrides)),
+            visible(&strip_items(&labels, 0..5, "", &current, &overrides)),
             [1]
         );
-        let items = strip_items(&labels, "failed", &current, &overrides);
+        let items = strip_items(&labels, 0..5, "failed", &current, &overrides);
         assert_eq!(visible(&items), [3]);
         assert!(
             matches!(&items[0], StripItem::Group { indexes, matches: 1, is_open: true, .. } if indexes == &[0, 3])
         );
-        assert!(strip_items(&labels, "not found", &current, &overrides).is_empty());
+        assert!(strip_items(&labels, 0..5, "not found", &current, &overrides).is_empty());
+        assert!(strip_items(&labels, [0, 1], "failed", &current, &overrides).is_empty());
         assert_eq!(
-            visible(&strip_items(&labels, "", &current, &overrides)),
+            visible(&strip_items(&labels, 0..5, "", &current, &overrides)),
             [1]
         );
     }

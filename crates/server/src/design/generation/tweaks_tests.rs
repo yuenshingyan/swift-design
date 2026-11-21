@@ -5,17 +5,15 @@ use std::sync::{Arc, Mutex};
 use axum::http::StatusCode;
 use tempfile::TempDir;
 
-use design_model::{ArtifactKind, Design, Transition};
+use design_model::{Design, Transition};
 
 use crate::design::core::DesignStore;
 use crate::design::polish::{DemoAudit, DemoDomRunner, chrome_dom_runner};
-use crate::edit_focus::EditFix;
 use crate::events::ChangeNotifier;
 use crate::generation::{ArtifactRequest, GenerationEngine};
 use crate::model_client::LogSink;
-use crate::request::SessionRequest;
 use crate::screenshots::find_chrome;
-use crate::sessions::{RunOptions, SessionStore};
+use crate::sessions::SessionStore;
 use crate::test_support::{FakeModelServer, SAMPLE_DESIGN};
 
 fn design() -> Design {
@@ -86,6 +84,10 @@ fn changing_browser(measured: Arc<Mutex<Vec<Design>>>, cosmetic_warnings: bool) 
 async fn the_last_allowed_tweak_is_measured_and_the_exact_returned_version_is_rechecked() {
     let directory = TempDir::new().expect("temporary test directory should be created");
     let fake = FakeModelServer::start().await;
+    fake.push_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Transient polish provider failure",
+    );
     fake.push_text(r#"{"screens":[{"index":0,"screen":{"html":"<h1>Fixed</h1>"}}]}"#);
     let measured = Arc::new(Mutex::new(Vec::new()));
     let engine = engine(
@@ -98,7 +100,7 @@ async fn the_last_allowed_tweak_is_measured_and_the_exact_returned_version_is_re
         .await
         .expect("test design should complete visual review");
     assert_eq!(result.screens[0].html, "<h1>Fixed</h1>");
-    assert_eq!(fake.requests().len(), 1);
+    assert_eq!(fake.requests().len(), 2);
     let measured = measured.lock().expect("test mutex should not be poisoned");
     assert_eq!(measured.len(), 3);
     assert_eq!(
@@ -181,289 +183,6 @@ async fn a_failed_final_recheck_cannot_complete_an_initially_clean_design() {
             .await
             .is_err()
     );
-}
-
-#[tokio::test]
-async fn a_focused_repair_verifies_screen_three_without_rewriting_existing_errors_on_screen_one() {
-    let directory = TempDir::new().expect("temporary test directory should be created");
-    let fake = FakeModelServer::start().await;
-    fake.push_text(r#"{"screens":[{"index":2,"screen":{"html":"<h1>Fixed</h1>"}}]}"#);
-    let mut original = design();
-    original.screens[2].html = "<h1>Broken</h1>".to_owned();
-    let runner: DemoDomRunner = Arc::new(|design, _| {
-        let mut findings =
-            vec![serde_json::json!({"screen":0,"kind":"overflow","detail":"existing clipping"})];
-        if design.screens[2].html.contains("Broken") {
-            findings.push(
-                serde_json::json!({"screen":2,"kind":"overflow","detail":"screen three clipping"}),
-            );
-        }
-        let dom = report(&design, serde_json::json!(findings));
-        Box::pin(async move { Ok(dom) })
-    });
-    let engine = engine(&fake, &directory, runner);
-    let request = SessionRequest {
-        request: "Page 3 is still overflowed.".to_owned(),
-        conversation: String::new(),
-        kind: ArtifactKind::Demo,
-        answers: Vec::new(),
-        options: RunOptions::default(),
-    };
-    let context = context();
-    let fix = EditFix {
-        request: &request,
-        context: &context,
-        indexes: vec![2],
-    };
-    let result = engine
-        .fix_edited_design(&reqwest::Client::new(), original.clone(), &fix, &log())
-        .await
-        .expect("valid test edit should pass correction");
-    assert_eq!(result.0.screens[2].html, "<h1>Fixed</h1>");
-    assert_eq!(result.0.screens[0], original.screens[0]);
-    assert_eq!(fake.requests().len(), 1);
-}
-
-#[tokio::test]
-async fn one_tweak_round_repairs_blocked_screens_concurrently_and_audits_the_merge() {
-    let directory = TempDir::new().expect("temporary test directory should be created");
-    let barrier = Arc::new(tokio::sync::Barrier::new(2));
-    let provider = axum::Router::new().route(
-        "/chat",
-        axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
-            let barrier = Arc::clone(&barrier);
-            async move {
-                let prompt = body["messages"][1]["content"]
-                    .as_str()
-                    .expect("the repair should send a text prompt");
-                let first = prompt.contains("first repair evidence");
-                let third = prompt.contains("third repair evidence");
-                assert_ne!(first, third, "each worker should receive only its own finding");
-                assert!(!prompt.contains("untouched clipping"));
-                barrier.wait().await;
-                let index = if first { 0 } else { 2 };
-                let patch = serde_json::json!({"screens": [{"index": index, "screen": {"html": format!("<h1>Fixed {index}</h1>")}}]});
-                axum::Json(serde_json::json!({ "choices": [{ "message": { "content": patch.to_string() }}] }))
-            }
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("test provider should listen on an available port");
-    let address = listener
-        .local_addr()
-        .expect("test provider should expose its address");
-    let provider_task = tokio::spawn(async move { axum::serve(listener, provider).await });
-    let runner: DemoDomRunner = Arc::new(|design, _| {
-        let mut findings =
-            vec![serde_json::json!({"screen":1,"kind":"overflow","detail":"untouched clipping"})];
-        for (index, detail) in [(0, "first repair evidence"), (2, "third repair evidence")] {
-            if !design.screens[index].html.contains("Fixed") {
-                findings
-                    .push(serde_json::json!({"screen":index,"kind":"overflow","detail":detail}));
-            }
-        }
-        let dom = report(&design, serde_json::json!(findings));
-        Box::pin(async move { Ok(dom) })
-    });
-    let engine = GenerationEngine::new(
-        crate::model_client::ModelConfiguration {
-            provider: "fake".to_owned(),
-            chat_url: format!("http://{address}/chat"),
-            auth: crate::model_client::ProviderAuth::None,
-            wire: crate::model_client::WireFormat::OpenAiChat,
-            model: "fake-model".to_owned(),
-        },
-        DesignStore::new(directory.path().join("designs")),
-        SessionStore::new(directory.path().join("sessions")),
-        None,
-        "http://127.0.0.1:3000".to_owned(),
-        ChangeNotifier::new(),
-    )
-    .with_demo_dom_runner(runner);
-    let original = design();
-    let fix = EditFix {
-        request: &SessionRequest {
-            request: "Fix clipping on the first and third screens".to_owned(),
-            conversation: String::new(),
-            kind: ArtifactKind::Demo,
-            answers: Vec::new(),
-            options: RunOptions::default(),
-        },
-        context: &context(),
-        indexes: vec![0, 2],
-    };
-    let (merged, audit) = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        engine.fix_edited_design(&reqwest::Client::new(), original.clone(), &fix, &log()),
-    )
-    .await
-    .expect("both requests must reach the barrier in the same round")
-    .expect("the merged design should complete layout verification");
-    provider_task.abort();
-    assert_eq!(merged.screens[0].html, "<h1>Fixed 0</h1>");
-    assert_eq!(merged.screens[2].html, "<h1>Fixed 2</h1>");
-    assert_eq!(merged.screens[1], original.screens[1]);
-    assert_eq!(merged.theme, original.theme);
-    assert!(audit.require_layout_clean_on(Some(&fix.indexes)).is_ok());
-    assert!(audit.require_layout_clean_on(None).is_err());
-}
-
-#[tokio::test]
-async fn a_failed_repair_keeps_usable_edits_but_blocks_unusable_edits() {
-    for kind in ["overflow", "empty"] {
-        let directory = TempDir::new().expect("temporary test directory should be created");
-        let fake = FakeModelServer::start().await;
-        for _ in 0..4 {
-            fake.push_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Our servers are currently overloaded. Please try again later.",
-            );
-        }
-        let runner: DemoDomRunner = Arc::new(move |design, _| {
-            let dom = report(
-                &design,
-                serde_json::json!([{"screen":2,"node":"a.control (0/2)","kind":kind,"detail":"content needs 41px tall but the box is 38px tall"}]),
-            );
-            Box::pin(async move { Ok(dom) })
-        });
-        let engine = engine(&fake, &directory, runner);
-        let request = SessionRequest {
-            request: "Page 3 is still overflowed.".to_owned(),
-            conversation: String::new(),
-            kind: ArtifactKind::Demo,
-            answers: Vec::new(),
-            options: RunOptions::default(),
-        };
-        let context = context();
-        let fix = EditFix {
-            request: &request,
-            context: &context,
-            indexes: vec![2],
-        };
-        let original = design();
-        let result = engine
-            .fix_edited_design(&reqwest::Client::new(), original.clone(), &fix, &log())
-            .await;
-        if kind == "empty" {
-            let error = result
-                .expect_err("failed repair of an unusable edit should report the provider error");
-            assert!(error.contains("The layout repair could not finish"));
-            assert!(error.contains("servers are currently overloaded"));
-            assert!(error.contains("a.control (0/2)"));
-            assert!(error.contains("automatic retry budget exhausted"));
-        } else {
-            let (kept, audit) = result.expect("failed optional polish should keep the usable edit");
-            assert_eq!(kept, original);
-            assert!(
-                audit.instructions(Some(&[2]))[0].contains("41px tall but the box is 38px tall")
-            );
-        }
-        assert_eq!(fake.requests().len(), 4);
-    }
-}
-
-#[tokio::test]
-async fn layout_repair_continues_when_the_same_overflow_gets_smaller() {
-    let directory = TempDir::new().expect("temporary test directory should be created");
-    let fake = FakeModelServer::start().await;
-    fake.push_text(r#"{"screens":[{"index":2,"screen":{"html":"<h1>Closer</h1>"}}]}"#);
-    fake.push_text(r#"{"screens":[{"index":2,"screen":{"html":"<h1>Fits</h1>"}}]}"#);
-    let mut original = design();
-    original.screens[2].html = "<h1>Overflow</h1>".into();
-    let runner: DemoDomRunner = Arc::new(|design, _| {
-        let excess = match design.screens[2].html.as_str() {
-            "<h1>Overflow</h1>" => 43,
-            "<h1>Closer</h1>" => 28,
-            _ => 0,
-        };
-        let findings = if excess == 0 {
-            serde_json::json!([])
-        } else {
-            serde_json::json!([{"screen":2,"node":"div.scrim (0/3)","kind":"overflow","overflow_px":[0,excess],
-                "detail":format!("content needs {}px tall but the box is 806px tall",806+excess)}])
-        };
-        let dom = report(&design, findings);
-        Box::pin(async move { Ok(dom) })
-    });
-    let engine = engine(&fake, &directory, runner);
-    let request = SessionRequest {
-        request: "Make the dialog fit".into(),
-        conversation: String::new(),
-        kind: ArtifactKind::Demo,
-        answers: Vec::new(),
-        options: RunOptions::default(),
-    };
-    let context = ArtifactRequest {
-        effort: "medium".into(),
-        ..context()
-    };
-    let fix = EditFix {
-        request: &request,
-        context: &context,
-        indexes: vec![2],
-    };
-    let (fixed, audit) = engine
-        .fix_edited_design(&reqwest::Client::new(), original.clone(), &fix, &log())
-        .await
-        .expect("a smaller overflow should get another repair round");
-    assert_eq!(fixed.screens[2].html, "<h1>Fits</h1>");
-    assert_eq!(fixed.screens[..2], original.screens[..2]);
-    assert!(audit.require_layout_clean().is_ok());
-    let requests = fake.requests();
-    assert_eq!(requests.len(), 2);
-    assert!(
-        requests[0]
-            .to_string()
-            .contains("let the body scroll inside the dialog")
-    );
-    assert!(
-        requests[1]
-            .to_string()
-            .contains("834px tall but the box is 806px tall")
-    );
-}
-
-#[tokio::test]
-async fn a_temporary_failure_retries_the_repair_without_restarting_the_edit() {
-    let directory = TempDir::new().expect("temporary test directory should be created");
-    let fake = FakeModelServer::start().await;
-    fake.push_error(StatusCode::SERVICE_UNAVAILABLE, "overloaded");
-    fake.push_text(r#"{"screens":[{"index":2,"screen":{"html":"<h1>Fixed</h1>"}}]}"#);
-    let mut original = design();
-    original.screens[2].html = "<h1>Broken</h1>".to_owned();
-    let runner: DemoDomRunner = Arc::new(|design, _| {
-        let findings = if design.screens[2].html.contains("Broken") {
-            serde_json::json!([{"screen":2,"kind":"overflow","detail":"clipping"}])
-        } else {
-            serde_json::json!([])
-        };
-        let dom = report(&design, findings);
-        Box::pin(async move { Ok(dom) })
-    });
-    let engine = engine(&fake, &directory, runner);
-    let request = SessionRequest {
-        request: "Page 3".to_owned(),
-        conversation: String::new(),
-        kind: ArtifactKind::Demo,
-        answers: Vec::new(),
-        options: RunOptions::default(),
-    };
-    let context = context();
-    let fix = EditFix {
-        request: &request,
-        context: &context,
-        indexes: vec![2],
-    };
-    let result = engine
-        .fix_edited_design(&reqwest::Client::new(), original.clone(), &fix, &log())
-        .await
-        .expect("valid test edit should pass correction");
-    assert_eq!(result.0.screens[2].html, "<h1>Fixed</h1>");
-    assert_eq!(result.0.screens[0], original.screens[0]);
-    let requests = fake.requests();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0], requests[1]);
 }
 
 #[tokio::test]

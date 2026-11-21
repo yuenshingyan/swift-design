@@ -7,10 +7,10 @@ use design_model::Design;
 use crate::candidates::{candidate_id, next_candidate_number};
 use crate::design::core::is_pending_screen;
 use crate::design::patch::{apply_patch, parse_patch};
-use crate::design::polish::{DemoAudit, apply_tweak, polish_prompt};
+use crate::design::polish::{apply_tweak, polish_prompt};
 use crate::edit_focus::{
-    EditFix, EditInput, EditOrder, MergeInput, findings_for, fix_instruction, focus_note,
-    fresh_note, merge_sources, touched_indexes,
+    EditInput, EditOrder, MergeInput, findings_for, focus_note, fresh_note, merge_sources,
+    touched_indexes,
 };
 use crate::edit_report::saved_edit_report;
 use crate::model_client::LogSink;

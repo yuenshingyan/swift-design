@@ -1,15 +1,46 @@
-use std::collections::HashSet;
-
 use crate::design::annotations::AnnotationBatch;
 use crate::generation::UploadAttachment;
 use crate::screenshots::screenshot_marked_screen;
 
-use super::edit_requirements::{
-    DemoEditEvidence, DemoEditFailure, DemoEditRequirements, review_improved,
-};
+use super::edit_requirements::DemoEditRequirements;
 use super::*;
 
 const MAX_DEMO_CORRECTIONS: usize = 10;
+
+fn desktop_repair_baseline(saved: &Design, retained: &Design) -> Design {
+    let mut desktop = saved.clone();
+    desktop.screens.clear();
+    let mut positions = vec![usize::MAX; retained.screens.len()];
+    for (index, screen) in retained.screens.iter().enumerate() {
+        let accepted = saved.screens.get(index);
+        if let Some(accepted) = accepted
+            && (accepted.is_mobile(saved.viewport) || screen.is_mobile(retained.viewport))
+        {
+            positions[index] = desktop.screens.len();
+            desktop.screens.push(accepted.clone());
+        } else if accepted.is_some() || !screen.is_mobile(retained.viewport) {
+            positions[index] = desktop.screens.len();
+            desktop.screens.push(screen.clone());
+        }
+    }
+    let missing_destination = desktop.screens.len().max(desktop.outline.len());
+    // The remapper also accepts existing outline positions as destinations.
+    positions.extend(positions.len()..=missing_destination);
+    for position in &mut positions {
+        if *position == usize::MAX {
+            // Do not silently retarget a link to the next desktop screen.
+            *position = missing_destination;
+        }
+    }
+    if desktop.screens.len() != retained.screens.len() {
+        for (index, screen) in desktop.screens.iter_mut().enumerate() {
+            if saved.screens.get(index) != Some(screen) {
+                screen.html = design_model::markup::remap_screen_links(&screen.html, &positions);
+            }
+        }
+    }
+    desktop
+}
 
 fn require_repair_scope(
     before: &Design,
@@ -20,6 +51,8 @@ fn require_repair_scope(
         Some("the title changed".to_owned())
     } else if edited.theme != retained.theme {
         Some("the theme changed".to_owned())
+    } else if edited.viewport != retained.viewport {
+        Some("the canvas size changed".to_owned())
     } else if edited.app_window != retained.app_window {
         Some("the shared app window changed".to_owned())
     } else if edited.screens.len() < retained.screens.len() {
@@ -342,6 +375,19 @@ impl GenerationEngine {
         } else {
             design.clone()
         };
+        let is_desktop_repair = use_review_draft
+            && order.instruction.lines().next().is_some_and(|line| {
+                line.trim()
+                    .eq_ignore_ascii_case("desktop-only draft repair.")
+            });
+        if is_desktop_repair {
+            if draft.screens.len() < design.screens.len() {
+                return Err(GenerationStop::Failed(
+                    "Cannot repair desktop only: the retained draft removed saved screens. Start from the current snapshot.".into()
+                ));
+            }
+            draft = desktop_repair_baseline(&design, &draft);
+        }
         let retained = use_review_draft.then(|| draft.clone());
         // A repair can name pages that exist only in the retained draft.
         let scope_baseline = retained.as_ref().unwrap_or(&design);
@@ -455,8 +501,9 @@ impl GenerationEngine {
             String::new()
         };
         let mut attempt = 0;
-        let mut previous_failures: Option<(Design, Vec<DemoEditFailure>)> = None;
-        let mut navigation_errors = HashSet::new();
+        let mut best_blockers: Option<Vec<(usize, String)>> = None;
+        let mut best_has_navigation_errors = false;
+        let mut next_blocker = 0;
         let mut correction_screens = Vec::new();
         let progress = self.shared_progress(&[design_id.to_owned()], 5, 95).pop();
         let (final_design, verified_indexes, layout_warnings) = loop {
@@ -485,7 +532,12 @@ impl GenerationEngine {
             };
             let design_json =
                 design_json.map_err(|error| GenerationStop::Failed(error.to_string()))?;
-            let correction_instruction = format!("{instruction}\n{correction}");
+            let desktop_note = if is_desktop_repair {
+                "Desktop-only repair: keep existing mobile screens unchanged. Omit all new mobile specimens. Repair desktop links that pointed to excluded screens."
+            } else {
+                ""
+            };
+            let correction_instruction = format!("{instruction}\n{desktop_note}\n{correction}");
             let is_annotated = annotations.is_some();
             let is_focused_patch = is_annotated
                 || is_focused_correction
@@ -582,6 +634,14 @@ impl GenerationEngine {
                         return Err("A focused correction may replace only the specified screens. Do not insert screens, delete screens, or change shared settings.".into());
                     }
                     let edited = apply_patch(&original, patch)?;
+                    if is_desktop_repair
+                        && edited.screens.iter().enumerate().any(|(index, screen)| {
+                            screen.is_mobile(edited.viewport)
+                                && original.screens.get(index) != Some(screen)
+                        })
+                    {
+                        return Err("Desktop-only repair cannot add a mobile screen or change an existing one.".into());
+                    }
                     if is_annotated
                         && repair_screens.iter().any(|&index| {
                             let before = &original.screens[index];
@@ -604,7 +664,7 @@ impl GenerationEngine {
                 serde_json::json!({ "role": "system", "content": system_prompt() }),
                 self.user_message(&edit_prompt(&context.request, &input), &attachments),
             ];
-            let edited = if is_focused_patch || use_review_draft {
+            let edited = if is_focused_patch || use_review_draft || attempt > 0 {
                 self.request_valid(client, messages, &request, log).await?
             } else {
                 self.request_edit(
@@ -621,12 +681,21 @@ impl GenerationEngine {
                 )
                 .await?
             };
-            plan.check_structure(&design, scope_baseline, &edited)
-                .map_err(GenerationStop::Failed)?;
+            if let Err(error) = plan.check_scope(scope_baseline, &edited) {
+                if attempt == MAX_DEMO_CORRECTIONS {
+                    return Err(GenerationStop::Failed(error));
+                }
+                correction.push_str(&format!(
+                    "\nThe rejected patch exceeded the permitted scope. {error}"
+                ));
+                attempt += 1;
+                continue;
+            }
             if let Some(retained) = &retained {
                 require_repair_scope(&design, retained, &edited)?;
             }
-            if edited != design {
+            // Do not replace a better recovery checkpoint before checking a correction.
+            if attempt == 0 && edited != design {
                 self.designs
                     .keep_review_draft(design_id, &edited, Some(&design))
                     .await
@@ -634,28 +703,46 @@ impl GenerationEngine {
                         GenerationStop::Failed(format!("Cannot checkpoint the edit draft: {error}"))
                     })?;
             }
-            if let Err(error) =
-                design_model::markup::validate_demo_navigation(&edited, Some(&design))
-            {
-                if attempt == MAX_DEMO_CORRECTIONS || !navigation_errors.insert(error.clone()) {
-                    return Err(GenerationStop::Failed(format!(
-                        "Cannot save demo edit: {error}"
-                    )));
+            let added = edited.screens.len().saturating_sub(design.screens.len());
+            if added < plan.minimum_new_screens {
+                if attempt == 0 || edited.screens.len() > draft.screens.len() {
+                    if attempt > 0 {
+                        self.designs
+                            .keep_review_draft(design_id, &edited, Some(&design))
+                            .await
+                            .map_err(|error| {
+                                GenerationStop::Failed(format!(
+                                    "Cannot checkpoint the edit draft: {error}"
+                                ))
+                            })?;
+                    }
+                    draft = edited;
                 }
-                log(&format!(
-                    "{label}: correcting navigation before layout review: {error}"
-                ));
+                let remaining = plan
+                    .minimum_new_screens
+                    .saturating_sub(draft.screens.len().saturating_sub(design.screens.len()));
+                let issue =
+                    format!("The edit still needs {remaining} required separate screen(s).");
+                if attempt == MAX_DEMO_CORRECTIONS {
+                    let error = format!(
+                        "Reached the {MAX_DEMO_CORRECTIONS}-correction-round limit. {issue}"
+                    );
+                    let notice = self
+                        .review_draft_notice(design_id, &error, false)
+                        .await
+                        .map_err(GenerationStop::Failed)?;
+                    return Err(GenerationStop::Failed(notice));
+                }
                 correction = format!(
-                    "Repair this navigation issue in the latest draft. Preserve other completed work. {error}"
+                    "{issue} Append the missing pages to the best draft while preserving existing work."
                 );
-                draft = edited;
                 attempt += 1;
+                log(&format!(
+                    "{label}: correction round {attempt}/{MAX_DEMO_CORRECTIONS}; {issue}"
+                ));
                 continue;
             }
-            preview.show(&edited);
-            // A fix can make a new problem. The touched screens are measured
-            // again, and the model tweaks them until they measure clean or
-            // the effort's rounds run out.
+            // Recheck all affected screens so a correction cannot trade one blocker for another.
             let touched = if let Some(allowed) = &repair_indexes {
                 allowed
                     .iter()
@@ -670,178 +757,138 @@ impl GenerationEngine {
             } else {
                 touched_indexes(&design.screens, &edited.screens, &indexes)
             };
-            let fix = EditFix {
-                request: &context.request,
-                context: &request,
-                indexes: if is_focused_patch {
-                    write_indexes.clone()
-                } else {
-                    touched.clone()
-                },
-            };
-            let fallback = edited.clone();
-            let polished = if is_annotated {
-                self.audit_demo(&edited).await.map(|audit| (edited, audit))
-            } else {
-                self.fix_edited_design(client, edited, &fix, log).await
-            };
-            let (final_design, audit) = match polished {
-                Ok(result) => result,
-                Err(error) => {
-                    plan.check_structure(&design, scope_baseline, &fallback)
-                        .map_err(GenerationStop::Failed)?;
-                    let notice = self
-                        .review_draft_notice(design_id, &error, false)
-                        .await
-                        .map_err(GenerationStop::Failed)?;
-                    return Err(GenerationStop::Failed(notice));
+            let mut blockers: Vec<_> =
+                design_model::markup::demo_navigation_issues(&edited, Some(&design)).collect();
+            let has_navigation_errors = !blockers.is_empty();
+            // Check every scope-valid candidate with the same probes. Subjective
+            // findings neither undo a patch nor trigger another model call.
+            let mut layout_warnings = Vec::new();
+            if blockers.is_empty() {
+                log(&format!(
+                    "{}: checking layout and interactions on edited screens",
+                    request.label
+                ));
+                let audit = match self.audit_demo(&edited).await {
+                    Ok(audit) => audit,
+                    Err(error) => {
+                        let notice = self
+                            .review_draft_notice(design_id, &error, false)
+                            .await
+                            .map_err(GenerationStop::Failed)?;
+                        return Err(GenerationStop::Failed(notice));
+                    }
+                };
+                let evidence = audit.prototype_evidence();
+                if !evidence.is_empty() {
+                    log(&format!("{label}: browser interaction checks:\n{evidence}"));
                 }
+                blockers.extend(audit.usable_edit_issues(&touched));
+                layout_warnings = audit.edit_warnings(&edited, &touched);
+            }
+            if blockers.is_empty() {
+                preview.show(&edited);
+                request.report(1.0);
+                break (edited, touched, layout_warnings);
+            }
+            let improved = best_blockers.as_ref().is_none_or(|best| {
+                if has_navigation_errors != best_has_navigation_errors {
+                    !has_navigation_errors
+                } else {
+                    blockers.len() < best.len() && blockers.iter().all(|issue| best.contains(issue))
+                }
+            });
+            let rejected = if improved {
+                if edited != design && attempt > 0 {
+                    self.designs
+                        .keep_review_draft(design_id, &edited, Some(&design))
+                        .await
+                        .map_err(|error| {
+                            GenerationStop::Failed(format!(
+                                "Cannot checkpoint the improved edit: {error}"
+                            ))
+                        })?;
+                }
+                if !has_navigation_errors {
+                    preview.show(&edited);
+                }
+                best_blockers = Some(blockers);
+                best_has_navigation_errors = has_navigation_errors;
+                next_blocker = 0;
+                draft = edited;
+                String::new()
+            } else {
+                next_blocker += 1;
+                format!(
+                    " The last patch was discarded. Take a different approach; it left these blockers: {}.",
+                    blockers
+                        .iter()
+                        .map(|(_, detail)| detail.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
             };
-            plan.check_structure(&design, scope_baseline, &final_design)
-                .map_err(GenerationStop::Failed)?;
-            if let Some(retained) = &retained {
-                require_repair_scope(&design, retained, &final_design)?;
-            }
-            if final_design != design && final_design != fallback {
-                self.designs
-                    .keep_review_draft(design_id, &final_design, Some(&design))
-                    .await
-                    .map_err(|error| {
-                        GenerationStop::Failed(format!(
-                            "Cannot checkpoint the reviewed edit: {error}"
-                        ))
-                    })?;
-            }
-            if let Err(error) = audit.require_usable_edit_on(&touched) {
+            let remaining = best_blockers.as_deref().unwrap_or_default();
+            if attempt == MAX_DEMO_CORRECTIONS {
+                let details = remaining
+                    .iter()
+                    .map(|(_, detail)| detail.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let error = format!(
+                    "Reached the {MAX_DEMO_CORRECTIONS}-correction-round limit. Remaining blockers: {details}"
+                );
                 let notice = self
                     .review_draft_notice(design_id, &error, false)
                     .await
                     .map_err(GenerationStop::Failed)?;
                 return Err(GenerationStop::Failed(notice));
             }
-            let layout_warnings = audit.edit_warnings(&final_design, &touched);
-            log(&format!(
-                "{}: reviewing requested feature coverage before saving",
-                request.label
-            ));
-            let failures = self
-                .verify_demo_edit(
-                    client,
-                    &plan,
-                    DemoEditEvidence {
-                        candidate_id: design_id,
-                        saved_baseline: &design,
-                        retained_baseline: retained.as_ref(),
-                        after: &final_design,
-                        attachments: &attachments,
-                        browser_evidence: &audit.prototype_evidence(),
-                        previous_failures: previous_failures
-                            .as_ref()
-                            .map_or(&[], |(_, failures)| failures.as_slice()),
-                    },
-                    context.effort(),
-                )
-                .await
-                .map_err(GenerationStop::Failed)?;
-            if failures.is_empty() {
-                break (final_design, touched, layout_warnings);
-            }
-            let improved = previous_failures
-                .as_ref()
-                .is_none_or(|(_, previous)| review_improved(previous, &failures));
-            if !improved || attempt == MAX_DEMO_CORRECTIONS {
-                let reason = if improved {
-                    format!("the {MAX_DEMO_CORRECTIONS}-correction-round limit was reached")
-                } else {
-                    let defect_ids: Vec<_> = failures
-                        .iter()
-                        .map(|failure| format!("{}:{}", failure.requirement, failure.id))
-                        .collect();
-                    log(&format!(
-                        "{label}: discarded correction round {attempt}; unresolved defect IDs: {}",
-                        defect_ids.join(", ")
-                    ));
-                    "reviewed defects did not decrease without regression".to_owned()
-                };
-                let remaining = if !improved
-                    && let Some((best, previous)) = &previous_failures
-                    && best != &design
-                {
-                    self.designs
-                        .keep_review_draft(design_id, best, Some(&design))
-                        .await
-                        .map_err(|error| {
-                            GenerationStop::Failed(format!(
-                                "Cannot restore the better review draft: {error}"
-                            ))
-                        })?;
-                    previous.as_slice()
-                } else {
-                    failures.as_slice()
-                };
-                let details: Vec<_> = remaining
-                    .iter()
-                    .map(|failure| failure.detail.as_str())
-                    .collect();
-                return Err(GenerationStop::Failed(format!(
-                    "Cannot save incomplete demo edit after {attempt} correction round(s): {reason}; remaining issues: {}",
-                    details.join("; ")
-                )));
-            }
-            correction_screens.clear();
-            if failures.iter().all(|failure| !failure.screens.is_empty()) {
-                correction_screens.extend(
-                    failures
-                        .iter()
-                        .flat_map(|failure| failure.screens.iter().copied()),
-                );
-                correction_screens.sort_unstable();
-                correction_screens.dedup();
-            }
-            if is_annotated
-                && correction_screens
-                    .iter()
-                    .any(|index| !indexes.contains(index))
-            {
-                return Err(GenerationStop::Failed(
-                    "An annotation cannot require changes on unmarked screens.".into(),
-                ));
-            }
-            if let Some(allowed) = &repair_indexes
-                && let Some(index) = failures
-                    .iter()
-                    .flat_map(|failure| failure.screens.iter().copied())
-                    .find(|&index| {
-                        index < scope_baseline.screens.len() && !allowed.contains(&index)
+            let editable = |index: usize| {
+                index < draft.screens.len()
+                    && (plan.screens.is_empty()
+                        || plan.screens.contains(&index)
+                        || index >= scope_baseline.screens.len())
+                    && repair_indexes.as_ref().is_none_or(|allowed| {
+                        allowed.contains(&index) || index >= scope_baseline.screens.len()
                     })
-            {
-                return Err(GenerationStop::Failed(format!(
-                    "Cannot finish draft repair: review requires a change to protected screen {} ({}). Edit this screen separately from the saved version.",
-                    index + 1,
-                    scope_baseline.screens[index].name
-                )));
-            }
-            let details: Vec<_> = failures
-                .iter()
-                .map(|failure| failure.detail.as_str())
-                .collect();
-            let scope_note = if correction_screens.is_empty() {
-                ""
-            } else {
-                " Replace only the specified screens. Do not change shared settings or insert or delete screens."
             };
+            // Try another affected screen after a stall, starting from the best draft.
+            let mut repairable: Vec<_> = remaining
+                .iter()
+                .map(|(index, _)| *index)
+                .filter(|&index| editable(index))
+                .collect();
+            repairable.sort_unstable();
+            repairable.dedup();
+            let Some(&index) = repairable.get(next_blocker % repairable.len().max(1)) else {
+                let details = remaining
+                    .iter()
+                    .map(|(_, detail)| detail.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let error =
+                    format!("Cannot fix a blocker outside the permitted screen scope: {details}");
+                let notice = self
+                    .review_draft_notice(design_id, &error, false)
+                    .await
+                    .map_err(GenerationStop::Failed)?;
+                return Err(GenerationStop::Failed(notice));
+            };
+            let details = remaining
+                .iter()
+                .filter(|(affected, _)| *affected == index)
+                .map(|(_, detail)| detail.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            correction_screens = vec![index];
             correction = format!(
-                "Repair the supplied latest draft rather than starting over. Preserve completed work and satisfy the entire acceptance contract.{scope_note} The last review found {} unresolved defects:\n{}",
-                failures.len(),
-                details.join("\n")
+                "Repair only these verified issues in the supplied best draft. Replace only the specified screen. Preserve completed work. {details}{rejected}"
             );
-            draft = final_design;
             attempt += 1;
             log(&format!(
-                "{label}: correction round {attempt}/{MAX_DEMO_CORRECTIONS}; {} unresolved defects",
-                failures.len()
+                "{label}: correction round {attempt}/{MAX_DEMO_CORRECTIONS}; repairing screen {}: {details}",
+                index + 1
             ));
-            previous_failures = Some((draft.clone(), failures));
         };
         let mut report = saved_edit_report(design_id, context.request.kind, &design, &final_design)
             .map_err(GenerationStop::Failed)?;
@@ -861,6 +908,7 @@ impl GenerationEngine {
             .save_if_current(design_id, &final_design, Some(&design))
             .await
             .map_err(|error| GenerationStop::Failed(error.to_string()))?;
+        report.push_str("\nThe browser and structural checks passed for the saved edit. Requirements not covered by those checks were not independently verified.");
         if let Err(error) = self.designs.clear_review_draft(design_id).await {
             tracing::warn!(%design_id, %error, "could not clear the accepted review draft");
         }

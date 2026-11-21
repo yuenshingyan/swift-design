@@ -279,14 +279,11 @@ async fn a_chat_request_with_a_design_open_patches_that_design() {
 }
 
 #[tokio::test]
-async fn demo_edit_planning_and_review_receive_the_reference_screenshot() {
+async fn demo_edit_planning_and_writing_receive_the_reference_screenshot() {
     let server = FakeModelServer::start().await;
     server.push_text(r#"{"edit":true,"unsupported_requirements":[]}"#);
     server.push_text(EDIT_PLAN);
     server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1>Mint hero</h1>","css":"h1{color:#aaffcc}"}}]}"#);
-    server.push_text(
-        r#"{"coverage":[{"complete":true,"reason":"Matches reference"}],"reference_error":null}"#,
-    );
     let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
@@ -324,7 +321,7 @@ async fn demo_edit_planning_and_review_receive_the_reference_screenshot() {
     .await
     .expect("test generation run should complete successfully");
     let requests = server.requests();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 3);
     for request in &requests[1..] {
         let parts = request["messages"][1]["content"]
             .as_array()
@@ -344,9 +341,6 @@ async fn a_message_with_pinned_candidates_patches_each_of_them() {
     for _ in 0..2 {
         server.push_text(EDIT_PLAN);
         server.push_text(r#"{"screens":[{"index":0,"screen":{"name":"Hero","html":"<h1 class='title'>Tighter</h1>","css":".title{font-size:64px;}"}}]}"#);
-        server.push_text(
-            r#"{"coverage":[{"complete":true,"reason":"Hero updated"}],"reference_error":null}"#,
-        );
     }
     let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));

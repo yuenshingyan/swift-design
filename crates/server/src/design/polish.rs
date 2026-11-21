@@ -125,7 +125,7 @@ impl DemoAudit {
         })
     }
 
-    /// Reports actual browser probes rather than asking a model to infer execution.
+    /// Reports measured browser probes, including passed checks, for the run log.
     pub(crate) fn prototype_evidence(&self) -> String {
         self.prototype_checks.iter().map(|check| format!(
             "Screen {}: {} programmatic click, {} synthetic keyboard and {} programmatic focus checks. {} failures. Group: {}. {}",
@@ -134,17 +134,28 @@ impl DemoAudit {
     }
 
     fn prototype_failures(&self, indexes: Option<&[usize]>) -> impl Iterator<Item = String> {
+        self.failed_prototype_checks(indexes)
+            .map(|(_, detail)| detail)
+    }
+
+    fn failed_prototype_checks(
+        &self,
+        indexes: Option<&[usize]>,
+    ) -> impl Iterator<Item = (usize, String)> {
         self.prototype_checks
             .iter()
             .filter(move |check| {
                 check.failures != 0 && indexes.is_none_or(|indexes| indexes.contains(&check.screen))
             })
             .map(|check| {
-                format!(
-                    "screens[{}] prototype group {}: {}",
+                (
                     check.screen,
-                    check.group,
-                    check.issues.join("; ")
+                    format!(
+                        "screen {} prototype group {}: {}",
+                        check.screen + 1,
+                        check.group,
+                        check.issues.join("; ")
+                    ),
                 )
             })
     }
@@ -207,6 +218,7 @@ impl DemoAudit {
     }
 
     /// Returns only layout blockers for repair rounds after a focused user edit.
+    #[cfg(test)]
     pub(crate) fn layout_instructions(&self, indexes: &[usize]) -> Vec<String> {
         self.prototype_failures(Some(indexes))
             .chain(
@@ -291,28 +303,20 @@ impl DemoAudit {
         score < previous_score || (score == previous_score && overflow_improved)
     }
 
-    /// Rejects unusable edited screens without treating uncertain geometry as a failed edit.
-    pub(crate) fn require_usable_edit_on(&self, indexes: &[usize]) -> Result<(), String> {
-        let blockers: Vec<_> = self
-            .prototype_failures(Some(indexes))
-            .chain(
-                self.findings
-                    .iter()
-                    .filter(|finding| {
-                        indexes.contains(&finding.screen)
-                            && matches!(finding.kind.as_str(), "empty" | "window_geometry")
-                    })
-                    .map(format_finding),
-            )
-            .take(8)
-            .collect();
-        if blockers.is_empty() {
-            return Ok(());
-        }
-        Err(format!(
-            "Cannot save an unusable demo edit: {}",
-            blockers.join("; ")
-        ))
+    /// Lists concrete blockers on edited screens. Cosmetic findings are excluded.
+    pub(crate) fn usable_edit_issues(
+        &self,
+        indexes: &[usize],
+    ) -> impl Iterator<Item = (usize, String)> {
+        self.failed_prototype_checks(Some(indexes)).chain(
+            self.findings
+                .iter()
+                .filter(move |finding| {
+                    indexes.contains(&finding.screen)
+                        && matches!(finding.kind.as_str(), "empty" | "window_geometry")
+                })
+                .map(|finding| (finding.screen, format_finding(finding))),
+        )
     }
 
     /// Blocks completion while any measured layout error remains on any screen.
