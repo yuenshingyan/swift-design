@@ -221,18 +221,15 @@ existing screens, the repair can only replace those screens. Only a passing
 draft replaces the selected candidate; stopping or
 cancellation leaves that saved candidate intact. Missing or unreadable required references produce a
 reference-verification error instead of an incomplete-edit verdict.
-Safety, valid markup, protected-screen scope and core requested deliverables are
-hard gates. Alignment differences, unmeasurable groups, contrast and small-text
-findings are advisory. Local clipping of at most 8 CSS pixels and at most 15% of
-the affected box dimension is also advisory; larger clipping, off-screen content,
-actual overlap, empty screens and shared-shell violations still block verified
-completion. Obsolete alignment annotations may be corrected or removed rather
-than forcing filler content into a layout.
-Demo edits with only advisory findings can save after requirement review, with
-**Needs review** notes instead of an unqualified layout-verification claim. If
-layout repair, browser audit, or requirement review fails, the latest complete,
-valid, scope-preserving checkpoint stays attached to the selected candidate as
-**Needs review**. It does not replace the accepted version or enter its history.
+A usable demo edit becomes the current design automatically after review. The
+previous design remains available through the existing snapshots. Layout findings
+such as overflow and overlap are warnings for edits, not reasons to fail a run.
+An unsuccessful optional polish pass keeps the usable edit and its warnings.
+Unsafe markup, out-of-scope changes, incomplete requirements, empty edited
+screens, invalid window geometry, and failed prototype interaction probes still
+prevent replacement. If an edit cannot be verified as usable, its valid,
+scope-preserving checkpoint remains attached as **Needs review**. It does not
+replace the current snapshot. Initial generation still requires a clean layout.
 Failed continuation polish also keeps its draft under the source candidate.
 Fresh generation keeps its validated
 draft under its already reserved candidate id, labelled **Needs review**; mere

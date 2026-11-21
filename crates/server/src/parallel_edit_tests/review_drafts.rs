@@ -283,24 +283,38 @@ async fn stopping_during_layout_review_keeps_the_completed_edit_on_its_candidate
 }
 
 #[tokio::test]
-async fn advisory_polish_saves_but_serious_defects_keep_a_draft_on_the_same_candidate() {
+async fn usable_edits_replace_the_current_snapshot_but_unusable_edits_do_not() {
     for kind in [
         "alignment",
         "alignment_unmeasured",
         "minor_overflow",
         "contrast",
+        "overlap",
         "overflow",
+        "empty",
+        "broken_interaction",
     ] {
         let original = sample_design();
         let fake = ParallelFakeModel::start(None).await;
         let mut candidate = ReviewingCandidate::new(&fake);
         let runner: DemoDomRunner = Arc::new(move |design, _| {
             let coverage: Vec<_> = (0..design.screens.len()).collect();
-            let findings = json!([{"screen":0,"kind":kind,"node":"div.metrics","detail":"Review the measured group"}]);
+            let (findings, probes) = if kind == "broken_interaction" {
+                (
+                    json!([]),
+                    json!([{"screen":0,"group":"menu","clicks":1,"keys":1,"focus":1,"failures":1,"issues":["Menu cannot open"]}]),
+                )
+            } else {
+                (
+                    json!([{"screen":0,"kind":kind,"node":"div.metrics","detail":"Review the measured group"}]),
+                    json!([]),
+                )
+            };
             let dom = format!(
-                "<html data-swift-design-findings=\"{}\" data-swift-design-audited-screens=\"{}\">",
+                "<html data-swift-design-findings=\"{}\" data-swift-design-audited-screens=\"{}\" data-swift-design-prototype-checks=\"{}\">",
                 findings.to_string().replace('"', "&quot;"),
-                json!(coverage)
+                json!(coverage),
+                probes.to_string().replace('"', "&quot;")
             );
             Box::pin(async move { Ok(dom) })
         });
@@ -318,21 +332,29 @@ async fn advisory_polish_saves_but_serious_defects_keep_a_draft_on_the_same_cand
         let mut screen = original.screens[0].clone();
         screen.html = "<h1>Useful updated design</h1>".into();
         fake.push_text(json!({"screens":[{"index":0,"screen":screen}]}).to_string());
-        let serious = kind == "overflow";
-        fake.push_text(if serious {
-            "{}".into()
-        } else {
-            json!({"coverage":[{"complete":true,"reason":"Requested design present"}]}).to_string()
-        });
+        let is_unusable = matches!(kind, "empty" | "broken_interaction");
+        let runs_polish = is_unusable || matches!(kind, "overlap" | "overflow");
+        if runs_polish {
+            fake.push_text(r#"{"screens":[]}"#.into());
+        }
+        if !is_unusable {
+            fake.push_text(
+                json!({"coverage":[{"complete":true,"reason":"Requested design present"}]})
+                    .to_string(),
+            );
+        }
         let result = candidate.engine.clone().run("talk", log_sink()).await;
         let messages = candidate
             .sessions
             .messages("talk")
             .await
             .expect("test chat messages should be readable");
-        if serious {
-            let error =
-                result.expect_err("serious layout defects should block verified completion");
+        if is_unusable {
+            let error = result.expect_err("unusable edits should not replace the current snapshot");
+            assert!(
+                error.contains("Cannot save an unusable demo edit"),
+                "{error}"
+            );
             assert!(error.contains("Needs review"), "{error}");
             assert!(error.contains("talk-candidate-1"));
             assert!(
@@ -385,7 +407,20 @@ async fn advisory_polish_saves_but_serious_defects_keep_a_draft_on_the_same_cand
                 .last()
                 .expect("test collection should contain a last item")
                 .content;
-            assert!(report.contains("Needs review — advisory layout findings"));
+            assert!(report.contains("Layout warnings on the edited screens"));
+            let snapshots = candidate
+                .designs
+                .history("talk-candidate-1")
+                .await
+                .expect("the existing snapshot history should be readable");
+            assert_eq!(snapshots.len(), 1);
+            let restored = candidate
+                .designs
+                .restore("talk-candidate-1", &snapshots[0].stamp)
+                .await
+                .expect("the previous snapshot should be restorable")
+                .expect("the previous snapshot should exist");
+            assert_eq!(restored, original);
             assert!(!report.contains("Rendered layout verified"));
             assert!(
                 candidate
@@ -404,6 +439,10 @@ async fn advisory_polish_saves_but_serious_defects_keep_a_draft_on_the_same_cand
                     .is_none()
             );
         }
-        assert_eq!(fake.requests().len(), 4);
+        assert_eq!(
+            fake.requests().len(),
+            3 + usize::from(runs_polish) + usize::from(!is_unusable),
+            "{kind}"
+        );
     }
 }
