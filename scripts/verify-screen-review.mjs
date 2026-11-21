@@ -282,7 +282,11 @@ try {
   await evaluate(`${membersCheckbox}.click()`);
   await wait(`${button('Export selected (1)')}?.classList.contains('primary')`);
   await evaluate(`${button('Export selected (1)')}.click()`);
-  await wait("document.querySelector('.selected-screen-export [role=status]')?.textContent.includes('0 of 1')");
+  await wait("document.querySelector('.export-progress [role=status]')?.textContent.includes('0 of 1')");
+  assert(await evaluate(`(() => {
+    const bar = document.querySelector('.export-progress progress');
+    return bar?.max === 1 && bar.value === 0 && bar.getBoundingClientRect().height > 0;
+  })()`), 'export must show a visible progress bar with the screen count');
   const job = await wait('window.exportJob');
   assert.deepEqual([job.state, job.completed, job.total], ['preparing', 0, 1]);
   const jobRoute = `${designRoute}/exports/${job.job_id}`;
@@ -293,6 +297,7 @@ try {
   await evaluate(`${homeCheckbox}.click()`);
   const zipLink = await until(() => evaluate("document.querySelector('.export-feedback a')?.getAttribute('href')"), 60_000);
   assert.equal(zipLink, `${jobRoute}/download`);
+  assert.equal(await evaluate("!!document.querySelector('.export-progress progress')"), false);
   assert(await evaluate(`window.pollInterrupted && ${homeCheckbox}.checked`));
   assert.deepEqual(await api(jobRoute), { job_id: job.job_id, state: 'ready', completed: 1, total: 1 });
   const zipFile = join(downloads, `${id}.zip`);

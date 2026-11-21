@@ -221,7 +221,14 @@ pub(super) fn DesignExportGroup(
         }
         div { class: "selected-screen-export",
             if let Some((completed, total)) = progress() {
-                button { disabled: true, role: "status", "Preparing ZIP: {completed} of {total}" }
+                div { class: "export-progress",
+                    span { role: "status", "Preparing ZIP: {completed} of {total}" }
+                    progress {
+                        aria_label: "PNG export progress",
+                        max: "{total}",
+                        value: "{completed}",
+                    }
+                }
             } else if let Some(query) = export_query {
                 button {
                     class: "primary",
