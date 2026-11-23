@@ -39,6 +39,9 @@ pub(crate) fn SessionWorkspace(
     let mut drafts_key = use_signal(String::new);
     let mut revision = use_signal(|| 0u64);
     let mut error = use_signal(|| Option::<String>::None);
+    let mut title_draft = use_signal(|| Option::<String>::None);
+    let mut title_error = use_signal(|| Option::<String>::None);
+    let mut is_saving_title = use_signal(|| false);
     // The candidates pinned with `@` for the next message, the `@` menu
     // row, the draft the menu was closed on, and the caret.
     let mut pinned = use_signal(Vec::<String>::new);
@@ -318,6 +321,36 @@ pub(crate) fn SessionWorkspace(
         .map(|record| record.question_set)
         .collect();
 
+    let save_title = use_callback({
+        let session_id = session_id.clone();
+        move |_: ()| {
+            if is_saving_title() {
+                return;
+            }
+            let Some(title) = title_draft()
+                .map(|draft| draft.trim().to_owned())
+                .filter(|title| !title.is_empty())
+            else {
+                return;
+            };
+            is_saving_title.set(true);
+            title_error.set(None);
+            let session_id = session_id.clone();
+            spawn(async move {
+                match api::rename_session(&session_id, &title).await {
+                    Ok(()) => {
+                        if let Some(current) = view.write().as_mut() {
+                            current.session.title = title;
+                        }
+                        title_draft.set(None);
+                    }
+                    Err(message) => title_error.set(Some(message)),
+                }
+                is_saving_title.set(false);
+            });
+        }
+    });
+
     let send_message = use_callback({
         let session_id = session_id.clone();
         move |_: ()| {
@@ -451,7 +484,57 @@ pub(crate) fn SessionWorkspace(
             section { class: "conversation",
                 div { class: "studio-head",
                     button { class: "back", onclick: move |_| on_home.call(()), "‹ Sessions" }
-                    span { class: "studio-title", "{session.title}" }
+                    if let Some(name) = title_draft() {
+                        form {
+                            class: "studio-title-form",
+                            onsubmit: move |event: FormEvent| {
+                                event.prevent_default();
+                                save_title.call(());
+                            },
+                            onkeydown: move |event: KeyboardEvent| {
+                                if event.key() == Key::Escape && !is_saving_title() {
+                                    event.prevent_default();
+                                    title_draft.set(None);
+                                    title_error.set(None);
+                                }
+                            },
+                            input {
+                                class: "rename-input",
+                                aria_label: "Session name",
+                                autofocus: true,
+                                disabled: is_saving_title(),
+                                value: "{name}",
+                                oninput: move |event: FormEvent| {
+                                    title_draft.set(Some(event.value()));
+                                    title_error.set(None);
+                                },
+                            }
+                            button { r#type: "submit", disabled: is_saving_title() || name.trim().is_empty(), "Save" }
+                            button {
+                                r#type: "button",
+                                disabled: is_saving_title(),
+                                onclick: move |_| {
+                                    title_draft.set(None);
+                                    title_error.set(None);
+                                },
+                                "Cancel"
+                            }
+                        }
+                    } else {
+                        span { class: "studio-title", title: "{session.title}", "{session.title}" }
+                        button {
+                            class: "rename-session",
+                            title: "Rename session",
+                            onclick: {
+                                let title = session.title.clone();
+                                move |_| title_draft.set(Some(title.clone()))
+                            },
+                            "Rename"
+                        }
+                    }
+                }
+                if let Some(message) = title_error() {
+                    p { class: "error session-title-error", role: "alert", "{message}" }
                 }
                 div { id: "session-thread", class: "thread",
                     div { class: "bubble user", "{session.request}" }

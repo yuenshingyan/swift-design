@@ -166,6 +166,35 @@ try {
   const resize = (width, height) => cdp('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
   await resize(1440, 1000);
 
+  stage = 'session rename';
+  const sessionUrl = `${app}/#/sessions/${session}`;
+  await cdp('Page.navigate', { url: sessionUrl });
+  const sessionTitle = `document.querySelector('.studio-title')`;
+  const nameInput = `document.querySelector('input[aria-label="Session name"]')`;
+  const typeName = name => evaluate(`${nameInput}.value=${JSON.stringify(name)}; ${nameInput}.dispatchEvent(new Event('input', {bubbles:true}))`);
+  await wait(`${sessionTitle}?.textContent === 'Screen review'`);
+  await evaluate(`${button('Rename')}.click()`);
+  await wait(`!!${nameInput}`);
+  await typeName('Discard this draft');
+  await evaluate(`${button('Cancel')}.click()`);
+  await wait(`${sessionTitle}?.textContent === 'Screen review'`);
+  await evaluate(`${button('Rename')}.click()`);
+  await wait(`!!${nameInput}`);
+  await typeName('x'.repeat(81));
+  await evaluate(`${button('Save')}.click()`);
+  await wait(`document.querySelector('.session-title-error')?.textContent.includes('80 characters')`);
+  await typeName('Review · Q4');
+  await evaluate(`${nameInput}.focus()`);
+  assert(await evaluate(`document.activeElement === ${nameInput}`));
+  await cdp('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' });
+  await cdp('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await wait(`${sessionTitle}?.textContent === 'Review · Q4'`);
+  assert.equal(await evaluate('location.href'), sessionUrl);
+  await cdp('Page.reload');
+  await wait(`${sessionTitle}?.textContent === 'Review · Q4'`);
+  await evaluate(`${button('‹ Sessions')}.click()`);
+  await wait(`Array.from(document.querySelectorAll('.project-title')).some(title => title.textContent === 'Review · Q4')`);
+
   stage = 'screen groups, search, navigation, and export selection';
   const groupedRoute = '/designs/screen-review-candidate-2';
   const grouped = original.screens.map((screen, index) => ({
@@ -348,7 +377,7 @@ try {
   view = await until(() => completed(2), 90_000);
   assert(view.runs.some(run => run.result === 'failed') && rejectedMarkup, 'unsafe markup must fail validation');
   assert.deepEqual(await api(`${designRoute}/snapshots/current`), prior);
-  console.log('Screen review passed: warnings, badges, resize, one scoped edit, unsafe edit rejection, View, export, and snapshot restore.');
+  console.log('Screen review passed: session rename, warnings, badges, resize, one scoped edit, unsafe edit rejection, View, export, and snapshot restore.');
 
   if (candidateFile) {
     stage = 'Project Access dialog regression';

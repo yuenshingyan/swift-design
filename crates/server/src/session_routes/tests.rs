@@ -21,6 +21,91 @@ async fn create(application: &axum::Router, id: &str) {
 }
 
 #[tokio::test]
+async fn renaming_a_session_updates_the_list_without_moving_its_candidate() {
+    let directory = TempDir::new().expect("temporary test directory should be created");
+    let application = test_application(&directory);
+    create(&application, "finance-app").await;
+    let sessions = SessionStore::new(directory.path().join("data/sessions"));
+    for event in [
+        WorkflowEvent::QuestionsAsked,
+        WorkflowEvent::GenerationStarted,
+    ] {
+        sessions
+            .apply("finance-app", event)
+            .await
+            .expect("fixture should reach generation");
+    }
+    let design: design_model::Design =
+        serde_json::from_str(crate::test_support::SAMPLE_DESIGN).expect("sample demo should parse");
+    let designs = DesignStore::new(directory.path().join("designs"));
+    designs
+        .save("finance-app-candidate-1", &design)
+        .await
+        .expect("save fixture candidate");
+    let before = view(&application, "finance-app").await;
+    let (status, body) = send(
+        application.clone(),
+        "PUT",
+        "/sessions/finance-app/title",
+        Some(r#"{"title":"  Finance dashboard · Q4  "}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let mut after = view(&application, "finance-app").await;
+    assert_eq!(after["session"]["title"], "Finance dashboard · Q4");
+    after["session"]["title"] = before["session"]["title"].clone();
+    after["session"]["updated_at"] = before["session"]["updated_at"].clone();
+    assert_eq!(after, before);
+    assert_eq!(
+        designs
+            .load("finance-app-candidate-1")
+            .await
+            .expect("read fixture candidate"),
+        Some(design)
+    );
+    let (status, body) = send(application, "GET", "/sessions", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listing: serde_json::Value =
+        serde_json::from_str(&body).expect("session list should parse");
+    assert_eq!(listing[0]["id"], "finance-app");
+    assert_eq!(listing[0]["title"], "Finance dashboard · Q4");
+}
+
+#[tokio::test]
+async fn renaming_rejects_invalid_titles_and_missing_sessions() {
+    let directory = TempDir::new().expect("temporary test directory should be created");
+    let application = test_application(&directory);
+    create(&application, "finance-app").await;
+    for title in [
+        "  ".to_owned(),
+        "Too\nMany lines".to_owned(),
+        "名".repeat(81),
+    ] {
+        let payload = serde_json::json!({"title": title}).to_string();
+        let (status, body) = send(
+            application.clone(),
+            "PUT",
+            "/sessions/finance-app/title",
+            Some(&payload),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    }
+    assert_eq!(
+        view(&application, "finance-app").await["session"]["title"],
+        "Design finance-app."
+    );
+    let (status, _) = send(
+        application,
+        "PUT",
+        "/sessions/missing/title",
+        Some(r#"{"title":"A valid title"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn a_message_pins_candidates_of_its_own_session_only() {
     let directory = TempDir::new().expect("temporary test directory should be created");
     let application = test_application(&directory);

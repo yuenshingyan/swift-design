@@ -145,6 +145,7 @@ fn App() -> Element {
             },
             Some(View::Session(id)) => rsx! {
                 session::SessionWorkspace {
+                    key: "{id}",
                     session_id: id,
                     on_open_design: move |design_id| view.set(Some(View::Design(design_id))),
                     on_open_deck: move |deck_id| view.set(Some(View::Deck(deck_id))),

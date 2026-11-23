@@ -409,6 +409,20 @@ pub async fn fetch_session(id: &str) -> Result<SessionView, String> {
 /// Body of `POST /sessions/{id}/messages`.
 #[derive(Serialize)]
 struct MessageRequest<'value> {
+/// Changes the session's display title without changing its ID.
+pub async fn rename_session(id: &str, title: &str) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct TitleRequest<'a> {
+        title: &'a str,
+    }
+    let builder = Request::put(&format!("/sessions/{id}/title"))
+        .json(&TitleRequest { title })
+        .map_err(|error| error.to_string())?;
+    send_checked(builder, "PUT /sessions/title")
+        .await
+        .map(|_| ())
+}
+
     content: &'value str,
     #[serde(skip_serializing_if = "Option::is_none")]
     design: Option<&'value str>,

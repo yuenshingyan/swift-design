@@ -1113,7 +1113,13 @@ div.brief-attachments:has(+ ul.brief-attachments) { padding-bottom: 0.4rem; }
 .studio-head { display: flex; align-items: center; gap: 0.75rem; padding: 0.9rem 1.25rem;
   border-bottom: 1px solid var(--hairline); }
 .studio-head .back { font-size: 0.82rem; color: var(--ink-2); box-shadow: none; padding: 0.3rem 0.5rem; }
-.studio-title { font-size: 0.95rem; font-weight: 600; }
+.studio-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 0.95rem; font-weight: 600; }
+.studio-head .back, .studio-head .rename-session { flex: none; white-space: nowrap; }
+.studio-head .rename-session { margin-left: auto; }
+.studio-title-form { display: flex; align-items: center; gap: 0.4rem; flex: 1; min-width: 0; }
+.studio-title-form button, .studio-head .rename-session { padding: 0.3rem 0.5rem; font-size: 0.8rem; }
+.session-title-error { margin: 0 1.25rem; }
 .thread { flex: 1; overflow-y: auto; padding: 1.1rem 1.25rem; display: flex;
   flex-direction: column; gap: 0.75rem; }
 .workbench { min-width: 0; background: var(--sunken); overflow-y: auto; overflow-x: hidden; padding: 1.25rem 1.5rem;
