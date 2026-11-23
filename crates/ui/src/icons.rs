@@ -69,10 +69,20 @@ stroke=\"currentColor\" stroke-width=\"1.6\"></rect><path d=\"M10.5 18.75h3\" \
 stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\"></path></svg>";
 
 /// A pencil, for rename.
-#[allow(dead_code)]
 pub(crate) const PENCIL: &str = "<svg width=\"11\" height=\"11\" viewBox=\"0 0 12 12\" \
 fill=\"none\" aria-hidden=\"true\"><path d=\"M8.2 1.9l1.9 1.9-6 6-2.4.5.5-2.4 6-6z\" \
 stroke=\"currentColor\" stroke-width=\"1.1\" stroke-linejoin=\"round\"></path></svg>";
+
+/// A disk, for saving an edit.
+pub(crate) const SAVE: &str = "<svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" \
+fill=\"none\" aria-hidden=\"true\"><path d=\"M2 2h8l2 2v8H2zM4.5 2v3.5h5V2M4.5 12V8h5v4\" \
+stroke=\"currentColor\" stroke-width=\"1.2\" stroke-linecap=\"round\" \
+stroke-linejoin=\"round\"></path></svg>";
+
+/// A cross, for cancelling an edit.
+pub(crate) const CROSS: &str = "<svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" \
+fill=\"none\" aria-hidden=\"true\"><path d=\"m3.5 3.5 7 7m0-7-7 7\" stroke=\"currentColor\" \
+stroke-width=\"1.4\" stroke-linecap=\"round\"></path></svg>";
 
 /// A dashed square, for the empty node inspector.
 pub(crate) const DASHED_SQUARE: &str = "<svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" \
@@ -110,6 +120,8 @@ mod tests {
             STOP,
             DOWNLOAD,
             PENCIL,
+            SAVE,
+            CROSS,
             DASHED_SQUARE,
             LAYOUT,
         ] {
