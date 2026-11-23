@@ -513,27 +513,38 @@ pub(crate) fn SessionWorkspace(
                                     title_error.set(None);
                                 },
                             }
-                            button { r#type: "submit", disabled: is_saving_title() || name.trim().is_empty(), "Save" }
                             button {
+                                class: "icon-button",
+                                r#type: "submit",
+                                aria_label: "Save session name",
+                                title: "Save session name",
+                                disabled: is_saving_title() || name.trim().is_empty(),
+                                span { dangerous_inner_html: crate::icons::SAVE }
+                            }
+                            button {
+                                class: "icon-button",
                                 r#type: "button",
+                                aria_label: "Cancel rename",
+                                title: "Cancel rename",
                                 disabled: is_saving_title(),
                                 onclick: move |_| {
                                     title_draft.set(None);
                                     title_error.set(None);
                                 },
-                                "Cancel"
+                                span { dangerous_inner_html: crate::icons::CROSS }
                             }
                         }
                     } else {
                         span { class: "studio-title", title: "{session.title}", "{session.title}" }
                         button {
-                            class: "rename-session",
+                            class: "icon-button rename-session",
+                            aria_label: "Rename session",
                             title: "Rename session",
                             onclick: {
                                 let title = session.title.clone();
                                 move |_| title_draft.set(Some(title.clone()))
                             },
-                            "Rename"
+                            span { dangerous_inner_html: crate::icons::PENCIL }
                         }
                     }
                 }

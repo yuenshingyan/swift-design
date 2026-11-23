@@ -22,8 +22,8 @@ The questions are short choices with `Use your best judgment` on each, and you c
 
 Describe what you need and press **Create**. The app then asks which kind to
 build, in a modal over the home page. The kind is fixed for the session; start a
-new session to build another kind. Use **Rename** in the session header to change
-its display title. The session URL, candidates, and history stay the same.
+new session to build another kind. Use the pencil icon in the session header to
+change its display title. The session URL, candidates, and history stay the same.
 
 | Kind | What it is | JSON | Canvas | Saved under |
 |---|---|---|---|---|

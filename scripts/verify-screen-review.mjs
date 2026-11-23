@@ -172,16 +172,23 @@ try {
   const sessionTitle = `document.querySelector('.studio-title')`;
   const nameInput = `document.querySelector('input[aria-label="Session name"]')`;
   const typeName = name => evaluate(`${nameInput}.value=${JSON.stringify(name)}; ${nameInput}.dispatchEvent(new Event('input', {bubbles:true}))`);
+  const renameButton = `document.querySelector('button[aria-label="Rename session"]')`;
+  const saveButton = `document.querySelector('button[aria-label="Save session name"]')`;
+  const cancelButton = `document.querySelector('button[aria-label="Cancel rename"]')`;
   await wait(`${sessionTitle}?.textContent === 'Screen review'`);
-  await evaluate(`${button('Rename')}.click()`);
+  assert(await evaluate(`!!${renameButton}?.querySelector('svg[aria-hidden="true"]') && !${renameButton}.textContent.trim()`));
+  await evaluate(`${renameButton}.click()`);
   await wait(`!!${nameInput}`);
+  for (const control of [saveButton, cancelButton]) {
+    assert(await evaluate(`!!${control}?.querySelector('svg[aria-hidden="true"]') && !${control}.textContent.trim()`));
+  }
   await typeName('Discard this draft');
-  await evaluate(`${button('Cancel')}.click()`);
+  await evaluate(`${cancelButton}.click()`);
   await wait(`${sessionTitle}?.textContent === 'Screen review'`);
-  await evaluate(`${button('Rename')}.click()`);
+  await evaluate(`${renameButton}.click()`);
   await wait(`!!${nameInput}`);
   await typeName('x'.repeat(81));
-  await evaluate(`${button('Save')}.click()`);
+  await evaluate(`${saveButton}.click()`);
   await wait(`document.querySelector('.session-title-error')?.textContent.includes('80 characters')`);
   await typeName('Review · Q4');
   await evaluate(`${nameInput}.focus()`);

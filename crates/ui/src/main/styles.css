@@ -1118,7 +1118,7 @@ div.brief-attachments:has(+ ul.brief-attachments) { padding-bottom: 0.4rem; }
 .studio-head .back, .studio-head .rename-session { flex: none; white-space: nowrap; }
 .studio-head .rename-session { margin-left: auto; }
 .studio-title-form { display: flex; align-items: center; gap: 0.4rem; flex: 1; min-width: 0; }
-.studio-title-form button, .studio-head .rename-session { padding: 0.3rem 0.5rem; font-size: 0.8rem; }
+.studio-head .icon-button svg { width: 0.875rem; height: 0.875rem; }
 .session-title-error { margin: 0 1.25rem; }
 .thread { flex: 1; overflow-y: auto; padding: 1.1rem 1.25rem; display: flex;
   flex-direction: column; gap: 0.75rem; }
