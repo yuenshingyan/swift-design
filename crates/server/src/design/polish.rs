@@ -389,13 +389,9 @@ pub(crate) fn apply_tweak(
 
 /// Preserves canvas and shared shell bounds while allowing obsolete polish annotations to change.
 pub(crate) fn respects_layout_contracts(before: &Design, after: &Design) -> bool {
-    if before.viewport != after.viewport
-        || before.app_window != after.app_window
-        || before.screens.len() != after.screens.len()
-    {
-        return false;
-    }
-    true
+    before.viewport == after.viewport
+        && before.app_window == after.app_window
+        && before.screens.len() == after.screens.len()
 }
 
 fn is_known_finding(kind: &str) -> bool {
