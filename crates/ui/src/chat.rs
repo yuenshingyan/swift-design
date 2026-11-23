@@ -792,6 +792,7 @@ mod tests {
             design: Some("candidate-2".into()),
             pinned: Vec::new(),
             question_set: None,
+            needs_design_materials: false,
             is_continue: false,
             is_queued: false,
             at: None,

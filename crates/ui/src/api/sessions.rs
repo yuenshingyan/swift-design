@@ -49,6 +49,9 @@ pub struct ChatMessage {
     /// The number of the question set this turn posed, when it did.
     #[serde(default)]
     pub question_set: Option<u32>,
+    /// True when the assistant requests missing design materials before continuing.
+    #[serde(default)]
+    pub needs_design_materials: bool,
     /// True when the user pressed Finish on the design in `design`.
     #[serde(default)]
     pub is_continue: bool,
@@ -406,9 +409,6 @@ pub async fn fetch_session(id: &str) -> Result<SessionView, String> {
     get_json(&format!("/sessions/{id}")).await
 }
 
-/// Body of `POST /sessions/{id}/messages`.
-#[derive(Serialize)]
-struct MessageRequest<'value> {
 /// Changes the session's display title without changing its ID.
 pub async fn rename_session(id: &str, title: &str) -> Result<(), String> {
     #[derive(Serialize)]
@@ -423,6 +423,9 @@ pub async fn rename_session(id: &str, title: &str) -> Result<(), String> {
         .map(|_| ())
 }
 
+/// Body of `POST /sessions/{id}/messages`.
+#[derive(Serialize)]
+struct MessageRequest<'value> {
     content: &'value str,
     #[serde(skip_serializing_if = "Option::is_none")]
     design: Option<&'value str>,

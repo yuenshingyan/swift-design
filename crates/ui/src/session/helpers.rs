@@ -19,26 +19,34 @@ pub(crate) fn is_start_offered(
     }
 }
 
-/// True when a completed reply is waiting for the user, rather than another run.
-pub(crate) fn is_waiting_for_reply(
+/// The status for a completed reply waiting on the user, rather than another run.
+pub(crate) fn waiting_for_reply_label(
     view: &api::SessionView,
     is_running: bool,
     has_queued: bool,
-) -> bool {
-    matches!(
+) -> Option<&'static str> {
+    if !matches!(
         view.session.state,
         WorkflowState::Intake | WorkflowState::Clarifying
-    ) && !is_running
-        && !has_queued
-        && view.open_question_set.is_none()
-        && view
+    ) || is_running
+        || has_queued
+        || view.open_question_set.is_some()
+        || !view
             .runs
             .last()
             .is_some_and(|run| run.result.as_deref() == Some("replied"))
-        && view
-            .messages
-            .last()
-            .is_some_and(|message| message.role == "assistant")
+    {
+        return None;
+    }
+    let message = view
+        .messages
+        .last()
+        .filter(|message| message.role == "assistant")?;
+    Some(if message.needs_design_materials {
+        "Waiting for design materials"
+    } else {
+        "Waiting for your reply"
+    })
 }
 
 /// Keeps chat open in every state. Busy runs queue prompts; halted runs resume on send.

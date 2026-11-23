@@ -4,7 +4,7 @@ use design_model::WorkflowState;
 
 use crate::api::{AgentRun, ChatMessage, RunRecord, Session, SessionView};
 
-use super::helpers::is_waiting_for_reply;
+use super::helpers::waiting_for_reply_label;
 use super::{
     candidate_mentions, chat_placeholder, generation_step, is_canvas_shown, is_chat_open,
     is_start_offered, pin_candidates, pinned_reference, progress_label,
@@ -126,6 +126,7 @@ fn a_completed_intake_reply_waits_for_chat_without_offering_another_start() {
             design: None,
             pinned: Vec::new(),
             question_set: None,
+            needs_design_materials: false,
             is_continue: false,
             is_queued: false,
             at: None,
@@ -149,14 +150,25 @@ fn a_completed_intake_reply_waits_for_chat_without_offering_another_start() {
         campaigns: Vec::new(),
         artworks: Vec::new(),
     };
-    assert!(is_waiting_for_reply(&session, false, false));
-    assert!(!is_waiting_for_reply(&session, false, true));
-    assert!(!is_waiting_for_reply(&session, true, false));
+    assert_eq!(
+        waiting_for_reply_label(&session, false, false),
+        Some("Waiting for your reply")
+    );
+    session.messages[0].needs_design_materials = true;
+    assert_eq!(
+        waiting_for_reply_label(&session, false, false),
+        Some("Waiting for design materials")
+    );
+    assert_eq!(waiting_for_reply_label(&session, false, true), None);
+    assert_eq!(waiting_for_reply_label(&session, true, false), None);
     session.open_question_set = Some(1);
-    assert!(!is_waiting_for_reply(&session, false, false));
+    assert_eq!(waiting_for_reply_label(&session, false, false), None);
     session.open_question_set = None;
+    session.messages[0].role = "user".into();
+    assert_eq!(waiting_for_reply_label(&session, false, false), None);
+    session.messages[0].role = "assistant".into();
     session.runs.clear();
-    assert!(!is_waiting_for_reply(&session, false, false));
+    assert_eq!(waiting_for_reply_label(&session, false, false), None);
 }
 
 fn run(log: &str) -> AgentRun {
