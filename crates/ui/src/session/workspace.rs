@@ -2,8 +2,8 @@ use crate::chat::{FailedEditCard, failed_edit_index};
 use crate::uploads::{AttachButton, AttachmentChips, PasteUploads, pending_uploads};
 
 use super::helpers::{
-    chat_placeholder, is_chat_open, is_start_offered, is_waiting_for_reply, pinned_reference,
-    set_answers,
+    chat_placeholder, is_chat_open, is_start_offered, pinned_reference, set_answers,
+    waiting_for_reply_label,
 };
 use super::*;
 
@@ -471,13 +471,17 @@ pub(crate) fn SessionWorkspace(
     let session_run = run_value
         .as_ref()
         .filter(|run| run.session_id.as_deref() == Some(session_id.as_str()));
-    let awaiting_reply = is_waiting_for_reply(
+    let awaiting_reply = waiting_for_reply_label(
         &session_view,
         session_run.is_some_and(|run| run.is_running),
         has_queued,
     );
-    let can_start = is_start_offered(state, is_running, open_set.is_some(), awaiting_reply)
-        || (has_queued && !is_running && state == WorkflowState::Reviewing);
+    let can_start = is_start_offered(
+        state,
+        is_running,
+        open_set.is_some(),
+        awaiting_reply.is_some(),
+    ) || (has_queued && !is_running && state == WorkflowState::Reviewing);
 
     rsx! {
         main { class: "session",
@@ -693,11 +697,11 @@ pub(crate) fn SessionWorkspace(
                             }
                         }
                     }
-                    if awaiting_reply {
+                    if let Some(label) = awaiting_reply {
                         div { class: "status-card", role: "status",
                             div { class: "status-line",
                                 span { class: "status-dot waiting", aria_hidden: "true" }
-                                span { "Waiting for your reply" }
+                                span { "{label}" }
                             }
                         }
                     } else if let Some(run) = session_run {

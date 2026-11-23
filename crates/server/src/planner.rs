@@ -95,6 +95,8 @@ const QUESTION_SET_TITLE: &str = "A few questions first";
 pub(crate) struct Plan {
     /// Text for the user. Empty means nothing to say.
     pub(crate) reply: String,
+    /// True when the reply requests missing design materials before work can continue.
+    pub(crate) needs_design_materials: bool,
     /// The questions to ask, at most `QUESTIONS_PER_TURN_LIMIT`.
     pub(crate) question_set: Option<BriefQuestionSet>,
     /// True when the model wants to write candidates now.
@@ -131,6 +133,8 @@ pub(crate) fn parse_plan(content: &str) -> Plan {
     struct PlanReply {
         #[serde(default)]
         reply: String,
+        #[serde(default)]
+        needs_design_materials: bool,
         #[serde(default)]
         questions: Vec<PlannedQuestion>,
         #[serde(default)]
@@ -169,6 +173,7 @@ pub(crate) fn parse_plan(content: &str) -> Plan {
     });
     Plan {
         reply: parsed.reply.trim().to_owned(),
+        needs_design_materials: parsed.needs_design_materials,
         question_set,
         should_generate: parsed.generate,
         should_edit: parsed.edit,
@@ -405,7 +410,7 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
     format!(
         "{subject}\n\
          Read the request, the answers, and the conversation. Reply with only this JSON:\n\
-         {{\"reply\":\"text for the user\",\"questions\":[{{\"question\":\"...\",\"options\":[\"...\"],\"multi\":false}}],\"suggestions\":{{\"{first_key}\":\"{first_value}\"}},\"generate\":false,\"edit\":false,\"merge\":false,\"unsupported_requirements\":[],\"supported_alternatives\":[]}}\n\
+         {{\"reply\":\"text for the user\",\"needs_design_materials\":false,\"questions\":[{{\"question\":\"...\",\"options\":[\"...\"],\"multi\":false}}],\"suggestions\":{{\"{first_key}\":\"{first_value}\"}},\"generate\":false,\"edit\":false,\"merge\":false,\"unsupported_requirements\":[],\"supported_alternatives\":[]}}\n\
          {capabilities}\n\
          The app always asks the user its own fixed questions first. Your questions are added to that card.\n\
          The app questions, as key (wording): values:\n\
@@ -422,6 +427,7 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
          Name the real thing the option builds: a named feature, a named screen, a named section, a named step.\n\
          Two options must differ in what you build, not in wording.\n\
          Read the user's source files before you ask. Never ask what a source file already answers.\n\
+         Set needs_design_materials to true only if a required reference or source file is missing or unreadable. Name each required file or reference in reply. Acknowledge related materials you can read. Do not request materials that are already available. Leave needs_design_materials false for optional references, clarification questions, and approval requests.\n\
          After {answered} answered questions about one request, do not ask more about it. A later request for a change starts fresh: when the change is unclear, ask first and set edit and generate to false. When it is clear, edit.\n\
          Set generate to true when you know enough to write. Then say in reply what you will write.\n\
          When the input names artifacts and the user asks for a change, set edit to true and generate to false. Say in reply what you will change. The app applies the change to each of those artifacts.\n\

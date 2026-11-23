@@ -401,6 +401,9 @@ pub struct ChatMessage {
     /// The number of the question set this turn posed, when it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question_set: Option<u32>,
+    /// True when the assistant requests missing design materials before continuing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) needs_design_materials: bool,
     /// True when the user asked to finish the preview named in
     /// `design`. A plain message with a design open is an edit.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -444,6 +447,7 @@ impl ChatMessage {
             design: design.map(str::to_owned),
             annotations: None,
             question_set: None,
+            needs_design_materials: false,
             is_continue: false,
             is_regenerate: false,
             is_review_draft: false,
@@ -481,6 +485,7 @@ impl ChatMessage {
             design: None,
             annotations: None,
             question_set: None,
+            needs_design_materials: false,
             is_continue: false,
             is_regenerate: false,
             is_review_draft: false,
@@ -513,6 +518,7 @@ impl ChatMessage {
             design: None,
             annotations: None,
             question_set: Some(number),
+            needs_design_materials: false,
             is_continue: false,
             is_regenerate: false,
             is_review_draft: false,

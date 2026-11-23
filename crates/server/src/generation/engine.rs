@@ -674,7 +674,22 @@ impl GenerationEngine {
             return Ok(PlanStep::Asked(number));
         }
         if !plan.reply.is_empty() {
-            self.say(session_id, &plan.reply).await?;
+            if plan.needs_design_materials
+                && !plan.should_generate
+                && !plan.should_edit
+                && !plan.should_merge
+                && plan.question_set.is_none()
+            {
+                let mut message = ChatMessage::assistant(&plan.reply);
+                message.needs_design_materials = true;
+                self.sessions
+                    .append_message(session_id, message)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                self.notifier.notify();
+            } else {
+                self.say(session_id, &plan.reply).await?;
+            }
         }
         // A merge needs two sources. With one, the change is an edit.
         if plan.should_merge && targets.len() >= 2 {

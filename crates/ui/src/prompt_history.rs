@@ -114,6 +114,7 @@ mod tests {
             design: None,
             pinned: Vec::new(),
             question_set: None,
+            needs_design_materials: false,
             is_continue,
             is_queued: false,
             at: None,

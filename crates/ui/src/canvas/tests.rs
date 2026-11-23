@@ -26,6 +26,7 @@ fn message(role: &str, design: Option<&str>, is_continue: bool) -> api::ChatMess
         design: design.map(str::to_owned),
         pinned: Vec::new(),
         question_set: None,
+        needs_design_materials: false,
         is_continue,
         is_queued: false,
         at: None,

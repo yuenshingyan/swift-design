@@ -630,6 +630,34 @@ async fn a_planner_question_set_moves_the_session_to_clarifying() {
 }
 
 #[tokio::test]
+async fn the_planner_records_a_wait_for_required_design_materials() {
+    let server = FakeModelServer::start().await;
+    server.push_text(r#"{"reply":"I have the screenshot. Please upload the required Ticket Details source files.","needs_design_materials":true,"unsupported_requirements":[]}"#);
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
+    let designs = DesignStore::new(directory.path().join("designs"));
+    let sessions = SessionStore::new(directory.path().join("sessions"));
+    set_up_session(
+        &sessions,
+        "Use the screenshot for style and the Ticket Details source files for behavior.",
+    )
+    .await;
+    let outcome = engine(&server, &designs, &sessions)
+        .run("talk", silent_log())
+        .await
+        .expect("planner should reply without writing");
+    assert!(matches!(outcome, GenerationOutcome::Replied));
+    let messages = sessions.messages("talk").await.expect("read planner reply");
+    let reply = messages.last().expect("persisted reply exists");
+    assert!(reply.needs_design_materials);
+    assert!(
+        reply
+            .content
+            .contains("required Ticket Details source files")
+    );
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
 async fn a_plain_reply_keeps_the_state_and_lands_in_the_chat() {
     let server = FakeModelServer::start().await;
     server.push_text(r#"{"reply":"Hello. Tell me what to build.","unsupported_requirements":[]}"#);
@@ -653,6 +681,7 @@ async fn a_plain_reply_keeps_the_state_and_lands_in_the_chat() {
         .await
         .expect("test chat messages should be readable");
     assert_eq!(messages[0].content, "Hello. Tell me what to build.");
+    assert!(!messages[0].needs_design_materials);
     assert_eq!(
         sessions
             .runs("talk")

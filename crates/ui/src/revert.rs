@@ -158,6 +158,7 @@ mod tests {
             design: None,
             pinned: Vec::new(),
             question_set: None,
+            needs_design_materials: false,
             is_continue: false,
             is_queued: false,
             at: Some("2026-08-29T07:26:12Z".to_owned()),
