@@ -48,12 +48,14 @@ use crate::uploads::UploadStore;
 /// Most slides a deck run may be asked for. Past this the run costs
 /// more than a user waits for.
 const SLIDE_COUNT_LIMIT: u32 = 60;
+const SESSION_TITLE_LIMIT: usize = 80;
 
 /// The `/sessions` route table.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{id}", get(get_session).delete(delete_session))
+        .route("/sessions/{id}/title", put(put_title))
         .route("/sessions/{id}/options", put(put_options))
         .route("/sessions/{id}/messages", post(post_message))
         .route("/sessions/{id}/question-set", put(put_question_set))
@@ -91,7 +93,7 @@ fn session_error_response(error: &SessionError) -> Response {
 /// A short title from the request: the first line, capped.
 fn title_from_request(request: &str) -> String {
     let line = request.lines().next().unwrap_or(request).trim();
-    line.chars().take(80).collect()
+    line.chars().take(SESSION_TITLE_LIMIT).collect()
 }
 
 /// The eight artifact stores as one extractor, so a handler that reads
@@ -589,6 +591,49 @@ fn option_problem(options: &RunOptions) -> Option<String> {
         }
     }
     None
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TitleRequest {
+    title: String,
+}
+
+/// Changes the display title without moving the session or its candidates.
+async fn put_title(
+    State(sessions): State<SessionStore>,
+    State(notifier): State<ChangeNotifier>,
+    Path(id): Path<String>,
+    Json(request): Json<TitleRequest>,
+) -> Response {
+    if !is_valid_session_id(&id) {
+        return api_error::error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Invalid session ID.",
+            Vec::new(),
+        );
+    }
+    let title = request.title.trim();
+    if title.is_empty()
+        || title.chars().count() > SESSION_TITLE_LIMIT
+        || title.chars().any(char::is_control)
+    {
+        return api_error::error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("Enter a session name of 1 to {SESSION_TITLE_LIMIT} characters on one line."),
+            Vec::new(),
+        );
+    }
+    match sessions
+        .update(&id, |session| title.clone_into(&mut session.title))
+        .await
+    {
+        Ok(_) => {
+            notifier.notify();
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(error) => session_error_response(&error),
+    }
 }
 
 /// Replaces the run options.
