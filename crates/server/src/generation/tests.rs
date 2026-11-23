@@ -212,9 +212,9 @@ async fn the_planner_reads_the_users_source_files() {
 }
 
 #[tokio::test]
-async fn gpt_6_planner_receives_the_adopted_screenshot_as_an_image() {
+async fn planner_can_suggest_matching_the_adopted_screenshot() {
     let server = FakeModelServer::start().await;
-    server.push_text(r#"{"reply":"Which style?","generate":false,"unsupported_requirements":[]}"#);
+    server.push_text(r#"{"reply":"I’ll match the screenshot.","suggestions":{"color_mode":"match_reference"},"generate":false,"unsupported_requirements":[]}"#);
     let directory = tempfile::tempdir().expect("temporary test directory should be created");
     let designs = DesignStore::new(directory.path().join("designs"));
     let sessions = SessionStore::new(directory.path().join("sessions"));
@@ -228,13 +228,13 @@ async fn gpt_6_planner_receives_the_adopted_screenshot_as_an_image() {
         .adopt("talk")
         .await
         .expect("draft test uploads should be adopted by the session");
-    fresh_session(&sessions, "Use the attached screenshot.").await;
+    fresh_session(&sessions, "Keep the theme in the attached screenshot.").await;
     let mut configuration = server.configuration();
     configuration.model = "gpt-6-astra".to_owned();
     let engine = GenerationEngine::new(
         configuration,
         designs,
-        sessions,
+        sessions.clone(),
         None,
         "http://127.0.0.1:3000".to_owned(),
         ChangeNotifier::new(),
@@ -260,6 +260,41 @@ async fn gpt_6_planner_receives_the_adopted_screenshot_as_an_image() {
         )
     );
     assert!(!requests[0].to_string().contains("cannot see here"));
+    assert!(
+        requests[0]["messages"][0]["content"]
+            .to_string()
+            .contains("Match the attached design")
+    );
+    let session = sessions
+        .read("talk")
+        .await
+        .expect("session should load")
+        .expect("session exists");
+    assert_eq!(
+        session.options.color_mode.as_deref(),
+        Some("match_reference")
+    );
+    assert!(session.options.suggested.contains(&"color_mode".to_owned()));
+}
+
+#[tokio::test]
+async fn planner_cannot_suggest_matching_a_missing_reference() {
+    let server = FakeModelServer::start().await;
+    server.push_text(r#"{"reply":"I need the screenshot.","suggestions":{"color_mode":"match_reference"},"generate":false,"unsupported_requirements":[]}"#);
+    let directory = tempfile::tempdir().expect("temporary test directory should be created");
+    let designs = DesignStore::new(directory.path().join("designs"));
+    let sessions = SessionStore::new(directory.path().join("sessions"));
+    fresh_session(&sessions, "Keep the theme in the screenshot.").await;
+    engine(&server, &designs, &sessions)
+        .run("talk", silent_log())
+        .await
+        .expect("planner should open setup");
+    let session = sessions
+        .read("talk")
+        .await
+        .expect("session should load")
+        .expect("session exists");
+    assert_eq!(session.options.color_mode, None);
 }
 
 #[test]

@@ -201,6 +201,9 @@ pub(crate) fn request_input(request: &SessionRequest) -> String {
         let text = axis_label(name, value).unwrap_or(value);
         input.push_str(&format!("{name}: {text}\n"));
     }
+    if request.options.color_mode.as_deref() == Some("match_reference") {
+        input.push_str("Use the supplied design reference for the palette, typography, and component styling. Recreate the requested design in the artifact's native format; do not use the reference screenshot as a substitute for the requested design. Preserve any explicitly requested light and dark variants. If the relevant reference is missing or unreadable, say so; do not claim a match.\n");
+    }
     if request.options.fidelity.as_deref() == Some("wireframe") {
         input.push_str(WIREFRAME_NOTE);
     }
@@ -347,6 +350,16 @@ mod tests {
         assert!(input.contains("Post goal: Teach or explain"));
         assert!(!input.contains("Canvases"));
         assert!(!input.contains("Page"));
+    }
+
+    #[test]
+    fn matching_the_reference_preserves_the_requested_theme_variants() {
+        let mut demo = request(ArtifactKind::Demo);
+        demo.options.color_mode = Some("match_reference".to_owned());
+        let input = request_input(&demo);
+        assert!(input.contains("Color mode: Match the attached design"));
+        assert!(input.contains("palette, typography, and component styling"));
+        assert!(input.contains("Preserve any explicitly requested light and dark variants"));
     }
 
     #[test]
