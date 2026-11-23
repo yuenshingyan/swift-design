@@ -1,0 +1,2 @@
+# Axum responses are 128 bytes on the CI target. Keep this lint for larger errors.
+large-error-threshold = 129
