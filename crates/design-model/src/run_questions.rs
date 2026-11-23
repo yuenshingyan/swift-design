@@ -39,12 +39,10 @@ pub const TONES: [(&str, &str); 5] = [
 
 /// How the colors read, as (value, label).
 ///
-/// Each option is a complete look, not a single dial: it settles the
-/// background and the color character together, so one pick is a full
-/// answer. The values `light` and `dark` predate the longer labels and
-/// stay stable for stored sessions. There is no `Either`: every card
-/// already carries the judgment chip, which says the same thing.
-pub const COLOR_MODES: [(&str, &str); 8] = [
+/// Each option either sets a complete look or takes it from the attached
+/// design reference. The values `light` and `dark` predate the longer
+/// labels and stay stable for stored sessions.
+pub const COLOR_MODES: [(&str, &str); 9] = [
     ("light", "Light and airy"),
     ("dark", "Dark and sleek"),
     ("colorful", "Bright and colorful"),
@@ -53,6 +51,7 @@ pub const COLOR_MODES: [(&str, &str); 8] = [
     ("corporate", "Cool and corporate"),
     ("high_contrast", "Stark, high contrast"),
     ("monochrome", "Black and white"),
+    ("match_reference", "Match the attached design"),
 ];
 
 /// What kind of product a demo shows, as (value, label). It decides the

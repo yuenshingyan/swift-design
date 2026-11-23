@@ -611,7 +611,17 @@ impl GenerationEngine {
             log("unsupported mandatory requirements; waiting for explicit scope approval");
             return Ok(PlanStep::Replied);
         }
-        let plan = parse_plan(&reply);
+        let mut plan = parse_plan(&reply);
+        if !attachments.files.iter().any(|file| {
+            !file.bytes.is_empty()
+                && (is_text_attachment(file)
+                    || file.content_type == "application/pdf"
+                    || (file.content_type.starts_with("image/")
+                        && supports_vision(self.model.model())))
+        }) {
+            plan.suggestions
+                .retain(|(key, value)| key != "color_mode" || value != "match_reference");
+        }
         // The first turn always asks. The app owns a fixed list of
         // questions and asks it before anything is written; the planner
         // only adds to that card. Without this, a planner that asks

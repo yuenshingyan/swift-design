@@ -411,6 +411,7 @@ pub(crate) fn planner_prompt(kind: ArtifactKind) -> String {
          The app questions, as key (wording): values:\n\
          {axes}\n\
          Put in suggestions every app question the request answers by itself. Use the key and one of its values. Leave out a question the request does not answer. Use an empty object when it answers none. The card shows a suggestion as picked, and the user can change it.\n\
+         Suggest `color_mode: match_reference` (Match the attached design) when the user asks to keep or match the look of an attached design and its visual style is available in the supplied material. Use that choice rather than a generic light or dark preset, even when the brief asks for light and dark versions of the same look. Do not infer a theme from an unrelated attachment, a filename, or an image you cannot see. If the user asks for a different style, follow that instead.\n\
          Ask 0 to {per_turn} extra questions. Ask none when the request and the source files already say enough. Give 2 to 4 short options for each question you do ask.\n\
          Set multi to true when the user can pick more than one option at once, such as the topics to cover or the sections to include.\n\
          Set multi to false when the options rule each other out, such as the audience or the tone.\n\
